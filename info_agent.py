@@ -53,10 +53,10 @@ class infoAgent:
         
         messages = [
             SystemMessage(content=SYSTEM_AGENT_PROMPT),
-            HumanMessage(content=full_instruction_prompt) 
+            HumanMessage(content=full_instruction_prompt)
         ]
 
-        response = llama_client.get_response(messages)
+        response = llama_client.invoke(messages).content
 
         response_clean = response.strip()
 
@@ -113,7 +113,7 @@ class infoAgent:
                     HumanMessage(content=user_input)
                 ]
 
-                response = llama_client.get_response(messages)
+                response = llama_client.invoke(messages).content
                 return f"💬 Agente (RAG, impulsado por Tool): {response}"
 
             # Si fuera otra Tool (hypotética), ejecutaría aquí
@@ -127,7 +127,7 @@ class infoAgent:
             SystemMessage(content=SYSTEM_AGENT_PROMPT),
             HumanMessage(content=user_input)
         ]
-        response = llama_client.get_response(messages)
+        response = llama_client.invoke(messages).content
         return f"💡 Agente (LLM): {response}"
 
 # Instancia global

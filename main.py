@@ -7,6 +7,7 @@ import signal
 import sys
 import uuid
 
+
 # ===== INSTANCIAS GLOBALES =====
 
 state_manager = StateManager()

@@ -47,7 +47,7 @@ class ReceptionAgent:
 
     def _handle_reception_start(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
-        Maneja el estado inicial: clasifica la intención del usuario.
+        Maneja el estado inicial: clasifica la intención del usuario con retry logic.
         """
         logger.info("[ReceptionAgent] Clasificando intención del usuario...")
 
@@ -57,60 +57,66 @@ class ReceptionAgent:
             HumanMessage(content=message)
         ]
 
-        try:
-            # Crear LLM con tools bindeadas
-            llm_with_tools = llama_client.client.bind_tools(
-                [classify_intent_func],
-                tool_choice="classify_intent"
-            )
-            response = llm_with_tools.invoke(messages)
+        # Configurar LLM para forzar la tool call (la herramienta de clasificación)
+        llm_with_tools = llama_client.client.bind_tools(
+            [classify_intent_func],
+            tool_choice="classify_intent"
+        )
 
-            # Extraer tool call del LLM
-            if hasattr(response, 'tool_calls') and response.tool_calls:
-                tool_call = response.tool_calls[0]
-                intent = tool_call['args']['intent']
-                reason = tool_call['args']['reason']
+        # === INICIO DE LA LÓGICA DE RETRY ===
+        # Intentamos hasta 3 veces (1 intento inicial + 2 reintentos)
+        MAX_RETRIES = 2
 
-                logger.info(f"[ReceptionAgent] Intención clasificada: '{intent}' - {reason}")
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt > 0:
+                logger.warning(f"[ReceptionAgent] Fallo en intento {attempt}. Reintentando clasificación...")
 
-                # Actualizar estado según intención
-                if intent == "info":
-                    state.status = ConversationStatus.TRANSFERRED_INFO
-                    return {
-                        "response": "Entendido, déjame buscar esa información para ti...",
-                        "new_state": state
-                    }
+            try:
+                response = llm_with_tools.invoke(messages)
 
-                elif intent == "leadsales":
-                    state.status = ConversationStatus.AWAITING_LEAD_NAME
-                    return {
-                        "response": LEAD_NAME_REQUEST_PROMPT,
-                        "new_state": state
-                    }
+                # Extraer tool call del LLM
+                if hasattr(response, 'tool_calls') and response.tool_calls:
+                    tool_call = response.tool_calls[0]
+                    intent = tool_call['args']['intent']
+                    reason = tool_call['args']['reason']
 
-                elif intent == "ambiguous":
-                    state.status = ConversationStatus.AWAITING_CLARIFICATION
-                    clarification = random.choice(CLARIFICATION_PROMPTS)
-                    return {
-                        "response": clarification,
-                        "new_state": state
-                    }
+                    logger.info(f"[ReceptionAgent] Intención clasificada con éxito en intento {attempt+1}: '{intent}'")
 
-            # Fallback si no hay tool call
-            logger.warning("[ReceptionAgent] No se recibió tool call del LLM")
-            state.status = ConversationStatus.AWAITING_CLARIFICATION
-            return {
-                "response": CLARIFICATION_PROMPTS[0],
-                "new_state": state
-            }
+                    # Lógica de Transición
+                    if intent == "info":
+                        state.status = ConversationStatus.TRANSFERRED_INFO
+                        response_text = "Entendido, déjame buscar esa información para ti..."
+                    elif intent == "leadsales":
+                        state.status = ConversationStatus.AWAITING_LEAD_NAME
+                        response_text = LEAD_NAME_REQUEST_PROMPT
+                    elif intent == "ambiguous":
+                        state.status = ConversationStatus.AWAITING_CLARIFICATION
+                        response_text = random.choice(CLARIFICATION_PROMPTS)
+                    else:
+                        # Fallback si intent desconocido
+                        logger.warning(f"[ReceptionAgent] Intent desconocido: '{intent}'. Usando fallback.")
+                        state.status = ConversationStatus.AWAITING_CLARIFICATION
+                        response_text = CLARIFICATION_PROMPTS[0]
 
-        except Exception as e:
-            logger.error(f"[ReceptionAgent] Error en clasificación: {e}")
-            return {
-                "response": "Disculpa, ocurrió un error. ¿Podrías reformular tu consulta?",
-                "new_state": state
-            }
+                    return {"response": response_text, "new_state": state}
 
+                # Si no hay tool_calls, continuar al siguiente intento
+                logger.warning(f"[ReceptionAgent] No se recibió tool_call en intento {attempt+1}")
+
+            except Exception as e:
+                logger.error(f"[ReceptionAgent] Error en la invocación del LLM (Intento {attempt+1}): {e}")
+
+        # === FIN DE LA LÓGICA DE RETRY ===
+
+        # Fallback si se agotan todos los reintentos
+        logger.error(f"[ReceptionAgent] Clasificación fallida después de {MAX_RETRIES + 1} intentos. Requiriendo aclaración.")
+        state.status = ConversationStatus.AWAITING_CLARIFICATION
+
+        return {
+            "response": CLARIFICATION_PROMPTS[0],
+            "new_state": state
+        }
+        
     def _handle_awaiting_clarification(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja el estado de espera de aclaración: re-clasifica la intención.

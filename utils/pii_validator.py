@@ -5,18 +5,12 @@ import re
 def robust_extract_name(text: str) -> Optional[str]:
     """
     Extrae nombres de personas usando patrones simples.
-
-    Args:
-        text: Texto del usuario que potencialmente contiene un nombre.
-
-    Returns:
-        El nombre extraído si se detecta, None en caso contrario.
     """
     return _simple_fallback(text)
 
 def _simple_fallback(text: str) -> Optional[str]:
     """
-    Fallback simple: extrae nombres usando patrones heuristicos.
+    Fallback simple: extrae nombres usando patrones heurísticos.
     """
     text = text.strip()
 

@@ -1,0 +1,369 @@
+================================================================================
+DIAGRAMA DE FLUJO: REFACTOR InfoAgent - Parsing Manual → bind_tools()
+================================================================================
+
+PR ATOMICO #1: Migrar InfoAgent de parsing JSON manual a bind_tools(tool_choice="auto")
+
+================================================================================
+SITUACION ACTUAL (ANTES DEL REFACTOR)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ InfoAgent.process_info_query("¿Cual es el telefono?")              │
+└─────────────────────────────────────┬───────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ _determine_tool_call()                                              │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 1. Construir prompt con instrucciones:                          │ │
+│ │    "Si necesitas tool → Responde JSON"                          │ │
+│ │    "Si NO necesitas tool → Responde 'NO_TOOL'"                  │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 2. Llamar LLM SIN tools (respuesta en texto plano):             │ │
+│ │    response = llama_client.invoke(messages).content             │ │
+│ │    >>> "NO_TOOL"  O  '{"tool_name": "...", "tool_input": {...}}'│ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 3. PARSING MANUAL con regex:                                    │ │
+│ │    if "NO_TOOL" in response.upper():                            │ │
+│ │        return None  ←─ Flujo conversacional                     │ │
+│ │    else:                                                         │ │
+│ │        json_match = re.search(r'\{.*\}', response)              │ │
+│ │        tool_call = json.loads(json_match.group(0))  ←─ FRAGIL! │ │
+│ │        return tool_call                                          │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────┬───────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │                                   │
+                    ▼                                   ▼
+    ┌───────────────────────────┐       ┌───────────────────────────┐
+    │ tool_call = None          │       │ tool_call = {...}         │
+    │ (NO_TOOL detectado)       │       │ (JSON parseado)           │
+    └─────────┬─────────────────┘       └─────────┬─────────────────┘
+              │                                   │
+              ▼                                   ▼
+    ┌───────────────────────────┐       ┌───────────────────────────┐
+    │ FLUJO CONVERSACIONAL      │       │ FLUJO RAG                 │
+    │ (Lineas 124-131)          │       │ (Lineas 89-121)           │
+    │                           │       │                           │
+    │ LLM responde directo:     │       │ 1. _run_tool()           │
+    │ "Hola! Como puedo         │       │    → rag_service.search  │
+    │  ayudarte?"               │       │                           │
+    │                           │       │ 2. LLM con contexto RAG   │
+    │                           │       │    → "El telefono es..."  │
+    └───────────────────────────┘       └───────────────────────────┘
+
+PROBLEMAS DEL ENFOQUE ACTUAL:
+❌ Regex frágil: r'\{.*\}' falla con JSON anidado o strings con '}'
+❌ Prompt engineering: Confía en que LLM responda exactamente "NO_TOOL"
+❌ Parsing manual: try/except con json.loads() puede fallar silenciosamente
+❌ Inconsistente: ReceptionAgent usa bind_tools(), InfoAgent usa regex
+
+
+================================================================================
+DESPUES DEL REFACTOR (CON bind_tools)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ InfoAgent.process_info_query("¿Cual es el telefono?")              │
+└─────────────────────────────────────┬───────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ _determine_tool_call_with_auto()  ← NUEVO METODO                   │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 1. Vincular tools al LLM con tool_choice="auto":                │ │
+│ │    llm_with_tools = llama_client.client.bind_tools(             │ │
+│ │        [informacion_empresa_func],                               │ │
+│ │        tool_choice="auto"  ← LLM DECIDE automaticamente         │ │
+│ │    )                                                             │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 2. Llamar LLM CON tools vinculadas:                             │ │
+│ │    response = llm_with_tools.invoke(messages)                   │ │
+│ │    >>> AIMessage con tool_calls=[] o tool_calls=[{...}]         │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ 3. DETECCION NATIVA (sin regex, sin parsing manual):            │ │
+│ │    if response.tool_calls:  ← API nativa de LangChain           │ │
+│ │        tool_call = response.tool_calls[0]                        │ │
+│ │        return {                                                  │ │
+│ │            "tool_name": tool_call.name,                          │ │
+│ │            "tool_input": tool_call.args                          │ │
+│ │        }                                                          │ │
+│ │    else:                                                         │ │
+│ │        return None  ←─ LLM decidio NO usar tool                 │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────┬───────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │                                   │
+                    ▼                                   ▼
+    ┌───────────────────────────┐       ┌───────────────────────────┐
+    │ response.tool_calls = []  │       │ response.tool_calls = [...│
+    │ (LLM decidio NO tool)     │       │ (LLM decidio usar tool)   │
+    └─────────┬─────────────────┘       └─────────┬─────────────────┘
+              │                                   │
+              ▼                                   ▼
+    ┌───────────────────────────┐       ┌───────────────────────────┐
+    │ FLUJO CONVERSACIONAL      │       │ FLUJO RAG                 │
+    │ (IGUAL - Sin cambios)     │       │ (IGUAL - Sin cambios)     │
+    │                           │       │                           │
+    │ LLM responde directo      │       │ 1. _run_tool()           │
+    │                           │       │    → rag_service.search  │
+    │                           │       │                           │
+    │                           │       │ 2. LLM con contexto RAG   │
+    └───────────────────────────┘       └───────────────────────────┘
+
+VENTAJAS DEL NUEVO ENFOQUE:
+✅ API nativa: response.tool_calls (LangChain maneja serialización)
+✅ Sin regex: No hay parsing manual frágil
+✅ Robusto: OpenAI API decide formato interno
+✅ Consistente: Mismo patrón que ReceptionAgent
+
+
+================================================================================
+COMPARACION LADO A LADO: CODIGO ESPECIFICO
+================================================================================
+
+┌─────────────────────────────────────┬─────────────────────────────────────┐
+│ ANTES (Parsing Manual)              │ DESPUES (bind_tools)                │
+├─────────────────────────────────────┼─────────────────────────────────────┤
+│ def _determine_tool_call(           │ def _determine_tool_call(           │
+│     self, user_input: str           │     self, user_input: str           │
+│ ) -> dict | None:                   │ ) -> dict | None:                   │
+│                                     │                                     │
+│   # Construir prompt manual         │   # Preparar mensajes               │
+│   full_prompt = (                   │   messages = [                      │
+│       TOOL_DECISION_PROMPT +        │       SystemMessage(                │
+│       "Responde JSON o NO_TOOL"     │           content=SYSTEM_PROMPT     │
+│   )                                 │       ),                            │
+│                                     │       HumanMessage(                 │
+│   messages = [                      │           content=user_input        │
+│       SystemMessage(...),           │       )                             │
+│       HumanMessage(full_prompt)     │   ]                                 │
+│   ]                                 │                                     │
+│                                     │                                     │
+│   # Llamar LLM SIN tools            │   # Vincular tools con auto         │
+│   response = llama_client.invoke(   │   llm_with_tools = (                │
+│       messages                      │       llama_client.client           │
+│   ).content  # Texto plano          │           .bind_tools(              │
+│                                     │               [info_empresa_func],  │
+│   # PARSING MANUAL                  │               tool_choice="auto"    │
+│   response_clean = response.strip() │           )                         │
+│                                     │   )                                 │
+│   if "NO_TOOL" in response_clean:   │                                     │
+│       return None                   │   # Llamar LLM CON tools            │
+│                                     │   response = llm_with_tools.invoke( │
+│   try:                              │       messages                      │
+│       # Regex fragil                │   )                                 │
+│       json_match = re.search(       │                                     │
+│           r'\{.*\}',                │   # DETECCION NATIVA                │
+│           response_clean,           │   if response.tool_calls:           │
+│           re.DOTALL                 │       tool_call = (                 │
+│       )                             │           response.tool_calls[0]    │
+│       if json_match:                │       )                             │
+│           tool_call = json.loads(   │       return {                      │
+│               json_match.group(0)   │           "tool_name":              │
+│           )                         │               tool_call.name,       │
+│           if 'tool_name' in (       │           "tool_input":             │
+│               tool_call             │               tool_call.args        │
+│           ):                        │       }                             │
+│               return tool_call      │   else:                             │
+│       return None                   │       return None                   │
+│   except json.JSONDecodeError:      │                                     │
+│       print("Error parsing")        │                                     │
+│       return None                   │                                     │
+└─────────────────────────────────────┴─────────────────────────────────────┘
+
+LINEAS DE CODIGO:
+  ANTES: ~40 líneas (con try/except, regex, validaciones)
+  DESPUES: ~15 líneas (API nativa, sin excepciones)
+
+
+================================================================================
+IMPACTO EN TESTS
+================================================================================
+
+ANTES (Mock del parsing manual):
+────────────────────────────────────────────────────────────────────────────
+# Test debe mockear la respuesta como STRING con JSON embebido
+mock_tool_decision_response = AIMessage(
+    content='{"tool_name": "info_empresa_contacto_filosofia", ' +
+            '"tool_input": {"tema": "contacto"}}'  # ← STRING con JSON
+)
+
+with patch('info_agent.llama_client.invoke') as mock_llm:
+    mock_llm.side_effect = [mock_tool_decision_response, mock_rag_response]
+    # El codigo debe parsear manualmente el .content
+
+
+DESPUES (Mock de tool_calls nativo):
+────────────────────────────────────────────────────────────────────────────
+# Test mockea tool_calls como estructura nativa de LangChain
+mock_tool_call = MagicMock()
+mock_tool_call.name = "info_empresa_contacto_filosofia"
+mock_tool_call.args = {"tema": "contacto"}
+
+mock_response = AIMessage(content="", tool_calls=[mock_tool_call])
+
+with patch.object(llama_client.client, 'bind_tools') as mock_bind:
+    mock_llm = MagicMock()
+    mock_bind.return_value = mock_llm
+    mock_llm.invoke.return_value = mock_response
+    # El codigo usa response.tool_calls[0] directamente
+
+
+CAMBIOS EN TESTS:
+├─ test_info_agent_rag: Actualizar mock de tool_calls
+├─ test_info_agent_no_tool_direct_response: Mockear tool_calls=[]
+└─ test_info_agent_tool_detection: Actualizar mock de tool_calls
+
+
+================================================================================
+CASOS DE USO: COMO CAMBIA EL FLUJO
+================================================================================
+
+CASO 1: Consulta informativa (requiere RAG)
+────────────────────────────────────────────────────────────────────────────
+Usuario: "¿Cual es el telefono de contacto?"
+
+ANTES:
+  _determine_tool_call()
+    → LLM genera STRING: '{"tool_name": "info_empresa_...", "tool_input": {...}}'
+    → Regex extrae JSON: re.search(r'\{.*\}', response)
+    → json.loads() parsea manualmente
+    → return {"tool_name": "...", "tool_input": {...}}
+
+DESPUES:
+  _determine_tool_call()
+    → LLM con bind_tools(tool_choice="auto")
+    → OpenAI API retorna tool_calls=[ToolCall(name="info_empresa_...", args={...})]
+    → LangChain deserializa automaticamente
+    → return {"tool_name": tool_call.name, "tool_input": tool_call.args}
+
+RESULTADO: Mismo flujo RAG, diferente mecanismo interno
+
+
+CASO 2: Consulta conversacional (NO requiere RAG)
+────────────────────────────────────────────────────────────────────────────
+Usuario: "Hola, ¿como estas?"
+
+ANTES:
+  _determine_tool_call()
+    → LLM genera STRING: "NO_TOOL"
+    → if "NO_TOOL" in response.upper(): return None
+    → Flujo conversacional (lineas 124-131)
+
+DESPUES:
+  _determine_tool_call()
+    → LLM con bind_tools(tool_choice="auto")
+    → OpenAI API retorna tool_calls=[] (lista vacia)
+    → if response.tool_calls: (False) → return None
+    → Flujo conversacional (lineas 124-131)
+
+RESULTADO: Mismo flujo conversacional, diferente deteccion
+
+
+================================================================================
+PLAN DE IMPLEMENTACION DEL PR ATOMICO
+================================================================================
+
+PASO 1: Refactorizar metodo _determine_tool_call()
+────────────────────────────────────────────────────────────────────────────
+Archivo: info_agent.py (lineas 41-79)
+
+CAMBIOS:
+  [X] Eliminar construccion de prompt con "NO_TOOL"
+  [X] Eliminar regex re.search(r'\{.*\}', ...)
+  [X] Eliminar try/except con json.loads()
+  [X] Agregar llm_with_tools = llama_client.client.bind_tools([...], tool_choice="auto")
+  [X] Agregar deteccion con if response.tool_calls:
+  [X] Retornar {"tool_name": tool_call.name, "tool_input": tool_call.args}
+
+
+PASO 2: Actualizar tests
+────────────────────────────────────────────────────────────────────────────
+Archivo: tests/agents/test_info_agent.py
+
+CAMBIOS:
+  [X] test_info_agent_rag (linea 15):
+      - Mock tool_calls con MagicMock()
+      - Actualizar verificacion de llamadas
+
+  [X] test_info_agent_no_tool_direct_response (linea 59):
+      - Mock response con tool_calls=[]
+      - Verificar flujo conversacional
+
+  [X] test_info_agent_tool_detection (linea 87):
+      - Mock tool_calls con estructura nativa
+      - Verificar deteccion correcta
+
+
+PASO 3: Ejecutar tests y validar
+────────────────────────────────────────────────────────────────────────────
+COMANDOS:
+  $ pytest tests/agents/test_info_agent.py -v
+  $ pytest tests/  # Todos los tests (regresion)
+
+CRITERIO DE ACEPTACION:
+  ✅ Los 3 tests de test_info_agent.py pasan
+  ✅ Los 17 tests totales pasan (no regresion)
+  ✅ Cobertura se mantiene >= 80%
+
+
+PASO 4: Code review y merge
+────────────────────────────────────────────────────────────────────────────
+CHECKLIST:
+  [ ] Commit atomico con mensaje descriptivo
+  [ ] PR con descripcion clara del refactor
+  [ ] Tests pasan en CI/CD
+  [ ] Code review aprobado
+  [ ] Merge a main/master
+
+
+================================================================================
+RESUMEN EJECUTIVO
+================================================================================
+
+QUE CAMBIA:
+  - Metodo _determine_tool_call() en info_agent.py (lineas 41-79)
+  - 3 tests en test_info_agent.py (lineas 15, 59, 87)
+
+QUE NO CAMBIA:
+  - Flujo RAG (lineas 89-121 de info_agent.py)
+  - Flujo conversacional (lineas 124-131 de info_agent.py)
+  - ReceptionAgent (ya usa bind_tools)
+  - StateManager, RAG Service, LLM Client
+
+BENEFICIOS:
+  ✅ Elimina parsing manual fragil (regex + json.loads)
+  ✅ Usa API nativa de LangChain (response.tool_calls)
+  ✅ Consistencia arquitectonica con ReceptionAgent
+  ✅ Codigo mas simple: ~40 lineas → ~15 lineas
+  ✅ Tests mas robustos (mock de estructuras nativas)
+
+RIESGOS:
+  ⚠️  Cambio en comportamiento del LLM si tool_choice="auto" decide diferente
+  ⚠️  Tests requieren actualizacion de mocks
+
+TIEMPO ESTIMADO:
+  - Desarrollo: 1-2 horas
+  - Testing: 1 hora
+  - Code review: 30 min
+  - TOTAL: 2-4 horas (0.5 sprint points)
+
+SIGUIENTE PR:
+  PR #2: Implementar LeadSalesAgent (siguiendo patron de bind_tools)
+
+
+================================================================================
+FIN DEL DIAGRAMA
+================================================================================

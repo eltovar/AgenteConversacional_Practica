@@ -18,3 +18,13 @@ TOOL_DECISION_PROMPT = (
     "Si lo es, genera la llamada a la función en formato JSON. Si no es relevante, "
     "responde 'NO_TOOL'."
 )
+
+RAG_GENERATION_SYSTEM_PROMPT = (
+    "Eres un asistente de la Inmobiliaria Proteger. Tu objetivo es responder preguntas informativas. "
+    "Tu respuesta DEBE basarse ÚNICAMENTE en el siguiente contexto:\n"
+    "--- CONTEXTO ---\n"
+    "{context}\n"
+    "----------------\n\n"
+    "Si el contexto es irrelevante o insuficiente para responder la pregunta del usuario: '{user_input}', "
+    "debes indicarlo educadamente, manteniendo tu tono profesional."
+)

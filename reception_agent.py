@@ -16,15 +16,7 @@ import random
 from typing import Dict, Any
 
 class ReceptionAgent:
-    """
-    Agente de Recepción que maneja la clasificación de intenciones y captura de PII.
-
-    Responsable de:
-    - Clasificar la intención del usuario (info / leadsales / ambiguous)
-    - Capturar datos del lead (nombre) usando PII validation
-    - Actualizar el estado de la conversación
-    - Enrutar al usuario al agente apropiado
-    """
+    """ Agente de Recepción que maneja la clasificación de intenciones y captura de PII. """
 
     def __init__(self):
         self.tools = {tool.name: tool for tool in RECEPTION_TOOLS}
@@ -32,13 +24,6 @@ class ReceptionAgent:
     def process_message(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario según el estado actual de la conversación.
-
-        Args:
-            message: El mensaje del usuario
-            state: Estado actual de la conversación
-
-        Returns:
-            Dict con 'response' (str) y 'new_state' (ConversationState)
         """
         logger.info(f"[ReceptionAgent] Estado: {state.status}, Mensaje: '{message[:50]}...'")
 

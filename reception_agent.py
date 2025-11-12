@@ -50,10 +50,18 @@ class ReceptionAgent:
         Maneja el estado inicial: clasifica la intención del usuario con retry logic.
         """
         logger.info("[ReceptionAgent] Clasificando intención del usuario...")
+        
+        lead_name = state.lead_data.get('name')
+        system_prompt = RECEPTION_SYSTEM_PROMPT
+
+        if lead_name:
+            # Añadir un prefijo al prompt si ya conocemos el nombre
+            system_prompt = f"Dirígete al usuario como '{lead_name}' en tu respuesta. " + system_prompt
+
 
         # Invocar LLM con tool classify_intent (forzada)
         messages = [
-            SystemMessage(content=RECEPTION_SYSTEM_PROMPT),
+            SystemMessage(content=system_prompt), 
             HumanMessage(content=message)
         ]
 

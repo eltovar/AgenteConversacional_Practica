@@ -2,6 +2,7 @@
 from state_manager import StateManager, ConversationState, ConversationStatus
 from reception_agent import reception_agent
 from info_agent import agent as info_agent
+from leadsales_agent import LeadSalesAgent
 from logging_config import logger
 import signal
 import sys
@@ -11,6 +12,7 @@ import uuid
 # ===== INSTANCIAS GLOBALES =====
 
 state_manager = StateManager()
+lead_sales_agent = LeadSalesAgent()
 
 # ===== MANEJO DE SEÑALES =====
 
@@ -25,9 +27,6 @@ def signal_handler(sig, frame):
 def main_loop(session_id: str = "default"):
     """
     Bucle principal de interacción en terminal.
-
-    Args:
-        session_id: Identificador de la sesión (default: "default" para sesión única)
     """
     print("=" * 60)
     print("🏢 INMOBILIARIA PROTEGER - Asistente Virtual")
@@ -39,26 +38,23 @@ def main_loop(session_id: str = "default"):
 
     while True:
         try:
-            user_input = input("\n👤 Tú: ").strip()
-
-            # Comando de salida
-            if user_input.lower() in ["salir", "exit", "quit"]:
-                print("\n👋 ¡Hasta pronto!")
+            user_input = input("\nTú: ").strip()
+            if user_input.lower() == "salir":
+                print("👋 ¡Adiós! Agente detenido.")
+                logger.info("Sistema detenido por usuario (comando 'salir')")
                 break
-
-            # Ignorar mensajes vacíos
-            if not user_input:
-                continue
 
             # 1. OBTENER ESTADO ACTUAL
             state = state_manager.get_state(session_id)
             logger.info(f"[MAIN] Estado actual: {state.status}")
 
             # 2. ROUTER BASADO EN ESTADO
+            
             if state.status == ConversationStatus.TRANSFERRED_INFO:
-                # El usuario fue clasificado como 'info' → InfoAgent
+                # ... Lógica de InfoAgent con inyección de estado (para memoria de usuario) ...
+
                 logger.info("[MAIN] Enrutando a InfoAgent...")
-                response = info_agent.process_info_query(user_input)
+                response = info_agent.process_info_query(user_input, state)
                 print(f"\n🤖 Agente: {response}")
 
                 # Después de responder, volver a RECEPTION_START para siguiente consulta
@@ -66,20 +62,24 @@ def main_loop(session_id: str = "default"):
                 state_manager.update_state(state)
 
             elif state.status == ConversationStatus.TRANSFERRED_LEADSALES:
-                # El lead ya fue transferido → Volver a inicio para nueva consulta
-                logger.info("[MAIN] Lead transferido. Reiniciando conversación...")
-                state.status = ConversationStatus.RECEPTION_START
-                state_manager.update_state(state)
-
-                # Permitir que el usuario haga otra consulta
-                response = "¿Hay algo más en lo que pueda ayudarte?"
+                # --- NUEVA LÓGICA DE ENRUTAMIENTO ---
+                logger.info("[MAIN] Enrutando a LeadSalesAgent...")
+                
+                # Ejecutar el agente
+                result = lead_sales_agent.process_lead_handoff(user_input, state)
+                
+                response = result["response"]
+                new_state = result.get("new_state", state)
+                # El LeadSalesAgent retorna el estado sin cambiar, main.py lo resetea:
+                new_state.status = ConversationStatus.RECEPTION_START 
+                state_manager.update_state(new_state)
+                
                 print(f"\n🤖 Agente: {response}")
+                # --- FIN NUEVA LÓGICA ---
 
             else:
-                # Estados manejados por ReceptionAgent:
-                # - RECEPTION_START
-                # - AWAITING_CLARIFICATION
-                # - AWAITING_LEAD_NAME
+                # Estados manejados por ReceptionAgent: RECEPTION_START, AWAITING_CLARIFICATION, AWAITING_LEAD_NAME
+                # ... Lógica de ReceptionAgent (sin cambios) ...
                 logger.info("[MAIN] Enrutando a ReceptionAgent...")
                 result = reception_agent.process_message(user_input, state)
 
@@ -119,4 +119,4 @@ if __name__ == "__main__":
 
     # Iniciar bucle principal
     main_loop(session_id)
-    
+

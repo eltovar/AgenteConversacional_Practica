@@ -2,10 +2,11 @@
 
 from llm_client import llama_client
 from rag import rag_service
-from info_tool import ALL_TOOLS, informacion_empresa_func 
+from info_tool import ALL_TOOLS, informacion_empresa_func
 from langchain_core.messages import SystemMessage, HumanMessage
-from prompts.info_prompts import SYSTEM_AGENT_PROMPT, RAG_GENERATION_SYSTEM_PROMPT
-from typing import Dict, Any, List
+from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)
+from state_manager import ConversationState
+from typing import Dict, Any, List, Optional
 from logging_config import logger
 
 INFO_EMPRESA_TOOL_NAME = "info_empresa_contacto_filosofia"
@@ -40,13 +41,25 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
         return f"Error: Tool '{tool_name}' no encontrada o no implementada."
 
-    def process_info_query(self, user_input: str) -> str:
+    def process_info_query(self, user_input: str, state: Optional[ConversationState] = None) -> str:
         """
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.
         Este método reemplaza la lógica de _determine_tool_call().
+
+        Args:
+            user_input: Mensaje del usuario
+            state: Estado de la conversación (opcional, para inyectar contexto de usuario)
         """
+        # Construir prompt con o sin contexto de usuario
+        if state and state.lead_data.get('name'):
+            user_name = state.lead_data['name']
+            system_prompt = SYSTEM_AGENT_PROMPT_WITH_USER.format(user_name=user_name)
+            logger.info(f"[InfoAgent] Usando contexto de usuario: {user_name}")
+        else:
+            system_prompt = SYSTEM_AGENT_PROMPT_BASE
+
         messages = [
-            SystemMessage(content=SYSTEM_AGENT_PROMPT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=user_input)
         ]
         
@@ -73,19 +86,19 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 context = self._run_tool(tool_name, tool_input) 
 
                 # 3. Generación de Respuesta Final con Contexto
-                # Crear el prompt de generación RAG (sustituye al sistema inicial)
-                rag_system_instruction = RAG_GENERATION_SYSTEM_PROMPT.format(
-                    context=context,
-                    user_input=user_input
-                )
+                # Crear las instrucciones RAG con el contexto recuperado
+                rag_instructions = RAG_GENERATION_INSTRUCTIONS.format(context=context)
 
+                # Combinar el prompt base (con o sin nombre) con las instrucciones RAG
+                final_system_prompt = system_prompt + "\n\n" + rag_instructions
+                
                 messages_rag = [
                     # Inyectar la instrucción RAG como el nuevo SystemMessage
-                    SystemMessage(content=rag_system_instruction),
+                    SystemMessage(content=final_system_prompt),
                     # La pregunta original del usuario va sola como HumanMessage
                     HumanMessage(content=user_input)
                 ]
-
+                
                 final_response = llama_client.invoke(messages_rag).content
                 return f"💬 Agente (RAG): {final_response}"
             

@@ -54,13 +54,6 @@ class RAGService:
     def search_knowledge(self, document_path: str, query: str) -> str:
         """
         Busca información relevante en un documento específico usando keywords.
-
-        Args:
-            document_path: Ruta relativa al documento (ej: 'knowledge_base/info_pagos_online.txt')
-            query: Consulta del usuario
-
-        Returns:
-            Secciones del documento que coincidan con la consulta
         """
         # Normalizar path (Windows/Linux)
         document_path = document_path.replace("\\", "/")

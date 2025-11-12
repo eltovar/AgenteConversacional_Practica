@@ -93,17 +93,21 @@ class ReceptionAgent:
                     # Lógica de Transición
                     if intent == "info":
                         state.status = ConversationStatus.TRANSFERRED_INFO
+                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
                     elif intent == "leadsales":
                         state.status = ConversationStatus.AWAITING_LEAD_NAME
+                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_LEAD_NAME")
                         response_text = LEAD_NAME_REQUEST_PROMPT
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
+                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION")
                         response_text = random.choice(CLARIFICATION_PROMPTS)
                     else:
                         # Fallback si intent desconocido
                         logger.warning(f"[ReceptionAgent] Intent desconocido: '{intent}'. Usando fallback.")
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
+                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION (fallback)")
                         response_text = CLARIFICATION_PROMPTS[0]
 
                     return {"response": response_text, "new_state": state}

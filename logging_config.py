@@ -23,6 +23,9 @@ def setup_logging(level=logging.INFO):
         ]
     )
 
+    # Reducir verbosidad de librerías externas
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     # Logger específico para el proyecto
     logger = logging.getLogger("agent_system")
     logger.setLevel(level)

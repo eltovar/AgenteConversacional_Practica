@@ -2,7 +2,7 @@
 from state_manager import StateManager, ConversationState, ConversationStatus
 from reception_agent import reception_agent
 from info_agent import agent as info_agent
-from leadsales_agent import LeadSalesAgent
+from leadsales_agent import lead_sales_agent
 from logging_config import logger
 import signal
 import sys
@@ -12,7 +12,6 @@ import uuid
 # ===== INSTANCIAS GLOBALES =====
 
 state_manager = StateManager()
-lead_sales_agent = LeadSalesAgent()
 
 # ===== MANEJO DE SEÑALES =====
 
@@ -79,7 +78,6 @@ def main_loop(session_id: str = "default"):
 
             else:
                 # Estados manejados por ReceptionAgent: RECEPTION_START, AWAITING_CLARIFICATION, AWAITING_LEAD_NAME
-                # ... Lógica de ReceptionAgent (sin cambios) ...
                 logger.info("[MAIN] Enrutando a ReceptionAgent...")
                 result = reception_agent.process_message(user_input, state)
 
@@ -89,7 +87,31 @@ def main_loop(session_id: str = "default"):
                 # Actualizar estado
                 state_manager.update_state(new_state)
 
+                # Imprimir respuesta de clasificación
                 print(f"\n🤖 Agente: {response}")
+
+                # === AUTO-ENRUTAMIENTO INMEDIATO (FIX PR005) ===
+                # Si el ReceptionAgent cambió el estado a TRANSFERRED_*,
+                # ejecutar el agente especializado INMEDIATAMENTE en el mismo turno.
+
+                if new_state.status == ConversationStatus.TRANSFERRED_INFO:
+                    logger.info("[MAIN] Auto-enrutando a InfoAgent después de clasificación...")
+                    response = info_agent.process_info_query(user_input, new_state)
+                    print(f"\n🤖 Agente: {response}")
+
+                    # Resetear estado para el siguiente turno
+                    new_state.status = ConversationStatus.RECEPTION_START
+                    state_manager.update_state(new_state)
+
+                elif new_state.status == ConversationStatus.TRANSFERRED_LEADSALES:
+                    logger.info("[MAIN] Auto-enrutando a LeadSalesAgent después de clasificación...")
+                    result = lead_sales_agent.process_lead_handoff(user_input, new_state)
+                    response = result["response"]
+                    print(f"\n🤖 Agente: {response}")
+
+                    # Resetear estado para el siguiente turno
+                    new_state.status = ConversationStatus.RECEPTION_START
+                    state_manager.update_state(new_state)
 
         except KeyboardInterrupt:
             # Capturado por signal_handler, pero por si acaso

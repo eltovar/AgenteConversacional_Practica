@@ -2,14 +2,36 @@
 
 from llm_client import llama_client
 from rag import rag_service
-from info_tool import ALL_TOOLS, informacion_empresa_func
+from info_tool import ALL_TOOLS
 from langchain_core.messages import SystemMessage, HumanMessage
 from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
 
-INFO_EMPRESA_TOOL_NAME = "info_empresa_contacto_filosofia"
+# Mapeo de tools a documentos específicos
+TOOL_DOCUMENT_MAP = {
+    "info_institucional": [
+        "knowledge_base/informacion_institucional.txt",
+        "knowledge_base/info_cobertura_propiedades.txt",
+        "knowledge_base/info_pagos_online.txt"
+    ],
+    "soporte_contacto": [
+        "knowledge_base/soporte_administraciones_multas.txt",
+        "knowledge_base/soporte_caja_pagos.txt",
+        "knowledge_base/soporte_contabilidad_facturas.txt",
+        "knowledge_base/soporte_contratos_terminacion.txt",
+        "knowledge_base/soporte_juridico_legal.txt",
+        "knowledge_base/soporte_servicios_publicos.txt"
+    ],
+    "asesoria_legal_blog": [
+        "knowledge_base/blog_arriendo_claves_riesgos.txt",
+        "knowledge_base/blog_arriendo_contrato_legalidad.txt",
+        "knowledge_base/blog_arriendo_estudios_fraude.txt",
+        "knowledge_base/blog_arriendo_gastos_administracion.txt",
+        "knowledge_base/blog_arriendo_incrementos_ley.txt"
+    ]
+}
 
 class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
     """
@@ -22,25 +44,49 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
     def _run_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """
-        Ejecuta la herramienta RAG. El único propósito de esta tool es generar la query para RAG.
+        Ejecuta la herramienta RAG buscando en los documentos específicos de cada tool.
+
+        Args:
+            tool_name: Nombre de la tool invocada (info_institucional, soporte_contacto, asesoria_legal_blog)
+            tool_input: Argumentos de la tool (contiene 'tema')
+
+        Returns:
+            Contexto combinado de todos los documentos relevantes
         """
         logger.info(f"[InfoAgent] Ejecutando Tool '{tool_name}'...")
+
+        # Validar que la tool existe en el mapeo
+        if tool_name not in TOOL_DOCUMENT_MAP:
+            logger.error(f"[InfoAgent] Tool '{tool_name}' no encontrada en TOOL_DOCUMENT_MAP")
+            return f"Error: Tool '{tool_name}' no encontrada o no implementada."
+
+        # Obtener el tema/query desde tool_input
+        query = tool_input.get('tema', 'información general')
+        logger.info(f"[InfoAgent] Búsqueda RAG con query: '{query}'")
+
+        # Obtener lista de documentos asociados a esta tool
+        document_paths = TOOL_DOCUMENT_MAP[tool_name]
+        logger.info(f"[InfoAgent] Buscando en {len(document_paths)} documentos de '{tool_name}'")
+
+        # Buscar en cada documento y agregar resultados
+        all_contexts = []
+        for doc_path in document_paths:
+            logger.debug(f"[InfoAgent] Buscando en: {doc_path}")
+            context = rag_service.search_knowledge(doc_path, query)
+
+            # Solo agregar si no es un error
+            if not context.startswith("[ERROR]"):
+                all_contexts.append(f"--- Fuente: {doc_path} ---\n{context}")
+
+        # Combinar todos los contextos encontrados
+        if all_contexts:
+            combined_context = "\n\n".join(all_contexts)
+            logger.info(f"[InfoAgent] Contexto combinado generado ({len(combined_context)} caracteres)")
+            return combined_context
+        else:
+            logger.warning(f"[InfoAgent] No se encontró contexto relevante para query: '{query}'")
+            return f"No se encontró información específica sobre '{query}' en los documentos disponibles."
         
-        # Solo manejamos la tool de información de la empresa, que es un alias para RAG.
-        if tool_name == INFO_EMPRESA_TOOL_NAME:
-            # Obtener el tema/query desde la tool_input (usando 'tema')
-            query = tool_input.get('tema', 'información general de la empresa')
-            
-            logger.info(f"[InfoAgent] Búsqueda RAG con query: {query}")
-            
-            # Llamada al servicio RAG (rag.py)
-            context = rag_service.search_knowledge(query)
-            
-            # Devolvemos el contexto encontrado para que el LLM genere la respuesta final.
-            return context
-
-        return f"Error: Tool '{tool_name}' no encontrada o no implementada."
-
     def process_info_query(self, user_input: str, state: Optional[ConversationState] = None) -> str:
         """
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.

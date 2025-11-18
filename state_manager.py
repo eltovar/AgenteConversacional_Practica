@@ -2,6 +2,7 @@
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 class ConversationStatus(str, Enum):
     RECEPTION_START = "RECEPTION_START"
@@ -16,6 +17,7 @@ class ConversationState(BaseModel):
     status: ConversationStatus = ConversationStatus.RECEPTION_START
     lead_data: Dict[str, Any] = Field(default_factory=dict)
     history: List = Field(default_factory=list)
+    last_interaction_timestamp: Optional[datetime] = None
 
 class StateManager:
     def __init__(self):

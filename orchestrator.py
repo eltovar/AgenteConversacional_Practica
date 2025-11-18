@@ -103,7 +103,11 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
             elif new_state.status == ConversationStatus.TRANSFERRED_LEADSALES:
                 logger.info("[ORCHESTRATOR] Auto-enrutando a LeadSalesAgent...")
                 lead_result = lead_sales_agent.process_lead_handoff(user_message, new_state)
-                response = f"{response}\n\n{lead_result['response']}"
+
+                # CORRECCIÓN: Usar directamente la respuesta del LeadSalesAgent, sin concatenar la respuesta anterior.
+                # Esto soluciona un posible problema donde ReceptionAgent intenta generar un mensaje
+                # mientras espera el nombre del lead.
+                response = lead_result['response']
 
                 new_state.status = ConversationStatus.RECEPTION_START
                 state_manager.update_state(new_state)

@@ -30,12 +30,6 @@ def info_institucional_func(tema: str) -> str:
     Obtiene información institucional de GlobalHome: contacto (teléfono, email, horarios),
     filosofía empresarial, misión, historia, cobertura geográfica de propiedades,
     métodos de pago online disponibles.
-
-    Útil para preguntas como:
-    - "¿Cómo puedo contactar a la empresa?"
-    - "¿Cuál es la misión de GlobalHome?"
-    - "¿En qué zonas tienen propiedades?"
-    - "¿Cómo puedo pagar mi arriendo online?"
     """
     return f"[TOOL] info_institucional ejecutada para tema: '{tema}'"
 
@@ -45,13 +39,6 @@ def soporte_contacto_func(tema: str) -> str:
     Proporciona soporte técnico y administrativo para clientes de GlobalHome:
     consultas sobre administraciones y multas, caja de pagos, contabilidad y facturas,
     contratos y procesos de terminación, servicios públicos, soporte jurídico y legal.
-
-    Útil para preguntas como:
-    - "Tengo una multa de la administración, ¿qué hago?"
-    - "¿Cómo pago en la caja de GlobalHome?"
-    - "Necesito mi factura de este mes"
-    - "¿Cómo termino mi contrato de arriendo?"
-    - "¿Quién paga los servicios públicos?"
     """
     return f"[TOOL] soporte_contacto ejecutada para tema: '{tema}'"
 
@@ -61,13 +48,6 @@ def asesoria_legal_blog_func(tema: str) -> str:
     Proporciona asesoría legal y artículos educativos sobre arrendamiento en Colombia:
     claves y riesgos del arriendo, legalidad de contratos, estudios y prevención de fraude,
     gastos de administración, incrementos de arriendo según la ley.
-
-    Útil para preguntas como:
-    - "¿Qué riesgos debo considerar al arrendar?"
-    - "¿Mi contrato de arriendo es legal?"
-    - "¿Cómo evitar fraudes al arrendar?"
-    - "¿Cuánto pueden subir el arriendo este año?"
-    - "¿Qué cubre el gasto de administración?"
     """
     return f"[TOOL] asesoria_legal_blog ejecutada para tema: '{tema}'"
 

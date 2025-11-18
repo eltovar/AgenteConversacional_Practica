@@ -8,12 +8,14 @@ from prompts.reception_prompts import (
     LEAD_NAME_RETRY_PROMPT,
     LEAD_TRANSFER_SUCCESS_PROMPT,
     SOFIA_PERSONALITY
-) 
+)
+from prompts.leadsales_prompts import PROPERTY_EXTRACTION_PROMPT
 from utils.pii_validator import robust_extract_name
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
 from logging_config import logger
 import random
+import json
 from typing import Dict, Any
 
 class ReceptionAgent:
@@ -98,8 +100,14 @@ class ReceptionAgent:
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
                     elif intent == "leadsales":
+                        # Extraer entidades de la propiedad antes de pedir el nombre
+                        property_data = self._extract_property_entities(message)
+                        if property_data:
+                            state.lead_data['property_interest'] = property_data
+                            logger.info(f"[ReceptionAgent] Entidades extraídas: {property_data}")
+
                         state.status = ConversationStatus.AWAITING_LEAD_NAME
-                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_LEAD_NAME")
+                        logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_LEAD_NAME")
                         response_text = LEAD_NAME_REQUEST_PROMPT
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION

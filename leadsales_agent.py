@@ -4,6 +4,7 @@
 from state_manager import ConversationState
 from typing import Dict, Any
 from logging_config import logger
+from prompts.leadsales_prompts import LEADSALES_CONFIRMATION_TEMPLATE
 
 class LeadSalesAgent:
     """
@@ -33,12 +34,8 @@ class LeadSalesAgent:
 
         logger.info(f"[LEADSALES] Procesando mensaje en estado TRANSFERRED_LEADSALES. Lead: {lead_name}")
 
-        # 3. Respuesta al usuario
-        response_text = (
-            f"Gracias, {lead_name}. Tu informacion ha sido enviada a nuestro equipo de ventas. "
-            "Un asesor se pondra en contacto contigo muy pronto. "
-            "Mientras tanto, tienes alguna otra pregunta informativa sobre nuestros servicios o propiedades? "
-        )
+        # 3. Respuesta al usuario usando template con personalidad de Sofía
+        response_text = LEADSALES_CONFIRMATION_TEMPLATE.format(lead_name=lead_name)
 
         # 4. Transicion
         # El reset de estado (TRANSFERRED_LEADSALES -> RECEPTION_START) se maneja en main.py.

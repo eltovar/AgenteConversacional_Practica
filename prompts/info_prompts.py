@@ -1,7 +1,9 @@
 # prompts/tool_prompts.py
+from prompts.sofia_personality import SOFIA_PERSONALITY
 
 # Prompt base sin contexto de usuario
 SYSTEM_AGENT_PROMPT_BASE = (
+    SOFIA_PERSONALITY + "\n\n"
     "Eres un asistente de la Inmobiliaria Proteger. Tu objetivo es responder preguntas informativas. "
     "Tu principal responsabilidad es proporcionar la información más precisa posible. "
     "**REGLA CRÍTICA:** Siempre que el usuario pregunte sobre información específica de la empresa "
@@ -11,6 +13,7 @@ SYSTEM_AGENT_PROMPT_BASE = (
 
 # Template con inyección de nombre de usuario (para mantener memoria de sesión)
 SYSTEM_AGENT_PROMPT_WITH_USER = (
+    SOFIA_PERSONALITY + "\n\n"
     "Eres un asistente de la Inmobiliaria Proteger. Tu objetivo es responder preguntas informativas. "
     "Tu principal responsabilidad es proporcionar la información más precisa posible. "
     "**REGLA CRÍTICA:** Siempre que el usuario pregunte sobre información específica de la empresa "

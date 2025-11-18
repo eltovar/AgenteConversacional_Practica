@@ -146,15 +146,15 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 ]
                 
                 final_response = llama_client.invoke(messages_rag).content
-                return f"💬 Agente (RAG): {final_response}"
-            
+                return final_response
+
             # 4. LLM Base (Respuesta Conversacional)
             else:
                 # El LLM decidió no usar la Tool (NO_TOOL)
                 logger.info("[InfoAgent] LLM decidió NO usar Tool. Respondiendo directamente...")
-                
+
                 # La respuesta ya está en response_llm.content (la respuesta LLM al prompt inicial)
-                return f"💡 Agente (LLM): {response_llm.content}"
+                return response_llm.content
 
         except Exception as e:
             logger.error(f"[InfoAgent] Error crítico en el flujo RAG/LLM: {e}", exc_info=True)

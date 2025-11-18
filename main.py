@@ -73,7 +73,7 @@ def main_loop(session_id: str = "default"):
                 new_state.status = ConversationStatus.RECEPTION_START 
                 state_manager.update_state(new_state)
                 
-                print(f"\n🤖 Agente: {response}")
+                print(f"\n🤖 Sofía: {response}")
                 # --- FIN NUEVA LÓGICA ---
 
             else:
@@ -88,7 +88,7 @@ def main_loop(session_id: str = "default"):
                 state_manager.update_state(new_state)
 
                 # Imprimir respuesta de clasificación
-                print(f"\n🤖 Agente: {response}")
+                print(f"\n🤖 Sofía: {response}")
 
                 # === AUTO-ENRUTAMIENTO INMEDIATO (FIX PR005) ===
                 # Si el ReceptionAgent cambió el estado a TRANSFERRED_*,
@@ -97,7 +97,7 @@ def main_loop(session_id: str = "default"):
                 if new_state.status == ConversationStatus.TRANSFERRED_INFO:
                     logger.info("[MAIN] Auto-enrutando a InfoAgent después de clasificación...")
                     response = info_agent.process_info_query(user_input, new_state)
-                    print(f"\n🤖 Agente: {response}")
+                    print(f"\n🤖 Sofía: {response}")
 
                     # Resetear estado para el siguiente turno
                     new_state.status = ConversationStatus.RECEPTION_START
@@ -107,7 +107,7 @@ def main_loop(session_id: str = "default"):
                     logger.info("[MAIN] Auto-enrutando a LeadSalesAgent después de clasificación...")
                     result = lead_sales_agent.process_lead_handoff(user_input, new_state)
                     response = result["response"]
-                    print(f"\n🤖 Agente: {response}")
+                    print(f"\n🤖 Sofía: {response}")
 
                     # Resetear estado para el siguiente turno
                     new_state.status = ConversationStatus.RECEPTION_START
@@ -141,4 +141,4 @@ if __name__ == "__main__":
 
     # Iniciar bucle principal
     main_loop(session_id)
-
+    

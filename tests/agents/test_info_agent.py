@@ -61,7 +61,7 @@ def test_info_agent_rag(info_agent):
             # Verificar que la respuesta final incluye informacion del RAG
             assert isinstance(response, str)
             assert len(response) > 0
-            assert "RAG" in response  # Verifica prefijo "💬 Agente (RAG):"
+            # Verifica que retorna respuesta directa sin prefijos (main.py agrega "🤖 Sofía:")
 
 
 def test_info_agent_no_tool_direct_response(info_agent):
@@ -92,7 +92,7 @@ def test_info_agent_no_tool_direct_response(info_agent):
         # Verificar que hay respuesta
         assert isinstance(response, str)
         assert len(response) > 0
-        assert "LLM" in response  # Verifica prefijo "💡 Agente (LLM):"
+        # Verifica que retorna respuesta directa sin prefijos (main.py agrega "🤖 Sofía:")
 
 
 def test_info_agent_tool_detection(info_agent):

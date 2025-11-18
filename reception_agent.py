@@ -6,8 +6,9 @@ from prompts.reception_prompts import (
     CLARIFICATION_PROMPTS,
     LEAD_NAME_REQUEST_PROMPT,
     LEAD_NAME_RETRY_PROMPT,
-    LEAD_TRANSFER_SUCCESS_PROMPT
-)
+    LEAD_TRANSFER_SUCCESS_PROMPT,
+    SOFIA_PERSONALITY
+) 
 from utils.pii_validator import robust_extract_name
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -50,9 +51,10 @@ class ReceptionAgent:
         Maneja el estado inicial: clasifica la intención del usuario con retry logic.
         """
         logger.info("[ReceptionAgent] Clasificando intención del usuario...")
-        
+
         lead_name = state.lead_data.get('name')
-        system_prompt = RECEPTION_SYSTEM_PROMPT
+        # Anteponer personalidad de Sofía al prompt de clasificación
+        system_prompt = SOFIA_PERSONALITY + "\n\n" + RECEPTION_SYSTEM_PROMPT
 
         if lead_name:
             # Añadir un prefijo al prompt si ya conocemos el nombre

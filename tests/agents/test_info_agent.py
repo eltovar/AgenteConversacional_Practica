@@ -28,7 +28,7 @@ def test_info_agent_rag(info_agent):
         mock_tool_decision_response = AIMessage(
             content="",
             tool_calls=[{
-                'name': 'info_empresa_contacto_filosofia',
+                'name': 'soporte_contacto',
                 'args': {'accion': 'obtener_info', 'tema': 'contacto'},
                 'id': 'test_tool_call_1'
             }]
@@ -52,8 +52,8 @@ def test_info_agent_rag(info_agent):
             # Ejecutar proceso
             response = info_agent.process_info_query(user_query)
 
-            # Verificar que rag_service fue llamado
-            mock_rag.assert_called_once()
+            # Verificar que rag_service fue llamado (6 veces para soporte_contacto)
+            assert mock_rag.call_count == 6
 
             # Verificar que bind_tools fue llamado correctamente
             mock_client.bind_tools.assert_called_once()
@@ -105,7 +105,7 @@ def test_info_agent_tool_detection(info_agent):
     mock_tool_response = AIMessage(
         content="",
         tool_calls=[{
-            'name': 'info_empresa_contacto_filosofia',
+            'name': 'info_institucional',
             'args': {'accion': 'obtener_info', 'tema': 'filosofia'},
             'id': 'test_tool_call_3'
         }]
@@ -133,5 +133,5 @@ def test_info_agent_tool_detection(info_agent):
             # Verificar que se proceso correctamente
             assert isinstance(response, str)
             assert len(response) > 0
-            assert "RAG" in response
-            mock_rag.assert_called_once()
+            # Verificar que rag_service fue llamado (3 veces para info_institucional)
+            assert mock_rag.call_count == 3

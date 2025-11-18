@@ -16,5 +16,9 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 requests>=2.32.0
 
+# FastAPI y servidor (para webhooks)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
 # Testing (opcional)
 pytest>=8.0.0

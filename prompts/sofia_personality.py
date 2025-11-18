@@ -14,3 +14,13 @@ TONO DE COMUNICACIÓN:
 - Oraciones cortas y claras
 - Evita tecnicismos innecesarios
 - Respuestas directas sin rodeos"""
+
+SOFIA_WELCOME_MESSAGE = """¡Hola! Soy Sofía, asistente virtual de Inmobiliaria Proteger.
+
+Puedo ayudarte con:
+- Información sobre nuestros servicios y la empresa
+- Consultas sobre propiedades y arriendos
+- Soporte técnico y dudas frecuentes
+- Conectarte con un asesor comercial
+
+¿En qué puedo ayudarte hoy?"""

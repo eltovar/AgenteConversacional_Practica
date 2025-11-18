@@ -9,6 +9,7 @@ class ConversationStatus(str, Enum):
     AWAITING_LEAD_NAME = "AWAITING_LEAD_NAME"
     TRANSFERRED_INFO = "TRANSFERRED_INFO"
     TRANSFERRED_LEADSALES = "TRANSFERRED_LEADSALES"
+    WELCOME_SENT = "WELCOME_SENT"
 
 class ConversationState(BaseModel):
     session_id: str

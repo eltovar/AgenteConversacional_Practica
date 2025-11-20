@@ -1,6 +1,21 @@
+# Secrets y credenciales
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.*
+secrets.*
+config/local.*
+
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
 
+# Knowledge base (datos propietarios)
 knowledge_base/

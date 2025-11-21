@@ -149,6 +149,43 @@ class ReceptionAgent:
         state.status = ConversationStatus.RECEPTION_START
         return self._handle_reception_start(message, state)
 
+    def _extract_property_entities(self, message: str) -> Dict[str, Any]:
+        """
+        Extrae entidades de propiedad del mensaje del usuario usando LLM.
+        Retorna un diccionario con las entidades encontradas.
+        """
+        logger.info("[ReceptionAgent] Extrayendo entidades de propiedad...")
+
+        try:
+            extraction_prompt = PROPERTY_EXTRACTION_PROMPT.format(user_message=message)
+            messages = [
+                SystemMessage(content=extraction_prompt)
+            ]
+
+            response = llama_client.invoke(messages)
+            response_text = response.content.strip()
+
+            # Intentar parsear el JSON de la respuesta
+            # Buscar el JSON en la respuesta (puede estar envuelto en texto)
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}') + 1
+
+            if start_idx != -1 and end_idx > start_idx:
+                json_str = response_text[start_idx:end_idx]
+                property_data = json.loads(json_str)
+                logger.info(f"[ReceptionAgent] Entidades de propiedad extraídas: {property_data}")
+                return property_data
+            else:
+                logger.warning("[ReceptionAgent] No se encontró JSON en la respuesta de extracción")
+                return {}
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[ReceptionAgent] Error parseando JSON de entidades: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"[ReceptionAgent] Error extrayendo entidades: {e}")
+            return {}
+
     def _handle_awaiting_lead_name(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja el estado de captura de nombre: extrae PII y transfiere a Leadsales.

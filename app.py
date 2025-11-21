@@ -12,6 +12,19 @@ from orchestrator import process_message
 from logging_config import logger
 import uvicorn
 import json
+import os
+from dotenv import load_dotenv
+
+# ===== VALIDACIÓN DE SECRETS =====
+load_dotenv()
+
+REQUIRED_SECRETS = ["OPENAI_API_KEY"]
+missing = [key for key in REQUIRED_SECRETS if not os.getenv(key)]
+if missing:
+    raise EnvironmentError(
+        f"❌ Missing required secrets: {', '.join(missing)}\n"
+        f"💡 Copy .env.example to .env and add your API keys"
+    )
 
 
 # ===== FASTAPI APP =====

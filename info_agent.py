@@ -160,5 +160,23 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
             logger.error(f"[InfoAgent] Error crítico en el flujo RAG/LLM: {e}", exc_info=True)
             return "❌ Lo siento, no puedo procesar tu consulta en este momento. Inténtalo de nuevo más tarde."
 
+    def reload_knowledge_base(self) -> Dict[str, Any]:
+        """
+        Método pasarela para recargar la base de conocimiento RAG.
+        Delega la operación a rag_service.reload_knowledge_base().
+
+        Returns:
+            Dict[str, Any]: Resultado de la operación con estadísticas
+                {
+                    "status": "success" | "error",
+                    "files_loaded": int,
+                    "message": str
+                }
+        """
+        logger.info("[InfoAgent] Solicitando recarga de base de conocimiento...")
+        result = rag_service.reload_knowledge_base()
+        logger.info(f"[InfoAgent] Recarga completada: {result.get('message')}")
+        return result
+
 # Instancia global (Singleton)
 agent = InfoAgent()

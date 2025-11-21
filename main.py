@@ -5,6 +5,7 @@ Delega toda la lógica de negocio a orchestrator.py.
 """
 
 from orchestrator import process_message
+from info_agent import agent  # Para comando /reload
 from logging_config import logger
 import signal
 import sys
@@ -30,6 +31,7 @@ def main_loop(session_id: str = "default"):
     print("🏢 INMOBILIARIA PROTEGER - Asistente Virtual")
     print("=" * 60)
     print("Bienvenido. Escribe 'salir' o presiona Ctrl+C para terminar.")
+    print("Comandos especiales: /reload (recargar base de conocimiento)")
     print("-" * 60)
 
     logger.info(f"Sistema iniciado. Session ID: {session_id}")
@@ -42,6 +44,19 @@ def main_loop(session_id: str = "default"):
                 print("👋 ¡Adiós! Agente detenido.")
                 logger.info("Sistema detenido por usuario (comando 'salir')")
                 break
+
+            # COMANDO ESPECIAL: Recarga de base de conocimiento
+            if user_input.lower() == "/reload":
+                print("\n🔄 Recargando base de conocimiento...")
+                result = agent.reload_knowledge_base()
+
+                if result.get("status") == "success":
+                    print(f"✅ Recarga exitosa: {result.get('files_loaded')} archivos cargados")
+                    logger.info(f"[CLI] Recarga manual exitosa: {result.get('files_loaded')} archivos")
+                else:
+                    print(f"❌ Error en recarga: {result.get('message')}")
+                    logger.error(f"[CLI] Error en recarga manual: {result.get('message')}")
+                continue
 
             # DELEGAR A ORCHESTRATOR
             result = process_message(session_id, user_input)

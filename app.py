@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from orchestrator import process_message
+from info_agent import agent  # Para endpoint administrativo de recarga
 from logging_config import logger
 import uvicorn
 import json
@@ -129,9 +130,63 @@ async def root():
         "endpoints": {
             "webhook": "/webhook (POST)",
             "health": "/health (GET)",
+            "admin_reload": "/admin/reload-kb (POST)",
             "docs": "/docs (GET)"
         }
     }
+
+
+# ===== ENDPOINTS ADMINISTRATIVOS =====
+
+@app.post("/admin/reload-kb")
+async def reload_knowledge_base():
+    """
+    Endpoint administrativo para recargar la base de conocimiento RAG.
+
+    Permite actualizar los documentos en memoria sin reiniciar el servidor.
+    Útil para aplicar cambios en knowledge_base/ de forma inmediata.
+
+    Returns:
+        JSON con resultado de la operación:
+        - 200 OK: Recarga exitosa
+        - 500 Internal Server Error: Fallo en la recarga
+    """
+    try:
+        logger.info("[API] Solicitud de recarga de base de conocimiento recibida")
+
+        # Delegar a InfoAgent
+        result = agent.reload_knowledge_base()
+
+        # Verificar resultado
+        if result.get("status") == "success":
+            logger.info(f"[API] Recarga exitosa: {result.get('files_loaded')} archivos")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "files_loaded": result.get("files_loaded"),
+                    "message": result.get("message"),
+                    "timestamp": None  # Se puede añadir datetime.now() si se requiere
+                }
+            )
+        else:
+            # Caso de error controlado desde RAGService
+            logger.error(f"[API] Error en recarga: {result.get('message')}")
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("message", "Error desconocido al recargar")
+            )
+
+    except HTTPException:
+        # Re-lanzar excepciones HTTP ya manejadas
+        raise
+    except Exception as e:
+        # Capturar errores inesperados
+        logger.error(f"[API] Error crítico en /admin/reload-kb: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno al intentar recargar: {str(e)}"
+        )
 
 
 # ===== ENTRYPOINT =====

@@ -6,7 +6,7 @@ RECEPTION_SYSTEM_PROMPT = (
 
 1. **intent='info'**: El usuario busca información sobre:
    - Servicios de la inmobiliaria (venta, alquiler, administración)
-   - Contacto general (teléfono principal, dirección, horarios de atención)
+   - Contacto general (teléfono principal, dirección, `horario`s de atención)
    - Contactos departamentales específicos (WhatsApp de contabilidad, caja, contratos, jurídico, servicios públicos)
    - Soporte técnico o administrativo (facturas, multas, pagos, terminación de contratos)
    - Filosofía, historia, misión de la empresa

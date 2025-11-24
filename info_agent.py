@@ -45,13 +45,6 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
     def _run_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """
         Ejecuta la herramienta RAG buscando en los documentos específicos de cada tool.
-
-        Args:
-            tool_name: Nombre de la tool invocada (info_institucional, soporte_contacto, asesoria_legal_blog)
-            tool_input: Argumentos de la tool (contiene 'tema')
-
-        Returns:
-            Contexto combinado de todos los documentos relevantes
         """
         logger.info(f"[InfoAgent] Ejecutando Tool '{tool_name}'...")
 
@@ -91,10 +84,6 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         """
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.
         Este método reemplaza la lógica de _determine_tool_call().
-
-        Args:
-            user_input: Mensaje del usuario
-            state: Estado de la conversación (opcional, para inyectar contexto de usuario)
         """
         # Construir prompt con o sin contexto de usuario
         if state and state.lead_data.get('name'):
@@ -181,14 +170,6 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         """
         Método pasarela para recargar la base de conocimiento RAG.
         Delega la operación a rag_service.reload_knowledge_base().
-
-        Returns:
-            Dict[str, Any]: Resultado de la operación con estadísticas
-                {
-                    "status": "success" | "error",
-                    "files_loaded": int,
-                    "message": str
-                }
         """
         logger.info("[InfoAgent] Solicitando recarga de base de conocimiento...")
         result = rag_service.reload_knowledge_base()

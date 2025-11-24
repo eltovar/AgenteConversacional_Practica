@@ -145,11 +145,6 @@ async def reload_knowledge_base():
 
     Permite actualizar los documentos en memoria sin reiniciar el servidor.
     Útil para aplicar cambios en knowledge_base/ de forma inmediata.
-
-    Returns:
-        JSON con resultado de la operación:
-        - 200 OK: Recarga exitosa
-        - 500 Internal Server Error: Fallo en la recarga
     """
     try:
         logger.info("[API] Solicitud de recarga de base de conocimiento recibida")

@@ -15,12 +15,15 @@ RECEPTION_SYSTEM_PROMPT = (
    - Asesoría legal sobre arrendamiento (leyes, riesgos, incrementos, fraudes)
    - Comisiones y tarifas
    - Preguntas conversacionales sobre el asistente (nombre, quién lo creó, capacidades, horario)
+   - **Saludos simples, agradecimientos o despedidas** (ej: "gracias", "ok", "adiós", "perfecto")
+   - **Peticiones para recordar/repetir algo que se dijo anteriormente** (ej: "¿me repites?", "¿qué dijiste?", "¿puedes repetir?", "¿qué te pregunté?")
 
    **IMPORTANTE**:
    - Si el usuario solicita el contacto de un departamento específico (contabilidad, jurídico, caja, etc.)
      o necesita ayuda con un problema administrativo (facturas, pagos, contratos), clasifica como 'info'.
    - Si el usuario pregunta sobre el asistente mismo (nombre, creador, capacidades), clasifica como 'info'.
    - Si el usuario hace una pregunta específica y directa, clasifica como 'info' (NO como 'ambiguous').
+   - **Si el usuario pide repetir, recordar o hace referencia a mensajes anteriores, clasifica como 'info'** (NO como 'ambiguous').
 
 2. **intent='leadsales'**: El usuario quiere:
    - Hablar con un asesor COMERCIAL o de VENTAS

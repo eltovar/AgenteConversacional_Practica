@@ -66,6 +66,11 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
             logger.info("[ORCHESTRATOR] Enrutando a InfoAgent...")
             response = info_agent.process_info_query(user_message, state)
 
+            # Persistir conversación en history
+            state.history.append(f"User: {user_message}")
+            if response:
+                state.history.append(f"Agent: {response}")
+
             # Resetear estado y actualizar timestamp
             state.status = ConversationStatus.RECEPTION_START
             state.last_interaction_timestamp = now
@@ -79,6 +84,12 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
             response = result["response"]
             new_state = result.get("new_state", state)
+
+            # Persistir conversación en history
+            new_state.history.append(f"User: {user_message}")
+            if response:
+                new_state.history.append(f"Agent: {response}")
+
             new_state.status = ConversationStatus.RECEPTION_START
             new_state.last_interaction_timestamp = now
             state_manager.update_state(new_state)
@@ -120,6 +131,11 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
                 new_state.status = ConversationStatus.RECEPTION_START
                 state_manager.update_state(new_state)
+
+            # Persistir conversación en history
+            new_state.history.append(f"User: {user_message}")
+            if response:
+                new_state.history.append(f"Agent: {response}")
 
             # Actualizar timestamp en todas las rutas del bloque else
             new_state.last_interaction_timestamp = now

@@ -9,7 +9,6 @@ import os
 from unittest.mock import Mock, patch, MagicMock
 from state_manager import StateManager, ConversationState, ConversationStatus
 
-
 # ===== FIXTURES =====
 
 @pytest.fixture

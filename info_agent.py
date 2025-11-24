@@ -3,7 +3,7 @@
 from llm_client import llama_client
 from rag import rag_service
 from info_tool import ALL_TOOLS
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
@@ -104,10 +104,20 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         else:
             system_prompt = SYSTEM_AGENT_PROMPT_BASE
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_input)
-        ]
+        # Construir mensajes con historial completo de la conversación
+        messages = [SystemMessage(content=system_prompt)]
+
+        # Inyectar historial desde state.history (si existe)
+        if state and state.history:
+            logger.info(f"[InfoAgent] Inyectando {len(state.history)} mensajes del historial")
+            for msg in state.history:
+                if msg.startswith("User: "):
+                    messages.append(HumanMessage(content=msg[6:]))  # Remover prefijo "User: "
+                elif msg.startswith("Agent: "):
+                    messages.append(AIMessage(content=msg[7:]))  # Remover prefijo "Agent: "
+
+        # Añadir el mensaje actual del usuario como último HumanMessage
+        messages.append(HumanMessage(content=user_input))
         
         # 1. Detección de Tools con tool_choice="auto" (LangChain nativo)
         try:
@@ -138,12 +148,19 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 # Combinar el prompt base (con o sin nombre) con las instrucciones RAG
                 final_system_prompt = system_prompt + "\n\n" + rag_instructions
                 
-                messages_rag = [
-                    # Inyectar la instrucción RAG como el nuevo SystemMessage
-                    SystemMessage(content=final_system_prompt),
-                    # La pregunta original del usuario va sola como HumanMessage
-                    HumanMessage(content=user_input)
-                ]
+                # Construir mensajes RAG con historial completo
+                messages_rag = [SystemMessage(content=final_system_prompt)]
+
+                # Inyectar historial (igual que en flujo principal)
+                if state and state.history:
+                    for msg in state.history:
+                        if msg.startswith("User: "):
+                            messages_rag.append(HumanMessage(content=msg[6:]))
+                        elif msg.startswith("Agent: "):
+                            messages_rag.append(AIMessage(content=msg[7:]))
+
+                # La pregunta original del usuario va como último HumanMessage
+                messages_rag.append(HumanMessage(content=user_input))
                 
                 final_response = llama_client.invoke(messages_rag).content
                 return final_response

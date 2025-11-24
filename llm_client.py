@@ -1,5 +1,5 @@
 # llm_client.py
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from dotenv import load_dotenv
 from typing import List
@@ -28,5 +28,11 @@ class LLMClient:
 
         return self.client.invoke(messages, **kwargs)
 
-# Instancia global
+# Instancia global LLM
 llama_client = LLMClient()
+
+# Instancia global de Embeddings (para RAG vectorial)
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-small",
+    # API key se lee automáticamente del entorno
+)

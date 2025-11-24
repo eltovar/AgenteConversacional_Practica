@@ -44,9 +44,6 @@ class RAGService:
         2. Los divide en chunks
         3. Elimina embeddings existentes (limpieza para hot-reload)
         4. Indexa los nuevos chunks en pgvector
-
-        Returns:
-            Dict con status, número de chunks y mensaje
         """
         logger.info("[RAG] Iniciando recarga de base de conocimiento...")
 
@@ -100,13 +97,6 @@ class RAGService:
             # En una implementación completa, ejecutarías SQL: DELETE FROM collection_name
             logger.info("[RAG] Limpieza de vector store (pendiente implementación SQL directa)")
 
-            # TODO: Implementar limpieza real usando SQL directo si es necesario
-            # from sqlalchemy import text
-            # engine = pg_vector_store.get_vector_store()._engine
-            # with engine.connect() as conn:
-            #     conn.execute(text("DELETE FROM knowledge_base"))
-            #     conn.commit()
-
         except Exception as e:
             logger.warning(f"[RAG] No se pudo limpiar vector store: {e}")
 
@@ -116,14 +106,6 @@ class RAGService:
 
         IMPORTANTE: Esta es la interfaz de compatibilidad con el código legacy.
         Usa búsqueda semántica pero filtra por source en metadata.
-
-        Args:
-            document_path: Ruta del documento (usado para filtrar por source en metadata)
-            query: Consulta del usuario
-            k: Número máximo de chunks a recuperar
-
-        Returns:
-            String con contexto formateado
         """
         try:
             logger.debug(f"[RAG] Búsqueda en '{document_path}' con query: '{query}'")
@@ -227,10 +209,10 @@ def main():
     result = rag_service.reload_knowledge_base()
     print(f"Resultado: {result}")
 
-    print("\n[2/3] Realizando búsqueda de prueba...")
+    print("\n[2/3] Realizando búsqueda de prueba (semántica global)...")
     query = "¿Cuál es la misión de la empresa?"
-    results = rag_service.search_knowledge(query, k=3)
-
+    results = rag_service.semantic_search(query, k=3)
+    
     print(f"\nResultados para '{query}':")
     for i, doc in enumerate(results, 1):
         print(f"\n--- Resultado {i} ---")

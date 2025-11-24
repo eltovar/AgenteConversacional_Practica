@@ -1,7 +1,7 @@
 # info_agent.py (Refactorizado con bind_tools y tool_choice="auto")
 
 from llm_client import llama_client
-from rag import rag_service
+from rag.rag_service import rag_service
 from info_tool import ALL_TOOLS
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)

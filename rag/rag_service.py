@@ -40,9 +40,6 @@ class RAGService:
 
         Este método se llama automáticamente antes de cualquier operación
         que requiera acceso a la base de datos.
-
-        Raises:
-            Exception: Si la inicialización de PostgreSQL falla
         """
         if not self._db_initialized:
             logger.info("[RAG] Inicializando conexión a vector store (lazy)...")
@@ -120,9 +117,6 @@ class RAGService:
         Recarga la base de conocimiento (método público).
 
         Asegura que la base de datos esté inicializada antes de recargar.
-
-        Returns:
-            Dict con status, número de chunks y mensaje
         """
         # Asegurar que la DB esté inicializada
         self._ensure_db_initialized()
@@ -190,13 +184,6 @@ class RAGService:
     def semantic_search(self, query: str, k: int = 5) -> List[Document]:
         """
         Búsqueda semántica pura (sin filtrado por documento).
-
-        Args:
-            query: Consulta del usuario
-            k: Número de documentos a retornar
-
-        Returns:
-            Lista de documentos más relevantes
         """
         # Asegurar que la DB esté inicializada
         self._ensure_db_initialized()
@@ -214,13 +201,6 @@ class RAGService:
     def get_context_for_query(self, query: str, k: int = 3) -> str:
         """
         Obtiene contexto relevante formateado para el LLM (búsqueda global).
-
-        Args:
-            query: Consulta del usuario
-            k: Número de chunks a recuperar
-
-        Returns:
-            String con contexto formateado
         """
         documents = self.semantic_search(query, k=k)
 

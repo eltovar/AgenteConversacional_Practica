@@ -25,39 +25,67 @@ class ConversationState(BaseModel):
 class StateManager:
     def __init__(self):
         """
-        Inicializa el StateManager con conexión a Redis.
+        Inicializa el StateManager con lazy initialization.
+
+        La conexión a Redis se realiza bajo demanda cuando se accede
+        por primera vez a get_state() o update_state().
 
         Variables de entorno requeridas:
         - REDIS_URL: URL de conexión (ej: redis://localhost:6379/0)
         - SESSION_TTL: Tiempo de vida en segundos (default: 86400)
+        """
+        # Cargar configuración (no conecta aún)
+        self.redis_url = os.getenv("REDIS_URL")
+        self.session_ttl = int(os.getenv("SESSION_TTL", "86400"))
+
+        # Cliente Redis (se inicializará bajo demanda)
+        self.client = None
+        self._redis_initialized = False
+
+        logger.info("[StateManager] StateManager creado (lazy initialization habilitada)")
+
+    def _ensure_redis_initialized(self):
+        """
+        Inicializa la conexión a Redis bajo demanda (lazy initialization).
+
+        Este método se llama automáticamente antes de cualquier operación
+        que requiera acceso a Redis.
 
         Raises:
             ValueError: Si REDIS_URL no está configurada
-            redis.ConnectionError: Si no se puede conectar a Redis
+            ConnectionError: Si la conexión a Redis falla
         """
-        # Cargar configuración desde variables de entorno
-        redis_url = os.getenv("REDIS_URL")
-        if not redis_url:
-            error_msg = "REDIS_URL no encontrada en variables de entorno"
-            logger.error(f"[StateManager] {error_msg}")
-            raise ValueError(error_msg)
+        if not self._redis_initialized:
+            logger.info("[StateManager] Inicializando conexión a Redis (lazy)...")
 
-        self.session_ttl = int(os.getenv("SESSION_TTL", "86400"))  # Default: 24 horas
+            # Validar que REDIS_URL esté configurada
+            if not self.redis_url:
+                error_msg = "REDIS_URL no encontrada en variables de entorno"
+                logger.error(f"[StateManager] {error_msg}")
+                raise ValueError(error_msg)
 
-        # Inicializar cliente Redis
-        try:
-            self.client = redis.from_url(redis_url, decode_responses=True)
-            logger.info(f"[StateManager] Cliente Redis inicializado desde {redis_url}")
+            try:
+                # Crear cliente Redis
+                self.client = redis.from_url(self.redis_url, decode_responses=True)
+                logger.info(f"[StateManager] Cliente Redis creado desde {self.redis_url}")
 
-            # Verificación temprana de conexión (fail-fast)
-            self.client.ping()
-            logger.info("[StateManager] Conexión a Redis verificada exitosamente (ping OK)")
-        except redis.ConnectionError as e:
-            logger.error(f"[StateManager] Error de conexión a Redis: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"[StateManager] Error al inicializar cliente Redis: {e}")
-            raise
+                # Verificar conexión con ping
+                self.client.ping()
+                logger.info("[StateManager] Conexión a Redis verificada exitosamente (ping OK)")
+
+                # Marcar como inicializado
+                self._redis_initialized = True
+
+            except redis.ConnectionError as e:
+                logger.error(f"[StateManager] Error de conexión a Redis: {e}")
+                raise ConnectionError(
+                    f"No se pudo conectar a Redis. "
+                    f"Verifica que REDIS_URL esté configurado correctamente. "
+                    f"Error: {e}"
+                ) from e
+            except Exception as e:
+                logger.error(f"[StateManager] Error al inicializar Redis: {e}")
+                raise
 
     def get_state(self, session_id: str) -> ConversationState:
         """
@@ -72,6 +100,9 @@ class StateManager:
         Raises:
             redis.RedisError: Si hay error de comunicación con Redis
         """
+        # Asegurar que Redis esté inicializado
+        self._ensure_redis_initialized()
+
         key = f"session:{session_id}"
 
         try:
@@ -105,6 +136,9 @@ class StateManager:
         Raises:
             redis.RedisError: Si hay error de comunicación con Redis
         """
+        # Asegurar que Redis esté inicializado
+        self._ensure_redis_initialized()
+
         key = f"session:{state.session_id}"
 
         try:

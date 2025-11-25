@@ -15,6 +15,9 @@ class RAGService:
     """
     Servicio de RAG con búsqueda semántica usando pgvector.
     Soporta Hot-Reload de la base de conocimiento sin reiniciar el servidor.
+
+    Implementa Lazy Initialization para evitar errores de conexión durante
+    importaciones en entornos donde PostgreSQL no está disponible (ej. tests locales).
     """
     KNOWLEDGE_BASE_DIR = "knowledge_base"
     CHUNK_SIZE = 500
@@ -22,51 +25,77 @@ class RAGService:
 
     def __init__(self):
         """
-        Inicializa el servicio RAG y carga la base de conocimiento.
+        Inicializa el servicio RAG con lazy initialization.
+
+        La conexión a PostgreSQL se realiza bajo demanda (lazy) cuando
+        se accede por primera vez a métodos que requieren la base de datos.
         """
-        # Inicializar vector store
-        logger.info("[RAG] Inicializando vector store...")
+        # Flag para controlar si la DB ha sido inicializada
+        self._db_initialized = False
+        logger.info("[RAG] RAGService creado (lazy initialization habilitada)")
+
+    def _ensure_db_initialized(self):
+        """
+        Inicializa la conexión a PostgreSQL bajo demanda (lazy initialization).
+
+        Este método se llama automáticamente antes de cualquier operación
+        que requiera acceso a la base de datos.
+
+        Raises:
+            Exception: Si la inicialización de PostgreSQL falla
+        """
+        if not self._db_initialized:
+            logger.info("[RAG] Inicializando conexión a vector store (lazy)...")
+            try:
+                # Inicializar conexión a PostgreSQL + pgvector
+                pg_vector_store.initialize_db()
+                logger.info("[RAG] Vector store inicializado exitosamente")
+
+                # Cargar documentos en la primera inicialización
+                result = self._reload_knowledge_base_internal()
+                logger.info(f"[RAG] Base de conocimiento cargada: {result['message']}")
+
+                # Marcar como inicializado
+                self._db_initialized = True
+
+            except Exception as e:
+                logger.error(
+                    f"[RAG] Error al inicializar vector store: {e}",
+                    exc_info=True
+                )
+                raise ConnectionError(
+                    f"No se pudo conectar a PostgreSQL. "
+                    f"Verifica que DATABASE_URL esté configurado correctamente. "
+                    f"Error: {e}"
+                ) from e
+
+    def _reload_knowledge_base_internal(self) -> Dict[str, Any]:
+        """
+        Método interno para recargar la base de conocimiento.
+        No verifica inicialización (asume que ya está inicializado).
+
+        Returns:
+            Dict con status y mensaje
+        """
+        logger.info("[RAG] Recargando base de conocimiento...")
+
         try:
-            pg_vector_store.initialize_db()
-            logger.info("[RAG] Vector store inicializado exitosamente")
-        except Exception as e:
-            logger.error(f"[RAG] Error al inicializar vector store: {e}", exc_info=True)
-            raise
-
-        # Cargar documentos inmediatamente
-        result = self.reload_knowledge_base()
-        logger.info(f"[RAG] Servicio inicializado: {result['message']}")
-
-    def reload_knowledge_base(self) -> Dict[str, Any]:
-        """
-        Recarga la base de conocimiento:
-        1. Carga documentos del disco
-        2. Los divide en chunks
-        3. Elimina embeddings existentes (limpieza para hot-reload)
-        4. Indexa los nuevos chunks en pgvector
-        """
-        logger.info("[RAG] Iniciando recarga de base de conocimiento...")
-
-        try:
-            # 1. Cargar y dividir documentos en chunks
+            # Cargar y dividir documentos
             chunks = load_and_chunk_documents(
                 base_dir=self.KNOWLEDGE_BASE_DIR,
                 chunk_size=self.CHUNK_SIZE,
                 chunk_overlap=self.CHUNK_OVERLAP
             )
 
-            # Si no hay documentos, usar placeholder
             if not chunks:
                 logger.warning("[RAG] No se encontraron documentos, usando placeholder")
                 chunks = load_placeholder_documents()
 
-            # 2. Limpiar embeddings existentes (para hot-reload)
-            # NOTA: PGVector no tiene un método directo para limpiar la colección
-            # En producción, podrías implementar una estrategia de versionado o timestamps
+            # Limpiar índice anterior
             logger.info("[RAG] Limpiando índice anterior...")
             self._clear_vector_store()
 
-            # 3. Agregar nuevos chunks al vector store
+            # Indexar nuevos chunks
             logger.info(f"[RAG] Indexando {len(chunks)} chunks en pgvector...")
             ids = pg_vector_store.add_documents(chunks)
 
@@ -79,12 +108,27 @@ class RAGService:
             }
 
         except Exception as e:
-            logger.error(f"[RAG] Error crítico durante la recarga: {e}", exc_info=True)
+            logger.error(f"[RAG] Error durante la recarga: {e}", exc_info=True)
             return {
                 "status": "error",
                 "chunks_indexed": 0,
                 "message": f"Fallo al recargar: {str(e)}"
             }
+
+    def reload_knowledge_base(self) -> Dict[str, Any]:
+        """
+        Recarga la base de conocimiento (método público).
+
+        Asegura que la base de datos esté inicializada antes de recargar.
+
+        Returns:
+            Dict con status, número de chunks y mensaje
+        """
+        # Asegurar que la DB esté inicializada
+        self._ensure_db_initialized()
+
+        # Delegar al método interno
+        return self._reload_knowledge_base_internal()
 
     def _clear_vector_store(self) -> None:
         """
@@ -107,6 +151,9 @@ class RAGService:
         IMPORTANTE: Esta es la interfaz de compatibilidad con el código legacy.
         Usa búsqueda semántica pero filtra por source en metadata.
         """
+        # Asegurar que la DB esté inicializada
+        self._ensure_db_initialized()
+
         try:
             logger.debug(f"[RAG] Búsqueda en '{document_path}' con query: '{query}'")
 
@@ -151,6 +198,9 @@ class RAGService:
         Returns:
             Lista de documentos más relevantes
         """
+        # Asegurar que la DB esté inicializada
+        self._ensure_db_initialized()
+
         try:
             logger.debug(f"[RAG] Búsqueda semántica: '{query}' (top-{k})")
             results = pg_vector_store.similarity_search(query, k=k)

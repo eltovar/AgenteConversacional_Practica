@@ -49,14 +49,23 @@ def test_ragservice_reload_method_exists():
 
 
 def test_ragservice_reload_returns_dict():
-    """Verificar que reload_knowledge_base() retorna diccionario con estructura correcta."""
-    result = rag_service.reload_knowledge_base()
+    """
+    Verificar que reload_knowledge_base() retorna diccionario con estructura correcta.
 
-    assert isinstance(result, dict)
-    assert "status" in result
-    assert "files_loaded" in result
-    assert "message" in result
-    assert result["status"] in ["success", "error"]
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
+    """
+    try:
+        result = rag_service.reload_knowledge_base()
+
+        assert isinstance(result, dict)
+        assert "status" in result
+        assert "chunks_indexed" in result  # Cambiado de files_loaded a chunks_indexed
+        assert "message" in result
+        assert result["status"] in ["success", "error"]
+    except ConnectionError as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
 
 
 def test_ragservice_reload_detects_new_file(temp_knowledge_file):

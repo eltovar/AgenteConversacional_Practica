@@ -113,6 +113,9 @@ def test_indexing_to_vector_store(tmp_path):
     """
     Test: Verifica la indexación completa en vector store.
     Assert: El número de documentos insertados coincide con los chunks esperados.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
     # Crear archivos de prueba
     kb_dir = tmp_path / "test_kb"
@@ -130,27 +133,37 @@ def test_indexing_to_vector_store(tmp_path):
     expected_chunks = len(chunks)
     assert expected_chunks > 0
 
-    # Inicializar vector store temporal
-    vs = PgVectorStore(collection_name="test_indexing")
-    vs.initialize_db()
+    try:
+        # Inicializar vector store temporal
+        vs = PgVectorStore(collection_name="test_indexing")
+        vs.initialize_db()
 
-    # Indexar documentos
-    ids = vs.add_documents(chunks)
+        # Indexar documentos
+        ids = vs.add_documents(chunks)
 
-    # Assert: Número de IDs retornados coincide con chunks indexados
-    assert len(ids) == expected_chunks
-    assert all(isinstance(doc_id, str) for doc_id in ids)
+        # Assert: Número de IDs retornados coincide con chunks indexados
+        assert len(ids) == expected_chunks
+        assert all(isinstance(doc_id, str) for doc_id in ids)
 
-    # Verificar que se pueden recuperar mediante búsqueda
-    results = vs.similarity_search("Inmobiliaria", k=2)
-    assert len(results) > 0
-    assert any("Proteger" in doc.page_content or "Inmobiliaria" in doc.page_content
-               for doc in results)
+        # Verificar que se pueden recuperar mediante búsqueda
+        results = vs.similarity_search("Inmobiliaria", k=2)
+        assert len(results) > 0
+        assert any("Proteger" in doc.page_content or "Inmobiliaria" in doc.page_content
+                   for doc in results)
+    except Exception as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        if "could not translate host name" in str(e) or "Connection refused" in str(e):
+            pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
+        else:
+            raise  # Re-raise si es otro tipo de error
 
 
 def test_indexing_with_metadata_preservation():
     """
     Test: Verifica que los metadatos se preservan durante la indexación.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
     # Crear documentos con metadata específica
     docs = [
@@ -164,22 +177,29 @@ def test_indexing_with_metadata_preservation():
         )
     ]
 
-    # Indexar
-    vs = PgVectorStore(collection_name="test_metadata")
-    vs.initialize_db()
-    ids = vs.add_documents(docs)
+    try:
+        # Indexar
+        vs = PgVectorStore(collection_name="test_metadata")
+        vs.initialize_db()
+        ids = vs.add_documents(docs)
 
-    assert len(ids) == 2
+        assert len(ids) == 2
 
-    # Recuperar y verificar metadata
-    results = vs.similarity_search("documento", k=2)
+        # Recuperar y verificar metadata
+        results = vs.similarity_search("documento", k=2)
 
-    assert len(results) == 2
-    for doc in results:
-        assert "source" in doc.metadata
-        assert "category" in doc.metadata
-        assert "priority" in doc.metadata
-        assert doc.metadata["source"] in ["test1.txt", "test2.txt"]
+        assert len(results) == 2
+        for doc in results:
+            assert "source" in doc.metadata
+            assert "category" in doc.metadata
+            assert "priority" in doc.metadata
+            assert doc.metadata["source"] in ["test1.txt", "test2.txt"]
+    except Exception as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        if "could not translate host name" in str(e) or "Connection refused" in str(e):
+            pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
+        else:
+            raise  # Re-raise si es otro tipo de error
 
 
 def test_chunk_size_limits():

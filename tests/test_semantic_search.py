@@ -2,9 +2,13 @@
 """
 Tests de búsqueda semántica con pgvector.
 Verifica que la búsqueda vectorial funciona correctamente y retorna resultados relevantes.
+
+NOTA: Estos tests requieren conexión a PostgreSQL (Railway).
+      Se skipean automáticamente si se ejecutan localmente.
 """
 
 import pytest
+import os
 from langchain_core.documents import Document
 from rag.vector_store import PgVectorStore
 from rag import RAGService
@@ -14,47 +18,65 @@ from rag import RAGService
 def vector_store_with_data():
     """
     Fixture que crea un vector store con datos de prueba.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
-    vs = PgVectorStore(collection_name="test_semantic_search")
-    vs.initialize_db()
+    # Verificar que DATABASE_URL esté configurada
+    if not os.getenv("DATABASE_URL"):
+        pytest.skip("DATABASE_URL no configurada. Ejecutar tests en Railway o configurar PostgreSQL local")
 
-    # Documentos de prueba con información sobre horarios
-    test_docs = [
-        Document(
-            page_content=(
-                "Horarios de atención: Nuestras oficinas están abiertas de lunes a viernes "
-                "de 8:00 AM a 6:00 PM. Los sábados atendemos de 9:00 AM a 1:00 PM. "
-                "Domingos y festivos permanecemos cerrados."
-            ),
-            metadata={"source": "knowledge_base/info_horarios.txt", "filename": "info_horarios.txt"}
-        ),
-        Document(
-            page_content=(
-                "Contacto: Puede comunicarse con nosotros al teléfono 322 502 1493. "
-                "También estamos disponibles por correo electrónico en info@proteger.com"
-            ),
-            metadata={"source": "knowledge_base/info_contacto.txt", "filename": "info_contacto.txt"}
-        ),
-        Document(
-            page_content=(
-                "Servicios disponibles: Ofrecemos arriendo de apartamentos, casas y oficinas. "
-                "También brindamos asesoría legal y administración de propiedades."
-            ),
-            metadata={"source": "knowledge_base/info_servicios.txt", "filename": "info_servicios.txt"}
-        ),
-        Document(
-            page_content=(
-                "Ubicación: Nuestras oficinas principales están ubicadas en el centro de Medellín, "
-                "en la Carrera 43A #14-109. Contamos también con sucursales en El Poblado y Laureles."
-            ),
-            metadata={"source": "knowledge_base/info_ubicacion.txt", "filename": "info_ubicacion.txt"}
-        )
-    ]
+    try:
+        vs = PgVectorStore(collection_name="test_semantic_search")
 
-    # Indexar documentos
-    vs.add_documents(test_docs)
+        # Forzar inicialización para capturar errores de conexión en el fixture
+        # En lugar de dentro de los tests (FAILED → SKIPPED)
+        vs.initialize_db()
 
-    return vs
+        # Documentos de prueba con información sobre horarios
+        test_docs = [
+            Document(
+                page_content=(
+                    "Horarios de atención: Nuestras oficinas están abiertas de lunes a viernes "
+                    "de 8:00 AM a 6:00 PM. Los sábados atendemos de 9:00 AM a 1:00 PM. "
+                    "Domingos y festivos permanecemos cerrados."
+                ),
+                metadata={"source": "knowledge_base/info_horarios.txt", "filename": "info_horarios.txt"}
+            ),
+            Document(
+                page_content=(
+                    "Contacto: Puede comunicarse con nosotros al teléfono 322 502 1493. "
+                    "También estamos disponibles por correo electrónico en info@proteger.com"
+                ),
+                metadata={"source": "knowledge_base/info_contacto.txt", "filename": "info_contacto.txt"}
+            ),
+            Document(
+                page_content=(
+                    "Servicios disponibles: Ofrecemos arriendo de apartamentos, casas y oficinas. "
+                    "También brindamos asesoría legal y administración de propiedades."
+                ),
+                metadata={"source": "knowledge_base/info_servicios.txt", "filename": "info_servicios.txt"}
+            ),
+            Document(
+                page_content=(
+                    "Ubicación: Nuestras oficinas principales están ubicadas en el centro de Medellín, "
+                    "en la Carrera 43A #14-109. Contamos también con sucursales en El Poblado y Laureles."
+                ),
+                metadata={"source": "knowledge_base/info_ubicacion.txt", "filename": "info_ubicacion.txt"}
+            )
+        ]
+
+        # Indexar documentos
+        vs.add_documents(test_docs)
+
+        return vs
+
+    except (ConnectionError, Exception) as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        if "could not translate host name" in str(e) or "Connection refused" in str(e):
+            pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
+        else:
+            raise  # Re-raise si es otro tipo de error
 
 
 def test_semantic_search_horarios(vector_store_with_data):

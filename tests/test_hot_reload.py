@@ -2,9 +2,12 @@
 Tests de integración para Hot-Reload de Base de Conocimiento.
 
 Valida el flujo completo: RAGService → InfoAgent → Endpoint HTTP
+
+NOTA: Tests refactorizados para arquitectura vectorial (PostgreSQL + pgvector).
+      Los tests que validaban knowledge_map fueron eliminados (arquitectura obsoleta).
+      La funcionalidad de hot-reload (A → B update) se valida en test_criterio2.py.
 """
 import pytest
-import os
 from rag import rag_service
 from info_agent import agent
 from fastapi.testclient import TestClient
@@ -17,27 +20,6 @@ from app import app
 def client():
     """Cliente de prueba para FastAPI."""
     return TestClient(app)
-
-
-@pytest.fixture
-def temp_knowledge_file():
-    """
-    Fixture que crea un archivo temporal en knowledge_base/ para testing.
-    Se limpia automáticamente después del test.
-    """
-    test_file = "knowledge_base/test_hotreload_fixture.txt"
-
-    # Setup: crear archivo
-    with open(test_file, 'w', encoding='utf-8') as f:
-        f.write("CONTENIDO DE PRUEBA HOTRELOAD\n")
-        f.write("Palabra clave única: FIXTURE_HOTRELOAD_2024\n")
-        f.write("Este archivo es temporal para testing.")
-
-    yield test_file  # Proveer path al test
-
-    # Teardown: eliminar archivo si existe
-    if os.path.exists(test_file):
-        os.remove(test_file)
 
 
 # ===== TESTS UNITARIOS: RAGService =====
@@ -60,7 +42,7 @@ def test_ragservice_reload_returns_dict():
 
         assert isinstance(result, dict)
         assert "status" in result
-        assert "chunks_indexed" in result  # Cambiado de files_loaded a chunks_indexed
+        assert "chunks_indexed" in result
         assert "message" in result
         assert result["status"] in ["success", "error"]
     except ConnectionError as e:
@@ -68,74 +50,29 @@ def test_ragservice_reload_returns_dict():
         pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
 
 
-def test_ragservice_reload_detects_new_file(temp_knowledge_file):
-    """
-    Test que verifica que RAGService detecta archivos nuevos después de reload.
-
-    Flujo:
-    1. Verificar que archivo temporal NO está en memoria
-    2. Llamar a reload_knowledge_base()
-    3. Verificar que archivo AHORA SÍ está en memoria
-    """
-    normalized_path = temp_knowledge_file.replace("\\", "/")
-
-    # Estado inicial: archivo no debe estar en memoria (fue creado después del __init__)
-    assert normalized_path not in rag_service.knowledge_map
-
-    # Ejecutar recarga
-    result = rag_service.reload_knowledge_base()
-    assert result["status"] == "success"
-
-    # Verificar que ahora SÍ está en memoria
-    assert normalized_path in rag_service.knowledge_map
-
-    # Verificar contenido
-    content = rag_service.knowledge_map[normalized_path]
-    assert "FIXTURE_HOTRELOAD_2024" in content
-
-
-def test_ragservice_reload_removes_deleted_files(temp_knowledge_file):
-    """
-    Test que verifica que RAGService elimina archivos borrados después de reload.
-
-    Flujo:
-    1. Cargar archivo temporal con reload
-    2. Eliminar archivo del disco
-    3. Reload de nuevo
-    4. Verificar que ya NO está en memoria
-    """
-    normalized_path = temp_knowledge_file.replace("\\", "/")
-
-    # Cargar archivo
-    rag_service.reload_knowledge_base()
-    assert normalized_path in rag_service.knowledge_map
-
-    # Eliminar archivo del disco
-    os.remove(temp_knowledge_file)
-
-    # Recargar de nuevo
-    result = rag_service.reload_knowledge_base()
-    assert result["status"] == "success"
-
-    # Verificar que ya NO está en memoria
-    assert normalized_path not in rag_service.knowledge_map
-
-
-def test_ragservice_search_works_after_reload(temp_knowledge_file):
+def test_ragservice_search_works_after_reload():
     """
     Test que verifica que search_knowledge() funciona correctamente después de reload.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
-    normalized_path = temp_knowledge_file.replace("\\", "/")
+    try:
+        # Recargar base de conocimiento
+        rag_service.reload_knowledge_base()
 
-    # Recargar para incluir archivo temporal
-    rag_service.reload_knowledge_base()
+        # Buscar en un documento conocido
+        result = rag_service.search_knowledge(
+            "knowledge_base/informacion_institucional.txt",
+            "misión de la empresa"
+        )
 
-    # Buscar contenido
-    result = rag_service.search_knowledge(normalized_path, "FIXTURE_HOTRELOAD_2024")
-
-    # Verificar que encontró el contenido
-    assert "FIXTURE_HOTRELOAD_2024" in result
-    assert not result.startswith("[ERROR]")
+        # Verificar que no retorna error
+        assert not result.startswith("[ERROR]")
+        assert len(result) > 0
+    except ConnectionError as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
 
 
 # ===== TESTS UNITARIOS: InfoAgent =====
@@ -147,15 +84,24 @@ def test_infoagent_reload_method_exists():
 
 
 def test_infoagent_reload_delegates_to_rag():
-    """Verificar que InfoAgent.reload_knowledge_base() delega correctamente a RAGService."""
-    result = agent.reload_knowledge_base()
+    """
+    Verificar que InfoAgent.reload_knowledge_base() delega correctamente a RAGService.
 
-    # Verificar estructura de retorno
-    assert isinstance(result, dict)
-    assert "status" in result
-    assert "files_loaded" in result
-    assert result["status"] == "success"
-    assert result["files_loaded"] >= 0
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
+    """
+    try:
+        result = agent.reload_knowledge_base()
+
+        # Verificar estructura de retorno
+        assert isinstance(result, dict)
+        assert "status" in result
+        assert "chunks_indexed" in result
+        assert result["status"] == "success"
+        assert result["chunks_indexed"] >= 0
+    except ConnectionError as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")
 
 
 # ===== TESTS DE INTEGRACIÓN: API Endpoint =====
@@ -163,50 +109,30 @@ def test_infoagent_reload_delegates_to_rag():
 def test_api_endpoint_reload_success(client):
     """
     Test de integración que verifica endpoint /admin/reload-kb responde correctamente.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
     response = client.post("/admin/reload-kb")
 
-    # Verificar respuesta HTTP
+    # Si el endpoint retorna 500, verificar si es por falta de conexión PostgreSQL
+    if response.status_code == 500:
+        error_detail = response.json().get("detail", "")
+        if "could not translate host name" in error_detail or "PostgreSQL" in error_detail:
+            pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {error_detail}")
+        else:
+            # Si es otro tipo de error 500, fallar el test
+            raise AssertionError(f"Endpoint retornó 500 con error inesperado: {error_detail}")
+
+    # Verificar respuesta HTTP exitosa
     assert response.status_code == 200
 
     # Verificar estructura JSON
     data = response.json()
     assert data["status"] == "success"
-    assert "files_loaded" in data
-    assert data["files_loaded"] >= 0
+    assert "chunks_indexed" in data
+    assert data["chunks_indexed"] >= 0
     assert "message" in data
-
-
-def test_api_endpoint_reload_integrates_with_rag(client, temp_knowledge_file):
-    """
-    Test end-to-end que verifica el flujo completo:
-    HTTP POST → InfoAgent → RAGService → Detección de archivo nuevo
-
-    Este es el test más importante: valida toda la cadena de hot-reload.
-    """
-    normalized_path = temp_knowledge_file.replace("\\", "/")
-
-    # Estado inicial: archivo no está en memoria
-    initial_count = len(rag_service.knowledge_map)
-    assert normalized_path not in rag_service.knowledge_map
-
-    # Llamar al endpoint HTTP
-    response = client.post("/admin/reload-kb")
-
-    # Verificar respuesta exitosa
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "success"
-
-    # Verificar que el contador de archivos aumentó
-    assert data["files_loaded"] == initial_count + 1
-
-    # Verificar que el archivo nuevo AHORA SÍ está en memoria
-    assert normalized_path in rag_service.knowledge_map
-
-    # Verificar contenido
-    content = rag_service.knowledge_map[normalized_path]
-    assert "FIXTURE_HOTRELOAD_2024" in content
 
 
 def test_api_endpoint_only_accepts_post(client):
@@ -224,39 +150,31 @@ def test_api_endpoint_only_accepts_post(client):
     assert response_delete.status_code == 405
 
 
-# ===== TEST DE CONSISTENCIA =====
-
-def test_reload_count_consistency():
-    """
-    Test que verifica consistencia entre el contador reportado y archivos reales.
-    """
-    result = rag_service.reload_knowledge_base()
-
-    reported_count = result["files_loaded"]
-    actual_count = len(rag_service.knowledge_map)
-
-    assert reported_count == actual_count, \
-        f"Inconsistencia: reportado={reported_count}, real={actual_count}"
-
-
 # ===== TEST DE IDEMPOTENCIA =====
 
 def test_reload_is_idempotent():
     """
     Test que verifica que múltiples recargas consecutivas producen el mismo resultado.
+
+    NOTA: Este test requiere conexión a PostgreSQL (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
     """
-    # Primera recarga
-    result1 = rag_service.reload_knowledge_base()
-    count1 = result1["files_loaded"]
+    try:
+        # Primera recarga
+        result1 = rag_service.reload_knowledge_base()
+        count1 = result1["chunks_indexed"]
 
-    # Segunda recarga (sin cambios en disco)
-    result2 = rag_service.reload_knowledge_base()
-    count2 = result2["files_loaded"]
+        # Segunda recarga (sin cambios en disco)
+        result2 = rag_service.reload_knowledge_base()
+        count2 = result2["chunks_indexed"]
 
-    # Tercera recarga
-    result3 = rag_service.reload_knowledge_base()
-    count3 = result3["files_loaded"]
+        # Tercera recarga
+        result3 = rag_service.reload_knowledge_base()
+        count3 = result3["chunks_indexed"]
 
-    # Verificar que el contador es idéntico
-    assert count1 == count2 == count3
-    assert result1["status"] == result2["status"] == result3["status"] == "success"
+        # Verificar que el contador es idéntico
+        assert count1 == count2 == count3
+        assert result1["status"] == result2["status"] == result3["status"] == "success"
+    except ConnectionError as e:
+        # Skip si no hay conexión a PostgreSQL (ejecución local)
+        pytest.skip(f"Test requiere PostgreSQL (Railway). Error: {e}")

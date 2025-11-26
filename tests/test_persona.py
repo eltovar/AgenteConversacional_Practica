@@ -20,20 +20,48 @@ import re
 
 @pytest.fixture
 def state_manager():
-    """Fixture para crear un StateManager limpio por test."""
-    return StateManager()
+    """
+    Fixture para crear un StateManager que se conecta a Redis real.
+
+    NOTA: Este test requiere conexión a Redis (Railway).
+          Se skipea automáticamente si se ejecuta localmente.
+    """
+    if not os.getenv("REDIS_URL"):
+        pytest.skip("REDIS_URL no configurada. Ejecutar tests en Railway o configurar Redis local")
+
+    try:
+        manager = StateManager()
+        # Forzar inicialización para capturar errores de conexión en el fixture
+        manager._ensure_redis_initialized()
+        return manager
+    except (ConnectionError, Exception) as e:
+        pytest.skip(f"No se puede conectar a Redis: {e}")
 
 
 @pytest.fixture
 def session_id():
     """Fixture para el session_id de prueba."""
-    return "test_session"
+    return "test_persona_session"
 
 
 @pytest.fixture
 def clean_state(state_manager, session_id):
-    """Fixture para obtener un estado limpio por test."""
-    return state_manager.get_state(session_id)
+    """
+    Fixture para obtener un estado limpio por test.
+
+    NOTA: Limpia el estado antes y después del test para evitar contaminación.
+    """
+    # Crear un estado limpio
+    state = state_manager.get_state(session_id)
+
+    yield state
+
+    # Cleanup: Eliminar la sesión de test después del test
+    try:
+        key = f"session:{session_id}"
+        state_manager.client.delete(key)
+    except Exception:
+        pass  # Ignorar errores de cleanup
 
 
 # ===== HELPERS DE VALIDACIÓN =====

@@ -28,15 +28,22 @@ def state_manager_real():
 
     try:
         manager = StateManager()
+
+        # IMPORTANTE: Forzar inicialización de Redis para capturar errores de conexión
+        # antes de que los tests empiecen. Sin esto, lazy initialization hace que
+        # el error ocurra dentro de los tests (FAILED) en lugar de aquí (SKIPPED).
+        manager._ensure_redis_initialized()
+
         yield manager
 
         # Cleanup: Limpiar claves de test después de todos los tests
-        keys_to_delete = manager.client.keys("session:test_*")
-        keys_to_delete += manager.client.keys("session:stress_*")
-        if keys_to_delete:
-            manager.client.delete(*keys_to_delete)
-            print(f"\n[Cleanup] {len(keys_to_delete)} claves de test eliminadas")
-    except Exception as e:
+        if manager.client:
+            keys_to_delete = manager.client.keys("session:test_*")
+            keys_to_delete += manager.client.keys("session:stress_*")
+            if keys_to_delete:
+                manager.client.delete(*keys_to_delete)
+                print(f"\n[Cleanup] {len(keys_to_delete)} claves de test eliminadas")
+    except (ConnectionError, Exception) as e:
         pytest.skip(f"No se puede conectar a Redis: {e}")
 
 

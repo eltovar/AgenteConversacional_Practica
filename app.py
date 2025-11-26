@@ -4,8 +4,8 @@ Delega toda la lógica de negocio a orchestrator.py.
 Compatible con Twilio, WhatsApp Business API, y otros proveedores.
 """
 
-from fastapi import FastAPI, HTTPException, Response, Header
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Response, Header, Form, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from orchestrator import process_message
 from info_agent import agent
@@ -104,6 +104,64 @@ async def webhook(request: MessageRequest):
         raise HTTPException(
             status_code=500,
             detail="Internal server error. Por favor, intenta de nuevo."
+        )
+
+
+@app.post("/webhook/twilio")
+async def twilio_webhook(
+    From: str = Form(...),
+    Body: str = Form(...),
+    MessageSid: str = Form(None),
+    ProfileName: str = Form(None)
+):
+    """
+    Webhook específico para Twilio WhatsApp.
+
+    Twilio envía los mensajes como form data con los siguientes campos:
+    - From: Número del usuario (ej: whatsapp:+573001234567)
+    - Body: Contenido del mensaje
+    - MessageSid: ID del mensaje de Twilio
+    - ProfileName: Nombre del perfil de WhatsApp del usuario
+
+    Retorna: TwiML response (XML) para que Twilio pueda procesar la respuesta
+    """
+    try:
+        # Extraer session_id del número de teléfono (sin el prefijo whatsapp:)
+        session_id = From.replace("whatsapp:", "")
+
+        logger.info(f"[TWILIO] Mensaje de WhatsApp recibido")
+        logger.info(f"[TWILIO] De: {From} (Profile: {ProfileName})")
+        logger.info(f"[TWILIO] MessageSid: {MessageSid}")
+        logger.info(f"[TWILIO] Body: {Body[:100]}...")
+
+        # DELEGAR A ORCHESTRATOR (misma lógica que webhook JSON)
+        result = process_message(session_id, Body)
+
+        logger.info(f"[TWILIO] Respuesta generada. Status: {result['status']}")
+
+        # Twilio espera respuesta en formato TwiML (XML)
+        twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{result['response']}</Message>
+</Response>"""
+
+        return Response(
+            content=twiml_response,
+            media_type="application/xml"
+        )
+
+    except Exception as e:
+        logger.error(f"[TWILIO] Error procesando mensaje: {e}", exc_info=True)
+
+        # Responder con mensaje de error en TwiML
+        error_twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>Lo siento, ocurrió un error procesando tu mensaje. Por favor, intenta de nuevo.</Message>
+</Response>"""
+
+        return Response(
+            content=error_twiml,
+            media_type="application/xml"
         )
 
 

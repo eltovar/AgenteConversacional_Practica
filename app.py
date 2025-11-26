@@ -1,15 +1,14 @@
-# app.py (FASTAPI WEBHOOK BACKEND)
 """
 Servidor FastAPI para recibir mensajes vía webhooks.
 Delega toda la lógica de negocio a orchestrator.py.
 Compatible con Twilio, WhatsApp Business API, y otros proveedores.
 """
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from orchestrator import process_message
-from info_agent import agent  # Para endpoint administrativo de recarga
+from info_agent import agent
 from logging_config import logger
 import uvicorn
 import json
@@ -111,13 +110,44 @@ async def webhook(request: MessageRequest):
 @app.get("/health")
 async def health_check():
     """
-    Endpoint de health check para monitoreo.
+    Health check mejorado para Railway con verificación de dependencias.
+    Crea conexiones independientes para evitar import circular.
     """
-    return {
+    health_status = {
         "status": "ok",
         "service": "Sofia - Asistente Virtual",
         "version": "1.0.0"
     }
+
+    # Verificar conexión a Redis
+    try:
+        import redis
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            client = redis.from_url(redis_url, decode_responses=True)
+            client.ping()
+            client.close()
+            health_status["redis"] = "connected"
+        else:
+            health_status["redis"] = "not_configured"
+    except Exception as e:
+        health_status["redis"] = f"error: {str(e)[:50]}"
+
+    # Verificar conexión a PostgreSQL
+    try:
+        import psycopg
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            with psycopg.connect(database_url) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+            health_status["postgres"] = "connected"
+        else:
+            health_status["postgres"] = "not_configured"
+    except Exception as e:
+        health_status["postgres"] = f"error: {str(e)[:50]}"
+
+    return health_status
 
 
 @app.get("/")
@@ -139,15 +169,26 @@ async def root():
 # ===== ENDPOINTS ADMINISTRATIVOS =====
 
 @app.post("/admin/reload-kb")
-async def reload_knowledge_base():
+async def reload_knowledge_base(x_api_key: str = Header(None, alias="X-API-Key")):
     """
     Endpoint administrativo para recargar la base de conocimiento RAG.
 
     Permite actualizar los documentos en memoria sin reiniciar el servidor.
     Útil para aplicar cambios en knowledge_base/ de forma inmediata.
+
+    Requiere autenticación mediante X-API-Key header.
     """
+    # Verificar autenticación
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+    if not admin_api_key or x_api_key != admin_api_key:
+        logger.warning(f"[API] Intento de acceso no autorizado a /admin/reload-kb")
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: Invalid or missing API key"
+        )
+
     try:
-        logger.info("[API] Solicitud de recarga de base de conocimiento recibida")
+        logger.info("[API] Solicitud de recarga de base de conocimiento recibida (autenticada)")
 
         # Delegar a InfoAgent
         result = agent.reload_knowledge_base()
@@ -187,11 +228,14 @@ async def reload_knowledge_base():
 # ===== ENTRYPOINT =====
 
 if __name__ == "__main__":
-    # Para desarrollo local: python app.py
-    # Para producción: gunicorn -w 4 -k uvicorn.workers.UvicornWorker app:app
+    import os
+    
+    # Railway proporciona $PORT, fallback a 8000 para desarrollo local
+    port = int(os.getenv("PORT", "8000"))
+    
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=port,  # ← Dinámico
         log_level="info"
     )

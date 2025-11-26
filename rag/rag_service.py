@@ -1,4 +1,3 @@
-# rag.py
 """
 Servicio de RAG (Retrieval-Augmented Generation) con búsqueda semántica.
 Usa pgvector para almacenamiento de embeddings y búsqueda por similitud.
@@ -70,9 +69,6 @@ class RAGService:
         """
         Método interno para recargar la base de conocimiento.
         No verifica inicialización (asume que ya está inicializado).
-
-        Returns:
-            Dict con status y mensaje
         """
         logger.info("[RAG] Recargando base de conocimiento...")
 
@@ -127,15 +123,33 @@ class RAGService:
     def _clear_vector_store(self) -> None:
         """
         Limpia el vector store eliminando documentos antiguos.
-        NOTA: Implementación simplificada. En producción, usar estrategia más robusta.
+        Ejecuta DELETE directo en PostgreSQL para evitar duplicados.
         """
         try:
-            # PGVector/LangChain no proporciona un método directo de limpieza
-            # Por ahora, simplemente logueamos la acción
-            # En una implementación completa, ejecutarías SQL: DELETE FROM collection_name
-            logger.info("[RAG] Limpieza de vector store (pendiente implementación SQL directa)")
+            import psycopg
+            from rag.vector_store import pg_vector_store
+
+            logger.info("[RAG] Limpiando índice vectorial anterior...")
+
+            # Obtener connection string
+            connection_string = pg_vector_store.connection_string
+            collection_name = pg_vector_store.collection_name
+
+            # Conectar y ejecutar DELETE
+            with psycopg.connect(connection_string) as conn:
+                with conn.cursor() as cursor:
+                    # Eliminar todos los documentos de la colección
+                    cursor.execute(
+                        f"DELETE FROM langchain_pg_embedding WHERE cmetadata->>'collection_name' = %s",
+                        (collection_name,)
+                    )
+                    deleted_count = cursor.rowcount
+                    conn.commit()
+
+                    logger.info(f"[RAG] Vector store limpiado: {deleted_count} documentos eliminados")
 
         except Exception as e:
+            # No es fatal si falla la limpieza, solo logueamos warning
             logger.warning(f"[RAG] No se pudo limpiar vector store: {e}")
 
     def search_knowledge(self, document_path: str, query: str, k: int = 5) -> str:
@@ -151,20 +165,15 @@ class RAGService:
         try:
             logger.debug(f"[RAG] Búsqueda en '{document_path}' con query: '{query}'")
 
-            # Realizar búsqueda semántica (recupera más resultados para filtrar)
-            all_results = pg_vector_store.similarity_search(query, k=k * 3)
-
-            # Filtrar resultados por source que coincida con document_path
-            # Normalizar rutas para comparación
+            # Normalizar ruta para comparación
             normalized_doc_path = document_path.replace("\\", "/")
 
-            filtered_results = [
-                doc for doc in all_results
-                if doc.metadata.get("source", "").replace("\\", "/") == normalized_doc_path
-            ]
-
-            # Limitar a k resultados después del filtrado
-            filtered_results = filtered_results[:k]
+            # Usar filtrado nativo de PGVector (más eficiente que filtrar en Python)
+            filtered_results = pg_vector_store.similarity_search(
+                query,
+                k=k,
+                filter={"source": normalized_doc_path}
+            )
 
             if not filtered_results:
                 logger.warning(f"[RAG] No se encontraron resultados para '{document_path}'")
@@ -223,7 +232,6 @@ class RAGService:
 
 # Instancia global
 rag_service = RAGService()
-
 
 # Función main para testing/validación manual
 def main():

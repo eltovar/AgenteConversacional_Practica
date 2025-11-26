@@ -93,13 +93,14 @@ class PgVectorStore:
         logger.info(f"[PgVectorStore] {len(ids)} documentos agregados exitosamente")
         return ids
 
-    def similarity_search(self, query: str, k: int = 5) -> List[Document]:
+    def similarity_search(self, query: str, k: int = 5, filter: Optional[dict] = None) -> List[Document]:
         """
         Realiza búsqueda por similitud semántica.
 
         Args:
             query: Texto de búsqueda
             k: Número de resultados a retornar
+            filter: Filtro opcional para metadata (ej: {"source": "path/to/doc.txt"})
 
         Returns:
             List[Document]: Documentos más similares
@@ -107,8 +108,14 @@ class PgVectorStore:
         if self.vector_store is None:
             raise RuntimeError("Vector store no inicializado")
 
-        logger.debug(f"[PgVectorStore] Búsqueda de similitud: '{query}' (top-{k})")
-        results = self.vector_store.similarity_search(query, k=k)
+        logger.debug(f"[PgVectorStore] Búsqueda de similitud: '{query}' (top-{k}, filter={filter})")
+
+        # PGVector soporta filtrado nativo por metadata
+        if filter:
+            results = self.vector_store.similarity_search(query, k=k, filter=filter)
+        else:
+            results = self.vector_store.similarity_search(query, k=k)
+
         logger.debug(f"[PgVectorStore] {len(results)} resultados encontrados")
         return results
 

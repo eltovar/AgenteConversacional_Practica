@@ -168,42 +168,44 @@ async def twilio_webhook(
 @app.get("/health")
 async def health_check():
     """
-    Health check mejorado para Railway con verificación de dependencias.
-    Crea conexiones independientes para evitar import circular.
+    Health check básico para Railway.
+    Verifica dependencias opcionales sin bloquear la respuesta.
     """
     health_status = {
-        "status": "ok",
+        "status": "healthy",
         "service": "Sofia - Asistente Virtual",
         "version": "1.0.0"
     }
 
-    # Verificar conexión a Redis
+    # Verificar Redis (no crítico)
     try:
         import redis
         redis_url = os.getenv("REDIS_URL")
         if redis_url:
-            client = redis.from_url(redis_url, decode_responses=True)
+            client = redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
             client.ping()
             client.close()
             health_status["redis"] = "connected"
         else:
             health_status["redis"] = "not_configured"
     except Exception as e:
-        health_status["redis"] = f"error: {str(e)[:50]}"
+        logger.warning(f"[HEALTH] Redis check failed: {e}")
+        health_status["redis"] = "unavailable"
 
-    # Verificar conexión a PostgreSQL
+    # Verificar PostgreSQL (no crítico)
     try:
         import psycopg
         database_url = os.getenv("DATABASE_URL")
         if database_url:
-            with psycopg.connect(database_url) as conn:
+            with psycopg.connect(database_url, connect_timeout=2) as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT 1")
             health_status["postgres"] = "connected"
         else:
             health_status["postgres"] = "not_configured"
     except Exception as e:
-        health_status["postgres"] = f"error: {str(e)[:50]}"
+        logger.warning(f"[HEALTH] PostgreSQL check failed: {e}")
+        health_status["postgres"] = "unavailable"
 
     return health_status
 

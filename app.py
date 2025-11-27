@@ -171,11 +171,6 @@ async def twilio_webhook(
     Webhook específico para Twilio WhatsApp.
 
     Twilio envía los mensajes como form data con los siguientes campos:
-    - From: Número del usuario (ej: whatsapp:+573001234567)
-    - Body: Contenido del mensaje
-    - MessageSid: ID del mensaje de Twilio
-    - ProfileName: Nombre del perfil de WhatsApp del usuario
-
     Retorna: TwiML response (XML) para que Twilio pueda procesar la respuesta
     """
     try:

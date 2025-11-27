@@ -79,32 +79,85 @@ class MessageResponse(BaseModel):
 
 # ===== ENDPOINTS =====
 
-@app.post("/webhook", response_model=MessageResponse)
-async def webhook(request: MessageRequest):
+@app.post("/webhook")
+async def webhook(
+    request: Request,
+    From: str = Form(None),
+    Body: str = Form(None),
+    MessageSid: str = Form(None),
+    ProfileName: str = Form(None)
+):
     """
     Endpoint principal para recibir mensajes de usuarios.
-    Compatible con Twilio, WhatsApp Business API, etc.
+    Compatible con Twilio (form data) y otros clientes (JSON).
     """
     try:
-        logger.info(f"[WEBHOOK] Mensaje recibido de session_id: {request.session_id}")
-        logger.debug(f"[WEBHOOK] Contenido: '{request.message}'")
+        content_type = request.headers.get("content-type", "")
 
-        # DELEGAR A ORCHESTRATOR (misma lógica que CLI)
-        result = process_message(request.session_id, request.message)
+        # CASO 1: Petición de Twilio (application/x-www-form-urlencoded)
+        if "application/x-www-form-urlencoded" in content_type or From is not None:
+            logger.info(f"[WEBHOOK] Mensaje de Twilio WhatsApp recibido")
+            logger.info(f"[WEBHOOK] De: {From} (Profile: {ProfileName})")
+            logger.info(f"[WEBHOOK] MessageSid: {MessageSid}")
+            logger.info(f"[WEBHOOK] Body: {Body[:100] if Body else 'vacío'}...")
 
-        logger.info(f"[WEBHOOK] Respuesta enviada. Status: {result['status']}")
+            # Extraer session_id del número de teléfono
+            session_id = From.replace("whatsapp:", "") if From else "unknown"
+            message = Body or ""
 
-        return MessageResponse(
-            response=result["response"],
-            status=str(result["status"])
-        )
+            # Procesar mensaje
+            result = process_message(session_id, message)
+
+            logger.info(f"[WEBHOOK] Respuesta generada. Status: {result['status']}")
+
+            # Twilio espera TwiML (XML)
+            twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{result['response']}</Message>
+</Response>"""
+
+            return Response(
+                content=twiml_response,
+                media_type="application/xml"
+            )
+
+        # CASO 2: Petición JSON (otros clientes)
+        else:
+            body = await request.json()
+            session_id = body.get("session_id")
+            message = body.get("message")
+
+            logger.info(f"[WEBHOOK] Mensaje JSON recibido de session_id: {session_id}")
+            logger.debug(f"[WEBHOOK] Contenido: '{message}'")
+
+            # Procesar mensaje
+            result = process_message(session_id, message)
+
+            logger.info(f"[WEBHOOK] Respuesta enviada. Status: {result['status']}")
+
+            return MessageResponse(
+                response=result["response"],
+                status=str(result["status"])
+            )
 
     except Exception as e:
         logger.error(f"[WEBHOOK] Error procesando mensaje: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Internal server error. Por favor, intenta de nuevo."
-        )
+
+        # Si es Twilio, devolver TwiML de error
+        if From is not None:
+            error_twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>Lo siento, ocurrió un error procesando tu mensaje. Por favor, intenta de nuevo.</Message>
+</Response>"""
+            return Response(
+                content=error_twiml,
+                media_type="application/xml"
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error. Por favor, intenta de nuevo."
+            )
 
 
 @app.post("/webhook/twilio")

@@ -36,6 +36,52 @@ app = FastAPI(
 )
 
 
+# ===== STARTUP EVENT - INICIALIZACIÓN DE KB =====
+"""
+@app.on_event("startup")
+async def startup_event():
+    
+    Evento de startup crítico para Railway.
+    Inicializa la Base de Conocimiento RAG ANTES de aceptar tráfico HTTP.
+
+    Esto previene el timeout de Gunicorn (120s) que ocurría cuando
+    la lazy initialization se ejecutaba en el primer request del usuario.
+    
+    logger.info("=" * 60)
+    logger.info("[STARTUP] Iniciando carga de Base de Conocimiento RAG...")
+    logger.info("=" * 60)
+
+    try:
+        # Importar rag_service (evita circular import)
+        from rag.rag_service import rag_service
+
+        # Ejecutar carga e indexación completa (operación pesada)
+        result = rag_service.reload_knowledge_base()
+
+        # Verificar resultado
+        if result["status"] == "error":
+            error_msg = result.get("message", "Error desconocido")
+            logger.error(f"[STARTUP] ❌ FALLO CRÍTICO: {error_msg}")
+            raise RuntimeError(f"No se pudo cargar la Base de Conocimiento: {error_msg}")
+
+        # Log de éxito con métricas
+        chunks_indexed = result.get("chunks_indexed", 0)
+        duration = result.get("duration", 0)
+
+        logger.info("=" * 60)
+        logger.info(f"[STARTUP] ✅ KB cargada exitosamente")
+        logger.info(f"[STARTUP] Chunks indexados: {chunks_indexed}")
+        logger.info(f"[STARTUP] Tiempo de indexación: {duration:.2f}s")
+        logger.info("=" * 60)
+        logger.info("[STARTUP] Servidor listo para aceptar tráfico HTTP")
+
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"[STARTUP] ❌ ERROR CRÍTICO durante inicialización de KB: {e}")
+        logger.error("=" * 60)
+        # Re-lanzar excepción para que Railway detecte el fallo y no arranque el servicio
+        raise
+"""
 # ===== MIDDLEWARE PARA UTF-8 =====
 
 @app.middleware("http")

@@ -37,15 +37,17 @@ app = FastAPI(
 
 
 # ===== STARTUP EVENT - INICIALIZACIÓN DE KB =====
-"""
+
 @app.on_event("startup")
 async def startup_event():
     
+    """
     Evento de startup crítico para Railway.
     Inicializa la Base de Conocimiento RAG ANTES de aceptar tráfico HTTP.
 
     Esto previene el timeout de Gunicorn (120s) que ocurría cuando
     la lazy initialization se ejecutaba en el primer request del usuario.
+    """
     
     logger.info("=" * 60)
     logger.info("[STARTUP] Iniciando carga de Base de Conocimiento RAG...")
@@ -81,7 +83,7 @@ async def startup_event():
         logger.error("=" * 60)
         # Re-lanzar excepción para que Railway detecte el fallo y no arranque el servicio
         raise
-"""
+
 # ===== MIDDLEWARE PARA UTF-8 =====
 
 @app.middleware("http")

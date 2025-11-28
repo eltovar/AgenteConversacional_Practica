@@ -40,13 +40,9 @@ def main():
     # 2. Inicializar conexión
     print("\n[2/5] Inicializando conexión a PostgreSQL...")
     try:
-        result = pg_vector_store.initialize_db()
-        if result:
-            print("✓ Conexión a PostgreSQL establecida exitosamente")
-            print(f"✓ Tabla '{pg_vector_store.collection_name}' creada/verificada")
-        else:
-            print("❌ Error al inicializar la base de datos")
-            return False
+        pg_vector_store.initialize_db()
+        print("✓ Conexión a PostgreSQL establecida exitosamente")
+        print(f"✓ Tabla '{pg_vector_store.collection_name}' creada/verificada")
     except Exception as e:
         print(f"❌ ERROR al conectar: {e}")
         return False

@@ -1,8 +1,11 @@
 # Core LangChain
 langchain==0.3.27
 langchain-core==0.3.74
-langchain-community==0.3.27
+langchain-community==0.3.18
 langchain-text-splitters==0.3.9
+
+# NumPy - versión compatible con ambos langchain-community y langchain-postgres
+numpy<2.0,>=1.26.0
 
 # OpenAI (versión compatible con langchain-openai)
 openai>=1.86.0
@@ -29,9 +32,7 @@ redis>=5.0.0
 # PostgreSQL + pgvector (para RAG vectorial)
 # Forzar instalación de dialectos SQLAlchemy para PostgreSQL
 langchain-postgres==0.0.12
-psycopg[binary]==3.2.1
-psycopg2-binary==2.9.9
-asyncpg==0.29.0
+psycopg[binary]==3.2.3
 
 # Testing (opcional)
 pytest>=8.0.0

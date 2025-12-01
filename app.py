@@ -40,7 +40,6 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_event():
-    
     """
     Evento de startup crítico para Railway.
     Inicializa la Base de Conocimiento RAG ANTES de aceptar tráfico HTTP.

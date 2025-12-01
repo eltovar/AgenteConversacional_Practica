@@ -41,6 +41,13 @@ class PgVectorStore:
             if not self.connection_string:
                 raise ValueError("DATABASE_URL (connection_string) no está configurada.")
 
+            # Normalizar connection string: postgres:// → postgresql://
+            # SQLAlchemy requiere 'postgresql' como dialecto, no 'postgres'
+            """normalized_connection = self.connection_string.replace("postgres://", "postgresql://")
+
+            if normalized_connection != self.connection_string:
+                logger.info("[VectorStore] Connection string normalizada: postgres:// → postgresql://")"""
+
             # Crear instancia REAL de PGVector de LangChain
             self.vector_db = PGVector(
                 connection=self.connection_string,

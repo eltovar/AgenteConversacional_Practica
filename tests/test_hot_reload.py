@@ -8,8 +8,8 @@ NOTA: Tests refactorizados para arquitectura vectorial (PostgreSQL + pgvector).
       La funcionalidad de hot-reload (A → B update) se valida en test_criterio2.py.
 """
 import pytest
-from rag import rag_service
-from info_agent import agent
+from rag.rag_service import rag_service
+from Agents.InfoAgent.info_agent import agent
 from fastapi.testclient import TestClient
 from app import app
 

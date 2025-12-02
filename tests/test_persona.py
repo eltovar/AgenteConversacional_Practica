@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from state_manager import StateManager, ConversationState, ConversationStatus
 from Agents.ReceptionAgent.reception_agent import reception_agent
-from info_agent import agent as info_agent
-from agents.InfoAgent.LeadAgent.leadsales_agent import lead_sales_agent
+from Agents.InfoAgent.info_agent import agent as info_agent
+from Agents.LeadAgent.leadsales_agent import lead_sales_agent
 import re
 
 

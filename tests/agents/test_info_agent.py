@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from info_agent import InfoAgent
+from Agents.InfoAgent.info_agent import InfoAgent
 from langchain_core.messages import AIMessage
 
 
@@ -22,7 +22,7 @@ def test_info_agent_rag(info_agent):
     expected_context = "Telefono: +57 601 555 1234"
 
     # Mock de rag_service.search_knowledge
-    with patch('info_agent.rag_service.search_knowledge', return_value=expected_context) as mock_rag:
+    with patch('Agents.InfoAgent.info_agent.rag_service.search_knowledge', return_value=expected_context) as mock_rag:
         # Mock de llama_client.client.bind_tools (primera llamada)
         # Crear mock de tool_call nativo (debe ser dict con name, args, id)
         mock_tool_decision_response = AIMessage(
@@ -43,8 +43,8 @@ def test_info_agent_rag(info_agent):
         mock_llm_with_tools.invoke.return_value = mock_tool_decision_response
         mock_client.bind_tools.return_value = mock_llm_with_tools
 
-        with patch('info_agent.llama_client.client', mock_client), \
-             patch('info_agent.llama_client.invoke') as mock_llm_invoke:
+        with patch('Agents.InfoAgent.info_agent.llama_client.client', mock_client), \
+             patch('Agents.InfoAgent.info_agent.llama_client.invoke') as mock_llm_invoke:
 
             # Configurar invoke directo para segunda llamada (generacion RAG)
             mock_llm_invoke.return_value = mock_rag_response
@@ -82,7 +82,7 @@ def test_info_agent_no_tool_direct_response(info_agent):
     mock_llm_with_tools.invoke.return_value = mock_no_tool_response
     mock_client.bind_tools.return_value = mock_llm_with_tools
 
-    with patch('info_agent.llama_client.client', mock_client):
+    with patch('Agents.InfoAgent.info_agent.llama_client.client', mock_client):
         # Ejecutar proceso
         response = info_agent.process_info_query(user_query)
 
@@ -111,7 +111,7 @@ def test_info_agent_tool_detection(info_agent):
         }]
     )
 
-    with patch('info_agent.rag_service.search_knowledge',
+    with patch('Agents.InfoAgent.info_agent.rag_service.search_knowledge',
                return_value="Filosofia: Confianza y calidad") as mock_rag:
 
         # Crear mock del cliente completo
@@ -120,8 +120,8 @@ def test_info_agent_tool_detection(info_agent):
         mock_llm_with_tools.invoke.return_value = mock_tool_response
         mock_client.bind_tools.return_value = mock_llm_with_tools
 
-        with patch('info_agent.llama_client.client', mock_client), \
-             patch('info_agent.llama_client.invoke') as mock_llm_invoke:
+        with patch('Agents.InfoAgent.info_agent.llama_client.client', mock_client), \
+             patch('Agents.InfoAgent.info_agent.llama_client.invoke') as mock_llm_invoke:
 
             # Configurar respuesta final
             mock_llm_invoke.return_value = AIMessage(

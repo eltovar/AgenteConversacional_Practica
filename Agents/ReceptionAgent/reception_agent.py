@@ -1,6 +1,6 @@
 # reception_agent.py (NUEVO)
 from llm_client import llama_client
-from reception_tool import RECEPTION_TOOLS, classify_intent_func
+from Agents.ReceptionAgent.reception_tool import RECEPTION_TOOLS, classify_intent_func
 from prompts.reception_prompts import (
     RECEPTION_SYSTEM_PROMPT,
     CLARIFICATION_PROMPTS,

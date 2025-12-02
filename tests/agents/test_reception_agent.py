@@ -1,7 +1,7 @@
 # tests/agents/test_reception_agent.py
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from reception_agent import ReceptionAgent
+from Agents.ReceptionAgent.reception_agent import ReceptionAgent
 from state_manager import ConversationState, ConversationStatus
 
 

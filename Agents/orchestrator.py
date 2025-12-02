@@ -12,9 +12,9 @@ comandos:
 import os
 from dotenv import load_dotenv
 from state_manager import StateManager, ConversationState, ConversationStatus
-from reception_agent import reception_agent
-from info_agent import agent as info_agent
-from leadsales_agent import lead_sales_agent
+from Agents.ReceptionAgent.reception_agent import reception_agent
+from Agents.InfoAgent.info_agent import agent as info_agent
+from Agents.LeadAgent.leadsales_agent import lead_sales_agent
 from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
 from logging_config import logger
 from typing import Dict, Any

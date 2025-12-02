@@ -9,7 +9,7 @@ import pytest
 import os
 from unittest.mock import patch, MagicMock, Mock
 from state_manager import StateManager, ConversationState, ConversationStatus
-from orchestrator import process_message, state_manager
+from Agents.orchestrator import process_message, state_manager
 from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
 
 

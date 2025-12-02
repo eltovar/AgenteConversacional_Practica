@@ -7,8 +7,8 @@ Compatible con Twilio, WhatsApp Business API, y otros proveedores.
 from fastapi import FastAPI, HTTPException, Response, Header, Form, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
-from orchestrator import process_message
-from info_agent import agent
+from Agents.orchestrator import process_message
+from Agents.InfoAgent.info_agent import agent
 from logging_config import logger
 import uvicorn
 import json
@@ -292,9 +292,14 @@ async def health_check():
         import psycopg
         database_url = os.getenv("DATABASE_URL")
         if database_url:
-            with psycopg.connect(database_url, connect_timeout=2) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
+            # Normalizar connection string: postgres:// → postgresql://
+            normalized_url = database_url.replace("postgres://", "postgresql://")
+            conn = psycopg.connect(normalized_url, connect_timeout=2)
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            conn.close()
             health_status["postgres"] = "connected"
         else:
             health_status["postgres"] = "not_configured"

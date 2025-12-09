@@ -19,3 +19,10 @@ __pycache__/
 
 # Knowledge base (datos propietarios)
 knowledge_base/
+
+# Testing y análisis
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+*.cover

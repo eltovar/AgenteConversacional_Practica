@@ -18,6 +18,8 @@ pydantic-settings>=2.0.0
 # Utilities
 python-dotenv>=1.0.0
 requests>=2.32.0
+httpx>=0.27.0  # Cliente HTTP async para HubSpot
+tenacity>=8.2.3  # Retry logic con exponential backoff
 
 # FastAPI y servidor (para webhooks)
 fastapi>=0.104.0

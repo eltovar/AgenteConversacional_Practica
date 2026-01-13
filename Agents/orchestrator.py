@@ -1,20 +1,24 @@
 # orchestrator.py
 """
-Orquestador Central del Sistema Multi-Agente.
-Proporciona una función stateless para procesar mensajes de usuario.
+Orquestador Central del Sistema Multi-Agente (REFACTORIZADO - ASYNC).
+Proporciona una función asíncrona stateless para procesar mensajes de usuario.
 Funciona tanto para CLI como para webhooks (FastAPI).
 
-comandos:
-    -Ejecutar servidor: uvicorn app:app --reload
-    -Probar con: Invoke-WebRequest -Uri "http://localhost:8000/webhook" -Method POST -ContentType "application/json" -Body '{"session_id":"test","message":"Hola"}'
+Comandos:
+    - Ejecutar servidor: uvicorn app:app --reload
+    - Probar con: Invoke-WebRequest -Uri "http://localhost:8000/webhook" -Method POST -ContentType "application/json" -Body '{"session_id":"test","message":"Hola"}'
 """
 
 import os
 from dotenv import load_dotenv
 from state_manager import StateManager, ConversationState, ConversationStatus
+
+# IMPORTANTE: Asegúrate de que tus agentes expongan métodos async
+# Si Reception e Info siguen siendo síncronos, funcionarán, pero lo ideal es migrarlos a async.
 from Agents.ReceptionAgent.reception_agent import reception_agent
 from Agents.InfoAgent.info_agent import agent as info_agent
 from Agents.CRMAgent.crm_agent import crm_agent
+
 from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
 from logging_config import logger
 from typing import Dict, Any
@@ -35,10 +39,10 @@ if missing:
 state_manager = StateManager()
 
 
-def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
+async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
     """
-    Función central que procesa un mensaje del usuario.
-    Funciona tanto para CLI como para webhooks.
+    Función central ASÍNCRONA que procesa un mensaje del usuario.
+    Funciona tanto para CLI como para webhooks (FastAPI).
     """
     try:
         # 1. OBTENER ESTADO ACTUAL
@@ -46,7 +50,7 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         now = datetime.now()
         logger.info(f"[ORCHESTRATOR] Estado actual: {state.status}")
 
-        # 2. PRE-ROUTER: DETECCIÓN DE SESIÓN NUEVA O INACTIVA (24h)
+        # 2. LOGICA DE SESIÓN (BIENVENIDA)
         is_new_session = state.last_interaction_timestamp is None
         is_stale_session = (
             state.last_interaction_timestamp is not None and
@@ -54,98 +58,101 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         )
 
         if is_new_session or is_stale_session:
-            reason = "nueva" if is_new_session else "inactiva >24h"
-            logger.info(f"[ORCHESTRATOR] Sesión {reason} detectada - Enviando mensaje de bienvenida")
-            state.status = ConversationStatus.WELCOME_SENT
-            state.last_interaction_timestamp = now
-            state_manager.update_state(state)
+            _handle_welcome(state, now, is_new_session)
             return {"response": SOFIA_WELCOME_MESSAGE, "status": state.status}
 
-        # 3. ROUTER BASADO EN ESTADO
-        if state.status == ConversationStatus.TRANSFERRED_INFO:
-            logger.info("[ORCHESTRATOR] Enrutando a InfoAgent...")
-            response = info_agent.process_info_query(user_message, state)
+        # 3. CORE ROUTING LOGIC
+        response_text = ""
 
-            # Persistir conversación en history
-            state.history.append(f"User: {user_message}")
-            if response:
-                state.history.append(f"Agent: {response}")
+        # A. Si ya estamos en flujo de CRM (HubSpot)
+        if state.status == ConversationStatus.TRANSFERRED_CRM:
+            logger.info("[ORCHESTRATOR] Enrutando a CRMAgent (Async)...")
+            # AWAIT: Llamada asíncrona a HubSpot
+            result = await crm_agent.process_lead_handoff(user_message, state)
+            response_text = result["response"]
+            # El CRM podría devolver un estado nuevo si termina el flujo
+            if "new_state" in result:
+                state = result["new_state"]
 
-            # Resetear estado y actualizar timestamp
+            # Resetear a Reception si el CRM terminó su trabajo
             state.status = ConversationStatus.RECEPTION_START
-            state.last_interaction_timestamp = now
-            state_manager.update_state(state)
 
-            return {"response": response, "status": state.status}
+        # B. Si estamos en flujo de Info (RAG)
+        elif state.status == ConversationStatus.TRANSFERRED_INFO:
+            logger.info("[ORCHESTRATOR] Enrutando a InfoAgent...")
+            # Nota: Si info_agent es síncrono, esto bloquea un poco. Idealmente hazlo async también.
+            response_text = info_agent.process_info_query(user_message, state)
+            state.status = ConversationStatus.RECEPTION_START
 
-        elif state.status == ConversationStatus.TRANSFERRED_CRM:
-            logger.info("[ORCHESTRATOR] Enrutando a CRMAgent...")
-            result = crm_agent.process_lead_handoff(user_message, state)
-            
-            response = result["response"]
-            new_state = result.get("new_state", state)
-
-            # Persistir conversación en history
-            new_state.history.append(f"User: {user_message}")
-            if response:
-                new_state.history.append(f"Agent: {response}")
-
-            new_state.status = ConversationStatus.RECEPTION_START
-            new_state.last_interaction_timestamp = now
-            state_manager.update_state(new_state)
-
-            return {"response": response, "status": new_state.status}
-
+        # C. Flujo Normal (Reception Agent)
         else:
-            # Estados manejados por ReceptionAgent (RECEPTION_START, AWAITING_CLARIFICATION, WELCOME_SENT)
-
-            # Transición post-bienvenida: cambiar WELCOME_SENT a RECEPTION_START
             if state.status == ConversationStatus.WELCOME_SENT:
                 state.status = ConversationStatus.RECEPTION_START
-                state_manager.update_state(state)
 
             logger.info("[ORCHESTRATOR] Enrutando a ReceptionAgent...")
+            # Llamada a Reception (Asumimos síncrona por ahora, si la haces async ponle await)
             result = reception_agent.process_message(user_message, state)
 
-            response = result["response"]
-            new_state = result["new_state"]
-            state_manager.update_state(new_state)
+            initial_response = result["response"]
+            state = result["new_state"]  # Actualizamos el estado con lo que decidió Reception
 
-            # === AUTO-ENRUTAMIENTO INMEDIATO (FIX PR005) ===
-            if new_state.status == ConversationStatus.TRANSFERRED_INFO:
+            # === AUTO-ENRUTAMIENTO (Fast-Track) ===
+            # Si Reception decide transferir AHORA MISMO, ejecutamos el siguiente agente
+            # en la misma llamada para no hacer esperar al usuario.
+
+            if state.status == ConversationStatus.TRANSFERRED_INFO:
                 logger.info("[ORCHESTRATOR] Auto-enrutando a InfoAgent...")
-                info_response = info_agent.process_info_query(user_message, new_state)
-                response = f"{response}\n\n{info_response}"
+                rag_response = info_agent.process_info_query(user_message, state)
+                response_text = f"{initial_response}\n\n{rag_response}"
+                state.status = ConversationStatus.RECEPTION_START
 
-                new_state.status = ConversationStatus.RECEPTION_START
-                state_manager.update_state(new_state)
-
-            elif new_state.status == ConversationStatus.TRANSFERRED_CRM:
+            elif state.status == ConversationStatus.TRANSFERRED_CRM:
                 logger.info("[ORCHESTRATOR] Auto-enrutando a CRMAgent...")
-                crm_result = crm_agent.process_lead_handoff(user_message, new_state)
+                # AWAIT: Llamada asíncrona crucial aquí también
+                crm_result = await crm_agent.process_lead_handoff(user_message, state)
 
-                # CORRECCIÓN: Usar directamente la respuesta del CRMAgent, sin concatenar la respuesta anterior.
-                # Esto soluciona un posible problema donde ReceptionAgent intenta generar un mensaje
-                # mientras espera el nombre del lead.
-                response = crm_result['response']
-                
-                new_state.status = ConversationStatus.RECEPTION_START
-                state_manager.update_state(new_state)
+                # Usamos la respuesta del CRM directamente (o concatenamos según tu preferencia UX)
+                response_text = crm_result['response']
+                state.status = ConversationStatus.RECEPTION_START
 
-            # Persistir conversación en history
-            new_state.history.append(f"User: {user_message}")
-            if response:
-                new_state.history.append(f"Agent: {response}")
+            else:
+                # No hubo transferencia, respuesta normal
+                response_text = initial_response
 
-            # Actualizar timestamp en todas las rutas del bloque else
-            new_state.last_interaction_timestamp = now
-            state_manager.update_state(new_state)
+        # 4. CENTRALIZACIÓN DE PERSISTENCIA (DRY)
+        # Guardamos historial y estado una sola vez al final
+        _update_history_and_state(state, user_message, response_text, now)
 
-            return {"response": response, "status": new_state.status}
+        return {"response": response_text, "status": state.status}
 
     except Exception as e:
-        logger.error(f"[ORCHESTRATOR] Error inesperado: {e}", exc_info=True)
+        logger.error(f"[ORCHESTRATOR] Error crítico: {e}", exc_info=True)
         return {
-            "response": "Lo siento, ocurrió un error inesperado. Por favor, intenta de nuevo.",
+            "response": "Lo siento, tuve un problema técnico momentáneo. ¿Podrías repetirme eso?",
             "status": "error"
         }
+
+
+# ===== FUNCIONES AUXILIARES (Private Helpers) =====
+
+def _handle_welcome(state: ConversationState, now: datetime, is_new: bool):
+    """Maneja la actualización de estado para sesiones nuevas o inactivas."""
+    reason = "nueva" if is_new else "inactiva >24h"
+    logger.info(f"[ORCHESTRATOR] Sesión {reason} detectada.")
+    state.status = ConversationStatus.WELCOME_SENT
+    state.last_interaction_timestamp = now
+    state_manager.update_state(state)
+
+
+def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg: str, now: datetime):
+    """
+    Centraliza la lógica de guardado de historial y persistencia de estado.
+    Evita duplicación de código (DRY principle).
+    """
+    if user_msg:
+        state.history.append(f"User: {user_msg}")
+    if agent_msg:
+        state.history.append(f"Agent: {agent_msg}")
+
+    state.last_interaction_timestamp = now
+    state_manager.update_state(state)

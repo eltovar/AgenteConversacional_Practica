@@ -22,17 +22,17 @@ def initial_state():
     )
 
 
-def test_reception_agent_intent_leadsales(reception_agent, initial_state):
+def test_reception_agent_intent_crm(reception_agent, initial_state):
     """
     Criterio de Aceptación:
-    Mockear LLM (para que devuelva classify_intent: leadsales).
+    Mockear LLM (para que devuelva classify_intent: crm).
     Asegurar que el estado de salida sea AWAITING_LEAD_NAME.
     """
     # Mock del LLM response con tool call
     mock_response = MagicMock()
     mock_response.tool_calls = [{
         'args': {
-            'intent': 'leadsales',
+            'intent': 'crm',
             'reason': 'El usuario quiere vender su propiedad'
         }
     }]
@@ -109,7 +109,7 @@ def test_reception_agent_pii_capture(reception_agent):
     """
     Criterio de Aceptación:
     Mockear PII validator (para que devuelva "Juan").
-    Asegurar que el estado de salida sea TRANSFERRED_LEADSALES.
+    Asegurar que el estado de salida sea TRANSFERRED_CRM.
     """
     # Estado inicial en AWAITING_LEAD_NAME
     state = ConversationState(
@@ -130,9 +130,9 @@ def test_reception_agent_pii_capture(reception_agent):
     assert 'response' in result
     assert 'new_state' in result
 
-    # Verificar que el estado cambió a TRANSFERRED_LEADSALES
+    # Verificar que el estado cambió a TRANSFERRED_CRM
     new_state = result['new_state']
-    assert new_state.status == ConversationStatus.TRANSFERRED_LEADSALES
+    assert new_state.status == ConversationStatus.TRANSFERRED_CRM
 
     # Verificar que el nombre fue guardado
     assert 'name' in new_state.lead_data

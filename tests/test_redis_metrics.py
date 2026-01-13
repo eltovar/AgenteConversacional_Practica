@@ -163,7 +163,7 @@ def test_stress_create_100_sessions(state_manager_real):
     for i, session_id in enumerate(session_ids):
         state = ConversationState(
             session_id=session_id,
-            status=ConversationStatus.TRANSFERRED_LEADSALES,
+            status=ConversationStatus.TRANSFERRED_CRM,
             lead_data={
                 "name": f"Usuario {i}",
                 "email": f"user{i}@example.com",

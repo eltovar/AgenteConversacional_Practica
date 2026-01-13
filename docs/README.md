@@ -12,19 +12,19 @@ Bienvenido a la documentación técnica del sistema multi-agente conversacional.
 ### 🛠️ Implementación
 - [PR 1: Refactor InfoAgent con bind_tools](implementation/pr1_info_agent_refactor.md) - Migración de parsing manual a bind_tools()
 - [PR 2: Retry Logic en ReceptionAgent](implementation/pr2_retry_logic.md) - Implementación de resiliencia
-- [PR 3: LeadSalesAgent Stub](implementation/pr3_leadsales_stub.md) - Agente stub para handoff
+- [PR 3: CRMAgent Stub](implementation/pr3_leadsales_stub.md) - Agente stub para handoff
 - [Memoria de Sesión](implementation/session_memory.md) - Persistencia de contexto de usuario
 
 ### 📖 API de Componentes
 - [ReceptionAgent](api/reception_agent.md) - Clasificación de intenciones y captura de PII
 - [InfoAgent](api/info_agent.md) - Consultas informativas con RAG
-- [LeadSalesAgent](api/leadsales_agent.md) - Gestión de leads de ventas
+- [CRMAgent](api/leadsales_agent.md) - Gestión de leads de ventas
 - [LLMClient - Deuda Técnica](api/llm_client.md) - Wrapper de LangChain y análisis de duplicidad
 
 ### ✅ Reportes de Verificación
 - [Verificación PR1](verification/pr1_verification.md) - Validación del refactor InfoAgent
 - [Verificación PR2](verification/pr2_verification.md) - Validación de retry logic
-- [Verificación PR3](verification/pr3_verification.md) - Validación de LeadSalesAgent
+- [Verificación PR3](verification/pr3_verification.md) - Validación de CRMAgent
 - [Verificación Memoria de Sesión](verification/memory_verification.md) - Validación de persistencia de nombre
 
 ### 🧪 Testing
@@ -72,7 +72,7 @@ AgenteConversacional_Practica/
 │
 ├── reception_agent.py         # Agente de clasificación
 ├── info_agent.py              # Agente de información (RAG)
-├── leadsales_agent.py         # Agente de ventas (stub)
+├── crm_agent.py               # Agente CRM (stub)
 ├── main.py                    # Orquestador principal
 ├── state_manager.py           # Gestor de estado FSM
 ├── llm_client.py              # Wrapper de LangChain
@@ -89,7 +89,7 @@ AgenteConversacional_Practica/
 
 - ✅ PR 1: Refactor InfoAgent con `bind_tools()`
 - ✅ PR 2: Retry logic en ReceptionAgent
-- ✅ PR 3: LeadSalesAgent stub implementation
+- ✅ PR 3: CRMAgent stub implementation
 - ✅ Memoria de sesión (persistencia de nombre de usuario)
 
 ### En Progreso 🔄

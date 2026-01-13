@@ -1,7 +1,7 @@
-# prompts/leadsales_prompts.py
+# prompts/crm_prompts.py
 
-# Template para respuesta de confirmación de handoff (TRANSFERRED_LEADSALES)
-LEADSALES_CONFIRMATION_TEMPLATE = (
+# Template para respuesta de confirmación de handoff (TRANSFERRED_CRM)
+CRM_CONFIRMATION_TEMPLATE = (
     "Gracias, {lead_name}. Tu información ha sido enviada a nuestro equipo de ventas. "
     "Un asesor se pondrá en contacto contigo muy pronto. "
     "Es un placer atenderte."

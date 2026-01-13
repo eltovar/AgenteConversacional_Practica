@@ -7,9 +7,9 @@ from langchain_core.tools import tool
 
 class ClassifyIntentSchema(BaseModel):
     """Esquema de entrada para clasificar la intencion del usuario."""
-    intent: Literal["info", "leadsales", "ambiguous"] = Field(
+    intent: Literal["info", "crm", "ambiguous"] = Field(
         ...,
-        description="La intencion del usuario: 'info' (busca información), 'leadsales' (quiere contacto comercial), 'ambiguous' (no está claro)"
+        description="La intencion del usuario: 'info' (busca información), 'crm' (quiere contacto comercial), 'ambiguous' (no está claro)"
     )
     reason: str = Field(
         ...,

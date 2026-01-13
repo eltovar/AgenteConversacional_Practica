@@ -9,7 +9,7 @@ from prompts.reception_prompts import (
     LEAD_TRANSFER_SUCCESS_PROMPT,
     SOFIA_PERSONALITY
 )
-from prompts.leadsales_prompts import PROPERTY_EXTRACTION_PROMPT
+from prompts.crm_prompts import PROPERTY_EXTRACTION_PROMPT
 from utils.pii_validator import robust_extract_name
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -99,7 +99,7 @@ class ReceptionAgent:
                         state.status = ConversationStatus.TRANSFERRED_INFO
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
-                    elif intent == "leadsales":
+                    elif intent == "crm":
                         # Extraer entidades de la propiedad antes de pedir el nombre
                         property_data = self._extract_property_entities(message)
                         if property_data:
@@ -188,7 +188,7 @@ class ReceptionAgent:
 
     def _handle_awaiting_lead_name(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
-        Maneja el estado de captura de nombre: extrae PII y transfiere a Leadsales.
+        Maneja el estado de captura de nombre: extrae PII y transfiere a CRM.
         """
         logger.info("[ReceptionAgent] Extrayendo nombre del lead...")
 
@@ -198,11 +198,11 @@ class ReceptionAgent:
         if extracted_name:
             # PII extraído exitosamente
             state.lead_data['name'] = extracted_name
-            state.status = ConversationStatus.TRANSFERRED_LEADSALES
+            state.status = ConversationStatus.TRANSFERRED_CRM
 
             # Simular transferencia a CRM (Respuesta a Q2)
-            logger.info(f"🚀 [LEADSALES] Simulando transferencia a CRM: {state.lead_data}")
-
+            logger.info(f"🚀 [CRM] Simulando transferencia a CRM: {state.lead_data}")
+            
             response_text = LEAD_TRANSFER_SUCCESS_PROMPT.format(name=extracted_name)
             return {
                 "response": response_text,

@@ -261,7 +261,7 @@ def test_json_serialization_deserialization(state_manager):
 
     original_state = ConversationState(
         session_id="test_json",
-        status=ConversationStatus.TRANSFERRED_LEADSALES,
+        status=ConversationStatus.TRANSFERRED_CRM,
         lead_data={"name": "Ana López", "phone": "3001234567"},
         history=["msg1", "msg2", "msg3"],
         last_interaction_timestamp=datetime(2025, 1, 15, 10, 30, 0)

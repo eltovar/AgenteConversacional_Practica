@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from state_manager import StateManager, ConversationState, ConversationStatus
 from Agents.ReceptionAgent.reception_agent import reception_agent
 from Agents.InfoAgent.info_agent import agent as info_agent
-from Agents.LeadAgent.leadsales_agent import lead_sales_agent
+from Agents.CRMAgent.crm_agent import crm_agent
 from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
 from logging_config import logger
 from typing import Dict, Any
@@ -78,10 +78,10 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
             return {"response": response, "status": state.status}
 
-        elif state.status == ConversationStatus.TRANSFERRED_LEADSALES:
-            logger.info("[ORCHESTRATOR] Enrutando a LeadSalesAgent...")
-            result = lead_sales_agent.process_lead_handoff(user_message, state)
-
+        elif state.status == ConversationStatus.TRANSFERRED_CRM:
+            logger.info("[ORCHESTRATOR] Enrutando a CRMAgent...")
+            result = crm_agent.process_lead_handoff(user_message, state)
+            
             response = result["response"]
             new_state = result.get("new_state", state)
 
@@ -120,15 +120,15 @@ def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
                 new_state.status = ConversationStatus.RECEPTION_START
                 state_manager.update_state(new_state)
 
-            elif new_state.status == ConversationStatus.TRANSFERRED_LEADSALES:
-                logger.info("[ORCHESTRATOR] Auto-enrutando a LeadSalesAgent...")
-                lead_result = lead_sales_agent.process_lead_handoff(user_message, new_state)
+            elif new_state.status == ConversationStatus.TRANSFERRED_CRM:
+                logger.info("[ORCHESTRATOR] Auto-enrutando a CRMAgent...")
+                crm_result = crm_agent.process_lead_handoff(user_message, new_state)
 
-                # CORRECCIÓN: Usar directamente la respuesta del LeadSalesAgent, sin concatenar la respuesta anterior.
+                # CORRECCIÓN: Usar directamente la respuesta del CRMAgent, sin concatenar la respuesta anterior.
                 # Esto soluciona un posible problema donde ReceptionAgent intenta generar un mensaje
                 # mientras espera el nombre del lead.
-                response = lead_result['response']
-
+                response = crm_result['response']
+                
                 new_state.status = ConversationStatus.RECEPTION_START
                 state_manager.update_state(new_state)
 

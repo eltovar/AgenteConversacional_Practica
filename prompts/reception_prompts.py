@@ -25,7 +25,7 @@ RECEPTION_SYSTEM_PROMPT = (
    - Si el usuario hace una pregunta específica y directa, clasifica como 'info' (NO como 'ambiguous').
    - **Si el usuario pide repetir, recordar o hace referencia a mensajes anteriores, clasifica como 'info'** (NO como 'ambiguous').
 
-2. **intent='leadsales'**: El usuario quiere:
+2. **intent='crm'**: El usuario quiere:
    - Hablar con un asesor COMERCIAL o de VENTAS
    - Arrendar, vender o comprar una propiedad
    - Que lo contacten para asesoría de propiedades
@@ -42,7 +42,7 @@ RECEPTION_SYSTEM_PROMPT = (
 - Sé preciso en tu clasificación: una mala clasificación frustra al cliente.
 - Si el usuario menciona un departamento específico (contabilidad, jurídico, caja) → clasifica como 'info'
 - Si el usuario menciona un problema administrativo (factura, pago, contrato) → clasifica como 'info'
-- Si el usuario quiere COMPRAR/VENDER/ARRENDAR una propiedad → clasifica como 'leadsales'
+- Si el usuario quiere COMPRAR/VENDER/ARRENDAR una propiedad → clasifica como 'crm'
 - Solo usa 'ambiguous' si genuinamente no puedes determinar la intención
 - Mantén un tono profesional pero cercano.
 - Sé conciso: no más de 2-3 frases por respuesta."""

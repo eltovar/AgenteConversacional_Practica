@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from state_manager import StateManager, ConversationState, ConversationStatus
 from Agents.ReceptionAgent.reception_agent import reception_agent
 from Agents.InfoAgent.info_agent import agent as info_agent
-from Agents.LeadAgent.leadsales_agent import lead_sales_agent
+from Agents.CRMAgent.crm_agent import crm_agent
 import re
 
 
@@ -207,14 +207,14 @@ def test_info_con_contexto_usuario(clean_state):
     assert assert_tono_profesional_cercano(response), "Debe tener tono profesional/cercano"
 
 
-# ===== TESTS PARA LEADSALES AGENT =====
+# ===== TESTS PARA CRM AGENT =====
 
-def test_leadsales_handoff(clean_state):
-    """Test 7: LeadSalesAgent - Confirmación de handoff (TRANSFERRED_LEADSALES)"""
-    clean_state.status = ConversationStatus.TRANSFERRED_LEADSALES
+def test_crm_handoff(clean_state):
+    """Test 7: CRMAgent - Confirmación de handoff (TRANSFERRED_CRM)"""
+    clean_state.status = ConversationStatus.TRANSFERRED_CRM
     clean_state.lead_data['name'] = "Juan Pérez"
 
-    result = lead_sales_agent.process_lead_handoff("Quiero vender mi apartamento", clean_state)
+    result = crm_agent.process_lead_handoff("Quiero vender mi apartamento", clean_state)
     response = result["response"]
 
     print(f"\n  📝 Respuesta: {response}")
@@ -225,17 +225,17 @@ def test_leadsales_handoff(clean_state):
     assert assert_tono_profesional_cercano(response), "Debe tener tono profesional/cercano"
 
 
-def test_leadsales_tono_ventas(clean_state):
-    """Test 8: LeadSalesAgent - Verificar tono orientado a ventas pero cercano"""
-    clean_state.status = ConversationStatus.TRANSFERRED_LEADSALES
+def test_crm_tono_ventas(clean_state):
+    """Test 8: CRMAgent - Verificar tono orientado a ventas pero cercano"""
+    clean_state.status = ConversationStatus.TRANSFERRED_CRM
     clean_state.lead_data['name'] = "Ana Rodríguez"
 
-    result = lead_sales_agent.process_lead_handoff("Necesito arrendar urgente", clean_state)
+    result = crm_agent.process_lead_handoff("Necesito arrendar urgente", clean_state)
     response = result["response"]
 
     print(f"\n  📝 Respuesta: {response}")
 
-    # Verificar que mencione contacto de asesor (crítico para lead sales)
+    # Verificar que mencione contacto de asesor (crítico para CRM)
     menciona_asesor = any(word in response.lower() for word in ['asesor', 'contacto', 'pondrá en contacto'])
     assert menciona_asesor, "Debe mencionar contacto de asesor en respuesta de lead sales"
 

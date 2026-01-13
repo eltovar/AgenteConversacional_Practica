@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-# leadsales_agent.py
+# crm_agent.py
 
 from state_manager import ConversationState
 from typing import Dict, Any
 from logging_config import logger
-from prompts.leadsales_prompts import LEADSALES_CONFIRMATION_TEMPLATE
+from prompts.crm_prompts import CRM_CONFIRMATION_TEMPLATE
 
-class LeadSalesAgent:
+class CRMAgent:
     """
     Agente que simula la gestion de un lead de ventas.
     Actualmente es un stub que solo registra el lead capturado.
@@ -14,14 +14,14 @@ class LeadSalesAgent:
 
     def __init__(self):
         # En una version futura, podria cargar prompts o herramientas especificas.
-        logger.info("[LeadSalesAgent] Inicializado.")
+        logger.info("[CRMAgent] Inicializado.")
 
     def process_lead_handoff(self, user_input: str, state: ConversationState) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario tras la transferencia de lead.
 
         Dado que ReceptionAgent ya capturo el nombre y transfirio el estado a
-        TRANSFERRED_LEADSALES, este agente solo debe confirmar la recepcion y
+        TRANSFERRED_CRM, este agente solo debe confirmar la recepcion y
         registrar los datos capturados.
         """
 
@@ -32,13 +32,13 @@ class LeadSalesAgent:
         # NOTA: En este punto, el lead ya fue registrado por ReceptionAgent
         # (ver reception_agent.py, linea 145 donde se simula transferencia a CRM).
 
-        logger.info(f"[LEADSALES] Procesando mensaje en estado TRANSFERRED_LEADSALES. Lead: {lead_name}")
+        logger.info(f"[CRM] Procesando mensaje en estado TRANSFERRED_CRM. Lead: {lead_name}")
 
         # 3. Respuesta al usuario usando template con personalidad de Sofía
-        response_text = LEADSALES_CONFIRMATION_TEMPLATE.format(lead_name=lead_name)
+        response_text = CRM_CONFIRMATION_TEMPLATE.format(lead_name=lead_name)
 
         # 4. Transicion
-        # El reset de estado (TRANSFERRED_LEADSALES -> RECEPTION_START) se maneja en main.py.
+        # El reset de estado (TRANSFERRED_CRM -> RECEPTION_START) se maneja en main.py.
         # Por convencion, este agente NO cambia el estado, sino que permite que main.py lo fuerce.
 
         return {
@@ -47,4 +47,4 @@ class LeadSalesAgent:
         }
 
 # Instancia global (Singleton)
-lead_sales_agent = LeadSalesAgent()
+crm_agent = CRMAgent()

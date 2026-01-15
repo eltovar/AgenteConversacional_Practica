@@ -15,9 +15,9 @@ from state_manager import StateManager, ConversationState, ConversationStatus
 
 # IMPORTANTE: Asegúrate de que tus agentes expongan métodos async
 # Si Reception e Info siguen siendo síncronos, funcionarán, pero lo ideal es migrarlos a async.
-from Agents.ReceptionAgent.reception_agent import reception_agent
-from Agents.InfoAgent.info_agent import agent as info_agent
-from Agents.CRMAgent.crm_agent import crm_agent
+from agents.ReceptionAgent.reception_agent import reception_agent
+from agents.InfoAgent.info_agent import agent as info_agent
+from agents.CRMAgent.crm_agent import crm_agent
 
 from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
 from logging_config import logger

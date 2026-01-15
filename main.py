@@ -4,8 +4,8 @@ Interfaz CLI para el sistema multi-agente.
 Delega toda la lógica de negocio a orchestrator.py.
 """
 
-from Agents.orchestrator import process_message
-from Agents.InfoAgent.info_agent import agent  # Para comando /reload
+from agents.orchestrator import process_message
+from agents.InfoAgent.info_agent import agent  # Para comando /reload
 from logging_config import logger
 import signal
 import sys

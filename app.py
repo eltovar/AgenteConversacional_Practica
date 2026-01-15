@@ -7,8 +7,8 @@ Maneja webhooks de Twilio (WhatsApp) y requests JSON.
 from fastapi import FastAPI, HTTPException, Response, Form, Request, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from Agents.orchestrator import process_message
-from Agents.InfoAgent.info_agent import agent
+from agents.orchestrator import process_message
+from agents.InfoAgent.info_agent import agent
 from logging_config import logger
 import uvicorn
 import os

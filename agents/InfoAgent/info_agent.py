@@ -2,7 +2,7 @@
 
 from llm_client import llama_client
 from rag.rag_service import rag_service
-from Agents.InfoAgent.info_tool import ALL_TOOLS
+from agents.InfoAgent.info_tool import ALL_TOOLS
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)
 from state_manager import ConversationState

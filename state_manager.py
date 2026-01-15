@@ -26,16 +26,20 @@ class StateManager:
     def __init__(self):
         """
         Inicializa el StateManager con lazy initialization.
-
-        La conexión a Redis se realiza bajo demanda cuando se accede
-        por primera vez a get_state() o update_state().
-
-        Variables de entorno requeridas:
-        - REDIS_URL: URL de conexión (ej: redis://localhost:6379/0)
-        - SESSION_TTL: Tiempo de vida en segundos (default: 86400)
         """
-        # Cargar configuración (no conecta aún)
-        self.redis_url = os.getenv("REDIS_URL")
+        # Auto-detectar si estamos en Railway
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+
+        # Seleccionar URL apropiada según el entorno
+        if is_railway:
+            # Estamos en Railway → usar URL interna (más rápida)
+            self.redis_url = os.getenv("REDIS_URL")
+            logger.info("[StateManager] Entorno detectado: Railway (usando REDIS_URL interna)")
+        else:
+            # Estamos en local → usar URL pública (accesible desde fuera)
+            self.redis_url = os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL")
+            logger.info("[StateManager] Entorno detectado: Local (usando REDIS_PUBLIC_URL)")
+
         self.session_ttl = int(os.getenv("SESSION_TTL", "86400"))
 
         # Cliente Redis (se inicializará bajo demanda)
@@ -44,16 +48,35 @@ class StateManager:
 
         logger.info("[StateManager] StateManager creado (lazy initialization habilitada)")
 
+    def _mask_redis_url(self, url: str) -> str:
+        """
+        Enmascara credenciales en la URL de Redis para logging seguro.
+        """
+        if not url:
+            return "None"
+
+        try:
+            # Extraer esquema (redis://, rediss://)
+            if "://" not in url:
+                return url
+
+            scheme, rest = url.split("://", 1)
+
+            # Si tiene credenciales (usuario:password@host)
+            if "@" in rest:
+                _, host_part = rest.rsplit("@", 1)
+                return f"{scheme}://***:***@{host_part}"
+            else:
+                # No tiene credenciales, mostrar completo
+                return url
+
+        except Exception:
+            # Si falla el parsing, ocultar todo
+            return "redis://***:***@[masked]"
+
     def _ensure_redis_initialized(self):
         """
         Inicializa la conexión a Redis bajo demanda (lazy initialization).
-
-        Este método se llama automáticamente antes de cualquier operación
-        que requiera acceso a Redis.
-
-        Raises:
-            ValueError: Si REDIS_URL no está configurada
-            ConnectionError: Si la conexión a Redis falla
         """
         if not self._redis_initialized:
             logger.info("[StateManager] Inicializando conexión a Redis (lazy)...")
@@ -67,7 +90,10 @@ class StateManager:
             try:
                 # Crear cliente Redis
                 self.client = redis.from_url(self.redis_url, decode_responses=True)
-                logger.info(f"[StateManager] Cliente Redis creado desde {self.redis_url}")
+
+                # Log seguro: ocultar credenciales (solo mostrar host:puerto)
+                safe_url = self._mask_redis_url(self.redis_url)
+                logger.info(f"[StateManager] Cliente Redis creado: {safe_url}")
 
                 # Verificar conexión con ping
                 self.client.ping()
@@ -90,15 +116,6 @@ class StateManager:
     def get_state(self, session_id: str) -> ConversationState:
         """
         Recupera el estado de la conversación desde Redis.
-
-        Args:
-            session_id: Identificador único de la sesión
-
-        Returns:
-            ConversationState: Estado deserializado desde Redis o nuevo estado si no existe
-
-        Raises:
-            redis.RedisError: Si hay error de comunicación con Redis
         """
         # Asegurar que Redis esté inicializado
         self._ensure_redis_initialized()
@@ -129,12 +146,6 @@ class StateManager:
     def update_state(self, state: ConversationState):
         """
         Persiste el estado de la conversación en Redis con expiración automática.
-
-        Args:
-            state: Objeto ConversationState a persistir
-
-        Raises:
-            redis.RedisError: Si hay error de comunicación con Redis
         """
         # Asegurar que Redis esté inicializado
         self._ensure_redis_initialized()

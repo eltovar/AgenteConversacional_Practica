@@ -32,6 +32,19 @@ if missing := [k for k in REQUIRED if not os.getenv(k)]:
 app = FastAPI(title="Sofía - Asistente Virtual", version="1.0.0")
 
 # ===== 2. STARTUP EVENT (CRÍTICO PARA RAG) =====
+@app.get("/")
+def root():
+    return {
+        "service": "Sofía - Asistente Virtual Inmobiliaria",
+        "version": "1.0.0",
+        "status": "operational",
+        "endpoints": {
+            "webhook": "POST /webhook",
+            "health": "GET /health",
+            "docs": "GET /docs"
+        }
+    }
+
 @app.on_event("startup")
 async def startup_event():
     """Inicializa la Base de Conocimiento RAG para evitar timeouts."""
@@ -138,6 +151,34 @@ async def health_check():
         status["postgres"] = "error"
 
     return status
+
+@app.get("/test-hubspot")
+async def test_hubspot():
+    """Endpoint temporal para validar conectividad con HubSpot API."""
+    try:
+        from integrations.hubspot.hubspot_client import hubspot_client
+
+        # Test 1: Verificar que el cliente esté inicializado
+        if not hubspot_client:
+            return {"status": "error", "message": "HubSpot client no inicializado"}
+
+        # Test 2: Intentar búsqueda simple (operación READ)
+        result = await hubspot_client.search_contacts_by_email("test@nonexistent-domain-12345.com")
+
+        return {
+            "status": "success",
+            "hubspot_api": "reachable",
+            "authentication": "valid",
+            "permissions": "read_contacts_ok",
+            "test_details": f"Búsqueda ejecutada correctamente. Resultados: {len(result.get('results', []))}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "hubspot_api": "error",
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }
 
 @app.post("/admin/reload-kb")
 async def reload_knowledge_base(x_api_key: str = Header(None, alias="X-API-Key")):

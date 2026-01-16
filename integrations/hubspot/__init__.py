@@ -10,8 +10,12 @@ Componentes:
 from .hubspot_client import HubSpotClient
 from .hubspot_utils import normalize_phone_e164, calculate_lead_score
 
+# Instancia global del cliente HubSpot
+hubspot_client = HubSpotClient()
+
 __all__ = [
     "HubSpotClient",
+    "hubspot_client",
     "normalize_phone_e164",
     "calculate_lead_score"
 ]

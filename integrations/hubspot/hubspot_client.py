@@ -109,6 +109,36 @@ class HubSpotClient:
             logger.error(f"[HubSpotClient] Error buscando contacto: {e}", exc_info=True)
             return None
 
+    async def search_contacts_by_email(self, email: str) -> Dict[str, Any]:
+        """
+        Busca contactos por email usando la API de búsqueda.
+        Retorna el resultado completo de la búsqueda.
+        """
+        endpoint = "/crm/v3/objects/contacts/search"
+        payload = {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "propertyName": "email",
+                            "operator": "EQ",
+                            "value": email
+                        }
+                    ]
+                }
+            ],
+            "properties": ["id", "firstname", "lastname"]
+        }
+
+        try:
+            response = await self._request("POST", endpoint, payload)
+            logger.info(f"[HubSpotClient] Búsqueda por email '{email}' ejecutada correctamente")
+            return response
+
+        except Exception as e:
+            logger.error(f"[HubSpotClient] Error buscando contactos por email: {e}", exc_info=True)
+            raise
+
     async def create_contact(self, properties: Dict[str, Any]) -> str:
         """
         Crea un nuevo contacto en HubSpot.

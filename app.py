@@ -156,7 +156,7 @@ async def health_check():
 async def test_hubspot():
     """Endpoint temporal para validar conectividad con HubSpot API."""
     try:
-        from integrations.hubspot.hubspot_client import hubspot_client
+        from integrations.hubspot import hubspot_client
 
         # Test 1: Verificar que el cliente esté inicializado
         if not hubspot_client:

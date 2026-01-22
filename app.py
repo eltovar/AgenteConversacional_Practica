@@ -180,6 +180,92 @@ async def test_hubspot():
             "error_message": str(e)
         }
 
+
+@app.post("/test-hubspot-create")
+async def test_hubspot_create():
+    """
+    Endpoint de diagnóstico para probar creación de contactos en HubSpot.
+    Envía un payload mínimo para identificar la causa exacta del error 400.
+    """
+    import httpx
+    from datetime import datetime
+
+    api_key = os.getenv("HUBSPOT_API_KEY")
+    base_url = "https://api.hubapi.com"
+
+    # Timestamp único para evitar duplicados
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+    # Prueba 1: Payload MÍNIMO (solo propiedades estándar de HubSpot)
+    minimal_payload = {
+        "properties": {
+            "firstname": "Test",
+            "lastname": f"Diagnostico-{ts}",
+            "phone": f"+549110000{ts[-4:]}"
+        }
+    }
+
+    # Prueba 2: Payload con propiedades custom (como lo envía CRMAgent)
+    full_payload = {
+        "properties": {
+            "firstname": "Test",
+            "lastname": f"FullDiag-{ts}",
+            "phone": f"+549110001{ts[-4:]}",
+            "whatsapp_id": f"+549110001{ts[-4:]}",
+            "chatbot_property_type": "Departamento",
+            "chatbot_rooms": "2",
+            "chatbot_location": "Palermo",
+            "chatbot_budget": "100000",
+            "chatbot_conversation": "Test conversation",
+            "chatbot_score": "75",  # Como string
+            "chatbot_timestamp": str(int(datetime.utcnow().timestamp() * 1000))  # Unix ms
+        }
+    }
+
+    results = {}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # Test 1: Payload mínimo
+        try:
+            resp = await client.post(
+                f"{base_url}/crm/v3/objects/contacts",
+                headers=headers,
+                json=minimal_payload
+            )
+            results["test_1_minimal"] = {
+                "status_code": resp.status_code,
+                "payload_sent": minimal_payload,
+                "response": resp.json() if resp.status_code < 400 else resp.text
+            }
+        except Exception as e:
+            results["test_1_minimal"] = {"error": str(e)}
+
+        # Test 2: Payload completo
+        try:
+            resp = await client.post(
+                f"{base_url}/crm/v3/objects/contacts",
+                headers=headers,
+                json=full_payload
+            )
+            results["test_2_full"] = {
+                "status_code": resp.status_code,
+                "payload_sent": full_payload,
+                "response": resp.json() if resp.status_code < 400 else resp.text
+            }
+        except Exception as e:
+            results["test_2_full"] = {"error": str(e)}
+
+    return {
+        "diagnostic": "HubSpot Contact Creation Test",
+        "timestamp": datetime.utcnow().isoformat(),
+        "results": results
+    }
+
 @app.post("/admin/reload-kb")
 async def reload_knowledge_base(x_api_key: str = Header(None, alias="X-API-Key")):
     """Endpoint administrativo protegido para recargar RAG."""

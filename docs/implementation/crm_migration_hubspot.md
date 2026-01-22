@@ -106,8 +106,8 @@ Estas propiedades deben crearse manualmente en HubSpot antes de la integración:
 | `chatbot_location` | Single-line text | ❌ No | Ubicación de interés | `"Palermo, Buenos Aires"` |
 | `chatbot_budget` | Single-line text | ❌ No | Presupuesto estimado | `"$80,000 USD"` |
 | `chatbot_conversation` | Multi-line text | ❌ No | Historia completa (>2000 chars) | `"User: Hola\nAgent: ..."` |
-| `chatbot_score` | Number | ❌ No | Score de calificación (0-100) | `85` |
-| `chatbot_timestamp` | Date picker | ❌ No | Fecha/hora captura (ISO 8601) | `"2025-01-08T10:30:00Z"` |
+| `chatbot_score` | Number | ❌ No | Score de calificación (0-100) | `"85"` (string) |
+| `chatbot_timestamp` | Date picker | ❌ No | Fecha/hora captura (Unix ms) | `"1737576600000"` (Unix timestamp en milisegundos como string) |
 
 ---
 

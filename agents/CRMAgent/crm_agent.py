@@ -3,8 +3,7 @@
 """
 Agente de CRM con integración completa a HubSpot API v3.
 Reemplaza el stub anterior con funcionalidad real de sincronización.
-"""
-
+""" 
 from datetime import datetime
 from typing import Dict, Any
 from state_manager import ConversationState
@@ -61,6 +60,9 @@ class CRMAgent:
             lead_score = calculate_lead_score(score_data)
 
             # 2. MAPEO DE PROPIEDADES PARA HUBSPOT
+            # NOTA: HubSpot Date Picker requiere Unix timestamp en milisegundo.Propiedades numéricas deben enviarse como strings
+            timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+
             contact_properties = {
                 "firstname": name_parts["firstname"],
                 "lastname": name_parts["lastname"] or "WhatsApp",  # Fallback si no hay apellido
@@ -71,8 +73,8 @@ class CRMAgent:
                 "chatbot_location": metadata.get("ubicacion", ""),
                 "chatbot_budget": str(metadata.get("presupuesto", "")),
                 "chatbot_conversation": conversation_text,
-                "chatbot_score": lead_score,
-                "chatbot_timestamp": datetime.utcnow().isoformat()
+                "chatbot_score": str(lead_score),  # HubSpot Number como string
+                "chatbot_timestamp": timestamp_ms  # Unix timestamp en milisegundos
             }
 
             logger.info(f"[CRMAgent] Datos del contacto preparados. Score: {lead_score}/100")

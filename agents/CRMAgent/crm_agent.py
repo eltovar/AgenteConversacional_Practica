@@ -4,7 +4,7 @@
 Agente de CRM con integración completa a HubSpot API v3.
 Reemplaza el stub anterior con funcionalidad real de sincronización.
 """ 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any
 from state_manager import ConversationState
 from integrations.hubspot.hubspot_client import HubSpotClient
@@ -60,8 +60,11 @@ class CRMAgent:
             lead_score = calculate_lead_score(score_data)
 
             # 2. MAPEO DE PROPIEDADES PARA HUBSPOT
-            # NOTA: HubSpot Date Picker requiere Unix timestamp en milisegundo.Propiedades numéricas deben enviarse como strings
-            timestamp_ms = str(int(datetime.utcnow().timestamp() * 1000))
+            # NOTA: HubSpot Date Picker requiere Unix timestamp en milisegundos a MEDIANOCHE UTC
+            # Propiedades numéricas deben enviarse como strings
+            now_utc = datetime.now(timezone.utc)
+            today_midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            timestamp_ms = str(int(today_midnight_utc.timestamp() * 1000))
 
             contact_properties = {
                 "firstname": name_parts["firstname"],

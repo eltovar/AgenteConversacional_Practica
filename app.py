@@ -218,7 +218,10 @@ async def test_hubspot_create():
             "chatbot_budget": "100000",
             "chatbot_conversation": "Test conversation",
             "chatbot_score": "75",  # Como string
-            "chatbot_timestamp": str(int(datetime.utcnow().timestamp() * 1000))  # Unix ms
+            # HubSpot Date requiere timestamp a medianoche UTC
+            "chatbot_timestamp": str(int(
+                datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000
+            ))
         }
     }
 

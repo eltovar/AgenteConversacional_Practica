@@ -103,8 +103,8 @@ class ReceptionAgent:
                         # Extraer entidades de la propiedad antes de pedir el nombre
                         property_data = self._extract_property_entities(message)
                         if property_data:
-                            state.lead_data['property_interest'] = property_data
-                            logger.info(f"[ReceptionAgent] Entidades extraídas: {property_data}")
+                            state.lead_data['metadata'] = property_data
+                            logger.info(f"[ReceptionAgent] Metadata extraída: {property_data}")
 
                         state.status = ConversationStatus.AWAITING_LEAD_NAME
                         logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_LEAD_NAME")

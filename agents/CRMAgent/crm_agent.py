@@ -72,7 +72,7 @@ class CRMAgent:
                 "phone": normalized_phone,
                 "whatsapp_id": normalized_phone,  # ID único para deduplicación
                 "chatbot_property_type": metadata.get("tipo_propiedad", ""),
-                "chatbot_rooms": str(metadata.get("ambientes", "")),
+                "chatbot_rooms": str(metadata.get("caracteristicas", "")),  # Habitaciones, área, etc.
                 "chatbot_location": metadata.get("ubicacion", ""),
                 "chatbot_budget": str(metadata.get("presupuesto", "")),
                 "chatbot_conversation": conversation_text,

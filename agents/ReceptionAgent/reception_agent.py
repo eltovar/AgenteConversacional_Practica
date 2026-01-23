@@ -18,6 +18,9 @@ import random
 import json
 from typing import Dict, Any
 
+# Campos requeridos para calificación de leads antes de enviar al CRM
+REQUIRED_PROPERTY_FIELDS = ['ubicacion', 'presupuesto']
+
 class ReceptionAgent:
     """ Agente de Recepción que maneja la clasificación de intenciones y captura de PII. """
 
@@ -36,6 +39,9 @@ class ReceptionAgent:
 
         elif state.status == ConversationStatus.AWAITING_CLARIFICATION:
             return self._handle_awaiting_clarification(message, state)
+
+        elif state.status == ConversationStatus.AWAITING_PROPERTY_DATA:
+            return self._handle_awaiting_property_data(message, state)
 
         elif state.status == ConversationStatus.AWAITING_LEAD_NAME:
             return self._handle_awaiting_lead_name(message, state)
@@ -100,15 +106,38 @@ class ReceptionAgent:
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
                     elif intent == "crm":
-                        # Extraer entidades de la propiedad antes de pedir el nombre
+                        # Extraer entidades de la propiedad
                         property_data = self._extract_property_entities(message)
                         if property_data:
                             state.lead_data['metadata'] = property_data
                             logger.info(f"[ReceptionAgent] Metadata extraída: {property_data}")
 
-                        state.status = ConversationStatus.AWAITING_LEAD_NAME
-                        logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_LEAD_NAME")
-                        response_text = LEAD_NAME_REQUEST_PROMPT
+                        # Verificar si tenemos los datos mínimos de calificación
+                        missing_fields = self._get_missing_fields(property_data)
+
+                        if missing_fields:
+                            # Faltan datos → ir a calificación
+                            state.status = ConversationStatus.AWAITING_PROPERTY_DATA
+                            logger.info(f"[ReceptionAgent] Estado: RECEPTION_START → AWAITING_PROPERTY_DATA (faltan: {missing_fields})")
+
+                            # Pedir el primer campo faltante
+                            from prompts.crm_prompts import PROPERTY_QUALIFICATION_PROMPTS, FIELD_LABELS
+                            next_field = missing_fields[0]
+                            tipo_propiedad = property_data.get('tipo_propiedad', 'propiedad')
+                            tipo_operacion = property_data.get('tipo_operacion', 'la operación')
+
+                            response_text = PROPERTY_QUALIFICATION_PROMPTS.get(
+                                next_field,
+                                f"¿Podrías indicarme {FIELD_LABELS.get(next_field, next_field)}?"
+                            ).format(
+                                tipo_propiedad=tipo_propiedad,
+                                tipo_operacion=tipo_operacion
+                            )
+                        else:
+                            # Datos completos → pedir nombre directamente
+                            state.status = ConversationStatus.AWAITING_LEAD_NAME
+                            logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_LEAD_NAME (datos completos)")
+                            response_text = LEAD_NAME_REQUEST_PROMPT
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION")
@@ -185,6 +214,88 @@ class ReceptionAgent:
         except Exception as e:
             logger.error(f"[ReceptionAgent] Error extrayendo entidades: {e}")
             return {}
+
+    def _get_missing_fields(self, metadata: Dict[str, Any]) -> list:
+        """
+        Retorna lista de campos requeridos que faltan en metadata.
+        """
+        missing = []
+        for field in REQUIRED_PROPERTY_FIELDS:
+            value = metadata.get(field, "")
+            if not value or str(value).strip() == "":
+                missing.append(field)
+        return missing
+
+    def _handle_awaiting_property_data(self, message: str, state: ConversationState) -> Dict[str, Any]:
+        """
+        Maneja el estado de calificación de propiedades.
+        Extrae información adicional y determina si está completa.
+        """
+        from prompts.crm_prompts import (
+            PROPERTY_QUALIFICATION_PROMPTS,
+            PROPERTY_DATA_COMPLETE_PROMPT,
+            FIELD_LABELS
+        )
+
+        logger.info("[ReceptionAgent] Procesando datos de propiedad...")
+
+        # Obtener metadata existente
+        metadata = state.lead_data.get('metadata', {})
+
+        # Extraer nuevas entidades del mensaje actual
+        new_entities = self._extract_property_entities(message)
+
+        # Fusionar con metadata existente (nuevos valores sobrescriben)
+        for key, value in new_entities.items():
+            if value and str(value).strip():
+                metadata[key] = value
+
+        # Actualizar metadata en state
+        state.lead_data['metadata'] = metadata
+
+        # Verificar campos faltantes
+        missing_fields = self._get_missing_fields(metadata)
+
+        if not missing_fields:
+            # ¡Datos completos! Pasar a pedir nombre
+            state.status = ConversationStatus.AWAITING_LEAD_NAME
+            logger.info("[ReceptionAgent] Datos de propiedad completos. Estado: AWAITING_PROPERTY_DATA → AWAITING_LEAD_NAME")
+
+            # Construir información extra (características si existen)
+            extra_info = ""
+            if metadata.get('caracteristicas'):
+                extra_info = f"🏠 Características: {metadata['caracteristicas']}\n"
+            if metadata.get('tipo_propiedad'):
+                extra_info += f"📋 Tipo: {metadata['tipo_propiedad']}\n"
+
+            response_text = PROPERTY_DATA_COMPLETE_PROMPT.format(
+                ubicacion=metadata.get('ubicacion', 'No especificada'),
+                presupuesto=metadata.get('presupuesto', 'No especificado'),
+                correo=metadata.get('correo', 'No proporcionado'),
+                tiempo=metadata.get('tiempo', 'No especificado'),
+                extra_info=extra_info
+            )
+        else:
+            # Aún faltan campos - pedir el siguiente
+            next_field = missing_fields[0]
+            logger.info(f"[ReceptionAgent] Falta campo: {next_field}")
+
+            # Obtener tipo de operación y propiedad para personalizar prompt
+            tipo_propiedad = metadata.get('tipo_propiedad', 'propiedad')
+            tipo_operacion = metadata.get('tipo_operacion', 'la operación')
+
+            response_text = PROPERTY_QUALIFICATION_PROMPTS.get(
+                next_field,
+                f"¿Podrías indicarme {FIELD_LABELS.get(next_field, next_field)}?"
+            ).format(
+                tipo_propiedad=tipo_propiedad,
+                tipo_operacion=tipo_operacion
+            )
+
+        return {
+            "response": response_text,
+            "new_state": state
+        }
 
     def _handle_awaiting_lead_name(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """

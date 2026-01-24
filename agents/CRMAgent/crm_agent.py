@@ -260,7 +260,7 @@ class CRMAgent:
             today_midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
             timestamp_ms = str(int(today_midnight_utc.timestamp() * 1000))
 
-            # Construir chatbot_preference
+            # Construir chatbot_preference (resumen rápido para el asesor)
             preference_parts = []
             if metadata.get("tipo_operacion"):
                 preference_parts.append(f"Operación: {metadata['tipo_operacion']}")

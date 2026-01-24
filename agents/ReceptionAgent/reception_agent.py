@@ -87,7 +87,7 @@ class ReceptionAgent:
                     if intent == "info":
                         state.status = ConversationStatus.TRANSFERRED_INFO
                         logger.info("[ReceptionAgent] Estado: RECEPTION_START → TRANSFERRED_INFO")
-                        response_text = "Entendido, déjame buscar esa información para ti..."
+                        response_text = ""  # El InfoAgent generará la respuesta directamente
 
                     elif intent == "crm":
                         # Extraer entidades iniciales del mensaje

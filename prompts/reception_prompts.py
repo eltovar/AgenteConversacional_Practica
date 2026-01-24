@@ -26,10 +26,12 @@ INTENCIONES POSIBLES:
    Ejemplos: "Quiero arrendar un apartamento", "Busco casa en Chapinero",
    "¿Pueden contactarme para comprar?", "Necesito un asesor de ventas",
    "¿Tienen apartamentos disponibles?", "Quiero vender mi propiedad",
-   "Busco un local comercial", "¿Me pueden agendar una cita para ver un inmueble?"
+   "Busco un local comercial", "¿Me pueden agendar una cita para ver un inmueble?",
+   "Quiero una cita", "Quiero agendar una cita", "Necesito una cita con un asesor",
+   "¿Puedo pedir una cita?", "Me gustaría una cita para ver propiedades"
 
    Incluye: compra, venta, arriendo de inmuebles, citas para ver propiedades,
-   asesoría comercial personalizada, hablar con asesor de ventas.
+   agendar/pedir/solicitar citas, asesoría comercial personalizada, hablar con asesor de ventas.
 
 3. intent="ambiguous" — NO SE PUEDE DETERMINAR:
    Ejemplos: "Necesito ayuda", "Información", "Quiero saber algo"
@@ -41,6 +43,7 @@ REGLAS DE DECISIÓN:
 - Departamento específico (contabilidad, jurídico, caja, reparaciones) → info
 - Problema administrativo (factura, pago, contrato, multa, daño) → info
 - Tipo de propiedad o zona mencionada con intención de negociar → crm
+- Solicitar/agendar/pedir una cita (para ver inmuebles o con asesor) → crm
 - Saludos, despedidas, agradecimientos → info
 - Peticiones de repetir/recordar información → info
 - Preguntas sobre el bot (nombre, creador, capacidades) → info

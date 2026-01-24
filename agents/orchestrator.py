@@ -108,7 +108,7 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
             if state.status == ConversationStatus.TRANSFERRED_INFO:
                 logger.info("[ORCHESTRATOR] Auto-enrutando a InfoAgent...")
                 rag_response = info_agent.process_info_query(user_message, state)
-                response_text = f"{initial_response}\n\n{rag_response}"
+                response_text = rag_response
                 state.status = ConversationStatus.RECEPTION_START
 
             elif state.status == ConversationStatus.CRM_CONVERSATION:

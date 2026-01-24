@@ -64,18 +64,23 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         # 3. CORE ROUTING LOGIC
         response_text = ""
 
-        # A. Si ya estamos en flujo de CRM (HubSpot)
-        if state.status == ConversationStatus.TRANSFERRED_CRM:
-            logger.info("[ORCHESTRATOR] Enrutando a CRMAgent (Async)...")
-            # AWAIT: Llamada asíncrona a HubSpot
-            result = await crm_agent.process_lead_handoff(user_message, state)
+        # A. Si estamos en conversación CRM (recopilando datos)
+        if state.status == ConversationStatus.CRM_CONVERSATION:
+            logger.info("[ORCHESTRATOR] Enrutando a CRMAgent conversacional...")
+            result = await crm_agent.process_conversation(user_message, state)
             response_text = result["response"]
-            # El CRM podría devolver un estado nuevo si termina el flujo
             if "new_state" in result:
                 state = result["new_state"]
 
-            # Resetear a Reception si el CRM terminó su trabajo
+            # Si el CRM completó el handoff, resetear a Reception
+            if result.get("ready_for_handoff"):
+                state.status = ConversationStatus.RECEPTION_START
+
+        # A2. Si ya se completó la transferencia CRM (post-handoff)
+        elif state.status == ConversationStatus.TRANSFERRED_CRM:
+            logger.info("[ORCHESTRATOR] CRM ya transferido. Reseteando a Reception...")
             state.status = ConversationStatus.RECEPTION_START
+            response_text = "¿Hay algo más en lo que pueda ayudarte?"
 
         # B. Si estamos en flujo de Info (RAG)
         elif state.status == ConversationStatus.TRANSFERRED_INFO:
@@ -106,14 +111,15 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
                 response_text = f"{initial_response}\n\n{rag_response}"
                 state.status = ConversationStatus.RECEPTION_START
 
-            elif state.status == ConversationStatus.TRANSFERRED_CRM:
-                logger.info("[ORCHESTRATOR] Auto-enrutando a CRMAgent...")
-                # AWAIT: Llamada asíncrona crucial aquí también
-                crm_result = await crm_agent.process_lead_handoff(user_message, state)
-
-                # Usamos la respuesta del CRM directamente (o concatenamos según tu preferencia UX)
+            elif state.status == ConversationStatus.CRM_CONVERSATION:
+                logger.info("[ORCHESTRATOR] Auto-enrutando a CRMAgent conversacional...")
+                crm_result = await crm_agent.process_conversation(user_message, state)
                 response_text = crm_result['response']
-                state.status = ConversationStatus.RECEPTION_START
+                if "new_state" in crm_result:
+                    state = crm_result["new_state"]
+                # Si el CRM completó el handoff en este mismo turno, resetear
+                if crm_result.get("ready_for_handoff"):
+                    state.status = ConversationStatus.RECEPTION_START
 
             else:
                 # No hubo transferencia, respuesta normal

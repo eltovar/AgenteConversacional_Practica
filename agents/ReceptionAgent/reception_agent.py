@@ -106,38 +106,16 @@ class ReceptionAgent:
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
                     elif intent == "crm":
-                        # Extraer entidades de la propiedad
+                        # Extraer entidades iniciales del mensaje
                         property_data = self._extract_property_entities(message)
                         if property_data:
                             state.lead_data['metadata'] = property_data
-                            logger.info(f"[ReceptionAgent] Metadata extraída: {property_data}")
+                            logger.info(f"[ReceptionAgent] Metadata inicial extraída: {property_data}")
 
-                        # Verificar si tenemos los datos mínimos de calificación
-                        missing_fields = self._get_missing_fields(property_data)
-
-                        if missing_fields:
-                            # Faltan datos → ir a calificación
-                            state.status = ConversationStatus.AWAITING_PROPERTY_DATA
-                            logger.info(f"[ReceptionAgent] Estado: RECEPTION_START → AWAITING_PROPERTY_DATA (faltan: {missing_fields})")
-
-                            # Pedir el primer campo faltante
-                            from prompts.crm_prompts import PROPERTY_QUALIFICATION_PROMPTS, FIELD_LABELS
-                            next_field = missing_fields[0]
-                            tipo_propiedad = property_data.get('tipo_propiedad', 'propiedad')
-                            tipo_operacion = property_data.get('tipo_operacion', 'la operación')
-
-                            response_text = PROPERTY_QUALIFICATION_PROMPTS.get(
-                                next_field,
-                                f"¿Podrías indicarme {FIELD_LABELS.get(next_field, next_field)}?"
-                            ).format(
-                                tipo_propiedad=tipo_propiedad,
-                                tipo_operacion=tipo_operacion
-                            )
-                        else:
-                            # Datos completos → pedir nombre directamente
-                            state.status = ConversationStatus.AWAITING_LEAD_NAME
-                            logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_LEAD_NAME (datos completos)")
-                            response_text = LEAD_NAME_REQUEST_PROMPT
+                        # Transferir al CRM Agent conversacional
+                        state.status = ConversationStatus.CRM_CONVERSATION
+                        logger.info("[ReceptionAgent] Estado: RECEPTION_START → CRM_CONVERSATION")
+                        response_text = ""  # El CRM Agent generará la respuesta
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
                         logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION")

@@ -1,16 +1,12 @@
-# reception_agent.py (NUEVO)
+# reception_agent.py
 from llm_client import llama_client
 from agents.ReceptionAgent.reception_tool import RECEPTION_TOOLS, classify_intent_func
 from prompts.reception_prompts import (
     RECEPTION_SYSTEM_PROMPT,
     CLARIFICATION_PROMPTS,
-    LEAD_NAME_REQUEST_PROMPT,
-    LEAD_NAME_RETRY_PROMPT,
-    LEAD_TRANSFER_SUCCESS_PROMPT,
     SOFIA_PERSONALITY
 )
 from prompts.crm_prompts import PROPERTY_EXTRACTION_PROMPT
-from utils.pii_validator import robust_extract_name
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
 from logging_config import logger
@@ -18,11 +14,9 @@ import random
 import json
 from typing import Dict, Any
 
-# Campos requeridos para calificación de leads antes de enviar al CRM
-REQUIRED_PROPERTY_FIELDS = ['ubicacion', 'presupuesto']
 
 class ReceptionAgent:
-    """ Agente de Recepción que maneja la clasificación de intenciones y captura de PII. """
+    """ Agente de Recepción que clasifica intenciones y enruta al agente correcto. """
 
     def __init__(self):
         self.tools = {tool.name: tool for tool in RECEPTION_TOOLS}
@@ -40,12 +34,6 @@ class ReceptionAgent:
         elif state.status == ConversationStatus.AWAITING_CLARIFICATION:
             return self._handle_awaiting_clarification(message, state)
 
-        elif state.status == ConversationStatus.AWAITING_PROPERTY_DATA:
-            return self._handle_awaiting_property_data(message, state)
-
-        elif state.status == ConversationStatus.AWAITING_LEAD_NAME:
-            return self._handle_awaiting_lead_name(message, state)
-
         else:
             # Estado no manejado por ReceptionAgent
             logger.warning(f"[ReceptionAgent] Estado no manejado: {state.status}")
@@ -61,27 +49,22 @@ class ReceptionAgent:
         logger.info("[ReceptionAgent] Clasificando intención del usuario...")
 
         lead_name = state.lead_data.get('name')
-        # Anteponer personalidad de Sofía al prompt de clasificación
-        system_prompt = SOFIA_PERSONALITY + "\n\n" + RECEPTION_SYSTEM_PROMPT
+        system_prompt = RECEPTION_SYSTEM_PROMPT
 
         if lead_name:
-            # Añadir un prefijo al prompt si ya conocemos el nombre
             system_prompt = f"Dirígete al usuario como '{lead_name}' en tu respuesta. " + system_prompt
-
 
         # Invocar LLM con tool classify_intent (forzada)
         messages = [
-            SystemMessage(content=system_prompt), 
+            SystemMessage(content=system_prompt),
             HumanMessage(content=message)
         ]
 
-        # Configurar LLM para forzar la tool call (la herramienta de clasificación)
         llm_with_tools = llama_client.client.bind_tools(
             [classify_intent_func],
             tool_choice="classify_intent"
         )
 
-        # === INICIO DE LA LÓGICA DE RETRY ===
         # Intentamos hasta 3 veces (1 intento inicial + 2 reintentos)
         MAX_RETRIES = 2
 
@@ -103,8 +86,9 @@ class ReceptionAgent:
                     # Lógica de Transición
                     if intent == "info":
                         state.status = ConversationStatus.TRANSFERRED_INFO
-                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → TRANSFERRED_INFO")
+                        logger.info("[ReceptionAgent] Estado: RECEPTION_START → TRANSFERRED_INFO")
                         response_text = "Entendido, déjame buscar esa información para ti..."
+
                     elif intent == "crm":
                         # Extraer entidades iniciales del mensaje
                         property_data = self._extract_property_entities(message)
@@ -116,15 +100,16 @@ class ReceptionAgent:
                         state.status = ConversationStatus.CRM_CONVERSATION
                         logger.info("[ReceptionAgent] Estado: RECEPTION_START → CRM_CONVERSATION")
                         response_text = ""  # El CRM Agent generará la respuesta
+
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
-                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION")
+                        logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_CLARIFICATION")
                         response_text = random.choice(CLARIFICATION_PROMPTS)
+
                     else:
                         # Fallback si intent desconocido
                         logger.warning(f"[ReceptionAgent] Intent desconocido: '{intent}'. Usando fallback.")
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
-                        logger.info(f"[ReceptionAgent] Estado actualizado: RECEPTION_START → AWAITING_CLARIFICATION (fallback)")
                         response_text = CLARIFICATION_PROMPTS[0]
 
                     return {"response": response_text, "new_state": state}
@@ -135,52 +120,43 @@ class ReceptionAgent:
             except Exception as e:
                 logger.error(f"[ReceptionAgent] Error en la invocación del LLM (Intento {attempt+1}): {e}")
 
-        # === FIN DE LA LÓGICA DE RETRY ===
-
         # Fallback si se agotan todos los reintentos
-        logger.error(f"[ReceptionAgent] Clasificación fallida después de {MAX_RETRIES + 1} intentos. Requiriendo aclaración.")
+        logger.error(f"[ReceptionAgent] Clasificación fallida después de {MAX_RETRIES + 1} intentos.")
         state.status = ConversationStatus.AWAITING_CLARIFICATION
 
         return {
             "response": CLARIFICATION_PROMPTS[0],
             "new_state": state
         }
-        
+
     def _handle_awaiting_clarification(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja el estado de espera de aclaración: re-clasifica la intención.
         """
         logger.info("[ReceptionAgent] Re-clasificando después de aclaración...")
-
-        # Usar la misma lógica que RECEPTION_START
         state.status = ConversationStatus.RECEPTION_START
         return self._handle_reception_start(message, state)
 
     def _extract_property_entities(self, message: str) -> Dict[str, Any]:
         """
         Extrae entidades de propiedad del mensaje del usuario usando LLM.
-        Retorna un diccionario con las entidades encontradas.
         """
         logger.info("[ReceptionAgent] Extrayendo entidades de propiedad...")
 
         try:
             extraction_prompt = PROPERTY_EXTRACTION_PROMPT.format(user_message=message)
-            messages = [
-                SystemMessage(content=extraction_prompt)
-            ]
+            messages = [SystemMessage(content=extraction_prompt)]
 
             response = llama_client.invoke(messages)
             response_text = response.content.strip()
 
-            # Intentar parsear el JSON de la respuesta
-            # Buscar el JSON en la respuesta (puede estar envuelto en texto)
             start_idx = response_text.find('{')
             end_idx = response_text.rfind('}') + 1
 
             if start_idx != -1 and end_idx > start_idx:
                 json_str = response_text[start_idx:end_idx]
                 property_data = json.loads(json_str)
-                logger.info(f"[ReceptionAgent] Entidades de propiedad extraídas: {property_data}")
+                logger.info(f"[ReceptionAgent] Entidades extraídas: {property_data}")
                 return property_data
             else:
                 logger.warning("[ReceptionAgent] No se encontró JSON en la respuesta de extracción")
@@ -193,118 +169,6 @@ class ReceptionAgent:
             logger.error(f"[ReceptionAgent] Error extrayendo entidades: {e}")
             return {}
 
-    def _get_missing_fields(self, metadata: Dict[str, Any]) -> list:
-        """
-        Retorna lista de campos requeridos que faltan en metadata.
-        """
-        missing = []
-        for field in REQUIRED_PROPERTY_FIELDS:
-            value = metadata.get(field, "")
-            if not value or str(value).strip() == "":
-                missing.append(field)
-        return missing
-
-    def _handle_awaiting_property_data(self, message: str, state: ConversationState) -> Dict[str, Any]:
-        """
-        Maneja el estado de calificación de propiedades.
-        Extrae información adicional y determina si está completa.
-        """
-        from prompts.crm_prompts import (
-            PROPERTY_QUALIFICATION_PROMPTS,
-            PROPERTY_DATA_COMPLETE_PROMPT,
-            FIELD_LABELS
-        )
-
-        logger.info("[ReceptionAgent] Procesando datos de propiedad...")
-
-        # Obtener metadata existente
-        metadata = state.lead_data.get('metadata', {})
-
-        # Extraer nuevas entidades del mensaje actual
-        new_entities = self._extract_property_entities(message)
-
-        # Fusionar con metadata existente (nuevos valores sobrescriben)
-        for key, value in new_entities.items():
-            if value and str(value).strip():
-                metadata[key] = value
-
-        # Actualizar metadata en state
-        state.lead_data['metadata'] = metadata
-
-        # Verificar campos faltantes
-        missing_fields = self._get_missing_fields(metadata)
-
-        if not missing_fields:
-            # ¡Datos completos! Pasar a pedir nombre
-            state.status = ConversationStatus.AWAITING_LEAD_NAME
-            logger.info("[ReceptionAgent] Datos de propiedad completos. Estado: AWAITING_PROPERTY_DATA → AWAITING_LEAD_NAME")
-
-            # Construir información extra (características si existen)
-            extra_info = ""
-            if metadata.get('caracteristicas'):
-                extra_info = f"🏠 Características: {metadata['caracteristicas']}\n"
-            if metadata.get('tipo_propiedad'):
-                extra_info += f"📋 Tipo: {metadata['tipo_propiedad']}\n"
-
-            response_text = PROPERTY_DATA_COMPLETE_PROMPT.format(
-                ubicacion=metadata.get('ubicacion', 'No especificada'),
-                presupuesto=metadata.get('presupuesto', 'No especificado'),
-                correo=metadata.get('correo', 'No proporcionado'),
-                tiempo=metadata.get('tiempo', 'No especificado'),
-                extra_info=extra_info
-            )
-        else:
-            # Aún faltan campos - pedir el siguiente
-            next_field = missing_fields[0]
-            logger.info(f"[ReceptionAgent] Falta campo: {next_field}")
-
-            # Obtener tipo de operación y propiedad para personalizar prompt
-            tipo_propiedad = metadata.get('tipo_propiedad', 'propiedad')
-            tipo_operacion = metadata.get('tipo_operacion', 'la operación')
-
-            response_text = PROPERTY_QUALIFICATION_PROMPTS.get(
-                next_field,
-                f"¿Podrías indicarme {FIELD_LABELS.get(next_field, next_field)}?"
-            ).format(
-                tipo_propiedad=tipo_propiedad,
-                tipo_operacion=tipo_operacion
-            )
-
-        return {
-            "response": response_text,
-            "new_state": state
-        }
-
-    def _handle_awaiting_lead_name(self, message: str, state: ConversationState) -> Dict[str, Any]:
-        """
-        Maneja el estado de captura de nombre: extrae PII y transfiere a CRM.
-        """
-        logger.info("[ReceptionAgent] Extrayendo nombre del lead...")
-
-        # Extraer nombre con NER robusto
-        extracted_name = robust_extract_name(message)
-
-        if extracted_name:
-            # PII extraído exitosamente
-            state.lead_data['name'] = extracted_name
-            state.status = ConversationStatus.TRANSFERRED_CRM
-
-            # Simular transferencia a CRM (Respuesta a Q2)
-            logger.info(f"🚀 [CRM] Simulando transferencia a CRM: {state.lead_data}")
-            
-            response_text = LEAD_TRANSFER_SUCCESS_PROMPT.format(name=extracted_name)
-            return {
-                "response": response_text,
-                "new_state": state
-            }
-
-        else:
-            # No se pudo extraer el nombre
-            logger.warning("[ReceptionAgent] No se pudo extraer nombre del mensaje")
-            return {
-                "response": LEAD_NAME_RETRY_PROMPT,
-                "new_state": state  # Mantener el mismo estado
-            }
 
 # Instancia global
 reception_agent = ReceptionAgent()

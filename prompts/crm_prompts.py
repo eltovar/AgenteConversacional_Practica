@@ -63,31 +63,22 @@ CRM_CONFIRMATION_TEMPLATE = (
 )
 
 # Prompt para extraer entidades de la petición del usuario (propiedad, ubicación, etc.)
-PROPERTY_EXTRACTION_PROMPT = """Analiza el siguiente mensaje del usuario y extrae la información relevante sobre su interés inmobiliario.
+PROPERTY_EXTRACTION_PROMPT = """Extrae información inmobiliaria del mensaje. Responde ÚNICAMENTE con JSON válido, sin texto adicional.
 
-Extrae las siguientes entidades si están presentes y si el usuario las menciona:
-- tipo_propiedad: (casa, apartamento, local, oficina, bodega, lote, etc.)
-- tipo_operacion: (arriendo, compra, venta)
-- ubicacion: (barrio, zona, ciudad)
-- presupuesto: (rango de precio mencionado)
-- caracteristicas: (número de habitaciones, parqueadero, área, etc.)
-- correo: (email si lo menciona)
-- tiempo: (inmediata, próximos días, próximo mes, etc.)
-- comentarios_adicionales: (cualquier otra información relevante)
+Entidades a extraer (solo si están presentes):
+- tipo_propiedad: casa, apartamento, local, oficina, bodega, lote
+- tipo_operacion: arriendo, compra, venta
+- ubicacion: barrio, zona o ciudad mencionada
+- presupuesto: monto o rango de precio
+- caracteristicas: habitaciones, parqueadero, área, etc.
+- correo: email si lo menciona
+- tiempo: plazo mencionado (inmediato, próximo mes, etc.)
 
-Responde SOLO con un JSON válido con las entidades encontradas. Si no encuentras una entidad, omítela del JSON.
+IMPORTANTE: Si no hay información inmobiliaria, responde exactamente: {{}}
 
-Ejemplo de respuesta:
-{
-    "tipo_propiedad": "apartamento",
-    "tipo_operacion": "arriendo",
-    "ubicacion": "Chapinero",
-    "presupuesto": "2-3 millones",
-    "caracteristicas": "2 habitaciones, parqueadero",
-    "tiempo": "próximo mes"
-}
+Mensaje: {user_message}
 
-Mensaje del usuario: {user_message}"""
+JSON:"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROMPTS LEGACY PARA CALIFICACIÓN (se mantienen por compatibilidad)

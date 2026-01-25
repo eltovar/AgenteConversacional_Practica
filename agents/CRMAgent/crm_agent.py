@@ -164,6 +164,7 @@ class CRMAgent:
     def _extract_entities(self, message: str) -> Dict[str, Any]:
         """
         Extrae entidades inmobiliarias del mensaje del usuario usando LLM.
+        Incluye manejo robusto de respuestas JSON malformadas.
         """
         try:
             extraction_prompt = PROPERTY_EXTRACTION_PROMPT.format(user_message=message)
@@ -172,19 +173,37 @@ class CRMAgent:
             response = llama_client.invoke(messages)
             response_text = response.content.strip()
 
-            # Parsear JSON de la respuesta
+            logger.debug(f"[CRMAgent] Respuesta LLM extracción: {response_text[:200]}")
+
+            # Parsear JSON de la respuesta - buscar bloque JSON completo
             start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}') + 1
+            end_idx = response_text.rfind('}')
 
-            if start_idx != -1 and end_idx > start_idx:
-                json_str = response_text[start_idx:end_idx]
+            if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+                logger.debug("[CRMAgent] No se encontró JSON válido en respuesta")
+                return {}
+
+            json_str = response_text[start_idx:end_idx + 1]
+
+            # Intentar parsear el JSON
+            try:
                 entities = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Intentar limpiar JSON mal formateado (saltos de línea, etc.)
+                json_str_clean = json_str.replace('\n', '').replace('\r', '')
+                entities = json.loads(json_str_clean)
+
+            # Filtrar valores vacíos o None
+            entities = {k: v for k, v in entities.items() if v and str(v).strip()}
+
+            if entities:
                 logger.info(f"[CRMAgent] Entidades extraídas: {entities}")
-                return entities
+            return entities
 
+        except json.JSONDecodeError as e:
+            logger.warning(f"[CRMAgent] JSON malformado: {e}")
             return {}
-
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.warning(f"[CRMAgent] Error extrayendo entidades: {e}")
             return {}
 

@@ -38,10 +38,13 @@ class CRMAgent:
         """
         Procesa un turno de conversación con el cliente para recopilar datos.
         Usa LLM con CRM_SYSTEM_PROMPT para conversar naturalmente.
-        Cuando detecta que tiene el nombre, extrae entidades y envía al CRM.
+        IMPORTANTE: Siempre conversa al menos una vez antes de enviar al CRM.
         """
         try:
             logger.info(f"[CRMAgent] Procesando conversación. Input: '{user_input[:50]}...'")
+
+            crm_history = state.lead_data.get('crm_history', [])
+            is_first_turn = len(crm_history) < 2  # Primer turno si no hay historial previo
 
             # 1. Extraer entidades del mensaje actual
             new_entities = self._extract_entities(user_input)
@@ -55,13 +58,24 @@ class CRMAgent:
             state.lead_data['metadata'] = metadata
             logger.info(f"[CRMAgent] Metadata acumulada: {metadata}")
 
-            # 2. Intentar extraer nombre del mensaje actual
+            # 2. En el primer turno, SIEMPRE generar respuesta conversacional
+            # No intentamos extraer nombre ni enviar al CRM en el primer turno
+            if is_first_turn:
+                logger.info("[CRMAgent] Primer turno - generando respuesta conversacional")
+                response_text = self._generate_conversation_response(user_input, state)
+                return {
+                    "response": response_text,
+                    "new_state": state,
+                    "ready_for_handoff": False
+                }
+
+            # 3. A partir del segundo turno, intentar extraer nombre
             extracted_name = self._extract_name_from_message(user_input, state)
             if extracted_name:
                 state.lead_data['name'] = extracted_name
                 logger.info(f"[CRMAgent] Nombre detectado: {extracted_name}")
 
-            # 3. Verificar si estamos listos para registrar (tenemos nombre)
+            # 4. Verificar si estamos listos para registrar (tenemos nombre)
             lead_name = state.lead_data.get('name')
             if lead_name:
                 # Tenemos nombre → enviar al CRM
@@ -69,7 +83,7 @@ class CRMAgent:
                 result = await self.process_lead_handoff(user_input, state)
                 return result
 
-            # 4. Si no tenemos nombre, continuar conversación con LLM
+            # 5. Si no tenemos nombre, continuar conversación con LLM
             response_text = self._generate_conversation_response(user_input, state)
 
             return {
@@ -177,18 +191,20 @@ class CRMAgent:
     def _extract_name_from_message(self, message: str, state: ConversationState) -> str:
         """
         Intenta extraer un nombre completo del mensaje del usuario.
-        Usa regex + LLM. Solo intenta extracción LLM si el contexto sugiere
-        que el usuario está respondiendo con su nombre.
+        IMPORTANTE: Solo intenta extracción si ya hubo al menos un turno de conversación CRM.
+        Esto evita falsos positivos en el primer mensaje del usuario.
         """
         from utils.pii_validator import robust_extract_name
 
-        # Primero intentar con el extractor robusto existente (regex)
-        name = robust_extract_name(message)
-        if name:
-            return name
+        crm_history = state.lead_data.get('crm_history', [])
+
+        # GUARDIA: No intentar extraer nombre en el primer turno (sin historial CRM)
+        # El usuario debe haber respondido al menos una vez al CRM Agent
+        if len(crm_history) < 2:  # Necesitamos al menos 1 User + 1 Agent message previos
+            logger.debug("[CRMAgent] Primer turno CRM - no se intenta extraer nombre aún")
+            return None
 
         # Verificar si el último mensaje del agente pidió el nombre
-        crm_history = state.lead_data.get('crm_history', [])
         last_agent_msg = ""
         for entry in reversed(crm_history):
             if entry.startswith("Agent:"):
@@ -198,11 +214,22 @@ class CRMAgent:
         name_request_indicators = ['nombre', 'cómo te llamas', 'como te llamas', 'registrarte']
         agent_asked_name = any(ind in last_agent_msg for ind in name_request_indicators)
 
-        # Si el agente pidió el nombre y el mensaje es corto (probable respuesta de nombre)
-        if agent_asked_name and len(message.split()) <= 6 and '?' not in message:
+        # Solo intentar extracción de nombre si el agente lo pidió explícitamente
+        if not agent_asked_name:
+            return None
+
+        # El agente pidió el nombre - intentar extracción
+        # Primero con regex (patrones explícitos como "Me llamo X")
+        name = robust_extract_name(message)
+        if name:
+            logger.info(f"[CRMAgent] Nombre extraído via regex: {name}")
+            return name
+
+        # Si el mensaje es corto (probable respuesta de nombre), usar LLM
+        if len(message.split()) <= 6 and '?' not in message:
             immob_keywords = ['casa', 'apartamento', 'arriendo', 'compra', 'venta',
                               'local', 'oficina', 'barrio', 'zona', 'presupuesto',
-                              'habitaciones', 'millones', 'no', 'si', 'sí']
+                              'habitaciones', 'millones', 'no', 'si', 'sí', 'cita']
             message_lower = message.lower()
             if not any(kw in message_lower for kw in immob_keywords):
                 try:

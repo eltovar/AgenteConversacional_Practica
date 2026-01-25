@@ -2,76 +2,88 @@
 from typing import Optional
 import re
 
+# Palabras comunes que NO son nombres (en minúscula para comparación case-insensitive)
+COMMON_WORDS = {
+    # Artículos y preposiciones
+    'me', 'mi', 'es', 'soy', 'el', 'la', 'los', 'las', 'un', 'una',
+    'de', 'del', 'al', 'con', 'sin', 'por', 'para', 'y', 'o',
+    # Saludos y expresiones
+    'hola', 'como', 'estas', 'que', 'cual', 'donde', 'cuando',
+    'si', 'no', 'bien', 'gracias', 'buenas', 'buenos',
+    # Verbos comunes (evitar falsos positivos)
+    'quiero', 'quisiera', 'necesito', 'busco', 'tengo', 'puedo',
+    'pedir', 'ver', 'saber', 'hacer', 'hablar', 'comunicar',
+    'agendar', 'solicitar', 'contactar',
+    # Palabras inmobiliarias (evitar "pedir una cita" como nombre)
+    'cita', 'casa', 'apartamento', 'apartaestudio', 'local', 'oficina',
+    'propiedad', 'inmueble', 'arriendo', 'arrendar', 'compra', 'comprar',
+    'venta', 'vender', 'asesor', 'asesora', 'informacion', 'ayuda',
+    'contacto', 'zona', 'barrio', 'sector',
+    # Números y cantidades
+    'millones', 'millon', 'mil', 'pesos'
+}
+
+
+def _is_common_word(word: str) -> bool:
+    """Verifica si una palabra es común (case-insensitive)."""
+    return word.lower() in COMMON_WORDS
+
+
 def robust_extract_name(text: str) -> Optional[str]:
     """
     Extrae nombres de personas usando patrones simples.
-    """
-    return _simple_fallback(text)
-
-def _simple_fallback(text: str) -> Optional[str]:
-    """
-    Fallback simple: extrae nombres usando patrones heurísticos.
+    Solo detecta nombres cuando hay patrones explícitos como "Me llamo X" o "Soy X".
     """
     text = text.strip()
 
-    # Limpiar puntuacion basica para analisis
+    # Limpiar puntuación básica para análisis
     text_clean = re.sub(r'[¿?¡!,;.]', '', text)
     words = text_clean.split()
 
-    # Palabras comunes que no son nombres
-    common_words = {
-        'Me', 'Mi', 'Es', 'Soy', 'El', 'La', 'Los', 'Las', 'Un', 'Una',
-        'Hola', 'Como', 'Estas', 'Que', 'Cual', 'Donde', 'Cuando', 'Por',
-        'Para', 'Con', 'Sin', 'Si', 'No', 'Y', 'O', 'De', 'Del', 'Al'
-    }
+    if not words:
+        return None
 
-    # Caso 1: Texto directo (1-3 palabras capitalizadas, sin puntuacion)
-    if 1 <= len(words) <= 3:
-        # Todas las palabras deben empezar con mayuscula y no ser comunes
-        if all(w[0].isupper() and w not in common_words for w in words if w):
-            return ' '.join(words)
-
-    # Caso 2: Patron "Me llamo X" o similar
-    patterns = [
-        r'(?:me llamo|mi nombre es|soy)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-        r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})$',  # Nombre al final
+    # Caso 1: Patrón explícito "Me llamo X" / "Mi nombre es X" / "Soy X"
+    explicit_patterns = [
+        r'(?:me llamo|mi nombre es)\s+([A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)*)',
     ]
 
-    for pattern in patterns:
+    for pattern in explicit_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             name = match.group(1).strip()
             name_words = name.split()
             # Validar que el nombre tenga entre 1 y 3 palabras y no sean comunes
             if 1 <= len(name_words) <= 3:
-                if not any(w in common_words for w in name_words):
-                    return name
+                if not any(_is_common_word(w) for w in name_words):
+                    # Capitalizar correctamente
+                    return ' '.join(w.capitalize() for w in name_words)
 
-    # Caso 3: Buscar secuencias de palabras capitalizadas
-    capitalized_words = []
+    # Caso 2: Texto directo corto (1-3 palabras) que parece ser solo un nombre
+    # Solo si NO contiene verbos ni palabras inmobiliarias
+    if 1 <= len(words) <= 3:
+        # Verificar que todas las palabras empiecen con mayúscula y no sean comunes
+        all_capitalized = all(w[0].isupper() for w in words if w)
+        none_common = not any(_is_common_word(w) for w in words)
+
+        if all_capitalized and none_common:
+            # Verificación adicional: no debe contener dígitos
+            if not any(char.isdigit() for char in text_clean):
+                return ' '.join(words)
+
+    # Caso 3: Buscar secuencias de 2-3 palabras capitalizadas consecutivas
+    # que NO sean palabras comunes
+    capitalized_sequence = []
 
     for word in words:
-        # Palabra capitalizada y no es palabra comun
-        if word and word[0].isupper() and word not in common_words:
-            capitalized_words.append(word)
-        elif capitalized_words:
-            # Si ya tenemos palabras acumuladas y encontramos una no capitalizada, terminamos
+        if word and word[0].isupper() and not _is_common_word(word):
+            capitalized_sequence.append(word)
+        elif capitalized_sequence:
+            # Terminó la secuencia
             break
 
-    # Si encontramos 2-3 palabras capitalizadas consecutivas, probablemente sea un nombre
-    # (evitamos 1 sola palabra para reducir falsos positivos como "Hola")
-    if 2 <= len(capitalized_words) <= 3:
-        return ' '.join(capitalized_words)
-
-    # Caso especial: 1 palabra capitalizada SOLO si tiene 2+ silabas y no es comun
-    if len(capitalized_words) == 1:
-        word = capitalized_words[0]
-        # Verificar que tenga al menos 3 caracteres y no sea saludo comun
-        if len(word) >= 3 and word not in common_words:
-            # Verificar que no sea inicio de pregunta
-            if text_clean.lower().startswith(word.lower()) and len(words) > 1:
-                # Es el inicio de una oracion, probablemente no sea nombre
-                return None
-            return word
+    # Solo aceptar si hay 2-3 palabras (más probable que sea nombre completo)
+    if 2 <= len(capitalized_sequence) <= 3:
+        return ' '.join(capitalized_sequence)
 
     return None

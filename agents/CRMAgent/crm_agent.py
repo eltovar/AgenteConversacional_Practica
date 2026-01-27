@@ -187,7 +187,7 @@ class CRMAgent:
             "mercado_libre": "Mercado Libre",
             "ciencuadras": "Ciencuadras",
             "pagina_web": "nuestra página web",
-            "whatsapp_direct": "WhatsApp",
+            "whatsapp_directo": "WhatsApp",
             "desconocido": "internet",
         }
         nombre_portal_amigable = portal_nombres.get(nombre_portal, "internet")

@@ -18,7 +18,7 @@ class PortalOrigen(str, Enum):
     MERCADO_LIBRE = "mercado_libre"
     CIENCUADRAS = "ciencuadras"
     PAGINA_WEB = "pagina_web"
-    WHATSAPP_DIRECT = "whatsapp_direct"
+    WHATSAPP_DIRECT = "whatsapp_directo"
     DESCONOCIDO = "desconocido"
 
 

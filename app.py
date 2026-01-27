@@ -575,7 +575,7 @@ async def get_orphan_leads(x_api_key: str = Header(None, alias="X-API-Key")):
                     "id": "123",
                     "name": "Juan Pérez",
                     "phone": "+549...",
-                    "canal": "whatsapp_direct",
+                    "canal": "whatsapp_directo",
                     "score": "75"
                 },
                 ...

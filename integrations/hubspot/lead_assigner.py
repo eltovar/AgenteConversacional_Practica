@@ -55,7 +55,7 @@ class LeadAssigner:
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
         # === TRABAJADOR 2 ===
-        "whatsapp_direct": "equipo_trabajador2",
+        "whatsapp_directo": "equipo_trabajador2",
         "finca_raiz": "equipo_trabajador2",
         "pagina_web": "equipo_trabajador2",
         "instagram": "equipo_trabajador2",
@@ -131,7 +131,7 @@ class LeadAssigner:
         owners = self.OWNERS_CONFIG.get(team, self.OWNERS_CONFIG["default"])
         return [o for o in owners if o.get("active", True)]
 
-    def get_next_owner(self, channel_origin: str = "whatsapp_direct") -> Optional[str]:
+    def get_next_owner(self, channel_origin: str = "whatsapp_directo") -> Optional[str]:
         """
         Retorna el ID del siguiente owner en rotación para el canal especificado.
 
@@ -236,7 +236,7 @@ class LeadAssigner:
             return "google_ads"
 
         # 3. Default: WhatsApp directo
-        return "whatsapp_direct"
+        return "whatsapp_directo"
 
     def reset_index(self, team: str = "default") -> bool:
         """

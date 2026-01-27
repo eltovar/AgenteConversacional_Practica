@@ -22,7 +22,7 @@ class LeadCounter:
 
     # Emojis para cada canal
     CANAL_EMOJIS = {
-        "whatsapp_direct": "📱",
+        "whatsapp_directo": "📱",
         "instagram": "📸",
         "facebook": "👤",
         "finca_raiz": "🏠",
@@ -61,7 +61,7 @@ class LeadCounter:
             {
                 "total": 4,
                 "por_canal": {
-                    "whatsapp_direct": 2,
+                    "whatsapp_directo": 2,
                     "finca_raiz": 1,
                     "instagram": 1
                 },
@@ -69,7 +69,7 @@ class LeadCounter:
                     {
                         "id": "123",
                         "name": "Juan Pérez",
-                        "canal": "whatsapp_direct",
+                        "canal": "whatsapp_directo",
                         "timestamp": "2026-01-27T10:00:00Z"
                     },
                     ...

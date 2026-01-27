@@ -30,23 +30,23 @@ class LeadAssigner:
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
     #
     # CONFIGURACIÓN ACTUALIZADA:
-    # - Trabajador1 (ID: 87367331): Facebook, Mercado Libre, Ciencuadras, Metrocuadrado
-    # - Trabajador2 (ID: 87367331): WhatsApp, Finca Raíz, Página Web, Instagram
+    # - Trabajador1 "Salo Tovar (admin)" (ID: 86909130): Facebook, Mercado Libre, Ciencuadras, Metrocuadrado
+    # - Trabajador2 "Sin nombre" (ID: 87367331): WhatsApp, Finca Raíz, Página Web, Instagram
     OWNERS_CONFIG = {
-        # Equipo para Trabajador 1
+        # Equipo para Trabajador 1 (Salo Tovar - Admin)
         "equipo_trabajador1": [
-            {"name": "Trabajador1", "id": "87367331", "active": True},
+            {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
         ],
 
-        # Equipo para Trabajador 2
+        # Equipo para Trabajador 2 (Sin nombre)
         "equipo_trabajador2": [
-            {"name": "Trabajador2", "id": "87367331", "active": True},
+            {"name": "Sin nombre", "id": "87367331", "active": True},
         ],
 
         # Equipo default (fallback - ambos trabajadores en round robin)
         "default": [
-            {"name": "Trabajador1", "id": "87367331", "active": True},
-            {"name": "Trabajador2", "id": "87367331", "active": True},
+            {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
+            {"name": "Sin nombre", "id": "87367331", "active": True},
         ],
     }
 
@@ -368,6 +368,302 @@ class OrphanLeadAlert:
             return [json.loads(a) for a in alerts_raw]
         except Exception as e:
             logger.error(f"[OrphanLeadAlert] Error leyendo alertas: {e}")
+            return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MONITOR PROACTIVO DE LEADS HUÉRFANOS (BÚSQUEDA EN HUBSPOT)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OrphanLeadMonitor:
+    """
+    Monitorea activamente leads sin owner en HubSpot y envía alertas.
+
+    Características:
+    - Búsqueda periódica en HubSpot de leads sin asignar
+    - Alertas a Slack/Discord via webhook
+    - Almacenamiento en Redis de leads detectados
+    - Integración con sistema de logging
+    """
+
+    REDIS_KEY_ORPHANS = "lead_assigner:orphan_leads_detected"
+
+    def __init__(self, hubspot_client, redis_client: Optional[redis.Redis] = None):
+        """
+        Inicializa el monitor con cliente HubSpot y Redis.
+
+        Args:
+            hubspot_client: Instancia de HubSpotClient
+            redis_client: Cliente Redis opcional
+        """
+        self.hubspot = hubspot_client
+        self.redis = redis_client
+        self._redis_available = redis_client is not None
+
+        # URL del webhook para alertas (Slack, Discord, Teams, etc.)
+        self.webhook_url = os.getenv("ORPHAN_LEAD_WEBHOOK_URL")
+
+        logger.info(
+            f"[OrphanLeadMonitor] Inicializado. "
+            f"Webhook: {'Configurado' if self.webhook_url else 'No configurado'}"
+        )
+
+    async def check_orphan_leads(self, hours_window: int = 24) -> List[Dict]:
+        """
+        Busca leads sin owner asignado en HubSpot.
+
+        Args:
+            hours_window: Ventana de tiempo en horas para buscar leads recientes
+
+        Returns:
+            Lista de leads huérfanos encontrados
+        """
+        try:
+            # Calcular timestamp límite
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_window)
+            cutoff_timestamp_ms = int(cutoff_time.timestamp() * 1000)
+
+            logger.info(f"[OrphanLeadMonitor] Buscando leads sin asignar (últimas {hours_window}h)...")
+
+            # Construir filtros para búsqueda
+            filters = {
+                "filterGroups": [
+                    {
+                        "filters": [
+                            {
+                                "propertyName": "hubspot_owner_id",
+                                "operator": "NOT_HAS_PROPERTY"
+                            },
+                            {
+                                "propertyName": "chatbot_timestamp",
+                                "operator": "HAS_PROPERTY"  # Solo leads del chatbot
+                            },
+                            {
+                                "propertyName": "chatbot_timestamp",
+                                "operator": "GTE",
+                                "value": cutoff_timestamp_ms
+                            }
+                        ]
+                    }
+                ],
+                "properties": [
+                    "firstname",
+                    "lastname",
+                    "phone",
+                    "canal_origen",
+                    "chatbot_score",
+                    "chatbot_location",
+                    "chatbot_urgency",
+                    "chatbot_timestamp"
+                ],
+                "limit": 100
+            }
+
+            # Ejecutar búsqueda en HubSpot
+            endpoint = "/crm/v3/objects/contacts/search"
+            response = await self.hubspot._request("POST", endpoint, filters)
+
+            orphans = response.get("results", [])
+
+            if orphans:
+                logger.warning(f"[OrphanLeadMonitor] ⚠️ {len(orphans)} leads sin asignar detectados")
+                await self._send_alert(orphans, hours_window)
+            else:
+                logger.info("[OrphanLeadMonitor] ✅ No se encontraron leads sin asignar")
+
+            return orphans
+
+        except Exception as e:
+            logger.error(f"[OrphanLeadMonitor] Error buscando leads huérfanos: {e}", exc_info=True)
+            return []
+
+    async def _send_alert(self, orphan_leads: List[Dict], hours_window: int):
+        """
+        Envía alertas sobre leads huérfanos por múltiples canales.
+
+        Args:
+            orphan_leads: Lista de leads sin asignar
+            hours_window: Ventana de tiempo usada en la búsqueda
+        """
+        # 1. Log a consola (siempre)
+        logger.warning(
+            f"[OrphanLeadMonitor] 🚨 ALERTA: {len(orphan_leads)} leads sin asignar "
+            f"en las últimas {hours_window}h"
+        )
+
+        # 2. Guardar en Redis para consulta posterior
+        if self._redis_available:
+            await self._store_in_redis(orphan_leads)
+
+        # 3. Webhook (Slack/Discord/Teams)
+        if self.webhook_url:
+            await self._send_webhook_alert(orphan_leads, hours_window)
+        else:
+            logger.warning(
+                "[OrphanLeadMonitor] ORPHAN_LEAD_WEBHOOK_URL no configurada. "
+                "No se enviarán notificaciones externas."
+            )
+
+    async def _store_in_redis(self, orphan_leads: List[Dict]):
+        """
+        Almacena leads huérfanos en Redis con TTL.
+
+        Args:
+            orphan_leads: Lista de leads a almacenar
+        """
+        try:
+            import json
+
+            for lead in orphan_leads:
+                lead_data = {
+                    "contact_id": lead["id"],
+                    "properties": lead.get("properties", {}),
+                    "detected_at": datetime.now(timezone.utc).isoformat()
+                }
+
+                # Guardar con key única por contact_id
+                redis_key = f"{self.REDIS_KEY_ORPHANS}:{lead['id']}"
+                self.redis.setex(
+                    redis_key,
+                    86400,  # TTL 24 horas
+                    json.dumps(lead_data)
+                )
+
+            logger.info(f"[OrphanLeadMonitor] {len(orphan_leads)} leads almacenados en Redis")
+
+        except Exception as e:
+            logger.error(f"[OrphanLeadMonitor] Error guardando en Redis: {e}")
+
+    async def _send_webhook_alert(self, orphan_leads: List[Dict], hours_window: int):
+        """
+        Envía notificación a Slack/Discord via webhook.
+
+        Args:
+            orphan_leads: Lista de leads sin asignar
+            hours_window: Ventana de tiempo
+        """
+        try:
+            import httpx
+
+            # Construir mensaje
+            message = self._format_webhook_message(orphan_leads, hours_window)
+
+            # Enviar POST al webhook
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(self.webhook_url, json=message)
+                response.raise_for_status()
+
+            logger.info(f"[OrphanLeadMonitor] ✅ Alerta enviada a webhook ({response.status_code})")
+
+        except Exception as e:
+            logger.error(f"[OrphanLeadMonitor] Error enviando webhook: {e}")
+
+    def _format_webhook_message(self, orphan_leads: List[Dict], hours_window: int) -> Dict:
+        """
+        Formatea mensaje para Slack/Discord.
+
+        Args:
+            orphan_leads: Lista de leads
+            hours_window: Ventana de tiempo
+
+        Returns:
+            Payload del webhook
+        """
+        # Slack Webhook Format (compatible con Discord también)
+        message = {
+            "text": f"⚠️ *Alerta: {len(orphan_leads)} leads sin asignar*",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"⚠️ {len(orphan_leads)} Leads Sin Asignar",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"Se detectaron *{len(orphan_leads)} leads* del chatbot "
+                            f"sin trabajador asignado en las últimas *{hours_window} horas*.\n\n"
+                            f"*Acción requerida:* Revisar y asignar manualmente en HubSpot."
+                        )
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": self._format_leads_list(orphan_leads)
+                    }
+                }
+            ]
+        }
+
+        return message
+
+    def _format_leads_list(self, orphan_leads: List[Dict]) -> str:
+        """
+        Formatea lista de leads para mensaje.
+
+        Args:
+            orphan_leads: Lista de leads
+
+        Returns:
+            String formateado con leads
+        """
+        lines = ["*Lista de Leads:*\n"]
+
+        # Mostrar máximo 10 leads
+        for i, lead in enumerate(orphan_leads[:10], 1):
+            props = lead.get("properties", {})
+            name = f"{props.get('firstname', '')} {props.get('lastname', '')}".strip() or "Sin nombre"
+            canal = props.get("canal_origen", "desconocido").replace("_", " ").title()
+            score = props.get("chatbot_score", "N/A")
+            urgency = props.get("chatbot_urgency", "N/A")
+
+            lines.append(
+                f"{i}. *{name}* | Canal: {canal} | Score: {score} | Urgencia: {urgency}"
+            )
+
+        # Si hay más, indicarlo
+        if len(orphan_leads) > 10:
+            lines.append(f"\n... y *{len(orphan_leads) - 10} más*")
+
+        return "\n".join(lines)
+
+    def get_cached_orphans(self) -> List[Dict]:
+        """
+        Obtiene leads huérfanos desde Redis (cache).
+
+        Returns:
+            Lista de leads en cache
+        """
+        if not self._redis_available:
+            return []
+
+        try:
+            import json
+
+            # Buscar todas las keys de orphan leads
+            pattern = f"{self.REDIS_KEY_ORPHANS}:*"
+            keys = self.redis.keys(pattern)
+
+            orphans = []
+            for key in keys:
+                data = self.redis.get(key)
+                if data:
+                    orphans.append(json.loads(data))
+
+            return orphans
+
+        except Exception as e:
+            logger.error(f"[OrphanLeadMonitor] Error leyendo cache: {e}")
             return []
 
 

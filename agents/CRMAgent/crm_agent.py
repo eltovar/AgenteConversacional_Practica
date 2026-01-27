@@ -430,6 +430,10 @@ class CRMAgent:
 
             chatbot_preference = " | ".join(preference_parts) if preference_parts else ""
 
+            # ASIGNACIÓN AUTOMÁTICA (antes de crear propiedades para incluir canal)
+            channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
+            owner_id = self.assigner.get_next_owner(channel_origin)
+
             # PROPIEDADES DEL CONTACTO
             contact_properties = {
                 "firstname": name_parts["firstname"],
@@ -444,7 +448,8 @@ class CRMAgent:
                 "chatbot_preference": chatbot_preference,
                 "chatbot_conversation": conversation_text,
                 "chatbot_score": str(lead_score),
-                "chatbot_timestamp": timestamp_ms
+                "chatbot_timestamp": timestamp_ms,
+                "canal_origen": channel_origin  # Canal de origen para workflows y reportes
             }
 
             # Agregar email si fue proporcionado
@@ -452,17 +457,14 @@ class CRMAgent:
                 contact_properties["email"] = metadata["correo"]
                 contact_properties["chatbot_email"] = metadata["correo"]
 
-            logger.info(f"[CRMAgent] Datos del contacto preparados. Score: {lead_score}/100")
-
-            # ASIGNACIÓN AUTOMÁTICA
-            channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
-            owner_id = self.assigner.get_next_owner(channel_origin)
-
+            # Asignar owner si está disponible
             if owner_id:
                 contact_properties["hubspot_owner_id"] = owner_id
                 logger.info(f"[CRMAgent] Lead asignado a owner ID: {owner_id} (canal: {channel_origin})")
             else:
                 logger.warning("[CRMAgent] No se pudo asignar owner. Lead será huérfano.")
+
+            logger.info(f"[CRMAgent] Datos del contacto preparados. Score: {lead_score}/100")
 
             # 3. LÓGICA SEARCH-BEFORE-CREATE (Deduplicación)
             contact_id = await self.hubspot.search_contact_by_phone(normalized_phone)

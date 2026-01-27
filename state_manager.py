@@ -22,6 +22,7 @@ class ConversationState(BaseModel):
     status: ConversationStatus = ConversationStatus.RECEPTION_START
     lead_data: Dict[str, Any] = Field(default_factory=dict)
     history: List = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     last_interaction_timestamp: Optional[datetime] = None
 
 class StateManager:

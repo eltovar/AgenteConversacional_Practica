@@ -8,7 +8,7 @@ import os
 import redis
 from typing import Optional, Dict, List, Any
 from logging_config import logger
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 class LeadAssigner:
@@ -420,7 +420,7 @@ class OrphanLeadMonitor:
         """
         try:
             # Calcular timestamp límite
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_window)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_window) 
             cutoff_timestamp_ms = int(cutoff_time.timestamp() * 1000)
 
             logger.info(f"[OrphanLeadMonitor] Buscando leads sin asignar (últimas {hours_window}h)...")

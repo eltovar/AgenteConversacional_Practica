@@ -431,7 +431,12 @@ class CRMAgent:
             chatbot_preference = " | ".join(preference_parts) if preference_parts else ""
 
             # ASIGNACIÓN AUTOMÁTICA (antes de crear propiedades para incluir canal)
-            channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
+            # Primero verificar si el canal viene de state.metadata (llegada por link)
+            # Si no, usar detect_channel_origin para detectarlo de lead_data.metadata
+            if state.metadata.get("canal_origen"):
+                channel_origin = state.metadata["canal_origen"]
+            else:
+                channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
             owner_id = self.assigner.get_next_owner(channel_origin)
 
             # PROPIEDADES DEL CONTACTO

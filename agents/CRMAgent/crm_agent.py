@@ -497,6 +497,8 @@ class CRMAgent:
                 "chatbot_budget": str(metadata.get("presupuesto", "")),
                 "chatbot_score": str(lead_score),
                 "chatbot_urgency": metadata.get("tiempo", ""),
+                "chatbot_conversation": conversation_text,  # Historial completo de la conversación
+                "canal_origen": channel_origin,  # Canal de origen del lead
             }
 
             # Asignar el mismo owner al Deal

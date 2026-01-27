@@ -427,6 +427,173 @@ def get_scenarios() -> List[Dict[str, Any]]:
                 "tiempo": "próximo mes",
             }
         },
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ESCENARIO 13: Cliente llega con link de Finca Raíz
+        # ─────────────────────────────────────────────────────────────────────
+        {
+            "id": 13,
+            "nombre": "Llegada por link - Finca Raíz",
+            "descripcion": "Cliente inicia conversación enviando un link de Finca Raíz",
+            "perfil": {
+                "nombre": "Laura Martínez Ospina",
+                "edad": 32,
+                "ocupacion": "Diseñadora gráfica",
+                "canal_origen": "finca_raiz",
+            },
+            "session_id": f"whatsapp:{generate_unique_phone()}",
+            "skip_initial_hola": True,  # NO enviar "hola" inicial, el link ES el primer mensaje
+            "mensajes": [
+                "https://www.fincaraiz.com.co/apartamento-en-arriendo/medellin/el-poblado/codigo-12345678",
+                "Sí, me interesa mucho ese apartamento",
+                "Busco algo de 2 habitaciones para vivir sola",
+                "Mi presupuesto es hasta 3 millones mensuales",
+                "Lo necesito para el próximo mes",
+                "Laura Martínez Ospina",
+            ],
+            "datos_esperados": {
+                "nombre": "Laura Martínez Ospina",
+                "tipo_propiedad": "apartamento",
+                "tipo_operacion": "arriendo",
+                "ubicacion": "El Poblado",
+                "presupuesto": "3 millones",
+                "tiempo": "próximo mes",
+                "canal_origen": "finca_raiz",
+            }
+        },
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ESCENARIO 14: Cliente llega con link de Metrocuadrado
+        # ─────────────────────────────────────────────────────────────────────
+        {
+            "id": 14,
+            "nombre": "Llegada por link - Metrocuadrado",
+            "descripcion": "Cliente inicia conversación enviando un link de Metrocuadrado",
+            "perfil": {
+                "nombre": "Carlos Eduardo Ríos",
+                "edad": 45,
+                "ocupacion": "Médico",
+                "canal_origen": "metrocuadrado",
+            },
+            "session_id": f"whatsapp:{generate_unique_phone()}",
+            "skip_initial_hola": True,
+            "mensajes": [
+                "https://www.metrocuadrado.com/inmueble/venta-casa-envigado-3-habitaciones",
+                "Me interesa esta casa que vi en Metrocuadrado",
+                "Quiero comprar, tengo presupuesto de unos 600 millones",
+                "Necesito mínimo 3 habitaciones y garaje doble",
+                "No tengo afán, estoy mirando opciones",
+                "Carlos Eduardo Ríos",
+            ],
+            "datos_esperados": {
+                "nombre": "Carlos Eduardo Ríos",
+                "tipo_propiedad": "casa",
+                "tipo_operacion": "venta",
+                "ubicacion": "Envigado",
+                "presupuesto": "600 millones",
+                "canal_origen": "metrocuadrado",
+            }
+        },
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ESCENARIO 15: Cliente llega con link de Instagram
+        # ─────────────────────────────────────────────────────────────────────
+        {
+            "id": 15,
+            "nombre": "Llegada por link - Instagram",
+            "descripcion": "Cliente inicia enviando link de publicación de Instagram",
+            "perfil": {
+                "nombre": "Valentina Ochoa",
+                "edad": 27,
+                "ocupacion": "Community Manager",
+                "canal_origen": "instagram",
+            },
+            "session_id": f"whatsapp:{generate_unique_phone()}",
+            "skip_initial_hola": True,
+            "mensajes": [
+                "https://www.instagram.com/p/ABC123xyz/ vi este apartamento en su Instagram!",
+                "Está muy lindo, busco arriendo",
+                "Zona Laureles o El Poblado",
+                "Presupuesto hasta 2.5 millones",
+                "Lo necesito ya, es urgente",
+                "Valentina Ochoa",
+            ],
+            "datos_esperados": {
+                "nombre": "Valentina Ochoa",
+                "tipo_propiedad": "apartamento",
+                "tipo_operacion": "arriendo",
+                "presupuesto": "2.5 millones",
+                "tiempo": "urgente",
+                "canal_origen": "instagram",
+            }
+        },
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ESCENARIO 16: Cliente llega con link de Facebook Marketplace
+        # ─────────────────────────────────────────────────────────────────────
+        {
+            "id": 16,
+            "nombre": "Llegada por link - Facebook Marketplace",
+            "descripcion": "Cliente inicia con link de Facebook Marketplace",
+            "perfil": {
+                "nombre": "Pedro Antonio Mejía",
+                "edad": 38,
+                "ocupacion": "Contador",
+                "canal_origen": "facebook",
+            },
+            "session_id": f"whatsapp:{generate_unique_phone()}",
+            "skip_initial_hola": True,
+            "mensajes": [
+                "https://www.facebook.com/marketplace/item/987654321 este local me interesa",
+                "Busco un local comercial para mi negocio",
+                "Prefiero arriendo, zona comercial",
+                "Presupuesto de 5 millones mensuales",
+                "Lo necesito para dentro de 2 meses",
+                "Pedro Antonio Mejía",
+            ],
+            "datos_esperados": {
+                "nombre": "Pedro Antonio Mejía",
+                "tipo_propiedad": "local comercial",
+                "tipo_operacion": "arriendo",
+                "presupuesto": "5 millones",
+                "tiempo": "2 meses",
+                "canal_origen": "facebook",
+            }
+        },
+
+        # ─────────────────────────────────────────────────────────────────────
+        # ESCENARIO 17: Cliente llega con link de Mercado Libre
+        # ─────────────────────────────────────────────────────────────────────
+        {
+            "id": 17,
+            "nombre": "Llegada por link - Mercado Libre",
+            "descripcion": "Cliente inicia con link de Mercado Libre Inmuebles",
+            "perfil": {
+                "nombre": "Andrea Cristina López",
+                "edad": 41,
+                "ocupacion": "Empresaria",
+                "canal_origen": "mercado_libre",
+            },
+            "session_id": f"whatsapp:{generate_unique_phone()}",
+            "skip_initial_hola": True,
+            "mensajes": [
+                "https://inmuebles.mercadolibre.com.co/apartamento-venta-sabaneta-MLO123456",
+                "Hola! Vi este apartamento en Mercado Libre",
+                "Quiero comprar para inversión",
+                "Tengo 350 millones de presupuesto",
+                "Zona Sabaneta o Envigado",
+                "No tengo prisa, busco buena oportunidad",
+                "Andrea Cristina López",
+            ],
+            "datos_esperados": {
+                "nombre": "Andrea Cristina López",
+                "tipo_propiedad": "apartamento",
+                "tipo_operacion": "venta",
+                "ubicacion": "Sabaneta/Envigado",
+                "presupuesto": "350 millones",
+                "canal_origen": "mercado_libre",
+            }
+        },
     ]
 
 
@@ -551,15 +718,20 @@ async def run_scenario(
         print_scenario_info(scenario)
 
     try:
-        # Mensaje inicial para recibir bienvenida
+        # Mensaje inicial para recibir bienvenida (a menos que el escenario empiece con link)
+        skip_initial = scenario.get('skip_initial_hola', False)
+
         if verbose:
             print("\n[Iniciando conversación...]")
 
-        response = await client.send_message(session_id, "hola")
-        if verbose:
-            print(f"\n🤖 SOFÍA: {response.get('response', 'Sin respuesta')[:300]}")
-
-        await asyncio.sleep(MESSAGE_DELAY)
+        if not skip_initial:
+            response = await client.send_message(session_id, "hola")
+            if verbose:
+                print(f"\n🤖 SOFÍA: {response.get('response', 'Sin respuesta')[:300]}")
+            await asyncio.sleep(MESSAGE_DELAY)
+        else:
+            if verbose:
+                print("\n[Escenario inicia con link - sin mensaje 'hola' previo]")
 
         # Procesar cada mensaje del escenario
         for i, mensaje in enumerate(scenario['mensajes'], 1):
@@ -728,7 +900,7 @@ def main():
     parser.add_argument(
         "--scenario", "-s",
         type=int,
-        help="Ejecutar solo un escenario específico (1-12)"
+        help="Ejecutar solo un escenario específico (1-17). Escenarios 13-17 son de llegada por link."
     )
     parser.add_argument(
         "--local", "-l",

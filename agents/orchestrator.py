@@ -19,7 +19,9 @@ from agents.ReceptionAgent.reception_agent import reception_agent
 from agents.InfoAgent.info_agent import agent as info_agent
 from agents.CRMAgent.crm_agent import crm_agent
 
-from prompts.sofia_personality import SOFIA_WELCOME_MESSAGE
+from prompts.sofia_personality import SOFIA_GREETING_PROMPT
+from llm_client import llama_client
+from langchain_core.messages import HumanMessage
 from logging_config import logger
 from typing import Dict, Any
 from datetime import datetime, timedelta
@@ -58,8 +60,11 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         )
 
         if is_new_session or is_stale_session:
+            # Generar saludo dinámico con LLM
+            greeting_response = _generate_dynamic_greeting(user_message)
             _handle_welcome(state, now, is_new_session)
-            return {"response": SOFIA_WELCOME_MESSAGE, "status": state.status}
+            _update_history_and_state(state, user_message, greeting_response, now)
+            return {"response": greeting_response, "status": state.status}
 
         # 3. CORE ROUTING LOGIC
         response_text = ""
@@ -140,6 +145,22 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
 
 # ===== FUNCIONES AUXILIARES (Private Helpers) =====
+
+def _generate_dynamic_greeting(user_message: str) -> str:
+    """
+    Genera un saludo dinámico usando LLM, adaptándose al mensaje del cliente.
+    """
+    try:
+        prompt = SOFIA_GREETING_PROMPT.format(user_message=user_message)
+        response = llama_client.invoke([HumanMessage(content=prompt)])
+        greeting = response.content.strip()
+        logger.info(f"[ORCHESTRATOR] Saludo dinámico generado para: '{user_message[:30]}...'")
+        return greeting
+    except Exception as e:
+        logger.error(f"[ORCHESTRATOR] Error generando saludo dinámico: {e}")
+        # Fallback simple si falla el LLM
+        return "¡Hola! Soy Sofía, de Inmobiliaria Proteger. ¿En qué puedo ayudarte?"
+
 
 def _handle_welcome(state: ConversationState, now: datetime, is_new: bool):
     """Maneja la actualización de estado para sesiones nuevas o inactivas."""

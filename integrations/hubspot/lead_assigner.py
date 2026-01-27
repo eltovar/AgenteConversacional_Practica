@@ -31,7 +31,7 @@ class LeadAssigner:
     #
     # CONFIGURACIÓN ACTUALIZADA:
     # - Trabajador1 (ID: 87367331): Facebook, Mercado Libre, Ciencuadras, Metrocuadrado
-    # - Trabajador2 (ID: XXXXXX): WhatsApp, Finca Raíz, Página Web, Instagram
+    # - Trabajador2 (ID: 87367331): WhatsApp, Finca Raíz, Página Web, Instagram
     OWNERS_CONFIG = {
         # Equipo para Trabajador 1
         "equipo_trabajador1": [
@@ -40,13 +40,13 @@ class LeadAssigner:
 
         # Equipo para Trabajador 2
         "equipo_trabajador2": [
-            {"name": "Trabajador2", "id": "XXXXXX", "active": True},  # TODO: Obtener ID real
+            {"name": "Trabajador2", "id": "87367331", "active": True},
         ],
 
         # Equipo default (fallback - ambos trabajadores en round robin)
         "default": [
             {"name": "Trabajador1", "id": "87367331", "active": True},
-            {"name": "Trabajador2", "id": "XXXXXX", "active": True},  # TODO: Obtener ID real
+            {"name": "Trabajador2", "id": "87367331", "active": True},
         ],
     }
 

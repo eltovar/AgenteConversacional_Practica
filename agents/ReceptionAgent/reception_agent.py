@@ -10,6 +10,7 @@ from prompts.crm_prompts import PROPERTY_EXTRACTION_PROMPT
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
 from logging_config import logger
+from utils.link_detector import LinkDetector, LinkDetectionResult, PortalOrigen
 import random
 import json
 from typing import Dict, Any
@@ -20,12 +21,41 @@ class ReceptionAgent:
 
     def __init__(self):
         self.tools = {tool.name: tool for tool in RECEPTION_TOOLS}
+        self.link_detector = LinkDetector()
 
     def process_message(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario según el estado actual de la conversación.
         """
         logger.info(f"[ReceptionAgent] Estado: {state.status}, Mensaje: '{message[:50]}...'")
+
+        # Detectar links ANTES de clasificar intención
+        link_result = self.link_detector.analizar_mensaje(message)
+
+        if link_result.tiene_link and link_result.es_inmueble:
+            # Fast-track: Enrutar directamente a CRM con contexto del link
+            logger.info(f"[ReceptionAgent] Link detectado de {link_result.portal.value}")
+
+            # Guardar info del link en metadata para el CRMAgent
+            state.metadata["canal_origen"] = link_result.portal.value
+            state.metadata["url_referencia"] = link_result.url_original
+            state.metadata["llegada_por_link"] = True
+
+            # Transferir al CRM Agent
+            state.status = ConversationStatus.CRM_CONVERSATION
+            logger.info("[ReceptionAgent] Estado: RECEPTION_START → CRM_CONVERSATION (via link)")
+
+            return {
+                "response": "",  # CRMAgent generará la respuesta
+                "new_state": state,
+                "link_info": {
+                    "portal": link_result.portal.value,
+                    "url": link_result.url_original,
+                    "nombre_portal": self.link_detector.obtener_nombre_portal(
+                        link_result.portal
+                    )
+                }
+            }
 
         # Router basado en el estado
         if state.status == ConversationStatus.RECEPTION_START:

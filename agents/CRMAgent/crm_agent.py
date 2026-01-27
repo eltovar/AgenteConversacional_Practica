@@ -14,7 +14,12 @@ from integrations.hubspot.hubspot_utils import (
     split_full_name,
     format_conversation_history
 )
-from prompts.crm_prompts import CRM_SYSTEM_PROMPT, CRM_CONFIRMATION_TEMPLATE, PROPERTY_EXTRACTION_PROMPT
+from prompts.crm_prompts import (
+    CRM_SYSTEM_PROMPT,
+    CRM_CONFIRMATION_TEMPLATE,
+    PROPERTY_EXTRACTION_PROMPT,
+    LINK_ARRIVAL_CONTEXT
+)
 from integrations.hubspot.lead_assigner import lead_assigner, orphan_alert_system
 from llm_client import llama_client
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -42,6 +47,11 @@ class CRMAgent:
         """
         try:
             logger.info(f"[CRMAgent] Procesando conversación. Input: '{user_input[:50]}...'")
+
+            # Verificar si es primera interacción llegando por link
+            if (state.metadata.get("llegada_por_link") and
+                    not state.metadata.get("link_procesado")):
+                return self._handle_link_arrival(user_input, state)
 
             crm_history = state.lead_data.get('crm_history', [])
             is_first_turn = len(crm_history) < 2  # Primer turno si no hay historial previo
@@ -160,6 +170,105 @@ class CRMAgent:
                 parts.append(f"- {label}: {value}")
 
         return "\n".join(parts) if parts else ""
+
+    def _handle_link_arrival(self, message: str, state: ConversationState) -> Dict[str, Any]:
+        """
+        Maneja la primera respuesta cuando el cliente llega enviando un link.
+        """
+        nombre_portal = state.metadata.get("canal_origen", "internet")
+        url = state.metadata.get("url_referencia", "")
+
+        # Obtener nombre amigable del portal
+        portal_nombres = {
+            "instagram": "Instagram",
+            "facebook": "Facebook",
+            "finca_raiz": "Finca Raíz",
+            "metrocuadrado": "Metrocuadrado",
+            "mercado_libre": "Mercado Libre",
+            "ciencuadras": "Ciencuadras",
+            "pagina_web": "nuestra página web",
+            "whatsapp_direct": "WhatsApp",
+            "desconocido": "internet",
+        }
+        nombre_portal_amigable = portal_nombres.get(nombre_portal, "internet")
+
+        # Construir prompt con contexto del link
+        link_context = LINK_ARRIVAL_CONTEXT.format(
+            nombre_portal=nombre_portal_amigable,
+            url_referencia=url
+        )
+
+        # Construir system prompt completo
+        system_content = CRM_SYSTEM_PROMPT + "\n\n" + link_context
+
+        messages = [
+            SystemMessage(content=system_content),
+            HumanMessage(content=message)
+        ]
+
+        # Generar respuesta personalizada
+        response = llama_client.invoke(messages)
+        response_text = response.content.strip()
+
+        # Marcar como procesado para no repetir
+        state.metadata["link_procesado"] = True
+
+        # Intentar extraer entidades del link/mensaje
+        entities = self._extract_entities_from_link(url, message)
+        if entities:
+            metadata = state.lead_data.get('metadata', {})
+            metadata.update(entities)
+            state.lead_data['metadata'] = metadata
+            logger.info(f"[CRMAgent] Entidades extraídas del link: {entities}")
+
+        # Guardar en historial CRM
+        if 'crm_history' not in state.lead_data:
+            state.lead_data['crm_history'] = []
+        state.lead_data['crm_history'].append(f"User: {message}")
+        state.lead_data['crm_history'].append(f"Agent: {response_text}")
+
+        logger.info(f"[CRMAgent] Respuesta generada para llegada por link de {nombre_portal}")
+
+        return {
+            "response": response_text,
+            "new_state": state,
+            "ready_for_handoff": False
+        }
+
+    def _extract_entities_from_link(self, url: str, message: str) -> Dict[str, Any]:
+        """
+        Intenta extraer información del inmueble basándose en el URL.
+
+        Ejemplo: fincaraiz.com.co/apartamento-arriendo-poblado
+        -> tipo_propiedad: apartamento, tipo_operacion: arriendo, ubicacion: poblado
+        """
+        entities = {}
+        url_lower = url.lower() if url else ""
+
+        # Detectar tipo de propiedad en URL
+        tipos = ['apartamento', 'casa', 'local', 'oficina', 'bodega', 'lote']
+        for tipo in tipos:
+            if tipo in url_lower:
+                entities['tipo_propiedad'] = tipo
+                break
+
+        # Detectar operación
+        if 'arriendo' in url_lower or 'alquiler' in url_lower:
+            entities['tipo_operacion'] = 'arriendo'
+        elif 'venta' in url_lower:
+            entities['tipo_operacion'] = 'venta'
+
+        # Detectar ubicaciones conocidas del Área Metropolitana
+        ubicaciones = [
+            'poblado', 'laureles', 'envigado', 'sabaneta', 'itagui',
+            'bello', 'medellin', 'rionegro', 'caldas', 'estrella'
+        ]
+        for ubi in ubicaciones:
+            if ubi in url_lower:
+                entities['ubicacion'] = ubi.title()
+                break
+
+        return entities
 
     def _extract_entities(self, message: str) -> Dict[str, Any]:
         """

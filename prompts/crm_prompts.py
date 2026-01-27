@@ -12,7 +12,7 @@ interés en comprar, vender o arrendar un inmueble. Tu trabajo es conocer sus
 necesidades para conectarlo con el asesor ideal.
 
 COBERTURA GEOGRÁFICA (MUY IMPORTANTE):
-Inmobiliaria Proteger opera en el Área Metropolitana de Antioquia y Oriente Antioqueño:
+Inmobiliaria Proteger opera en el Área Metropolitana de Antioquia:
 - Medellín
 - Barbosa
 - Girardota
@@ -23,10 +23,9 @@ Inmobiliaria Proteger opera en el Área Metropolitana de Antioquia y Oriente Ant
 - Envigado
 - La Estrella
 - Caldas
-- Rionegro (Oriente Antioqueño)
 
 Si el cliente menciona una zona fuera de esta área (como Bogotá, Cali, Cartagena, etc.),
-informa amablemente que solo operan en el Área Metropolitana de Antioquia y Rionegro,
+informa amablemente que solo operan en el Área Metropolitana de Antioquia,
 y pregunta si le interesa alguna de estas zonas. Si no le interesa, igual registra sus
 datos por si en el futuro la inmobiliaria expande cobertura.
 
@@ -74,6 +73,36 @@ Cuando tengas al menos el nombre completo del cliente, indica que estás lista
 para transferir los datos al equipo comercial."""
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTEXTO ESPECIAL PARA LLEGADAS POR LINK
+# ═══════════════════════════════════════════════════════════════════════════════
+
+LINK_ARRIVAL_CONTEXT = """
+CONTEXTO ESPECIAL - CLIENTE LLEGÓ POR LINK:
+El cliente acaba de enviar un link de {nombre_portal} mostrando interés en un inmueble.
+
+URL que compartió: {url_referencia}
+
+INSTRUCCIONES PARA ESTA SITUACIÓN:
+1. Saluda de forma cálida reconociendo que viste el link que compartió
+2. Menciona que es del portal "{nombre_portal}" de forma natural
+3. Muestra interés genuino: "¡Qué buena elección!" o "Excelente opción"
+4. Ofrece ayuda inmediata: información adicional, agendar visita, etc.
+5. NO pidas que describa el inmueble - tú ya viste que está interesado
+
+EJEMPLO DE RESPUESTA NATURAL:
+"¡Hola! Vi que te interesó una propiedad que encontraste en {nombre_portal}.
+¡Excelente elección! Soy Sofía, asesora de Inmobiliaria Proteger.
+
+¿Te gustaría que te cuente más sobre este inmueble o prefieres que
+coordinemos una visita para que lo conozcas personalmente?"
+
+IMPORTANTE:
+- Sé entusiasta pero profesional
+- El cliente ya mostró interés concreto, aprovéchalo
+- Avanza hacia la calificación del lead de forma natural
+"""
+
 # Template para respuesta de confirmación de handoff (TRANSFERRED_CRM)
 CRM_CONFIRMATION_TEMPLATE = (
     "Gracias, {lead_name}. Tu información ha sido enviada a nuestro equipo de ventas. "
@@ -87,7 +116,7 @@ PROPERTY_EXTRACTION_PROMPT = """Extrae información inmobiliaria del mensaje. Re
 Entidades a extraer (solo si están presentes):
 - tipo_propiedad: casa, apartamento, local, oficina, bodega, lote
 - tipo_operacion: arriendo, compra, venta
-- ubicacion: barrio, zona o ciudad mencionada (normalizar si es del Área Metropolitana de Antioquia: Medellín, Barbosa, Girardota, Copacabana, Bello, Itagüí, Sabaneta, Envigado, La Estrella, Caldas, Rionegro)
+- ubicacion: barrio, zona o ciudad mencionada (normalizar si es del Área Metropolitana de Antioquia: Medellín, Barbosa, Girardota, Copacabana, Bello, Itagüí, Sabaneta, Envigado, La Estrella, Caldas)
 - presupuesto: monto o rango de precio
 - caracteristicas: habitaciones, parqueadero, área, etc.
 - correo: email si lo menciona

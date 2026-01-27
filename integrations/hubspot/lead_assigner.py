@@ -28,22 +28,25 @@ class LeadAssigner:
 
     # IDs de owners de HubSpot (obtener de Settings > Users & Teams)
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
+    #
+    # CONFIGURACIÓN ACTUALIZADA:
+    # - Trabajador1 (ID: 87367331): Facebook, Mercado Libre, Ciencuadras, Metrocuadrado
+    # - Trabajador2 (ID: XXXXXX): WhatsApp, Finca Raíz, Página Web, Instagram
     OWNERS_CONFIG = {
+        # Equipo para Trabajador 1
+        "equipo_trabajador1": [
+            {"name": "Trabajador1", "id": "87367331", "active": True},
+        ],
+
+        # Equipo para Trabajador 2
+        "equipo_trabajador2": [
+            {"name": "Trabajador2", "id": "XXXXXX", "active": True},  # TODO: Obtener ID real
+        ],
+
+        # Equipo default (fallback - ambos trabajadores en round robin)
         "default": [
             {"name": "Trabajador1", "id": "87367331", "active": True},
-            # Agregar más trabajadores aquí cuando estén disponibles:
-            # {"name": "Maria", "id": "PENDIENTE", "active": True},
-            # {"name": "Luisa", "id": "PENDIENTE", "active": True},
-        ],
-        # Equipos especializados por canal (opcional)
-        "finca_raiz": [
-            {"name": "Trabajador1", "id": "87367331", "active": True},
-        ],
-        "facebook": [
-            {"name": "Trabajador1", "id": "87367331", "active": True},
-        ],
-        "instagram": [
-            {"name": "Trabajador1", "id": "87367331", "active": True},
+            {"name": "Trabajador2", "id": "XXXXXX", "active": True},  # TODO: Obtener ID real
         ],
     }
 
@@ -51,15 +54,22 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        "whatsapp_direct": "default",      # WhatsApp directo (sin publicidad)
-        "finca_raiz": "finca_raiz",         # Portal Finca Raíz
-        "metrocuadrado": "default",         # Portal Metrocuadrado
-        "pagina_web": "default",            # Página web propia
-        "facebook": "facebook",             # Facebook/Messenger
-        "instagram": "instagram",           # Instagram
-        "google_ads": "default",            # Google Ads
-        "referido": "default",              # Referidos
-        # Agregar más canales según necesidad
+        # === TRABAJADOR 2 ===
+        "whatsapp_direct": "equipo_trabajador2",
+        "finca_raiz": "equipo_trabajador2",
+        "pagina_web": "equipo_trabajador2",
+        "instagram": "equipo_trabajador2",
+
+        # === TRABAJADOR 1 ===
+        "facebook": "equipo_trabajador1",
+        "mercado_libre": "equipo_trabajador1",
+        "ciencuadras": "equipo_trabajador1",
+        "metrocuadrado": "equipo_trabajador1",
+
+        # === FALLBACK ===
+        "desconocido": "default",
+        "google_ads": "default",
+        "referido": "default",
     }
 
     # Prefijo para claves de Redis

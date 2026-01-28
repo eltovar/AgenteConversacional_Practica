@@ -17,8 +17,9 @@ __pycache__/
 *.pyd
 .Python
 
-# Knowledge base (datos propietarios)
-knowledge_base/
+# Knowledge base - NOTA: Se incluye en el repo para que Railway pueda cargar los documentos
+# Si contiene datos sensibles, considera usar almacenamiento externo (S3, etc.)
+# knowledge_base/
 
 # Testing y análisis
 .pytest_cache/

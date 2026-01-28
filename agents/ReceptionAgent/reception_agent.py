@@ -78,6 +78,9 @@ class ReceptionAgent:
         """
         logger.info("[ReceptionAgent] Clasificando intención del usuario...")
 
+        # Detectar si es primer mensaje
+        is_first_message = state.metadata.get("is_first_message", False)
+
         lead_name = state.lead_data.get('name')
         system_prompt = RECEPTION_SYSTEM_PROMPT
 
@@ -134,13 +137,24 @@ class ReceptionAgent:
                     elif intent == "ambiguous":
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
                         logger.info("[ReceptionAgent] Estado: RECEPTION_START → AWAITING_CLARIFICATION")
-                        response_text = random.choice(CLARIFICATION_PROMPTS)
+                        clarification = random.choice(CLARIFICATION_PROMPTS)
+                        # Si es primer mensaje, añadir presentación
+                        if is_first_message:
+                            response_text = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {clarification}"
+                            state.metadata["is_first_message"] = False
+                        else:
+                            response_text = clarification
 
                     else:
                         # Fallback si intent desconocido
                         logger.warning(f"[ReceptionAgent] Intent desconocido: '{intent}'. Usando fallback.")
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
-                        response_text = CLARIFICATION_PROMPTS[0]
+                        fallback_clarification = CLARIFICATION_PROMPTS[0]
+                        if is_first_message:
+                            response_text = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {fallback_clarification}"
+                            state.metadata["is_first_message"] = False
+                        else:
+                            response_text = fallback_clarification
 
                     return {"response": response_text, "new_state": state}
 
@@ -154,8 +168,13 @@ class ReceptionAgent:
         logger.error(f"[ReceptionAgent] Clasificación fallida después de {MAX_RETRIES + 1} intentos.")
         state.status = ConversationStatus.AWAITING_CLARIFICATION
 
+        fallback_response = CLARIFICATION_PROMPTS[0]
+        if is_first_message:
+            fallback_response = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {fallback_response}"
+            state.metadata["is_first_message"] = False
+
         return {
-            "response": CLARIFICATION_PROMPTS[0],
+            "response": fallback_response,
             "new_state": state
         }
 

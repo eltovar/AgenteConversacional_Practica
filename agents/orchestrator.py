@@ -19,9 +19,6 @@ from agents.ReceptionAgent.reception_agent import reception_agent
 from agents.InfoAgent.info_agent import agent as info_agent
 from agents.CRMAgent.crm_agent import crm_agent
 
-from prompts.sofia_personality import SOFIA_GREETING_PROMPT, SOFIA_GREETING_WITH_LINK_PROMPT
-from llm_client import llama_client
-from langchain_core.messages import HumanMessage
 from logging_config import logger
 from typing import Dict, Any
 from datetime import datetime, timedelta
@@ -64,26 +61,16 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         )
 
         if is_new_session or is_stale_session:
-            # DETECCIÓN DE LINK EN PRIMER MENSAJE
-            # Esto asegura que canal_origen y url_referencia se guarden
-            # incluso cuando el primer mensaje contiene un link
-            link_result = link_detector.analizar_mensaje(user_message)
-            has_link = link_result.tiene_link and link_result.es_inmueble
+            # Marcar como primer mensaje para que los agentes incluyan presentación
+            state.metadata["is_first_message"] = True
+            reason = "nueva" if is_new_session else "inactiva >24h"
+            logger.info(f"[ORCHESTRATOR] Sesión {reason} detectada. Marcando is_first_message=True")
 
-            if has_link:
-                state.metadata["canal_origen"] = link_result.portal.value
-                state.metadata["url_referencia"] = link_result.url_original
-                state.metadata["llegada_por_link"] = True
-                logger.info(
-                    f"[ORCHESTRATOR] Link detectado en bienvenida: "
-                    f"portal={link_result.portal.value}, url={link_result.url_original}"
-                )
-
-            # Generar saludo dinámico con LLM (usa prompt diferente si hay link)
-            greeting_response = _generate_dynamic_greeting(user_message, has_link)
-            _handle_welcome(state, now, is_new_session)
-            _update_history_and_state(state, user_message, greeting_response, now)
-            return {"response": greeting_response, "status": state.status}
+            # Inicializar estado y timestamp
+            state.status = ConversationStatus.RECEPTION_START
+            state.last_interaction_timestamp = now
+            state_manager.update_state(state)
+            # NOTA: El flujo continúa al CORE ROUTING LOGIC (no retorna aquí)
 
         # 3. CORE ROUTING LOGIC
         response_text = ""
@@ -164,37 +151,6 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
 
 # ===== FUNCIONES AUXILIARES (Private Helpers) =====
-
-def _generate_dynamic_greeting(user_message: str, has_link: bool = False) -> str:
-    """
-    Genera un saludo dinámico usando LLM, adaptándose al mensaje del cliente.
-    Si el mensaje contiene un link, usa un prompt más directo orientado a conectar con asesor.
-    """
-    try:
-        if has_link:
-            prompt = SOFIA_GREETING_WITH_LINK_PROMPT.format(user_message=user_message)
-        else:
-            prompt = SOFIA_GREETING_PROMPT.format(user_message=user_message)
-
-        response = llama_client.invoke([HumanMessage(content=prompt)])
-        greeting = response.content.strip()
-        logger.info(f"[ORCHESTRATOR] Saludo dinámico generado para: '{user_message[:30]}...'")
-        return greeting
-    except Exception as e:
-        logger.error(f"[ORCHESTRATOR] Error generando saludo dinámico: {e}")
-        # Fallback simple si falla el LLM
-        if has_link:
-            return "¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. La información sobre precios y disponibilidad de inmuebles la manejan nuestros Asesores Comerciales. ¿Te gustaría que un Asesor Comercial te contacte? Déjame tu nombre."
-        return "¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. ¿En qué puedo ayudarte?"
-
-
-def _handle_welcome(state: ConversationState, now: datetime, is_new: bool):
-    """Maneja la actualización de estado para sesiones nuevas o inactivas."""
-    reason = "nueva" if is_new else "inactiva >24h"
-    logger.info(f"[ORCHESTRATOR] Sesión {reason} detectada.")
-    state.status = ConversationStatus.WELCOME_SENT
-    state.last_interaction_timestamp = now
-    state_manager.update_state(state)
 
 
 def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg: str, now: datetime):

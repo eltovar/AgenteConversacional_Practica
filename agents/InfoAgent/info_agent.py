@@ -4,7 +4,12 @@ from llm_client import llama_client
 from rag.rag_service import rag_service
 from agents.InfoAgent.info_tool import ALL_TOOLS
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from prompts.info_prompts import (SYSTEM_AGENT_PROMPT_BASE, SYSTEM_AGENT_PROMPT_WITH_USER, RAG_GENERATION_INSTRUCTIONS)
+from prompts.info_prompts import (
+    SYSTEM_AGENT_PROMPT_BASE,
+    SYSTEM_AGENT_PROMPT_WITH_USER,
+    RAG_GENERATION_INSTRUCTIONS,
+    FIRST_MESSAGE_INSTRUCTIONS
+)
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
@@ -87,6 +92,13 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.
         Este método reemplaza la lógica de _determine_tool_call().
         """
+        # Detectar si es primer mensaje para incluir presentación
+        is_first_message = state and state.metadata.get("is_first_message", False)
+        if is_first_message:
+            logger.info("[InfoAgent] Primer mensaje detectado - incluirá presentación")
+            # Limpiar el flag para que no se repita
+            state.metadata["is_first_message"] = False
+
         # Construir prompt con o sin contexto de usuario
         if state and state.lead_data.get('name'):
             user_name = state.lead_data['name']
@@ -94,6 +106,10 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
             logger.info(f"[InfoAgent] Usando contexto de usuario: {user_name}")
         else:
             system_prompt = SYSTEM_AGENT_PROMPT_BASE
+
+        # Añadir instrucciones de primer mensaje si aplica
+        if is_first_message:
+            system_prompt = system_prompt + "\n\n" + FIRST_MESSAGE_INSTRUCTIONS
 
         # Construir mensajes con historial completo de la conversación
         messages = [SystemMessage(content=system_prompt)]

@@ -115,11 +115,32 @@ class CRMAgent:
         Genera una respuesta conversacional usando LLM con el system prompt del CRM.
         Inyecta el historial de conversación y la metadata recopilada hasta ahora.
         """
+        # Detectar si es primer mensaje para incluir presentación
+        is_first_message = state.metadata.get("is_first_message", False)
+        if is_first_message:
+            logger.info("[CRMAgent] Primer mensaje detectado - incluirá presentación")
+            state.metadata["is_first_message"] = False  # Limpiar flag
+
         # Construir contexto con datos ya recopilados
         metadata = state.lead_data.get('metadata', {})
         context_info = self._build_context_summary(metadata)
 
         system_content = CRM_SYSTEM_PROMPT
+
+        # Añadir instrucciones de presentación si es primer mensaje
+        if is_first_message:
+            system_content += """
+
+**CONTEXTO ESPECIAL - PRIMER MENSAJE:**
+Este es el PRIMER contacto del cliente. Debes:
+1. Incluir una breve presentación al inicio (Sofía, asesora virtual de Inmobiliaria Proteger)
+2. Responder a la necesidad del cliente
+3. Todo en un mensaje fluido y natural
+
+EJEMPLO DE TONO:
+"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. [continúa con la respuesta]..."
+"""
+
         if context_info:
             system_content += f"\n\nDATOS YA RECOPILADOS DEL CLIENTE:\n{context_info}\nNo vuelvas a preguntar por estos datos."
 
@@ -175,6 +196,10 @@ class CRMAgent:
         """
         Maneja la primera respuesta cuando el cliente llega enviando un link.
         """
+        # Limpiar flag de primer mensaje (LINK_ARRIVAL_CONTEXT ya incluye presentación)
+        if state.metadata.get("is_first_message"):
+            state.metadata["is_first_message"] = False
+
         nombre_portal = state.metadata.get("canal_origen", "internet")
         url = state.metadata.get("url_referencia", "")
 

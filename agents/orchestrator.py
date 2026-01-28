@@ -19,7 +19,7 @@ from agents.ReceptionAgent.reception_agent import reception_agent
 from agents.InfoAgent.info_agent import agent as info_agent
 from agents.CRMAgent.crm_agent import crm_agent
 
-from prompts.sofia_personality import SOFIA_GREETING_PROMPT
+from prompts.sofia_personality import SOFIA_GREETING_PROMPT, SOFIA_GREETING_WITH_LINK_PROMPT
 from llm_client import llama_client
 from langchain_core.messages import HumanMessage
 from logging_config import logger
@@ -68,7 +68,9 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
             # Esto asegura que canal_origen y url_referencia se guarden
             # incluso cuando el primer mensaje contiene un link
             link_result = link_detector.analizar_mensaje(user_message)
-            if link_result.tiene_link:
+            has_link = link_result.tiene_link and link_result.es_inmueble
+
+            if has_link:
                 state.metadata["canal_origen"] = link_result.portal.value
                 state.metadata["url_referencia"] = link_result.url_original
                 state.metadata["llegada_por_link"] = True
@@ -77,8 +79,8 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
                     f"portal={link_result.portal.value}, url={link_result.url_original}"
                 )
 
-            # Generar saludo dinámico con LLM
-            greeting_response = _generate_dynamic_greeting(user_message)
+            # Generar saludo dinámico con LLM (usa prompt diferente si hay link)
+            greeting_response = _generate_dynamic_greeting(user_message, has_link)
             _handle_welcome(state, now, is_new_session)
             _update_history_and_state(state, user_message, greeting_response, now)
             return {"response": greeting_response, "status": state.status}
@@ -163,12 +165,17 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
 # ===== FUNCIONES AUXILIARES (Private Helpers) =====
 
-def _generate_dynamic_greeting(user_message: str) -> str:
+def _generate_dynamic_greeting(user_message: str, has_link: bool = False) -> str:
     """
     Genera un saludo dinámico usando LLM, adaptándose al mensaje del cliente.
+    Si el mensaje contiene un link, usa un prompt más directo orientado a conectar con asesor.
     """
     try:
-        prompt = SOFIA_GREETING_PROMPT.format(user_message=user_message)
+        if has_link:
+            prompt = SOFIA_GREETING_WITH_LINK_PROMPT.format(user_message=user_message)
+        else:
+            prompt = SOFIA_GREETING_PROMPT.format(user_message=user_message)
+
         response = llama_client.invoke([HumanMessage(content=prompt)])
         greeting = response.content.strip()
         logger.info(f"[ORCHESTRATOR] Saludo dinámico generado para: '{user_message[:30]}...'")
@@ -176,6 +183,8 @@ def _generate_dynamic_greeting(user_message: str) -> str:
     except Exception as e:
         logger.error(f"[ORCHESTRATOR] Error generando saludo dinámico: {e}")
         # Fallback simple si falla el LLM
+        if has_link:
+            return "¡Hola! Soy Sofía, de Inmobiliaria Proteger. Vi que te interesa un inmueble, déjame tomarte unos datos para conectarte con un asesor. ¿Cuál es tu nombre?"
         return "¡Hola! Soy Sofía, de Inmobiliaria Proteger. ¿En qué puedo ayudarte?"
 
 

@@ -22,7 +22,9 @@ TOOL_DOCUMENT_MAP = {
         "knowledge_base/soporte_contabilidad_facturas.txt",
         "knowledge_base/soporte_contratos_terminacion.txt",
         "knowledge_base/soporte_juridico_legal.txt",
-        "knowledge_base/soporte_servicios_publicos.txt"
+        "knowledge_base/soporte_servicios_publicos.txt",
+        "knowledge_base/soporte_reparaciones.txt",
+        "knowledge_base/info_estudios_libertador.txt"
     ],
     "asesoria_legal_blog": [
         "knowledge_base/blog_arriendo_claves_riesgos.txt",

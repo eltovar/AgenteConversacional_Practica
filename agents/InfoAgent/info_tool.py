@@ -13,7 +13,7 @@ class InfoInstitucionalSchema(BaseModel):
 class SoporteContactoSchema(BaseModel):
     """Esquema para consultas de soporte técnico y administrativo."""
     tema: str = Field(
-        description="Tema de soporte: administraciones y multas, caja de pagos, contabilidad y facturas, contratos y terminación, servicios públicos, soporte jurídico/legal."
+        description="Tema de soporte: administraciones y multas, caja de pagos, contabilidad y facturas, contratos y terminación, servicios públicos, soporte jurídico/legal, reparaciones, estudios de crédito El Libertador para arriendo."
     )
 
 class AsesoriaLegalBlogSchema(BaseModel):
@@ -36,9 +36,10 @@ def info_institucional_func(tema: str) -> str:
 @tool("soporte_contacto", args_schema=SoporteContactoSchema)
 def soporte_contacto_func(tema: str) -> str:
     """
-    Proporciona soporte técnico y administrativo para clientes de GlobalHome:
+    Proporciona soporte técnico y administrativo para clientes de Inmobiliaria Proteger:
     consultas sobre administraciones y multas, caja de pagos, contabilidad y facturas,
-    contratos y procesos de terminación, servicios públicos, soporte jurídico y legal.
+    contratos y procesos de terminación, servicios públicos, soporte jurídico y legal,
+    reparaciones, y estudios de crédito El Libertador para arriendo (requisitos, proceso digital, link).
     """
     return f"[TOOL] soporte_contacto ejecutada para tema: '{tema}'"
 

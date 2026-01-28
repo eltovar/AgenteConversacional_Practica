@@ -53,15 +53,15 @@ Usa SIEMPRE la herramienta classify_intent. Responde con máximo 2 frases, tono 
 
 # Prompts de respuesta con personalidad de Sofía integrada
 CLARIFICATION_PROMPTS = [
-    "¿Podrías especificar si buscas información sobre nuestros servicios o prefieres hablar con un asesor comercial?",
-    "Para ayudarte mejor, ¿necesitas conocer detalles de la empresa o quieres que un asesor te contacte?",
-    "¿Buscas información general o prefieres agendar una cita con nuestro equipo de ventas?",
+    "¿Podrías especificar si buscas información sobre nuestros servicios o prefieres hablar con un Asesor Comercial?",
+    "Para ayudarte mejor, ¿necesitas conocer detalles de la empresa o quieres que un Asesor Comercial te contacte?",
+    "¿Buscas información general o prefieres agendar una cita con nuestro equipo de Asesores Comerciales?",
     "¿Tu consulta es sobre cómo funcionan nuestros servicios o necesitas asesoría personalizada?",
-    "¿Prefieres que te explique nuestros servicios o que un asesor comercial te contacte?"
+    "¿Prefieres que te explique nuestros servicios o que un Asesor Comercial te contacte?"
 ]
 
-LEAD_NAME_REQUEST_PROMPT = "Perfecto. Para que un asesor comercial te contacte, ¿cuál es tu nombre completo?"
+LEAD_NAME_REQUEST_PROMPT = "Perfecto. Para que un Asesor Comercial te contacte, ¿cuál es tu nombre completo?"
 
 LEAD_NAME_RETRY_PROMPT = "Disculpa, no logré entender tu nombre. ¿Podrías repetirlo?"
 
-LEAD_TRANSFER_SUCCESS_PROMPT = "Gracias, {name}. Hemos registrado tu solicitud. Un asesor comercial de Inmobiliaria Proteger se pondrá en contacto contigo pronto. ¿Hay algo más en lo que pueda ayudarte?"
+LEAD_TRANSFER_SUCCESS_PROMPT = "Gracias, {name}. Hemos registrado tu solicitud. Un Asesor Comercial de Inmobiliaria Proteger se pondrá en contacto contigo pronto. ¿Hay algo más en lo que pueda ayudarte?"

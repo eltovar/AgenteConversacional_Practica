@@ -184,8 +184,8 @@ def _generate_dynamic_greeting(user_message: str, has_link: bool = False) -> str
         logger.error(f"[ORCHESTRATOR] Error generando saludo dinámico: {e}")
         # Fallback simple si falla el LLM
         if has_link:
-            return "¡Hola! Soy Sofía, de Inmobiliaria Proteger. Vi que te interesa un inmueble, déjame tomarte unos datos para conectarte con un asesor. ¿Cuál es tu nombre?"
-        return "¡Hola! Soy Sofía, de Inmobiliaria Proteger. ¿En qué puedo ayudarte?"
+            return "¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. La información sobre precios y disponibilidad de inmuebles la manejan nuestros Asesores Comerciales. ¿Te gustaría que un Asesor Comercial te contacte? Déjame tu nombre."
+        return "¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. ¿En qué puedo ayudarte?"
 
 
 def _handle_welcome(state: ConversationState, now: datetime, is_new: bool):

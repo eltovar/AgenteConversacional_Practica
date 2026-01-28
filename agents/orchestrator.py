@@ -25,6 +25,10 @@ from langchain_core.messages import HumanMessage
 from logging_config import logger
 from typing import Dict, Any
 from datetime import datetime, timedelta
+from utils.link_detector import LinkDetector
+
+# Instancia del detector de links para el flujo de bienvenida
+link_detector = LinkDetector()
 
 # ===== VALIDACIÓN DE SECRETS =====
 load_dotenv()
@@ -60,6 +64,19 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         )
 
         if is_new_session or is_stale_session:
+            # DETECCIÓN DE LINK EN PRIMER MENSAJE
+            # Esto asegura que canal_origen y url_referencia se guarden
+            # incluso cuando el primer mensaje contiene un link
+            link_result = link_detector.analizar_mensaje(user_message)
+            if link_result.tiene_link:
+                state.metadata["canal_origen"] = link_result.portal.value
+                state.metadata["url_referencia"] = link_result.url_original
+                state.metadata["llegada_por_link"] = True
+                logger.info(
+                    f"[ORCHESTRATOR] Link detectado en bienvenida: "
+                    f"portal={link_result.portal.value}, url={link_result.url_original}"
+                )
+
             # Generar saludo dinámico con LLM
             greeting_response = _generate_dynamic_greeting(user_message)
             _handle_welcome(state, now, is_new_session)

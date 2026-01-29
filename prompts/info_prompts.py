@@ -28,9 +28,6 @@ HERRAMIENTAS DISPONIBLES:
   * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 323 508 18 84
   * Reparaciones (daños en el inmueble) → WhatsApp: 323 327 7132
   * Estudios de crédito El Libertador (requisitos para arriendo, proceso digital, link de solicitud)
-- asesoria_legal_blog: Asesoría legal sobre arrendamiento (contratos escritos vs verbales,
-  incrementos de canon/IPC según Ley 820 de 2003, fraudes inmobiliarios, estudios de
-  arrendamiento, cuotas de administración, claves para alquilar sin riesgos).
 
 REGLAS IMPORTANTES:
 - SIEMPRE usa las herramientas antes de responder sobre temas de la empresa. No respondas de memoria.
@@ -77,9 +74,6 @@ HERRAMIENTAS DISPONIBLES:
   * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 323 508 18 84
   * Reparaciones (daños en el inmueble) → WhatsApp: 323 327 7132
   * Estudios de crédito El Libertador (requisitos para arriendo, proceso digital, link de solicitud)
-- asesoria_legal_blog: Asesoría legal sobre arrendamiento (contratos escritos vs verbales,
-  incrementos de canon/IPC según Ley 820 de 2003, fraudes inmobiliarios, estudios de
-  arrendamiento, cuotas de administración, claves para alquilar sin riesgos).
 
 REGLAS IMPORTANTES:
 - SIEMPRE usa las herramientas antes de responder sobre temas de la empresa. No respondas de memoria.

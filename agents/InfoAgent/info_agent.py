@@ -14,7 +14,7 @@ from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
 
-# Mapeo de tools a documentos específicos
+# Mapeo de tools a documentos específicos (REORGANIZADO - 8 documentos)
 TOOL_DOCUMENT_MAP = {
     "info_institucional": [
         "knowledge_base/informacion_institucional.txt",
@@ -22,21 +22,11 @@ TOOL_DOCUMENT_MAP = {
         "knowledge_base/info_pagos_online.txt"
     ],
     "soporte_contacto": [
-        "knowledge_base/soporte_administraciones_multas.txt",
+        "knowledge_base/soporte_departamentos.txt",
         "knowledge_base/soporte_caja_pagos.txt",
         "knowledge_base/soporte_contabilidad_facturas.txt",
         "knowledge_base/soporte_contratos_terminacion.txt",
-        "knowledge_base/soporte_juridico_legal.txt",
-        "knowledge_base/soporte_servicios_publicos.txt",
-        "knowledge_base/soporte_reparaciones.txt",
         "knowledge_base/info_estudios_libertador.txt"
-    ],
-    "asesoria_legal_blog": [
-        "knowledge_base/blog_arriendo_claves_riesgos.txt",
-        "knowledge_base/blog_arriendo_contrato_legalidad.txt",
-        "knowledge_base/blog_arriendo_estudios_fraude.txt",
-        "knowledge_base/blog_arriendo_gastos_administracion.txt",
-        "knowledge_base/blog_arriendo_incrementos_ley.txt"
     ]
 }
 

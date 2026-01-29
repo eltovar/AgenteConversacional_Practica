@@ -33,14 +33,12 @@ Nota: Para extranjeros el proceso de estudio se realiza por otro medio, si es tu
 
 ¿Te gustaría que un Asesor Comercial te contacte para ayudarte con el proceso de arriendo?"""
 
-# Patrones para detectar preguntas sobre El Libertador
+# Patrones para detectar preguntas sobre El Libertador (SOLO en mensaje actual)
 LIBERTADOR_PATTERNS = [
     r'\blibertador\b',
     r'\bestudio.*cr[eé]dito\b',
     r'\brequisitos.*arriendo\b',
     r'\bestudio.*arriendo\b',
-    r'\blink.*estudio\b',
-    r'\bregistro.*estudio\b',
 ]
 
 # Mapeo de tools a documentos específicos (REORGANIZADO - 8 documentos)
@@ -68,17 +66,12 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
     def __init__(self, tools: List[Any] = ALL_TOOLS):
         self.tools = {tool.name: tool for tool in tools}
 
-    def _check_libertador_query(self, user_input: str, history: List[str] = None) -> bool:
+    def _check_libertador_query(self, user_input: str) -> bool:
         """
-        Detecta si el usuario pregunta sobre El Libertador o estudios de crédito.
-        También verifica el contexto del historial reciente.
+        Detecta si el usuario pregunta DIRECTAMENTE sobre El Libertador.
+        Solo revisa el mensaje actual (no el historial) para evitar loops.
         """
         text_to_check = user_input.lower()
-
-        # También revisar los últimos 4 mensajes del historial para contexto
-        if history:
-            recent_context = " ".join(history[-4:]).lower()
-            text_to_check = f"{recent_context} {text_to_check}"
 
         for pattern in LIBERTADOR_PATTERNS:
             if re.search(pattern, text_to_check, re.IGNORECASE):
@@ -131,8 +124,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         # ═══════════════════════════════════════════════════════════════════
         # 0. RESPUESTAS FIJAS (Bypass RAG) - El Libertador
         # ═══════════════════════════════════════════════════════════════════
-        history = state.history if state else None
-        if self._check_libertador_query(user_input, history):
+        if self._check_libertador_query(user_input):
             logger.info("[InfoAgent] ⚡ Detectada consulta sobre El Libertador - Retornando respuesta fija")
             return RESPUESTA_LIBERTADOR
 

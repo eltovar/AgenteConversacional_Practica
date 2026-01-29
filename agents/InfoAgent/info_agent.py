@@ -1,5 +1,5 @@
 # info_agent.py (Refactorizado con bind_tools y tool_choice="auto")
-
+import re
 from llm_client import llama_client
 from rag.rag_service import rag_service
 from agents.InfoAgent.info_tool import ALL_TOOLS
@@ -13,6 +13,35 @@ from prompts.info_prompts import (
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESPUESTAS FIJAS (Bypass RAG - Solicitadas por el jefe)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RESPUESTA_LIBERTADOR = """EL REQUISITOS PARA ESTUDIO DE CRÉDITO – ARRIENDO ES MUY FACIL: SOLO SE REQUIERE
+
+Un Arrendatario + Deudor Solidario
+Cada uno debe contar con ingresos
+
+El Estudio es 100% digital
+No tiene ningun costo
+
+Con este link Inicias el proceso:
+https://analisisweb.ellibertador.co/estudio-digital/datos-basicos/natural
+
+Nota: Para extranjeros el proceso de estudio se realiza por otro medio, si es tu caso infórmale a tu asesor para que te indique el proceso
+
+¿Te gustaría que un Asesor Comercial te contacte para ayudarte con el proceso de arriendo?"""
+
+# Patrones para detectar preguntas sobre El Libertador
+LIBERTADOR_PATTERNS = [
+    r'\blibertador\b',
+    r'\bestudio.*cr[eé]dito\b',
+    r'\brequisitos.*arriendo\b',
+    r'\bestudio.*arriendo\b',
+    r'\blink.*estudio\b',
+    r'\bregistro.*estudio\b',
+]
 
 # Mapeo de tools a documentos específicos (REORGANIZADO - 8 documentos)
 TOOL_DOCUMENT_MAP = {
@@ -38,6 +67,23 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
     def __init__(self, tools: List[Any] = ALL_TOOLS):
         self.tools = {tool.name: tool for tool in tools}
+
+    def _check_libertador_query(self, user_input: str, history: List[str] = None) -> bool:
+        """
+        Detecta si el usuario pregunta sobre El Libertador o estudios de crédito.
+        También verifica el contexto del historial reciente.
+        """
+        text_to_check = user_input.lower()
+
+        # También revisar los últimos 4 mensajes del historial para contexto
+        if history:
+            recent_context = " ".join(history[-4:]).lower()
+            text_to_check = f"{recent_context} {text_to_check}"
+
+        for pattern in LIBERTADOR_PATTERNS:
+            if re.search(pattern, text_to_check, re.IGNORECASE):
+                return True
+        return False
 
     def _run_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """
@@ -82,6 +128,14 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.
         Este método reemplaza la lógica de _determine_tool_call().
         """
+        # ═══════════════════════════════════════════════════════════════════
+        # 0. RESPUESTAS FIJAS (Bypass RAG) - El Libertador
+        # ═══════════════════════════════════════════════════════════════════
+        history = state.history if state else None
+        if self._check_libertador_query(user_input, history):
+            logger.info("[InfoAgent] ⚡ Detectada consulta sobre El Libertador - Retornando respuesta fija")
+            return RESPUESTA_LIBERTADOR
+
         # Detectar si es primer mensaje para incluir presentación
         is_first_message = state and state.metadata.get("is_first_message", False)
         if is_first_message:

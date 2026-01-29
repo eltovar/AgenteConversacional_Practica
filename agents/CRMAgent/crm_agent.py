@@ -465,6 +465,10 @@ EJEMPLO DE TONO:
             owner_id = self.assigner.get_next_owner(channel_origin)
 
             # PROPIEDADES DEL CONTACTO
+            # Normalizar presupuesto a número para HubSpot (chatbot_budget es INTEGER)
+            budget_raw = metadata.get("presupuesto", "")
+            budget_numeric = self._parse_budget_to_number(budget_raw)
+
             contact_properties = {
                 "firstname": name_parts["firstname"],
                 "lastname": name_parts["lastname"] or "WhatsApp",
@@ -473,7 +477,7 @@ EJEMPLO DE TONO:
                 "chatbot_property_type": metadata.get("tipo_propiedad", ""),
                 "chatbot_rooms": str(metadata.get("caracteristicas", "")),
                 "chatbot_location": metadata.get("ubicacion", ""),
-                "chatbot_budget": str(metadata.get("presupuesto", "")),
+                "chatbot_budget": budget_numeric,  # Número entero para HubSpot
                 "chatbot_urgency": metadata.get("tiempo", ""),
                 "chatbot_preference": chatbot_preference,
                 "chatbot_conversation": conversation_text,
@@ -519,7 +523,7 @@ EJEMPLO DE TONO:
                 "description": f"Lead capturado vía chatbot Sofía. Interesado en {metadata.get('ubicacion', 'propiedad')}.",
                 "chatbot_property_type": metadata.get("tipo_propiedad", ""),
                 "chatbot_location": metadata.get("ubicacion", ""),
-                "chatbot_budget": str(metadata.get("presupuesto", "")),
+                "chatbot_budget": budget_numeric,  # Reutilizar el valor numérico calculado
                 "chatbot_score": str(lead_score),
                 "chatbot_urgency": metadata.get("tiempo", ""),
                 "chatbot_conversation": conversation_text,  # Historial completo de la conversación
@@ -585,6 +589,66 @@ EJEMPLO DE TONO:
         except Exception as e:
             logger.warning(f"[CRMAgent] No se pudo parsear presupuesto '{budget_str}': {e}")
             return 0.0
+
+    def _parse_budget_to_number(self, budget_str: str) -> int:
+        """
+        Convierte un string de presupuesto a número entero para HubSpot.
+        Maneja formatos comunes en español:
+        - "200 millones" → 200000000
+        - "200millones" → 200000000
+        - "2.5 millones" → 2500000
+        - "500 mil" → 500000
+        - "200.000.000" → 200000000
+        - "200,000,000" → 200000000
+        - "$200.000.000" → 200000000
+        """
+        import re
+
+        if not budget_str:
+            return 0
+
+        try:
+            text = str(budget_str).lower().strip()
+
+            # Remover símbolos de moneda
+            text = text.replace('$', '').replace('cop', '').strip()
+
+            # Caso: "X millones" o "X millones de pesos"
+            millon_match = re.search(r'(\d+(?:[.,]\d+)?)\s*mill[oó]n(?:es)?', text)
+            if millon_match:
+                num_str = millon_match.group(1).replace(',', '.')
+                return int(float(num_str) * 1_000_000)
+
+            # Caso: "X mil" (ej: "500 mil")
+            mil_match = re.search(r'(\d+(?:[.,]\d+)?)\s*mil\b', text)
+            if mil_match:
+                num_str = mil_match.group(1).replace(',', '.')
+                return int(float(num_str) * 1_000)
+
+            # Caso: número con separadores (200.000.000 o 200,000,000)
+            # Primero intentar formato colombiano (punto como separador de miles)
+            cleaned = re.sub(r'[^\d.,]', '', text)
+
+            if cleaned:
+                # Si tiene puntos como separadores de miles (formato colombiano)
+                if '.' in cleaned and ',' not in cleaned:
+                    # 200.000.000 → 200000000
+                    cleaned = cleaned.replace('.', '')
+                elif ',' in cleaned and '.' not in cleaned:
+                    # 200,000,000 → 200000000
+                    cleaned = cleaned.replace(',', '')
+                elif ',' in cleaned and '.' in cleaned:
+                    # Formato mixto - asumir punto es miles, coma es decimal
+                    # 2.500,00 → 2500.00
+                    cleaned = cleaned.replace('.', '').replace(',', '.')
+
+                return int(float(cleaned)) if cleaned else 0
+
+            return 0
+
+        except Exception as e:
+            logger.warning(f"[CRMAgent] No se pudo parsear presupuesto a número '{budget_str}': {e}")
+            return 0
 
 
 # Instancia global (Singleton)

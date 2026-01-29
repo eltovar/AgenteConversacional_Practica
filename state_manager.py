@@ -43,7 +43,8 @@ class StateManager:
             self.redis_url = os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL")
             logger.info("[StateManager] Entorno detectado: Local (usando REDIS_PUBLIC_URL)")
 
-        self.session_ttl = int(os.getenv("SESSION_TTL", "86400"))
+        # TTL de 30 días (2592000 segundos) - El historial se mantiene para consultas futuras
+        self.session_ttl = int(os.getenv("SESSION_TTL", "2592000"))
 
         # Cliente Redis (se inicializará bajo demanda)
         self.client = None

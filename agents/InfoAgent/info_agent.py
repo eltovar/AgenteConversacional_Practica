@@ -158,8 +158,11 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
                 # La pregunta original del usuario va como último HumanMessage
                 messages_rag.append(HumanMessage(content=user_input))
-                
+
+                logger.info("[InfoAgent] Generando respuesta final con contexto RAG...")
                 final_response = llama_client.invoke(messages_rag).content
+                logger.info(f"[InfoAgent] Respuesta generada ({len(final_response) if final_response else 0} caracteres)")
+
                 return final_response
 
             # 4. LLM Base (Respuesta Conversacional)

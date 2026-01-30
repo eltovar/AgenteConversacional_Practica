@@ -96,30 +96,32 @@ class RAGService:
         """
         try:
             import psycopg
-            from rag.vector_store import pg_vector_store
 
             logger.info("[RAG] Limpiando índice vectorial anterior...")
 
-            # Obtener connection string
+            # Obtener connection string (pg_vector_store ya está importado en el scope global)
             connection_string = pg_vector_store.connection_string
             collection_name = pg_vector_store.collection_name
 
             # Conectar y ejecutar DELETE
+            if connection_string is None:
+                raise ValueError("DATABASE_URL no está configurada")
+            
             with psycopg.connect(connection_string) as conn:
                 with conn.cursor() as cursor:
                     # Eliminar todos los documentos de la colección
                     cursor.execute(
-                        f"DELETE FROM langchain_pg_embedding WHERE cmetadata->>'collection_name' = %s",
+                        "DELETE FROM langchain_pg_embedding WHERE cmetadata->>'collection_name' = %s",
                         (collection_name,)
                     )
                     deleted_count = cursor.rowcount
                     conn.commit()
 
-                    logger.info(f"[RAG] Vector store limpiado: {deleted_count} documentos eliminados")
+                    logger.info("[RAG] Vector store limpiado: %d documentos eliminados", deleted_count)
 
         except Exception as e:
             # No es fatal si falla la limpieza, solo logueamos warning
-            logger.warning(f"[RAG] No se pudo limpiar vector store: {e}")
+            logger.warning("[RAG] No se pudo limpiar vector store: %s", e)
 
     def _validate_response_no_obsolete_numbers(self, response: str) -> str:
         """
@@ -185,11 +187,11 @@ class RAGService:
             # 🛡️ Validar que no contenga números obsoletos
             self._validate_response_no_obsolete_numbers(formatted_context)
 
-            logger.debug(f"[RAG] Encontrados {len(filtered_results)} chunks relevantes")
+            logger.debug("[RAG] Encontrados %d chunks relevantes", len(filtered_results))
             return formatted_context
 
-        except Exception as e:
-            logger.error(f"[RAG] Error en búsqueda: {e}", exc_info=True)
+        except (ValueError, RuntimeError) as e:
+            logger.error("[RAG] Error en búsqueda: %s", e, exc_info=True)
             return f"[ERROR] Error al buscar en '{document_path}': {str(e)}"
 
     def semantic_search(self, query: str, k: int = 5) -> List[Document]:

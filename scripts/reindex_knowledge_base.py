@@ -10,7 +10,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
-from logging_config import logger
 
 # Cargar variables de entorno desde .env
 load_dotenv()
@@ -45,7 +44,7 @@ try:
     print("="*60)
     print("\n🎯 Siguiente paso: Iniciar la aplicación con 'python main.py'\n")
     
-except Exception as e:
+except (ValueError, ConnectionError, RuntimeError) as e:
     print(f"\n❌ ERROR durante reindexación: {e}")
     import traceback
     traceback.print_exc()

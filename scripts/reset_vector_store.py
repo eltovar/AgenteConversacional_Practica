@@ -46,7 +46,7 @@ try:
     print("="*60)
     print("\n🎯 Siguiente paso: Ejecutar la reindexación de knowledge base\n")
     
-except Exception as e:
+except (ValueError, ConnectionError, RuntimeError) as e:
     print(f"\n❌ ERROR: {e}")
     import traceback
     traceback.print_exc()

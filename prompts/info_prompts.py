@@ -18,15 +18,15 @@ CÓMO RESPONDES:
 HERRAMIENTAS DISPONIBLES:
 - info_institucional: Información general de la empresa (historia, misión, visión, horarios,
   dirección, cobertura geográfica, tipos de propiedades, métodos de pago online, comisiones).
-  Contacto general: 322 502 1493.
+  Contacto general: 604 444 6364.
 - soporte_contacto: Problemas y consultas administrativas por departamento:
-  * Caja (pagos, consignaciones, certificados de renta) → WhatsApp: 322 502 1493
+  * Caja (pagos, consignaciones, certificados de renta) → WhatsApp: 604 444 6364
   * Administraciones (cuotas residenciales, multas) → WhatsApp: 320 609 2896
-  * Contabilidad (facturas, certificados tributarios, retenciones) → WhatsApp: 322 502 1493
-  * Contratos (terminación, prórroga, documentación, convivencia) → WhatsApp: 320 649 12 88
+  * Contabilidad (facturas, certificados tributarios, retenciones) → WhatsApp: 604 444 6364
+  * Contratos (terminación, prórroga, documentación, convivencia) → WhatsApp: 604 444 6364
   * Jurídico (abogado, Data Crédito, demandas, codeudores) → WhatsApp: 321 789 86 79
-  * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 323 508 18 84
-  * Reparaciones (daños en el inmueble) → WhatsApp: 323 327 7132
+  * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 604 444 6364
+  * Reparaciones (daños en el inmueble) → WhatsApp: 604 444 6364
   * Estudios de crédito El Libertador (requisitos para arriendo, proceso digital, link de solicitud)
 
 REGLAS IMPORTANTES:
@@ -64,15 +64,15 @@ CÓMO RESPONDES:
 HERRAMIENTAS DISPONIBLES:
 - info_institucional: Información general de la empresa (historia, misión, visión, horarios,
   dirección, cobertura geográfica, tipos de propiedades, métodos de pago online, comisiones).
-  Contacto general: 322 502 1493.
+  Contacto general: 604 444 6364.
 - soporte_contacto: Problemas y consultas administrativas por departamento:
-  * Caja (pagos, consignaciones, certificados de renta) → WhatsApp: 322 502 1493
-  * Administraciones (cuotas residenciales, multas) → WhatsApp: 320 609 2896
-  * Contabilidad (facturas, certificados tributarios, retenciones) → WhatsApp: 322 502 1493
-  * Contratos (terminación, prórroga, documentación, convivencia) → WhatsApp: 320 649 12 88
-  * Jurídico (abogado, Data Crédito, demandas, codeudores) → WhatsApp: 321 789 86 79
-  * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 323 508 18 84
-  * Reparaciones (daños en el inmueble) → WhatsApp: 323 327 7132
+  * Caja (pagos, consignaciones, certificados de renta) → WhatsApp: 604 444 6364
+  * Administraciones (cuotas residenciales, multas) → WhatsApp: 604 444 6364
+  * Contabilidad (facturas, certificados tributarios, retenciones) → WhatsApp: 604 444 6364
+  * Contratos (terminación, prórroga, documentación, convivencia) → WhatsApp: 604 444 6364
+  * Jurídico (abogado, Data Crédito, demandas, codeudores) → WhatsApp: 604 444 6364
+  * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 604 444 6364
+  * Reparaciones (daños en el inmueble) → WhatsApp: 604 444 6364
   * Estudios de crédito El Libertador (requisitos para arriendo, proceso digital, link de solicitud)
 
 REGLAS IMPORTANTES:

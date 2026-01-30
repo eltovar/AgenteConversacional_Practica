@@ -122,7 +122,7 @@ def test_indexing_to_vector_store(tmp_path):
     kb_dir.mkdir()
 
     file1 = kb_dir / "info.txt"
-    file1.write_text("Inmobiliaria Proteger. Contacto: 322 502 1493.", encoding='utf-8')
+    file1.write_text("Inmobiliaria Proteger. Contacto: 604 444 6364.", encoding='utf-8')
 
     file2 = kb_dir / "servicios.txt"
     file2.write_text("Ofrecemos apartamentos y casas en Medellín.", encoding='utf-8')

@@ -45,7 +45,7 @@ def vector_store_with_data():
             ),
             Document(
                 page_content=(
-                    "Contacto: Puede comunicarse con nosotros al teléfono 322 502 1493. "
+                    "Contacto: Puede comunicarse con nosotros al teléfono 604 444 6364. "
                     "También estamos disponibles por correo electrónico en info@proteger.com"
                 ),
                 metadata={"source": "knowledge_base/info_contacto.txt", "filename": "info_contacto.txt"}

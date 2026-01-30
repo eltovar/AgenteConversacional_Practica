@@ -105,7 +105,7 @@ def load_placeholder_documents() -> List[Document]:
 
     return [
         Document(
-            page_content="Misión: Conectar personas con su espacio ideal. Contacto: 322 502 1493.",
+            page_content="Misión: Conectar personas con su espacio ideal. Contacto: 604 444 6364.",
             metadata={"source": "placeholder", "filename": "info_institucional.txt"}
         )
     ]

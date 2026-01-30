@@ -10,6 +10,14 @@ from logging_config import logger
 from rag.data_loader import load_and_chunk_documents, load_placeholder_documents
 from rag.vector_store import pg_vector_store
 
+# ===== LISTA DE NÚMEROS OBSOLETOS =====
+# Estos números fueron reemplazados y NO deben aparecer en respuestas
+OBSOLETE_PHONE_NUMBERS = [
+    "322 502 1493",  # Número viejo del área de contratos
+    "3225021493",    # Sin espacios
+    "+573225021493", # Con código país
+]
+
 
 class RAGService:
     """
@@ -113,6 +121,33 @@ class RAGService:
             # No es fatal si falla la limpieza, solo logueamos warning
             logger.warning(f"[RAG] No se pudo limpiar vector store: {e}")
 
+    def _validate_response_no_obsolete_numbers(self, response: str) -> str:
+        """
+        🛡️ VALIDACIÓN DE SEGURIDAD: Verifica que la respuesta no contenga números telefónicos obsoletos.
+        
+        Esta es una medida preventiva para evitar servir información desactualizada.
+        Si se detecta un número obsoleto, se lanza una excepción.
+        
+        Args:
+            response: Texto de respuesta del RAG
+            
+        Returns:
+            str: La respuesta validada (o excepción si contiene números obsoletos)
+            
+        Raises:
+            RuntimeError: Si se detecta un número obsoleto en la respuesta
+        """
+        for obsolete_num in OBSOLETE_PHONE_NUMBERS:
+            if obsolete_num in response:
+                error_msg = (
+                    f"🚨 NÚMERO OBSOLETO DETECTADO EN RESPUESTA: {obsolete_num} | "
+                    f"Este número fue reemplazado y NO debe servirse a usuarios."
+                )
+                logger.critical(error_msg)
+                raise RuntimeError(error_msg)
+        
+        return response
+
     def search_knowledge(self, document_path: str, query: str, k: int = 5) -> str:
         """
         Realiza la búsqueda de similitud en el vector store, filtrando por el documento de origen.
@@ -146,6 +181,9 @@ class RAGService:
             # Formatear resultados
             context_parts = [doc.page_content.strip() for doc in filtered_results]
             formatted_context = "\n".join(context_parts)
+
+            # 🛡️ Validar que no contenga números obsoletos
+            self._validate_response_no_obsolete_numbers(formatted_context)
 
             logger.debug(f"[RAG] Encontrados {len(filtered_results)} chunks relevantes")
             return formatted_context

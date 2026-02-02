@@ -5,16 +5,18 @@ Maneja webhooks de Twilio (WhatsApp) y requests JSON.
 Incluye sistema de agregación de mensajes para manejar múltiples mensajes seguidos.
 """
 
-from fastapi import FastAPI, HTTPException, Response, Form, Request, Header
+from fastapi import FastAPI, HTTPException, Response, Form, Request, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from agents.orchestrator import process_message
 from agents.InfoAgent.info_agent import agent
 from utils.message_aggregator import message_aggregator, AGGREGATION_TIMEOUT
+from utils.twilio_client import twilio_client
 from logging_config import logger
 import uvicorn
 import os
 import json
+import asyncio
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -77,10 +79,60 @@ class MessageResponse(BaseModel):
     response: str
     status: str
 
-# ===== 4. ENDPOINT UNIFICADO (WEBHOOK) =====
+
+# ===== 4. FUNCIÓN DE PROCESAMIENTO EN BACKGROUND =====
+async def process_aggregated_messages(session_id: str, to_number: str):
+    """
+    Función que se ejecuta en background para:
+    1. Esperar el timeout de agregación
+    2. Obtener todos los mensajes combinados
+    3. Procesar con el orchestrator
+    4. Enviar respuesta via Twilio API
+
+    Esta función resuelve el problema del timeout de 15 segundos de Twilio.
+    """
+    try:
+        # 1. Esperar y obtener mensajes combinados
+        combined_message = await message_aggregator.wait_and_get_combined_message(session_id)
+
+        if not combined_message:
+            logger.warning(f"[BACKGROUND] No hay mensajes para procesar (session: {session_id})")
+            return
+
+        logger.info(f"[BACKGROUND] Procesando mensajes agregados: '{combined_message[:80]}...'")
+
+        # 2. Procesar con el orchestrator
+        result = await process_message(session_id, combined_message)
+
+        if not result or not result.get("response"):
+            logger.warning(f"[BACKGROUND] Orchestrator no generó respuesta para {session_id}")
+            return
+
+        # 3. Enviar respuesta via Twilio API
+        if twilio_client.is_available:
+            send_result = await twilio_client.send_whatsapp_message(
+                to=to_number,
+                body=result["response"]
+            )
+            if send_result["status"] == "success":
+                logger.info(f"[BACKGROUND] Respuesta enviada exitosamente a {to_number}")
+            else:
+                logger.error(f"[BACKGROUND] Error enviando respuesta: {send_result}")
+        else:
+            logger.error(
+                "[BACKGROUND] Twilio client no disponible. "
+                "Configura TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER"
+            )
+
+    except Exception as e:
+        logger.error(f"[BACKGROUND] Error en procesamiento: {e}", exc_info=True)
+
+
+# ===== 5. ENDPOINT UNIFICADO (WEBHOOK) =====
 @app.post("/webhook")
 async def webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     From: str = Form(None),
     Body: str = Form(None)
 ):
@@ -90,10 +142,13 @@ async def webhook(
 
     Flujo con agregación (30 segundos por defecto):
     1. Mensaje llega → se agrega al buffer
-    2. Si es el primer mensaje → espera AGGREGATION_TIMEOUT segundos
+    2. Si es el primer mensaje → inicia procesamiento en BACKGROUND
     3. Si llegan más mensajes en ese tiempo → se agregan al buffer
-    4. Después del timeout → procesa todos los mensajes juntos
-    5. Mensajes subsecuentes durante el timeout no generan respuesta
+    4. Después del timeout → procesa todos los mensajes juntos via Twilio API
+    5. Todos los webhooks responden inmediatamente con TwiML vacío
+
+    IMPORTANTE: Cuando hay agregación activa, la respuesta se envía via
+    Twilio Messages API (no via TwiML response) para evitar el timeout de 15s.
     """
     try:
         # A. Detectar origen (Twilio vs JSON)
@@ -102,6 +157,7 @@ async def webhook(
 
         if is_twilio:
             session_id = From.replace("whatsapp:", "")
+            to_number = From  # Guardamos el número completo para enviar respuesta
             message = Body or ""
             logger.info(f"[WEBHOOK] Twilio msg recibido de: {session_id}")
         else:
@@ -121,6 +177,7 @@ async def webhook(
 
             session_id = data.get("session_id")
             message = data.get("message")
+            to_number = session_id  # Para JSON, usamos session_id
             if not session_id or not message:
                 raise HTTPException(status_code=400, detail="Faltan campos: session_id y message son requeridos")
             logger.info(f"[WEBHOOK] JSON msg recibido de: {session_id}")
@@ -145,15 +202,27 @@ async def webhook(
                     status="aggregating"
                 )
 
-        # C. ESPERAR Y OBTENER MENSAJES COMBINADOS
-        if agg_result["is_aggregating"]:
-            # Esperar el timeout y obtener todos los mensajes
-            combined_message = await message_aggregator.wait_and_get_combined_message(session_id)
-            if combined_message:
-                message = combined_message
-                logger.info(f"[WEBHOOK] Procesando mensajes agregados: '{message[:80]}...'")
+        # C. VERIFICAR SI HAY AGREGACIÓN ACTIVA (Redis disponible)
+        if agg_result["is_aggregating"] and is_twilio:
+            # Con agregación: procesar en background y responder inmediatamente
+            # Esto evita el timeout de 15 segundos de Twilio
+            logger.info(f"[WEBHOOK] Iniciando procesamiento en background para {session_id}")
+            background_tasks.add_task(
+                process_aggregated_messages,
+                session_id,
+                to_number
+            )
+            # Responder inmediatamente a Twilio con TwiML vacío
+            return Response(
+                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                media_type="application/xml"
+            )
 
-        # D. PROCESAMIENTO ASÍNCRONO
+        # D. SIN AGREGACIÓN: Procesar inmediatamente (modo legacy/sin Redis)
+        # Esto se usa cuando Redis no está disponible o para requests JSON
+        if agg_result.get("combined_message"):
+            message = agg_result["combined_message"]
+
         result = await process_message(session_id, message)
 
         # E. Generar respuesta según cliente

@@ -217,10 +217,22 @@ EJEMPLO DE TONO:
         }
         nombre_portal_amigable = portal_nombres.get(nombre_portal, "internet")
 
-        # Construir prompt con contexto del link
+        # PRIMERO: Extraer entidades del link/mensaje ANTES de generar respuesta
+        entities = self._extract_entities_from_link(url, message)
+        if entities:
+            metadata = state.lead_data.get('metadata', {})
+            metadata.update(entities)
+            state.lead_data['metadata'] = metadata
+            logger.info(f"[CRMAgent] Entidades extraídas del link: {entities}")
+
+        # Construir descripción del inmueble para el prompt
+        info_inmueble = self._build_property_description(entities)
+
+        # Construir prompt con contexto del link E información del inmueble
         link_context = LINK_ARRIVAL_CONTEXT.format(
             nombre_portal=nombre_portal_amigable,
-            url_referencia=url
+            url_referencia=url,
+            info_inmueble=info_inmueble
         )
 
         # Construir system prompt completo
@@ -234,17 +246,6 @@ EJEMPLO DE TONO:
         # Generar respuesta personalizada
         response = llama_client.invoke(messages)
         response_text = response.content.strip()
-
-        # Marcar como procesado para no repetir
-        state.metadata["link_procesado"] = True
-
-        # Intentar extraer entidades del link/mensaje
-        entities = self._extract_entities_from_link(url, message)
-        if entities:
-            metadata = state.lead_data.get('metadata', {})
-            metadata.update(entities)
-            state.lead_data['metadata'] = metadata
-            logger.info(f"[CRMAgent] Entidades extraídas del link: {entities}")
 
         # Guardar en historial CRM
         if 'crm_history' not in state.lead_data:
@@ -294,6 +295,39 @@ EJEMPLO DE TONO:
                 break
 
         return entities
+
+    def _build_property_description(self, entities: Dict[str, Any]) -> str:
+        """
+        Construye una descripción legible del inmueble basada en las entidades extraídas.
+        Esta descripción se incluye en el prompt para que Sofía sepa qué inmueble le interesa al cliente.
+        """
+        if not entities:
+            return "No se pudo extraer información específica del inmueble del link."
+
+        parts = []
+
+        tipo = entities.get('tipo_propiedad')
+        operacion = entities.get('tipo_operacion')
+        ubicacion = entities.get('ubicacion')
+
+        if tipo and operacion and ubicacion:
+            # Caso completo: "Casa en arriendo en Envigado"
+            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
+            parts.append(f"- Ubicación: {ubicacion}")
+        elif tipo and operacion:
+            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
+        elif tipo and ubicacion:
+            parts.append(f"- Tipo: {tipo.capitalize()}")
+            parts.append(f"- Ubicación: {ubicacion}")
+        elif tipo:
+            parts.append(f"- Tipo: {tipo.capitalize()}")
+        elif ubicacion:
+            parts.append(f"- Ubicación: {ubicacion}")
+
+        if not parts:
+            return "No se pudo extraer información específica del inmueble del link."
+
+        return "\n".join(parts)
 
     def _extract_entities(self, message: str) -> Dict[str, Any]:
         """

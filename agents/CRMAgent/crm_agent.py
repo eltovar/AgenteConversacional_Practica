@@ -503,16 +503,20 @@ EJEMPLO DE TONO:
             budget_raw = metadata.get("presupuesto", "")
             budget_numeric = self._parse_budget_to_number(budget_raw)
 
+            # Formatear características como texto multilínea con viñetas
+            features_formatted = self._format_features_as_text(metadata.get("caracteristicas"))
+
             contact_properties = {
                 "firstname": name_parts["firstname"],
                 "lastname": name_parts["lastname"] or "WhatsApp",
                 "phone": normalized_phone,
                 "whatsapp_id": normalized_phone,
                 "chatbot_property_type": metadata.get("tipo_propiedad", ""),
-                "chatbot_rooms": str(metadata.get("caracteristicas", "")),
+                "chatbot_rooms": features_formatted,  # Ahora es texto multilínea con viñetas
                 "chatbot_location": metadata.get("ubicacion", ""),
                 "chatbot_budget": budget_numeric,  # Número entero para HubSpot
                 "chatbot_urgency": metadata.get("tiempo", ""),
+                "chatbot_operation_type": metadata.get("tipo_operacion", ""),  # NUEVO: Tipo de operación
                 "chatbot_preference": chatbot_preference,
                 "chatbot_conversation": conversation_text,
                 "chatbot_score": str(lead_score),
@@ -556,8 +560,10 @@ EJEMPLO DE TONO:
                 "amount": self._parse_amount(metadata.get("presupuesto", "0")),
                 "description": f"Lead capturado vía chatbot Sofía. Interesado en {metadata.get('ubicacion', 'propiedad')}.",
                 "chatbot_property_type": metadata.get("tipo_propiedad", ""),
+                "chatbot_operation_type": metadata.get("tipo_operacion", ""),  # NUEVO: Tipo de operación
                 "chatbot_location": metadata.get("ubicacion", ""),
                 "chatbot_budget": budget_numeric,  # Reutilizar el valor numérico calculado
+                "chatbot_rooms": features_formatted,  # Características formateadas
                 "chatbot_score": str(lead_score),
                 "chatbot_urgency": metadata.get("tiempo", ""),
                 "chatbot_conversation": conversation_text,  # Historial completo de la conversación
@@ -612,6 +618,46 @@ EJEMPLO DE TONO:
                 "ready_for_handoff": True,
                 "success": False
             }
+
+    def _format_features_as_text(self, features) -> str:
+        """
+        Convierte las características a formato texto multilínea para HubSpot.
+
+        Input puede ser:
+        - Lista: ["3 habitaciones", "2 baños", "parqueadero"]
+        - String: "3 habitaciones, 2 baños"
+        - None/vacío
+
+        Output:
+        "• 3 habitaciones
+        • 2 baños
+        • parqueadero"
+        """
+        if not features:
+            return ""
+
+        # Si ya es una lista, formatear directamente
+        if isinstance(features, list):
+            if not features:
+                return ""
+            return "\n".join(f"• {item.strip()}" for item in features if item and str(item).strip())
+
+        # Si es string, intentar detectar si tiene múltiples características
+        text = str(features).strip()
+        if not text:
+            return ""
+
+        # Detectar si es una lista separada por comas o "y"
+        # Ej: "3 habitaciones, 2 baños y parqueadero"
+        if ',' in text or ' y ' in text.lower():
+            # Reemplazar " y " por coma para unificar
+            text = text.lower().replace(' y ', ', ')
+            items = [item.strip() for item in text.split(',') if item.strip()]
+            if len(items) > 1:
+                return "\n".join(f"• {item}" for item in items)
+
+        # Si es un solo valor, retornarlo con viñeta
+        return f"• {text}"
 
     def _parse_amount(self, budget_str: str) -> float:
         """

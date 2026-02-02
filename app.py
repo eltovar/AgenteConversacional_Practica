@@ -2,6 +2,7 @@
 """
 Servidor FastAPI asíncrono para chatbot Sofía.
 Maneja webhooks de Twilio (WhatsApp) y requests JSON.
+Incluye sistema de agregación de mensajes para manejar múltiples mensajes seguidos.
 """
 
 from fastapi import FastAPI, HTTPException, Response, Form, Request, Header
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from agents.orchestrator import process_message
 from agents.InfoAgent.info_agent import agent
+from utils.message_aggregator import message_aggregator, AGGREGATION_TIMEOUT
 from logging_config import logger
 import uvicorn
 import os
@@ -83,7 +85,14 @@ async def webhook(
 ):
     """
     Maneja mensajes de Twilio (Form Data) y JSON estándar.
-    Totalmente ASÍNCRONO para soportar alta concurrencia.
+    Incluye sistema de AGREGACIÓN para manejar múltiples mensajes seguidos.
+
+    Flujo con agregación (30 segundos por defecto):
+    1. Mensaje llega → se agrega al buffer
+    2. Si es el primer mensaje → espera AGGREGATION_TIMEOUT segundos
+    3. Si llegan más mensajes en ese tiempo → se agregan al buffer
+    4. Después del timeout → procesa todos los mensajes juntos
+    5. Mensajes subsecuentes durante el timeout no generan respuesta
     """
     try:
         # A. Detectar origen (Twilio vs JSON)
@@ -100,18 +109,43 @@ async def webhook(
             message = data.get("message")
             logger.info(f"[WEBHOOK] JSON msg recibido de: {session_id}")
 
-        # B. PROCESAMIENTO ASÍNCRONO (La clave del cambio)
-        # Usamos await para liberar el worker mientras el agente piensa o llama a HubSpot
+        # B. SISTEMA DE AGREGACIÓN DE MENSAJES
+        # Agrega el mensaje al buffer y determina si debe procesarse
+        agg_result = await message_aggregator.add_message_to_buffer(session_id, message)
+
+        if not agg_result["should_process"]:
+            # Este mensaje se agregó a un buffer existente
+            # No responder nada - el proceso principal responderá por todos
+            logger.info(f"[WEBHOOK] Mensaje agregado a buffer. Total: {agg_result['buffer_count']}")
+            if is_twilio:
+                # Respuesta vacía para Twilio (no envía mensaje al usuario)
+                return Response(
+                    content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    media_type="application/xml"
+                )
+            else:
+                return MessageResponse(
+                    response="",
+                    status="aggregating"
+                )
+
+        # C. ESPERAR Y OBTENER MENSAJES COMBINADOS
+        if agg_result["is_aggregating"]:
+            # Esperar el timeout y obtener todos los mensajes
+            combined_message = await message_aggregator.wait_and_get_combined_message(session_id)
+            if combined_message:
+                message = combined_message
+                logger.info(f"[WEBHOOK] Procesando mensajes agregados: '{message[:80]}...'")
+
+        # D. PROCESAMIENTO ASÍNCRONO
         result = await process_message(session_id, message)
 
-        # C. Generar respuesta según cliente
+        # E. Generar respuesta según cliente
         if is_twilio:
-            # Respuesta TwiML (XML)
             xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response><Message>{result['response']}</Message></Response>"""
             return Response(content=xml_response, media_type="application/xml")
         else:
-            # Respuesta JSON
             return MessageResponse(
                 response=result["response"],
                 status=str(result["status"])
@@ -121,7 +155,7 @@ async def webhook(
         logger.error(f"[WEBHOOK] Error procesando mensaje: {e}", exc_info=True)
         if From:  # Fallback seguro para WhatsApp
             return Response(
-                content="""<?xml version="1.0"?><Response><Message>Lo siento, ocurrió un error técnico momentáneo.</Message></Response>""",
+                content='<?xml version="1.0"?><Response><Message>Lo siento, ocurrió un error.</Message></Response>',
                 media_type="application/xml"
             )
         raise HTTPException(status_code=500, detail="Internal Server Error")

@@ -113,13 +113,15 @@ Entidades a extraer (solo si están presentes):
 - tipo_operacion: arriendo, compra, venta
 - ubicacion: barrio, zona o ciudad mencionada (normalizar si es del Área Metropolitana de Antioquia: Medellín, Barbosa, Girardota, Copacabana, Bello, Itagüí, Sabaneta, Envigado, La Estrella, Caldas)
 - presupuesto: monto o rango de precio
-- caracteristicas: habitaciones, parqueadero, área, etc.
+- caracteristicas: LISTA de características mencionadas (habitaciones, baños, parqueadero, área, piso, balcón, estudio, patio, terraza, vista, amoblado, etc.)
+  IMPORTANTE: Extrae como ARRAY de strings, ej: ["3 habitaciones", "2 baños", "parqueadero cubierto"]
 - correo: email si lo menciona
 - tiempo: plazo mencionado (inmediato, próximo mes, etc.)
 
 IMPORTANTE:
 - Si no hay información inmobiliaria, responde exactamente: {{}}
 - Si mencionan una ubicación, extráela tal cual (incluye ciudades fuera del Área Metropolitana, el agente se encargará de validar)
+- Las características SIEMPRE deben ser un array/lista, nunca un string simple
 
 Mensaje: {user_message}
 

@@ -5,6 +5,8 @@ Usa pgvector para almacenamiento de embeddings y búsqueda por similitud.
 
 import time
 from typing import Dict, List, Any
+
+import psycopg
 from langchain_core.documents import Document
 from logging_config import logger
 from rag.data_loader import load_and_chunk_documents, load_placeholder_documents
@@ -95,8 +97,6 @@ class RAGService:
         Ejecuta DELETE directo en PostgreSQL para evitar duplicados.
         """
         try:
-            import psycopg
-
             logger.info("[RAG] Limpiando índice vectorial anterior...")
 
             # Obtener connection string (pg_vector_store ya está importado en el scope global)
@@ -110,13 +110,20 @@ class RAGService:
             with psycopg.connect(connection_string) as conn:
                 with conn.cursor() as cursor:
                     # Eliminar todos los documentos de la colección
+                    # LangChain PGVector usa collection_id (UUID) en langchain_pg_embedding
+                    # que referencia a langchain_pg_collection.uuid por nombre
                     cursor.execute(
-                        "DELETE FROM langchain_pg_embedding WHERE cmetadata->>'collection_name' = %s",
+                        """
+                        DELETE FROM langchain_pg_embedding
+                        WHERE collection_id = (
+                            SELECT uuid FROM langchain_pg_collection WHERE name = %s
+                        )
+                        """,
                         (collection_name,)
                     )
                     deleted_count = cursor.rowcount
                     conn.commit()
-
+                    
                     logger.info("[RAG] Vector store limpiado: %d documentos eliminados", deleted_count)
 
         except Exception as e:

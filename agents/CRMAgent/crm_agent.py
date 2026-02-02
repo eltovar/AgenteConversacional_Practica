@@ -195,7 +195,11 @@ EJEMPLO DE TONO:
     def _handle_link_arrival(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja la primera respuesta cuando el cliente llega enviando un link.
+        Solo se ejecuta UNA VEZ por sesión (controlado por flag link_procesado).
         """
+        # Marcar que el link ya fue procesado para evitar bucle infinito
+        state.metadata["link_procesado"] = True
+
         # Limpiar flag de primer mensaje (LINK_ARRIVAL_CONTEXT ya incluye presentación)
         if state.metadata.get("is_first_message"):
             state.metadata["is_first_message"] = False

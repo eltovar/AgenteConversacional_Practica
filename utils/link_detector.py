@@ -84,7 +84,31 @@ class LinkDetector:
     KEYWORDS_INMUEBLE = [
         'apartamento', 'casa', 'local', 'oficina', 'bodega', 'lote',
         'arriendo', 'venta', 'alquiler', 'inmueble', 'propiedad',
-        '/p/', '/listing/', '/detail/', '/inmueble/', '/property/'
+        '/p/', '/listing/', '/detail/', '/inmueble/', '/property/',
+        # Instagram content patterns
+        '/reel/', '/reels/', '/stories/',
+        # Facebook content patterns
+        '/posts/', '/videos/', '/watch/', '/groups/', '/marketplace/',
+        # Palabras clave de interés
+        'interesa', 'interesado', 'interesada', 'info', 'información',
+        'precio', 'disponible', 'disponibilidad', 'más detalles'
+    ]
+
+    # Patrones de URL de contenido específico en redes sociales
+    # Estos se consideran links de inmueble por defecto (la inmobiliaria publica propiedades)
+    SOCIAL_MEDIA_CONTENT_PATTERNS = [
+        r'/p/[A-Za-z0-9_-]+',      # Instagram posts: /p/ABC123
+        r'/reel/[A-Za-z0-9_-]+',   # Instagram reels: /reel/ABC123
+        r'/reels/[A-Za-z0-9_-]+',  # Instagram reels alternate
+        r'/stories/',              # Instagram stories
+        r'/posts/',                # Facebook posts
+        r'/videos/',               # Facebook videos
+        r'/watch/',                # Facebook watch
+        r'/marketplace/',          # Facebook marketplace
+        r'/groups/\d+/posts/',     # Facebook group posts
+        r'/photo',                 # Facebook photos
+        r'\?fbid=',                # Facebook photo IDs
+        r'\?v=',                   # Facebook video IDs
     ]
 
     def __init__(self):
@@ -125,7 +149,7 @@ class LinkDetector:
                         tiene_link=True,
                         portal=portal,
                         url_original=url,
-                        es_inmueble=self._es_link_inmueble(url, mensaje_lower),
+                        es_inmueble=self._es_link_inmueble(url, mensaje_lower, portal),
                         metadata_extra={
                             "mensaje_completo": mensaje,
                             "posicion_link": match.span(),
@@ -145,10 +169,36 @@ class LinkDetector:
 
         return self._resultado_sin_link()
 
-    def _es_link_inmueble(self, url: str, mensaje: str) -> bool:
-        """Determina si el link parece ser de un inmueble específico"""
-        texto_completo = f"{url} {mensaje}".lower()
-        return any(kw in texto_completo for kw in self.KEYWORDS_INMUEBLE)
+    def _es_link_inmueble(self, url: str, mensaje: str, portal: PortalOrigen = None) -> bool:
+        """
+        Determina si el link parece ser de un inmueble específico.
+
+        Para redes sociales (Instagram/Facebook), los links de contenido
+        (posts, reels, videos, etc.) se consideran inmuebles por defecto
+        ya que la inmobiliaria los usa para promocionar propiedades.
+        """
+        url_lower = url.lower() if url else ""
+        mensaje_lower = mensaje.lower() if mensaje else ""
+        texto_completo = f"{url_lower} {mensaje_lower}"
+
+        # Verificar keywords generales primero
+        if any(kw in texto_completo for kw in self.KEYWORDS_INMUEBLE):
+            return True
+
+        # Para Instagram y Facebook, verificar si es un link de contenido
+        # (posts, reels, videos, etc.) - estos se asumen como inmuebles
+        if portal in [PortalOrigen.INSTAGRAM, PortalOrigen.FACEBOOK]:
+            for pattern in self.SOCIAL_MEDIA_CONTENT_PATTERNS:
+                if re.search(pattern, url_lower):
+                    return True
+
+            # Si es Instagram o Facebook con parámetros (como ?igsh=), es contenido compartido
+            if '?' in url_lower and portal == PortalOrigen.INSTAGRAM:
+                # URLs con parámetros de sharing son contenido específico
+                if 'igsh=' in url_lower or 'utm_' in url_lower:
+                    return True
+
+        return False
 
     def _resultado_sin_link(self) -> LinkDetectionResult:
         """Retorna resultado vacío cuando no hay links"""

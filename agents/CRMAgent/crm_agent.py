@@ -377,62 +377,69 @@ EJEMPLO DE TONO:
 
     def _extract_name_from_message(self, message: str, state: ConversationState) -> str:
         """
-        Intenta extraer un nombre completo del mensaje del usuario.
-        IMPORTANTE: Solo intenta extracción si ya hubo al menos un turno de conversación CRM.
-        Esto evita falsos positivos en el primer mensaje del usuario.
+        Extrae nombre de persona del mensaje usando LLM.
+        VERSIÓN AGRESIVA: Siempre intenta extraer, sin importar longitud del mensaje,
+        turno de conversación, ni si el agente preguntó explícitamente por el nombre.
+
+        El nombre es el "gatillo" para enviar a HubSpot, así que es crítico detectarlo.
         """
         from utils.pii_validator import robust_extract_name
 
         crm_history = state.lead_data.get('crm_history', [])
 
-        # GUARDIA: No intentar extraer nombre en el primer turno (sin historial CRM)
-        # El usuario debe haber respondido al menos una vez al CRM Agent
-        if len(crm_history) < 2:  # Necesitamos al menos 1 User + 1 Agent message previos
-            logger.debug("[CRMAgent] Primer turno CRM - no se intenta extraer nombre aún")
-            return None
-
-        # Verificar si el último mensaje del agente pidió el nombre
-        last_agent_msg = ""
-        for entry in reversed(crm_history):
-            if entry.startswith("Agent:"):
-                last_agent_msg = entry[6:].strip().lower()
-                break
-
-        name_request_indicators = ['nombre', 'cómo te llamas', 'como te llamas', 'registrarte']
-        agent_asked_name = any(ind in last_agent_msg for ind in name_request_indicators)
-
-        # Solo intentar extracción de nombre si el agente lo pidió explícitamente
-        if not agent_asked_name:
-            return None
-
-        # El agente pidió el nombre - intentar extracción
-        # Primero con regex (patrones explícitos como "Me llamo X")
+        # 1. INTENTO RÁPIDO: Regex para patrones explícitos ("Me llamo X", "Soy X")
         name = robust_extract_name(message)
         if name:
             logger.info(f"[CRMAgent] Nombre extraído via regex: {name}")
             return name
 
-        # Si el mensaje es corto (probable respuesta de nombre), usar LLM
-        if len(message.split()) <= 6 and '?' not in message:
-            immob_keywords = ['casa', 'apartamento', 'arriendo', 'compra', 'venta',
-                              'local', 'oficina', 'barrio', 'zona', 'presupuesto',
-                              'habitaciones', 'millones', 'no', 'si', 'sí', 'cita']
-            message_lower = message.lower()
-            if not any(kw in message_lower for kw in immob_keywords):
-                try:
-                    prompt = (
-                        f"El siguiente mensaje es la respuesta de un usuario a la pregunta '¿Cuál es tu nombre completo?'. "
-                        f"Extrae el nombre completo. Si el mensaje NO contiene un nombre de persona, responde 'NO_NAME'.\n"
-                        f"Mensaje: \"{message}\"\n"
-                        f"Responde SOLO con el nombre completo o 'NO_NAME'."
-                    )
-                    response = llama_client.invoke([HumanMessage(content=prompt)])
-                    result = response.content.strip()
-                    if result and result != "NO_NAME" and len(result) > 2 and len(result) < 60:
-                        logger.info(f"[CRMAgent] Nombre extraído via LLM: {result}")
-                        return result
-                except Exception as e:
-                    logger.warning(f"[CRMAgent] Error en extracción LLM de nombre: {e}")
+        # 2. INTENTO PRINCIPAL: Usar LLM para extraer nombre de CUALQUIER mensaje
+        # Sin límite de palabras - el LLM es capaz de encontrar nombres en contexto
+        try:
+            # Construir contexto de la conversación para ayudar al LLM
+            conversation_context = ""
+            for entry in crm_history[-6:]:  # Últimos 3 turnos (6 mensajes)
+                conversation_context += f"{entry}\n"
+
+            prompt = f"""Analiza el siguiente mensaje de un cliente en una conversación inmobiliaria.
+Tu ÚNICA tarea es extraer el NOMBRE COMPLETO de la persona si lo menciona.
+
+CONTEXTO DE LA CONVERSACIÓN:
+{conversation_context}
+
+MENSAJE ACTUAL DEL CLIENTE:
+"{message}"
+
+INSTRUCCIONES:
+- Busca nombres propios de persona (ej: "German", "María López", "Juan Carlos")
+- El nombre puede aparecer en cualquier parte del mensaje
+- Puede estar precedido de frases como "me llamo", "soy", "mi nombre es", o simplemente mencionado
+- También puede aparecer al final del mensaje como firma informal
+- NO confundas nombres de lugares (Sabaneta, Medellín) con nombres de persona
+- NO confundas palabras comunes (apartamento, casa, arriendo) con nombres
+
+RESPUESTA:
+- Si encuentras un nombre de persona, responde SOLO con el nombre (ej: "German" o "María López")
+- Si NO hay nombre de persona en el mensaje, responde exactamente: NO_NAME"""
+
+            response = llama_client.invoke([HumanMessage(content=prompt)])
+            result = response.content.strip()
+
+            # Validar respuesta del LLM
+            if result and result != "NO_NAME":
+                # Limpiar posibles artefactos de la respuesta
+                result = result.replace('"', '').replace("'", "").strip()
+
+                # Validaciones básicas de que es un nombre válido
+                if (len(result) >= 2 and
+                    len(result) <= 60 and
+                    not any(word in result.lower() for word in ['no_name', 'no hay', 'no encuentro', 'ninguno'])):
+
+                    logger.info(f"[CRMAgent] Nombre extraído via LLM: {result}")
+                    return result
+
+        except Exception as e:
+            logger.warning(f"[CRMAgent] Error en extracción LLM de nombre: {e}")
 
         return None
 

@@ -14,6 +14,7 @@ from utils.message_aggregator import message_aggregator, AGGREGATION_TIMEOUT
 from logging_config import logger
 import uvicorn
 import os
+import json
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -104,9 +105,24 @@ async def webhook(
             message = Body or ""
             logger.info(f"[WEBHOOK] Twilio msg recibido de: {session_id}")
         else:
-            data = await request.json()
+            # Manejar JSON con posibles problemas de encoding
+            try:
+                data = await request.json()
+            except UnicodeDecodeError as ue:
+                # Intentar con encoding latin-1 si UTF-8 falla
+                body_bytes = await request.body()
+                body_text = body_bytes.decode('latin-1')
+                import json
+                data = json.loads(body_text)
+                logger.warning(f"[WEBHOOK] JSON decodificado con latin-1 fallback")
+            except Exception as json_err:
+                logger.error(f"[WEBHOOK] Error parseando JSON: {json_err}")
+                raise HTTPException(status_code=400, detail=f"JSON inválido: {str(json_err)}")
+
             session_id = data.get("session_id")
             message = data.get("message")
+            if not session_id or not message:
+                raise HTTPException(status_code=400, detail="Faltan campos: session_id y message son requeridos")
             logger.info(f"[WEBHOOK] JSON msg recibido de: {session_id}")
 
         # B. SISTEMA DE AGREGACIÓN DE MENSAJES

@@ -269,24 +269,30 @@ EJEMPLO DE TONO:
         """
         Intenta extraer información del inmueble basándose en el URL.
 
-        Ejemplo: fincaraiz.com.co/apartamento-arriendo-poblado
-        -> tipo_propiedad: apartamento, tipo_operacion: arriendo, ubicacion: poblado
+        IMPORTANTE: La operación en el URL indica el estado del inmueble, NO la intención del cliente.
+        - URL con "venta" → inmueble en venta → cliente quiere COMPRAR
+        - URL con "arriendo" → inmueble en arriendo → cliente quiere ARRENDAR
+
+        Ejemplo: fincaraiz.com.co/apartamento-venta-poblado
+        -> tipo_propiedad: apartamento, tipo_operacion: compra, ubicacion: poblado
         """
         entities = {}
         url_lower = url.lower() if url else ""
 
         # Detectar tipo de propiedad en URL
-        tipos = ['apartamento', 'casa', 'local', 'oficina', 'bodega', 'lote']
+        tipos = ['apartamento', 'apartaestudio', 'casa', 'local', 'oficina', 'bodega', 'lote', 'finca']
         for tipo in tipos:
             if tipo in url_lower:
                 entities['tipo_propiedad'] = tipo
                 break
 
-        # Detectar operación
-        if 'arriendo' in url_lower or 'alquiler' in url_lower:
-            entities['tipo_operacion'] = 'arriendo'
-        elif 'venta' in url_lower:
-            entities['tipo_operacion'] = 'venta'
+        # Detectar operación desde la PERSPECTIVA DEL CLIENTE
+        # Si el inmueble está en "venta", el cliente quiere "comprar"
+        # Si el inmueble está en "arriendo", el cliente quiere "arrendar"
+        if 'arriendo' in url_lower or 'alquiler' in url_lower or 'arrendar' in url_lower:
+            entities['tipo_operacion'] = 'arriendo'  # Cliente quiere tomar en arriendo
+        elif 'venta' in url_lower or 'compra' in url_lower:
+            entities['tipo_operacion'] = 'compra'  # Cliente quiere comprar
 
         # Detectar ubicaciones conocidas del Área Metropolitana
         ubicaciones = [
@@ -304,6 +310,9 @@ EJEMPLO DE TONO:
         """
         Construye una descripción legible del inmueble basada en las entidades extraídas.
         Esta descripción se incluye en el prompt para que Sofía sepa qué inmueble le interesa al cliente.
+
+        NOTA: tipo_operacion almacena la intención del cliente (compra/arriendo),
+        pero para describir el inmueble usamos el estado (en venta/en arriendo).
         """
         if not entities:
             return "No se pudo extraer información específica del inmueble del link."
@@ -314,12 +323,22 @@ EJEMPLO DE TONO:
         operacion = entities.get('tipo_operacion')
         ubicacion = entities.get('ubicacion')
 
-        if tipo and operacion and ubicacion:
-            # Caso completo: "Casa en arriendo en Envigado"
-            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
+        # Convertir intención del cliente a estado del inmueble para la descripción
+        # compra → en venta, arriendo → en arriendo
+        estado_inmueble = None
+        if operacion == 'compra':
+            estado_inmueble = 'en venta'
+        elif operacion == 'arriendo':
+            estado_inmueble = 'en arriendo'
+        elif operacion == 'venta':
+            estado_inmueble = 'en venta (cliente quiere vender)'
+
+        if tipo and estado_inmueble and ubicacion:
+            # Caso completo: "Apartamento en venta en Envigado"
+            parts.append(f"- Tipo: {tipo.capitalize()} {estado_inmueble}")
             parts.append(f"- Ubicación: {ubicacion}")
-        elif tipo and operacion:
-            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
+        elif tipo and estado_inmueble:
+            parts.append(f"- Tipo: {tipo.capitalize()} {estado_inmueble}")
         elif tipo and ubicacion:
             parts.append(f"- Tipo: {tipo.capitalize()}")
             parts.append(f"- Ubicación: {ubicacion}")

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-# Agents/CRMAgent/crm_agent.py
 """
 Agente de CRM conversacional con integración a HubSpot API v3.
 Conversa con el cliente para recopilar datos antes de sincronizar con HubSpot.
@@ -18,7 +16,8 @@ from prompts.crm_prompts import (
     CRM_SYSTEM_PROMPT,
     CRM_CONFIRMATION_TEMPLATE,
     PROPERTY_EXTRACTION_PROMPT,
-    LINK_ARRIVAL_CONTEXT
+    LINK_ARRIVAL_CONTEXT,
+    NAME_EXTRACTION_PROMPT
 )
 from integrations.hubspot.lead_assigner import lead_assigner, orphan_alert_system
 from llm_client import llama_client
@@ -195,11 +194,7 @@ EJEMPLO DE TONO:
     def _handle_link_arrival(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja la primera respuesta cuando el cliente llega enviando un link.
-        Solo se ejecuta UNA VEZ por sesión (controlado por flag link_procesado).
         """
-        # Marcar que el link ya fue procesado para evitar bucle infinito
-        state.metadata["link_procesado"] = True
-
         # Limpiar flag de primer mensaje (LINK_ARRIVAL_CONTEXT ya incluye presentación)
         if state.metadata.get("is_first_message"):
             state.metadata["is_first_message"] = False
@@ -269,30 +264,24 @@ EJEMPLO DE TONO:
         """
         Intenta extraer información del inmueble basándose en el URL.
 
-        IMPORTANTE: La operación en el URL indica el estado del inmueble, NO la intención del cliente.
-        - URL con "venta" → inmueble en venta → cliente quiere COMPRAR
-        - URL con "arriendo" → inmueble en arriendo → cliente quiere ARRENDAR
-
-        Ejemplo: fincaraiz.com.co/apartamento-venta-poblado
-        -> tipo_propiedad: apartamento, tipo_operacion: compra, ubicacion: poblado
+        Ejemplo: fincaraiz.com.co/apartamento-arriendo-poblado
+        -> tipo_propiedad: apartamento, tipo_operacion: arriendo, ubicacion: poblado
         """
         entities = {}
         url_lower = url.lower() if url else ""
 
         # Detectar tipo de propiedad en URL
-        tipos = ['apartamento', 'apartaestudio', 'casa', 'local', 'oficina', 'bodega', 'lote', 'finca']
+        tipos = ['apartamento', 'casa', 'local', 'oficina', 'bodega', 'lote']
         for tipo in tipos:
             if tipo in url_lower:
                 entities['tipo_propiedad'] = tipo
                 break
 
-        # Detectar operación desde la PERSPECTIVA DEL CLIENTE
-        # Si el inmueble está en "venta", el cliente quiere "comprar"
-        # Si el inmueble está en "arriendo", el cliente quiere "arrendar"
-        if 'arriendo' in url_lower or 'alquiler' in url_lower or 'arrendar' in url_lower:
-            entities['tipo_operacion'] = 'arriendo'  # Cliente quiere tomar en arriendo
-        elif 'venta' in url_lower or 'compra' in url_lower:
-            entities['tipo_operacion'] = 'compra'  # Cliente quiere comprar
+        # Detectar operación
+        if 'arriendo' in url_lower or 'alquiler' in url_lower:
+            entities['tipo_operacion'] = 'arriendo'
+        elif 'venta' in url_lower:
+            entities['tipo_operacion'] = 'venta'
 
         # Detectar ubicaciones conocidas del Área Metropolitana
         ubicaciones = [
@@ -310,9 +299,6 @@ EJEMPLO DE TONO:
         """
         Construye una descripción legible del inmueble basada en las entidades extraídas.
         Esta descripción se incluye en el prompt para que Sofía sepa qué inmueble le interesa al cliente.
-
-        NOTA: tipo_operacion almacena la intención del cliente (compra/arriendo),
-        pero para describir el inmueble usamos el estado (en venta/en arriendo).
         """
         if not entities:
             return "No se pudo extraer información específica del inmueble del link."
@@ -323,22 +309,12 @@ EJEMPLO DE TONO:
         operacion = entities.get('tipo_operacion')
         ubicacion = entities.get('ubicacion')
 
-        # Convertir intención del cliente a estado del inmueble para la descripción
-        # compra → en venta, arriendo → en arriendo
-        estado_inmueble = None
-        if operacion == 'compra':
-            estado_inmueble = 'en venta'
-        elif operacion == 'arriendo':
-            estado_inmueble = 'en arriendo'
-        elif operacion == 'venta':
-            estado_inmueble = 'en venta (cliente quiere vender)'
-
-        if tipo and estado_inmueble and ubicacion:
-            # Caso completo: "Apartamento en venta en Envigado"
-            parts.append(f"- Tipo: {tipo.capitalize()} {estado_inmueble}")
+        if tipo and operacion and ubicacion:
+            # Caso completo: "Casa en arriendo en Envigado"
+            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
             parts.append(f"- Ubicación: {ubicacion}")
-        elif tipo and estado_inmueble:
-            parts.append(f"- Tipo: {tipo.capitalize()} {estado_inmueble}")
+        elif tipo and operacion:
+            parts.append(f"- Tipo: {tipo.capitalize()} en {operacion}")
         elif tipo and ubicacion:
             parts.append(f"- Tipo: {tipo.capitalize()}")
             parts.append(f"- Ubicación: {ubicacion}")
@@ -401,14 +377,20 @@ EJEMPLO DE TONO:
     def _extract_name_from_message(self, message: str, state: ConversationState) -> str:
         """
         Extrae nombre de persona del mensaje usando LLM.
-        VERSIÓN AGRESIVA: Siempre intenta extraer, sin importar longitud del mensaje,
-        turno de conversación, ni si el agente preguntó explícitamente por el nombre.
+        VERSIÓN AGRESIVA: Siempre intenta extraer, sin importar longitud del mensaje
+        ni si el agente preguntó explícitamente por el nombre.
 
         El nombre es el "gatillo" para enviar a HubSpot, así que es crítico detectarlo.
         """
         from utils.pii_validator import robust_extract_name
 
         crm_history = state.lead_data.get('crm_history', [])
+
+        # GUARDIA MÍNIMA: Solo evitar extracción en el primer turno absoluto
+        # (para no confundir saludos con nombres)
+        if len(crm_history) < 2:
+            logger.debug("[CRMAgent] Primer turno CRM - no se intenta extraer nombre aún")
+            return None
 
         # 1. INTENTO RÁPIDO: Regex para patrones explícitos ("Me llamo X", "Soy X")
         name = robust_extract_name(message)
@@ -424,26 +406,10 @@ EJEMPLO DE TONO:
             for entry in crm_history[-6:]:  # Últimos 3 turnos (6 mensajes)
                 conversation_context += f"{entry}\n"
 
-            prompt = f"""Analiza el siguiente mensaje de un cliente en una conversación inmobiliaria.
-Tu ÚNICA tarea es extraer el NOMBRE COMPLETO de la persona si lo menciona.
-
-CONTEXTO DE LA CONVERSACIÓN:
-{conversation_context}
-
-MENSAJE ACTUAL DEL CLIENTE:
-"{message}"
-
-INSTRUCCIONES:
-- Busca nombres propios de persona (ej: "German", "María López", "Juan Carlos")
-- El nombre puede aparecer en cualquier parte del mensaje
-- Puede estar precedido de frases como "me llamo", "soy", "mi nombre es", o simplemente mencionado
-- También puede aparecer al final del mensaje como firma informal
-- NO confundas nombres de lugares (Sabaneta, Medellín) con nombres de persona
-- NO confundas palabras comunes (apartamento, casa, arriendo) con nombres
-
-RESPUESTA:
-- Si encuentras un nombre de persona, responde SOLO con el nombre (ej: "German" o "María López")
-- Si NO hay nombre de persona en el mensaje, responde exactamente: NO_NAME"""
+            prompt = NAME_EXTRACTION_PROMPT.format(
+                conversation_context=conversation_context,
+                message=message
+            )
 
             response = llama_client.invoke([HumanMessage(content=prompt)])
             result = response.content.strip()

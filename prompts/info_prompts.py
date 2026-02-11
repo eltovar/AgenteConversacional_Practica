@@ -146,3 +146,31 @@ EJEMPLO DE TONO:
 
 IMPORTANTE: Adapta el saludo al tono del cliente. Si es formal, sé formal. Si es casual, sé casual.
 """
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESPUESTAS FIJAS (Bypass RAG)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Respuesta fija para consultas sobre El Libertador (estudio de crédito para arriendo)
+RESPUESTA_LIBERTADOR = """EL REQUISITOS PARA ESTUDIO DE CRÉDITO – ARRIENDO ES MUY FACIL: SOLO SE REQUIERE
+
+Un Arrendatario + Deudor Solidario
+Cada uno debe contar con ingresos
+
+El Estudio es 100% digital
+No tiene ningun costo
+
+Con este link Inicias el proceso:
+https://analisisweb.ellibertador.co/estudio-digital/datos-basicos/natural
+
+Nota: Para extranjeros el proceso de estudio se realiza por otro medio, si es tu caso infórmale a tu asesor para que te indique el proceso
+
+¿Te gustaría que un Asesor Comercial te contacte para ayudarte con el proceso de arriendo?"""
+
+# Patrones regex para detectar preguntas sobre El Libertador (SOLO en mensaje actual)
+LIBERTADOR_PATTERNS = [
+    r'\blibertador\b',
+    r'\bestudio.*cr[eé]dito\b',
+    r'\brequisitos.*arriendo\b',
+    r'\bestudio.*arriendo\b',
+]

@@ -8,38 +8,13 @@ from prompts.info_prompts import (
     SYSTEM_AGENT_PROMPT_BASE,
     SYSTEM_AGENT_PROMPT_WITH_USER,
     RAG_GENERATION_INSTRUCTIONS,
-    FIRST_MESSAGE_INSTRUCTIONS
+    FIRST_MESSAGE_INSTRUCTIONS,
+    RESPUESTA_LIBERTADOR,
+    LIBERTADOR_PATTERNS
 )
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# RESPUESTAS FIJAS (Bypass RAG - Solicitadas por el jefe)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-RESPUESTA_LIBERTADOR = """EL REQUISITOS PARA ESTUDIO DE CRÉDITO – ARRIENDO ES MUY FACIL: SOLO SE REQUIERE
-
-Un Arrendatario + Deudor Solidario
-Cada uno debe contar con ingresos
-
-El Estudio es 100% digital
-No tiene ningun costo
-
-Con este link Inicias el proceso:
-https://analisisweb.ellibertador.co/estudio-digital/datos-basicos/natural
-
-Nota: Para extranjeros el proceso de estudio se realiza por otro medio, si es tu caso infórmale a tu asesor para que te indique el proceso
-
-¿Te gustaría que un Asesor Comercial te contacte para ayudarte con el proceso de arriendo?"""
-
-# Patrones para detectar preguntas sobre El Libertador (SOLO en mensaje actual)
-LIBERTADOR_PATTERNS = [
-    r'\blibertador\b',
-    r'\bestudio.*cr[eé]dito\b',
-    r'\brequisitos.*arriendo\b',
-    r'\bestudio.*arriendo\b',
-]
 
 # Mapeo de tools a documentos específicos (REORGANIZADO - 8 documentos)
 TOOL_DOCUMENT_MAP = {

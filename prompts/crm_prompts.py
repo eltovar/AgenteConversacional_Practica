@@ -181,3 +181,28 @@ FIELD_LABELS = {
     "correo": "tu correo electrónico",
     "tiempo": "para cuándo necesitas el inmueble",
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROMPT PARA EXTRACCIÓN DE NOMBRE DE PERSONA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+NAME_EXTRACTION_PROMPT = """Analiza el siguiente mensaje de un cliente en una conversación inmobiliaria.
+Tu ÚNICA tarea es extraer el NOMBRE COMPLETO de la persona si lo menciona.
+
+CONTEXTO DE LA CONVERSACIÓN:
+{conversation_context}
+
+MENSAJE ACTUAL DEL CLIENTE:
+"{message}"
+
+INSTRUCCIONES:
+- Busca nombres propios de persona (ej: "German", "María López", "Juan Carlos")
+- El nombre puede aparecer en cualquier parte del mensaje
+- Puede estar precedido de frases como "me llamo", "soy", "mi nombre es", o simplemente mencionado
+- También puede aparecer al final del mensaje como firma informal
+- NO confundas nombres de lugares (Sabaneta, Medellín) con nombres de persona
+- NO confundas palabras comunes (apartamento, casa, arriendo) con nombres
+
+RESPUESTA:
+- Si encuentras un nombre de persona, responde SOLO con el nombre (ej: "German" o "María López")
+- Si NO hay nombre de persona en el mensaje, responde exactamente: NO_NAME"""

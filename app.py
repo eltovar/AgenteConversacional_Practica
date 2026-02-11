@@ -20,6 +20,12 @@ import asyncio
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+# Importar el router del middleware inteligente (lazy import)
+from middleware import get_whatsapp_router
+
+# Importar el router de webhooks de salida HubSpot -> WhatsApp
+from integrations.hubspot import get_outbound_router
+
 # ===== 1. CONFIGURACIÓN INICIAL Y VALIDACIÓN =====
 load_dotenv()
 
@@ -36,6 +42,16 @@ if missing := [k for k in REQUIRED if not os.getenv(k)]:
     raise EnvironmentError(f"❌ CRITICAL: Missing secrets: {', '.join(missing)}")
 
 app = FastAPI(title="Sofía - Asistente Virtual", version="1.0.0")
+
+# ===== MIDDLEWARE INTELIGENTE (Fase 2) =====
+# Router para el nuevo sistema de WhatsApp con estados BOT_ACTIVE/HUMAN_ACTIVE
+# Endpoints: /whatsapp/webhook, /whatsapp/admin/*
+app.include_router(get_whatsapp_router())
+
+# ===== HUBSPOT OUTBOUND (Fase 2.5) =====
+# Router para webhooks de salida: HubSpot Inbox -> WhatsApp
+# Endpoints: /hubspot/outbound, /hubspot/thread-mapping
+app.include_router(get_outbound_router())
 
 # ===== 2. STARTUP EVENT (CRÍTICO PARA RAG) =====
 @app.get("/")

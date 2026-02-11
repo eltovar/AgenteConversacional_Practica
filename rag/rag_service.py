@@ -107,7 +107,10 @@ class RAGService:
             if connection_string is None:
                 raise ValueError("DATABASE_URL no está configurada")
             
-            with psycopg.connect(connection_string) as conn:
+            # psycopg v3: NO usar context manager para conexión (no hace commit auto)
+            # Se debe hacer commit() explícito antes de cerrar
+            conn = psycopg.connect(connection_string)
+            try:
                 with conn.cursor() as cursor:
                     # Eliminar todos los documentos de la colección
                     # LangChain PGVector usa collection_id (UUID) en langchain_pg_embedding
@@ -115,17 +118,18 @@ class RAGService:
                     cursor.execute(
                         """
                         DELETE FROM langchain_pg_embedding
-                        WHERE collection_id = (
+                        WHERE collection_id IN (
                             SELECT uuid FROM langchain_pg_collection WHERE name = %s
                         )
                         """,
                         (collection_name,)
                     )
                     deleted_count = cursor.rowcount
-                    conn.commit()
-                    
-                    logger.info("[RAG] Vector store limpiado: %d documentos eliminados", deleted_count)
-
+                conn.commit()
+                logger.info("[RAG] Vector store limpiado: %d documentos eliminados", deleted_count)
+            finally:
+                conn.close()
+                
         except Exception as e:
             # No es fatal si falla la limpieza, solo logueamos warning
             logger.warning("[RAG] No se pudo limpiar vector store: %s", e)

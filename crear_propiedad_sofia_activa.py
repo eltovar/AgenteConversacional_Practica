@@ -1,10 +1,11 @@
+import os
 import requests
 
 # ==========================================
 # CONFIGURACIÓN - Propiedad "Sofía Activa"
 # ==========================================
 # Tu Access Token de la App Privada (pat-na1-...)
-ACCESS_TOKEN = "pat-na1-cb39cafc-1eb4-4d21-9aea-2453402dfe7d"
+ACCESS_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN")
 
 
 def crear_propiedad_sofia_activa():

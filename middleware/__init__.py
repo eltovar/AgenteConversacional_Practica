@@ -34,9 +34,27 @@ def get_sofia_brain():
     return SofiaBrain
 
 
+def get_message_analysis():
+    """Lazy import de MessageAnalysis para análisis de mensajes."""
+    from .sofia_brain import MessageAnalysis
+    return MessageAnalysis
+
+
+def get_single_stream_response():
+    """Lazy import de SingleStreamResponse para respuestas con análisis."""
+    from .sofia_brain import SingleStreamResponse
+    return SingleStreamResponse
+
+
 def get_whatsapp_router():
     """Lazy import del router de WhatsApp."""
     from .webhook_handler import router
+    return router
+
+
+def get_outbound_panel_router():
+    """Lazy import del router del Panel de Envío para asesores."""
+    from .outbound_panel import router
     return router
 
 
@@ -52,4 +70,5 @@ __all__ = [
     "get_contact_info",
     "get_sofia_brain",
     "get_whatsapp_router",
+    "get_outbound_panel_router",
 ]

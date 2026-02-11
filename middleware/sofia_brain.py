@@ -5,13 +5,16 @@ Cerebro de Sofía - Motor de IA con Memoria.
 - LangChain para orquestación
 - LLM de OpenAI gpt-4o-mini
 - Redis para memoria de conversación (últimos 10-15 mensajes)
+- respuesta + análisis en 1 llamada LLM
 
 Sofía NO puede "olvidar" lo que se dijo hace 2 minutos.
 La memoria persiste en Redis con TTL de 24 horas.
 """
 
 import os
+import json
 from typing import Optional, Dict, Any
+from dataclasses import dataclass, field, asdict
 
 from langchain_openai import ChatOpenAI
 from langchain_community.chat_message_histories import RedisChatMessageHistory
@@ -22,9 +25,53 @@ from langchain_core.messages import HumanMessage, AIMessage
 from logging_config import logger
 from prompts.middleware_prompts import (
     SOFIA_MIDDLEWARE_SYSTEM_PROMPT,
+    SOFIA_SINGLE_STREAM_SYSTEM_PROMPT,
     HANDOFF_KEYWORDS,
     MIDDLEWARE_MESSAGES,
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ESTRUCTURAS DE DATOS PARA ANÁLISIS SINGLE-STREAM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class MessageAnalysis:
+    """Análisis del mensaje del cliente."""
+    emocion: str = "neutral"
+    sentiment_score: int = 5
+    intencion_visita: bool = False
+    pregunta_tecnica: bool = False
+    handoff_priority: str = "none"
+    summary_update: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MessageAnalysis":
+        return cls(
+            emocion=data.get("emocion", "neutral"),
+            sentiment_score=data.get("sentiment_score", 5),
+            intencion_visita=data.get("intencion_visita", False),
+            pregunta_tecnica=data.get("pregunta_tecnica", False),
+            handoff_priority=data.get("handoff_priority", "none"),
+            summary_update=data.get("summary_update")
+        )
+
+
+@dataclass
+class SingleStreamResponse:
+    """Respuesta completa del procesamiento Single-Stream."""
+    respuesta: str
+    analisis: MessageAnalysis
+    raw_json: Optional[Dict] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "respuesta": self.respuesta,
+            "analisis": self.analisis.to_dict(),
+        }
 
 
 class SofiaBrain:
@@ -36,6 +83,7 @@ class SofiaBrain:
     - Usa OpenAI gpt-4o-mini
     - Integración con perfil de HubSpot para contexto adicional
     - TTL de 24 horas en Redis
+    - respuesta + análisis en 1 llamada LLM
     """
 
     # Número máximo de mensajes a mantener en memoria
@@ -50,6 +98,7 @@ class SofiaBrain:
         openai_api_key: Optional[str] = None,
         model: str = "gpt-4o-mini",
         temperature: float = 0.3,
+        use_single_stream: bool = True,
     ):
         """
         Inicializa el cerebro de Sofía.
@@ -59,8 +108,10 @@ class SofiaBrain:
             openai_api_key: API key de OpenAI (opcional, usa env var)
             model: Modelo de OpenAI a usar (default: gpt-4o-mini)
             temperature: Temperatura del modelo (default: 0.3)
+            use_single_stream: Usar procesamiento Single-Stream (default: True)
         """
         self.redis_url = redis_url
+        self.use_single_stream = use_single_stream
 
         # Inicializar LLM
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -70,12 +121,15 @@ class SofiaBrain:
         self.llm = ChatOpenAI(
             model=model,
             temperature=temperature,
-            max_tokens=500,
+            max_tokens=800,  # Aumentado para incluir JSON de análisis
         )
 
         # Configurar prompt usando el prompt centralizado
+        # Usar Single-Stream si está habilitado
+        system_prompt = SOFIA_SINGLE_STREAM_SYSTEM_PROMPT if use_single_stream else SOFIA_MIDDLEWARE_SYSTEM_PROMPT
+
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", SOFIA_MIDDLEWARE_SYSTEM_PROMPT),
+            ("system", system_prompt),
             MessagesPlaceholder(variable_name="history"),
             ("human", "{input}"),
         ])
@@ -83,7 +137,8 @@ class SofiaBrain:
         # Crear cadena base
         self.chain = self.prompt | self.llm
 
-        logger.info(f"[SofiaBrain] Inicializado con OpenAI {model}")
+        mode = "Single-Stream" if use_single_stream else "Legacy"
+        logger.info(f"[SofiaBrain] Inicializado con OpenAI {model} (modo: {mode})")
 
     def _get_message_history(self, session_id: str) -> RedisChatMessageHistory:
         """
@@ -112,6 +167,8 @@ class SofiaBrain:
         Procesa un mensaje del usuario y genera respuesta.
 
         Este es el método principal del cerebro de Sofía.
+        Si use_single_stream está habilitado, usa internamente process_message_with_analysis
+        y retorna solo la respuesta.
 
         Args:
             session_id: ID de sesión (número normalizado, ej: "+573001234567")
@@ -121,7 +178,36 @@ class SofiaBrain:
         Returns:
             Respuesta generada por Sofía
         """
-        logger.info(f"[SofiaBrain] Procesando mensaje de {session_id}")
+        if self.use_single_stream:
+            # Usar Single-Stream y extraer solo la respuesta
+            result = await self.process_message_with_analysis(
+                session_id=session_id,
+                user_message=user_message,
+                lead_context=lead_context
+            )
+            return result.respuesta
+
+        # Modo legacy: proceso original sin análisis
+        return await self._process_message_legacy(session_id, user_message, lead_context)
+
+    async def _process_message_legacy(
+        self,
+        session_id: str,
+        user_message: str,
+        lead_context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Procesa mensaje en modo legacy (sin análisis).
+
+        Args:
+            session_id: ID de sesión
+            user_message: Mensaje del usuario
+            lead_context: Contexto adicional
+
+        Returns:
+            Respuesta generada por Sofía
+        """
+        logger.info(f"[SofiaBrain] Procesando mensaje de {session_id} (modo legacy)")
 
         # Crear runnable con historial
         with_message_history = RunnableWithMessageHistory(
@@ -162,6 +248,132 @@ class SofiaBrain:
         except Exception as e:
             logger.error(f"[SofiaBrain] Error procesando mensaje: {e}", exc_info=True)
             return MIDDLEWARE_MESSAGES["error_processing"]
+
+    async def process_message_with_analysis(
+        self,
+        session_id: str,
+        user_message: str,
+        lead_context: Optional[Dict[str, Any]] = None
+    ) -> SingleStreamResponse:
+        """
+        Procesa un mensaje y retorna respuesta + análisis en una sola llamada LLM.
+
+        Este método implementa Single-Stream Processing:
+        - Una sola llamada al LLM
+        - Respuesta natural para el cliente
+        - Análisis de emoción, intención, prioridad de handoff
+        - Actualización de resumen del cliente
+
+        Args:
+            session_id: ID de sesión (número normalizado)
+            user_message: Mensaje del usuario
+            lead_context: Contexto adicional del lead desde HubSpot
+
+        Returns:
+            SingleStreamResponse con respuesta y análisis completo
+        """
+        logger.info(f"[SofiaBrain] Procesando mensaje Single-Stream de {session_id}")
+
+        # Crear runnable con historial
+        with_message_history = RunnableWithMessageHistory(
+            self.chain,
+            self._get_message_history,
+            input_messages_key="input",
+            history_messages_key="history",
+        )
+
+        # Preparar input
+        input_data = {"input": user_message}
+
+        # Agregar contexto del lead si existe
+        if lead_context:
+            context_str = self._format_lead_context(lead_context)
+            input_data["input"] = f"{context_str}\n\nMensaje del cliente: {user_message}"
+
+        # Configuración de sesión
+        config = {"configurable": {"session_id": session_id}}
+
+        try:
+            # Invocar cadena
+            response = with_message_history.invoke(input_data, config=config)
+
+            # Extraer contenido de la respuesta
+            if hasattr(response, "content"):
+                raw_content = response.content
+            else:
+                raw_content = str(response)
+
+            # Parsear JSON de la respuesta
+            parsed = self._parse_single_stream_response(raw_content)
+
+            logger.info(
+                f"[SofiaBrain] Single-Stream completado para {session_id} | "
+                f"Emoción: {parsed.analisis.emocion}, "
+                f"Score: {parsed.analisis.sentiment_score}, "
+                f"Handoff: {parsed.analisis.handoff_priority}"
+            )
+
+            # Truncar historial si excede el máximo
+            await self._trim_history(session_id)
+
+            return parsed
+
+        except Exception as e:
+            logger.error(f"[SofiaBrain] Error en Single-Stream: {e}", exc_info=True)
+            # Retornar respuesta de error con análisis por defecto
+            return SingleStreamResponse(
+                respuesta=MIDDLEWARE_MESSAGES["error_processing"],
+                analisis=MessageAnalysis()
+            )
+
+    def _parse_single_stream_response(self, raw_content: str) -> SingleStreamResponse:
+        """
+        Parsea la respuesta JSON del LLM Single-Stream.
+
+        Args:
+            raw_content: Contenido crudo de la respuesta del LLM
+
+        Returns:
+            SingleStreamResponse parseado
+        """
+        try:
+            # Intentar parsear como JSON directo
+            # El LLM puede envolver en ```json``` o no
+            content = raw_content.strip()
+
+            # Remover bloques de código markdown si existen
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+
+            content = content.strip()
+
+            # Parsear JSON
+            data = json.loads(content)
+
+            # Extraer respuesta y análisis
+            respuesta = data.get("respuesta", "")
+            analisis_data = data.get("analisis", {})
+
+            return SingleStreamResponse(
+                respuesta=respuesta,
+                analisis=MessageAnalysis.from_dict(analisis_data),
+                raw_json=data
+            )
+
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"[SofiaBrain] Error parseando JSON Single-Stream: {e}. "
+                f"Usando respuesta raw."
+            )
+            # Si falla el parseo, usar el contenido como respuesta simple
+            return SingleStreamResponse(
+                respuesta=raw_content,
+                analisis=MessageAnalysis()
+            )
 
     def _format_lead_context(self, lead_context: Dict[str, Any]) -> str:
         """

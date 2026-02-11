@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Importar el router del middleware inteligente (lazy import)
-from middleware import get_whatsapp_router
+from middleware import get_whatsapp_router, get_outbound_panel_router
 
 # Importar el router de webhooks de salida HubSpot -> WhatsApp
 from integrations.hubspot import get_outbound_router
@@ -52,6 +52,11 @@ app.include_router(get_whatsapp_router())
 # Router para webhooks de salida: HubSpot Inbox -> WhatsApp
 # Endpoints: /hubspot/outbound, /hubspot/thread-mapping
 app.include_router(get_outbound_router())
+
+# ===== PANEL DE ENVÍO PARA ASESORES (Fase 3.2) =====
+# UI y API para que asesores envíen mensajes directamente por WhatsApp
+# Endpoints: /whatsapp/panel/, /whatsapp/panel/send-message, etc.
+app.include_router(get_outbound_panel_router())
 
 # ===== 2. STARTUP EVENT (CRÍTICO PARA RAG) =====
 @app.get("/")
@@ -776,5 +781,6 @@ async def get_orphan_leads(x_api_key: str = Header(None, alias="X-API-Key")):
 # ===== 6. ENTRYPOINT =====
 if __name__ == "__main__":
     # Railway inyecta la variable PORT automáticamente
-    port = int(os.getenv("PORT", "8000"))
+    # Default cambiado a 8001 para evitar conflictos con otros proyectos locales
+    port = int(os.getenv("PORT", "8001"))
     uvicorn.run(app, host="0.0.0.0", port=port)

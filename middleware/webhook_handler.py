@@ -29,6 +29,9 @@ from .sofia_brain import SofiaBrain
 # Importaciones para integración con HubSpot Timeline
 from integrations.hubspot import get_timeline_logger
 
+# Importación para actualizar ventana de 24h
+from .outbound_panel import update_last_client_message
+
 
 # Router de FastAPI para el middleware
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Middleware"])
@@ -126,6 +129,12 @@ async def whatsapp_webhook(
 
         phone_normalized = validation.normalized
         logger.info(f"[Webhook] Número normalizado: {From} → {phone_normalized}")
+
+        # ════════════════════════════════════════════════════════════
+        # Actualizar timestamp de último mensaje del cliente
+        # ════════════════════════════════════════════════════════════
+        # Necesario para calcular la ventana de 24 horas de WhatsApp
+        background_tasks.add_task(update_last_client_message, phone_normalized)
 
         # ════════════════════════════════════════════════════════════
         # PASO 2: Consultar estado de la conversación
@@ -227,38 +236,71 @@ async def whatsapp_webhook(
                     return Response(content="", media_type="text/xml")
 
             # ════════════════════════════════════════════════════════════
-            # PASO 4.2: Sofía está activa - Procesar mensaje
+            # PASO 4.2: Sofía está activa - Procesar mensaje con Single-Stream
             # ════════════════════════════════════════════════════════════
-            logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje")
+            logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje (Single-Stream)")
 
             sofia = get_sofia_brain()
 
-            # Detectar intención de handoff
-            if sofia.detect_handoff_intent(Body):
-                logger.info(f"[Webhook] Detectada intención de handoff")
-                await state_manager.request_handoff(
-                    phone_normalized,
-                    reason="Cliente solicitó hablar con asesor"
-                )
-
-            # Procesar mensaje con Sofía
-            response_text = await sofia.process_message(
+            # Procesar mensaje con análisis integrado (Single-Stream)
+            result = await sofia.process_message_with_analysis(
                 session_id=phone_normalized,
                 user_message=Body,
                 lead_context=None  # TODO: Obtener de HubSpot si es necesario
             )
 
+            response_text = result.respuesta
+            analysis = result.analisis
+
+            # ════════════════════════════════════════════════════════════
+            # PASO 4.3: Actuar según el análisis
+            # ════════════════════════════════════════════════════════════
+
+            # Handoff inmediato si cliente enojado o lo solicita explícitamente
+            if analysis.handoff_priority == "immediate":
+                logger.info(
+                    f"[Webhook] Handoff INMEDIATO detectado: "
+                    f"emoción={analysis.emocion}, score={analysis.sentiment_score}"
+                )
+                await state_manager.request_handoff(
+                    phone_normalized,
+                    reason=f"Handoff automático: {analysis.emocion} (score: {analysis.sentiment_score})"
+                )
+
+            # Handoff alto - cliente listo para avanzar
+            elif analysis.handoff_priority == "high":
+                logger.info(
+                    f"[Webhook] Handoff HIGH detectado: intención_visita={analysis.intencion_visita}"
+                )
+                # No cambiar estado, pero registrar para notificar al asesor
+                if contact_info:
+                    background_tasks.add_task(
+                        _notify_high_priority_lead,
+                        contact_info.contact_id,
+                        phone_normalized,
+                        analysis
+                    )
+
+            # Fallback: Detectar intención de handoff por keywords (compatibilidad)
+            elif sofia.detect_handoff_intent(Body):
+                logger.info(f"[Webhook] Detectada intención de handoff por keywords")
+                await state_manager.request_handoff(
+                    phone_normalized,
+                    reason="Cliente solicitó hablar con asesor"
+                )
+
             # Actualizar actividad
             await state_manager.update_activity(phone_normalized)
 
-            # Sincronizar con HubSpot en background
+            # Sincronizar con HubSpot en background (incluye análisis)
             if contact_info:
                 background_tasks.add_task(
-                    _sync_conversation_to_hubspot,
+                    _sync_conversation_with_analysis_to_hubspot,
                     contact_info.contact_id,
                     Body,
                     response_text,
-                    phone_normalized
+                    phone_normalized,
+                    analysis
                 )
 
             return _create_twiml_response(response_text)
@@ -425,6 +467,120 @@ async def _sync_conversation_to_hubspot(
 
     except Exception as e:
         logger.error(f"[HubSpot Sync] Error sincronizando conversación: {e}")
+
+
+async def _sync_conversation_with_analysis_to_hubspot(
+    contact_id: str,
+    user_message: str,
+    bot_response: str,
+    phone: str,
+    analysis
+) -> None:
+    """
+    Sincroniza una interacción completa con análisis a HubSpot Timeline.
+
+    Incluye el análisis de sentimiento y actualiza propiedades adicionales
+    basadas en la información extraída del análisis Single-Stream.
+
+    Args:
+        contact_id: ID del contacto en HubSpot
+        user_message: Mensaje del usuario
+        bot_response: Respuesta de Sofía
+        phone: Número normalizado
+        analysis: MessageAnalysis con el análisis del mensaje
+    """
+    try:
+        timeline_logger = get_timeline_logger()
+
+        # 1. Registrar mensaje del cliente en Timeline
+        await timeline_logger.log_client_message(
+            contact_id=contact_id,
+            content=user_message,
+            session_id=phone
+        )
+
+        # 2. Registrar respuesta de Sofía en Timeline
+        await timeline_logger.log_bot_message(
+            contact_id=contact_id,
+            content=bot_response,
+            session_id=phone
+        )
+
+        # 3. Actualizar propiedades del contacto con análisis
+        contact_manager = get_contact_manager()
+        sofia = get_sofia_brain()
+        summary = await sofia.get_conversation_summary(phone)
+
+        properties = {
+            "chatbot_conversation": summary[-3000:],
+            "chatbot_timestamp": datetime.now().isoformat(),
+        }
+
+        # Agregar summary_update si existe nueva información
+        if analysis.summary_update:
+            # Acumular resúmenes en una propiedad (si existe)
+            properties["chatbot_summary"] = analysis.summary_update
+
+        # Registrar score de sentimiento si es bajo (para alertas)
+        if analysis.sentiment_score <= 4:
+            properties["chatbot_sentiment_alert"] = (
+                f"Score: {analysis.sentiment_score}/10 - {analysis.emocion}"
+            )
+
+        await contact_manager.update_contact_info(contact_id, properties)
+
+        logger.debug(
+            f"[HubSpot Sync] Conversación+Análisis sincronizado para {phone} | "
+            f"Emoción: {analysis.emocion}, Score: {analysis.sentiment_score}"
+        )
+
+    except Exception as e:
+        logger.error(f"[HubSpot Sync] Error sincronizando conversación con análisis: {e}")
+
+
+async def _notify_high_priority_lead(
+    contact_id: str,
+    phone: str,
+    analysis
+) -> None:
+    """
+    Notifica sobre un lead de alta prioridad.
+
+    Se llama cuando el análisis detecta handoff_priority="high",
+    por ejemplo cuando el cliente expresa intención de visitar.
+
+    Args:
+        contact_id: ID del contacto en HubSpot
+        phone: Número normalizado
+        analysis: MessageAnalysis con el análisis del mensaje
+    """
+    try:
+        contact_manager = get_contact_manager()
+
+        # Actualizar propiedades para marcar como lead caliente
+        properties = {
+            "chatbot_hot_lead": "true",
+            "chatbot_hot_lead_reason": (
+                f"Intención visita: {analysis.intencion_visita}, "
+                f"Handoff: {analysis.handoff_priority}"
+            ),
+            "chatbot_timestamp": datetime.now().isoformat(),
+        }
+
+        await contact_manager.update_contact_info(contact_id, properties)
+
+        logger.info(
+            f"[Webhook] Lead de alta prioridad marcado: {phone} | "
+            f"Intención visita: {analysis.intencion_visita}"
+        )
+
+        # TODO: Enviar notificación a webhook de Slack/Teams si está configurado
+        # webhook_url = os.getenv("HOT_LEAD_WEBHOOK_URL")
+        # if webhook_url:
+        #     await _send_hot_lead_notification(webhook_url, contact_id, phone, analysis)
+
+    except Exception as e:
+        logger.error(f"[Webhook] Error notificando lead de alta prioridad: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════

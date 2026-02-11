@@ -26,6 +26,7 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 gunicorn>=21.2.0
 python-multipart>=0.0.6  # Requerido para Form() data de Twilio
+twilio>=9.0.0  # Cliente WhatsApp/SMS
 
 
 # Redis (para persistencia de estado)

@@ -12,6 +12,10 @@ from integrations.hubspot.hubspot_utils import (
     split_full_name,
     format_conversation_history
 )
+from integrations.hubspot.pipeline_router import (
+    get_target_pipeline,
+    get_analytics_source,
+)
 from prompts.crm_prompts import (
     CRM_SYSTEM_PROMPT,
     CRM_CONFIRMATION_TEMPLATE,
@@ -456,12 +460,16 @@ EJEMPLO DE TONO:
             # Preparar metadata de propiedad
             metadata = state.lead_data.get('metadata', {})
 
-            # Calcular score de calidad del lead
+            # Calcular score de calidad del lead (incluye bonus por canal y código)
             score_data = {
                 "firstname": name_parts["firstname"],
                 "lastname": name_parts["lastname"],
                 "phone": normalized_phone,
-                "metadata": metadata
+                "metadata": metadata,
+                "canal_origen": channel_origin,
+                "property_code": state.metadata.get("property_code"),
+                "llegada_por_link": state.metadata.get("llegada_por_link", False),
+                "es_inmueble": state.metadata.get("es_inmueble", False),
             }
             lead_score = calculate_lead_score(score_data)
 
@@ -492,7 +500,13 @@ EJEMPLO DE TONO:
                 channel_origin = state.metadata["canal_origen"]
             else:
                 channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
+
+            # Obtener pipeline y stage basado en canal de origen
+            pipeline_config = get_target_pipeline(channel_origin)
+            analytics_source = get_analytics_source(channel_origin)
+
             owner_id = self.assigner.get_next_owner(channel_origin)
+            logger.info(f"[CRMAgent] Canal: {channel_origin}, Pipeline: {'Redes Sociales' if pipeline_config.get('is_social_media') else 'General'}")
 
             # PROPIEDADES DEL CONTACTO
             # Normalizar presupuesto a número para HubSpot (chatbot_budget es INTEGER)
@@ -517,7 +531,8 @@ EJEMPLO DE TONO:
                 "chatbot_conversation": conversation_text,
                 "chatbot_score": str(lead_score),
                 "chatbot_timestamp": timestamp_ms,
-                "canal_origen": channel_origin  # Canal de origen para workflows y reportes
+                "canal_origen": channel_origin,  # Canal de origen para workflows y reportes
+                "hs_analytics_source": analytics_source,  # Categoría macro para gráficos de HubSpot
             }
 
             # Agregar email si fue proporcionado
@@ -570,7 +585,13 @@ EJEMPLO DE TONO:
             if owner_id:
                 deal_properties["hubspot_owner_id"] = owner_id
 
-            deal_id = await self.hubspot.create_deal(contact_id, deal_properties)
+            # Crear deal con el pipeline correspondiente al canal de origen
+            deal_id = await self.hubspot.create_deal(
+                contact_id,
+                deal_properties,
+                pipeline_id=pipeline_config.get("pipeline_id"),
+                dealstage=pipeline_config.get("stage_id")
+            )
             logger.info(f"[CRMAgent] Deal creado exitosamente: {deal_id}")
 
             # ALERTAS PARA LEADS HUÉRFANOS

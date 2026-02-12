@@ -32,6 +32,9 @@ from integrations.hubspot import get_timeline_logger
 # Importación para actualizar ventana de 24h
 from .outbound_panel import update_last_client_message
 
+# Detector de códigos de inmuebles
+from utils.property_code_detector import detect_property_code
+
 
 # Router de FastAPI para el middleware
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Middleware"])
@@ -236,24 +239,51 @@ async def whatsapp_webhook(
                     return Response(content="", media_type="text/xml")
 
             # ════════════════════════════════════════════════════════════
-            # PASO 4.2: Sofía está activa - Procesar mensaje con Single-Stream
+            # PASO 4.2: Detectar código de inmueble (alta prioridad)
+            # ════════════════════════════════════════════════════════════
+            property_code_result = detect_property_code(Body)
+            property_code_detected = property_code_result.has_code
+
+            if property_code_detected:
+                logger.info(
+                    f"[Webhook] CÓDIGO DE INMUEBLE DETECTADO: {property_code_result.code} "
+                    f"(contexto: {property_code_result.context})"
+                )
+
+            # ════════════════════════════════════════════════════════════
+            # PASO 4.3: Sofía está activa - Procesar mensaje con Single-Stream
             # ════════════════════════════════════════════════════════════
             logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje (Single-Stream)")
 
             sofia = get_sofia_brain()
 
+            # Construir contexto adicional si hay código detectado
+            lead_context = None
+            if property_code_detected:
+                lead_context = {
+                    "property_code": property_code_result.code,
+                    "high_intent": True,
+                    "code_context": property_code_result.context
+                }
+
             # Procesar mensaje con análisis integrado (Single-Stream)
             result = await sofia.process_message_with_analysis(
                 session_id=phone_normalized,
                 user_message=Body,
-                lead_context=None  # TODO: Obtener de HubSpot si es necesario
+                lead_context=lead_context
             )
 
             response_text = result.respuesta
             analysis = result.analisis
 
+            # Si se detectó código de inmueble, forzar handoff high
+            if property_code_detected and analysis.handoff_priority not in ["immediate", "high"]:
+                logger.info("[Webhook] Elevando prioridad de handoff por código de inmueble detectado")
+                analysis.handoff_priority = "high"
+                analysis.intencion_visita = True
+
             # ════════════════════════════════════════════════════════════
-            # PASO 4.3: Actuar según el análisis
+            # PASO 4.4: Actuar según el análisis
             # ════════════════════════════════════════════════════════════
 
             # Handoff inmediato si cliente enojado o lo solicita explícitamente

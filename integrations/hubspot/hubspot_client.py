@@ -157,15 +157,21 @@ class HubSpotClient:
         await self._request("PATCH", endpoint, {"properties": properties})
         logger.info(f"[HubSpotClient] Contacto actualizado: {contact_id}")
 
-    async def create_deal(self, contact_id: str, properties: Dict[str, Any]) -> str:
+    async def create_deal(
+        self,
+        contact_id: str,
+        properties: Dict[str, Any],
+        pipeline_id: Optional[str] = None,
+        dealstage: Optional[str] = None
+    ) -> str:
         """
         Crea un Deal (oportunidad) y lo asocia automáticamente al contacto.
         """
         endpoint = "/crm/v3/objects/deals"
 
-        # Agregar campos obligatorios del pipeline
-        properties["pipeline"] = self.pipeline_id
-        properties["dealstage"] = self.deal_stage
+        # Agregar campos obligatorios del pipeline (usar parámetros o defaults)
+        properties["pipeline"] = pipeline_id or self.pipeline_id
+        properties["dealstage"] = dealstage or self.deal_stage
 
         payload = {
             "properties": properties,

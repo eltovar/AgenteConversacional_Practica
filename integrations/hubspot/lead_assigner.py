@@ -29,24 +29,31 @@ class LeadAssigner:
     # IDs de owners de HubSpot (obtener de Settings > Users & Teams)
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
     #
-    # CONFIGURACIÓN ACTUALIZADA:
-    # - Trabajador1 "Salo Tovar (admin)" (ID: 86909130): Facebook, Mercado Libre, Ciencuadras, Metrocuadrado
-    # - Trabajador2 "Sin nombre" (ID: 87367331): WhatsApp, Finca Raíz, Página Web, Instagram
+    # CONFIGURACIÓN POR EQUIPOS:
+    # - equipo_redes_sociales: Instagram, Facebook, LinkedIn, YouTube, TikTok
+    # - equipo_portales: Finca Raíz, Metrocuadrado, Mercado Libre, Ciencuadras
+    # - equipo_directo: WhatsApp directo, Página Web
     OWNERS_CONFIG = {
-        # Equipo para Trabajador 1 (Salo Tovar - Admin)
-        "equipo_trabajador1": [
+        # Equipo dedicado a Redes Sociales
+        "equipo_redes_sociales": [
+            {"name": "Hector Guerra", "id": "86997110", "active": True},
+        ],
+
+        # Equipo para Portales Inmobiliarios
+        "equipo_portales": [
             {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
         ],
 
-        # Equipo para Trabajador 2 (Sin nombre)
-        "equipo_trabajador2": [
+        # Equipo para WhatsApp Directo y Página Web
+        "equipo_directo": [
             {"name": "Sin nombre", "id": "87367331", "active": True},
         ],
 
-        # Equipo default (fallback - ambos trabajadores en round robin)
+        # Equipo default (fallback - todos los trabajadores en round robin)
         "default": [
             {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
             {"name": "Sin nombre", "id": "87367331", "active": True},
+            {"name": "Hector Guerra", "id": "86997110", "active": True},
         ],
     }
 
@@ -54,17 +61,22 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        # === TRABAJADOR 2 ===
-        "whatsapp_directo": "equipo_trabajador2",
-        "finca_raiz": "equipo_trabajador2",
-        "pagina_web": "equipo_trabajador2",
-        "instagram": "equipo_trabajador2",
+        # === REDES SOCIALES (equipo dedicado) ===
+        "instagram": "equipo_redes_sociales",
+        "facebook": "equipo_redes_sociales",
+        "linkedin": "equipo_redes_sociales",
+        "youtube": "equipo_redes_sociales",
+        "tiktok": "equipo_redes_sociales",
 
-        # === TRABAJADOR 1 ===
-        "facebook": "equipo_trabajador1",
-        "mercado_libre": "equipo_trabajador1",
-        "ciencuadras": "equipo_trabajador1",
-        "metrocuadrado": "equipo_trabajador1",
+        # === PORTALES INMOBILIARIOS ===
+        "finca_raiz": "equipo_portales",
+        "metrocuadrado": "equipo_portales",
+        "mercado_libre": "equipo_portales",
+        "ciencuadras": "equipo_portales",
+
+        # === DIRECTO ===
+        "whatsapp_directo": "equipo_directo",
+        "pagina_web": "equipo_directo",
 
         # === FALLBACK ===
         "desconocido": "default",

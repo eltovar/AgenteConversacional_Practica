@@ -8,7 +8,6 @@ import re
 from typing import Dict, Any, Optional
 from logging_config import logger
 
-
 def normalize_phone_e164(phone: str) -> str:
     """
     Normaliza el teléfono para que sea el ID único en HubSpot.

@@ -43,8 +43,8 @@ class PropertyCodeDetector:
         (r'\bpropiedad\s*[:#]?\s*(\d{4,6})\b', 'propiedad'),
         (r'\bn[uú]mero\s*[:#]?\s*(\d{4,6})\b', 'número'),
         (r'\bid\s*[:#]?\s*(\d{4,6})\b', 'id'),
-        # Con hashtag
-        (r'\b#(\d{4,6})\b', 'hashtag'),
+        # Con hashtag (sin \b inicial porque # no es alfanumérico)
+        (r'(?:^|\s)#(\d{4,6})(?:\s|$)', 'hashtag'),
         # Con "el" + número (en contexto de conversación inmobiliaria)
         (r'\bel\s+(\d{4,6})\b', 'referencia directa'),
         # Número aislado después de palabras de interés

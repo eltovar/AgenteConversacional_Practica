@@ -35,6 +35,13 @@ from .outbound_panel import update_last_client_message
 # Detector de códigos de inmuebles
 from utils.property_code_detector import detect_property_code
 
+# Módulo de horarios laborales
+from utils.business_hours import (
+    is_business_hours,
+    get_out_of_hours_message,
+    should_add_out_of_hours_message
+)
+
 
 # Router de FastAPI para el middleware
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Middleware"])
@@ -321,6 +328,19 @@ async def whatsapp_webhook(
 
             # Actualizar actividad
             await state_manager.update_activity(phone_normalized)
+
+            # ════════════════════════════════════════════════════════════
+            # PASO 4.5: Verificar horario laboral para handoff
+            # ════════════════════════════════════════════════════════════
+            # Si el cliente quiere asesor y estamos fuera de horario,
+            # agregar mensaje tranquilizador (no cerramos la puerta)
+            if should_add_out_of_hours_message(analysis.handoff_priority):
+                out_of_hours_msg = get_out_of_hours_message()
+                response_text = f"{response_text}\n\n{out_of_hours_msg}"
+                logger.info(
+                    f"[Webhook] Mensaje de fuera de horario agregado para "
+                    f"handoff {analysis.handoff_priority}"
+                )
 
             # Sincronizar con HubSpot en background (incluye análisis)
             if contact_info:

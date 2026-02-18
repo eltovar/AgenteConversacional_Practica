@@ -44,6 +44,8 @@ class ConversationMeta:
     last_human_message: Optional[str] = None
     handoff_reason: Optional[str] = None
     assigned_owner_id: Optional[str] = None
+    canal_origen: Optional[str] = None  # Canal de origen del lead (para filtro por asesora)
+    display_name: Optional[str] = None  # Nombre para mostrar en el panel
     message_count: int = 0
     created_at: Optional[str] = None
 
@@ -255,7 +257,10 @@ class ConversationStateManager:
     async def request_handoff(
         self,
         phone_normalized: str,
-        reason: str = "Solicitud del cliente"
+        reason: str = "Solicitud del cliente",
+        contact_id: Optional[str] = None,
+        canal_origen: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Solicita transferencia a un humano.
@@ -263,6 +268,9 @@ class ConversationStateManager:
         Args:
             phone_normalized: Número en formato E.164
             reason: Razón del handoff
+            contact_id: ID del contacto en HubSpot (opcional)
+            canal_origen: Canal de origen del lead (opcional, para filtro por asesora)
+            display_name: Nombre para mostrar en el panel (opcional)
         """
         # Actualizar estado
         await self.set_status(phone_normalized, ConversationStatus.PENDING_HANDOFF)
@@ -275,6 +283,14 @@ class ConversationStateManager:
         meta.handoff_reason = reason
         meta.last_activity = datetime.now().isoformat()
 
+        # Nuevos campos para filtrado por asesora
+        if contact_id:
+            meta.contact_id = contact_id
+        if canal_origen:
+            meta.canal_origen = canal_origen
+        if display_name:
+            meta.display_name = display_name
+
         await self.set_meta(phone_normalized, meta)
 
         logger.info(
@@ -285,7 +301,10 @@ class ConversationStateManager:
         self,
         phone_normalized: str,
         owner_id: Optional[str] = None,
-        reason: Optional[str] = None
+        reason: Optional[str] = None,
+        contact_id: Optional[str] = None,
+        canal_origen: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> None:
         """
         Activa modo humano (asesor toma el control).
@@ -297,6 +316,9 @@ class ConversationStateManager:
             phone_normalized: Número en formato E.164
             owner_id: ID del asesor en HubSpot (opcional)
             reason: Razón de la activación (opcional)
+            contact_id: ID del contacto en HubSpot (opcional)
+            canal_origen: Canal de origen del lead (opcional, para filtro por asesora)
+            display_name: Nombre para mostrar en el panel (opcional)
         """
         # Guardar estado con TTL de 2 horas
         await self.set_status(
@@ -316,6 +338,14 @@ class ConversationStateManager:
         meta.assigned_owner_id = owner_id
         meta.handoff_reason = reason
         meta.last_activity = now.isoformat()
+
+        # Nuevos campos para filtrado por asesora
+        if contact_id:
+            meta.contact_id = contact_id
+        if canal_origen:
+            meta.canal_origen = canal_origen
+        if display_name:
+            meta.display_name = display_name
 
         # Guardar metadata con mismo TTL
         await self.set_meta(phone_normalized, meta, ttl=self.HANDOFF_TTL_SECONDS)
@@ -479,8 +509,13 @@ class ConversationStateManager:
                 status = await r.get(key)
                 logger.debug(f"[ConversationState] Key: {key} -> Status: {status}")
 
-                if status == ConversationStatus.HUMAN_ACTIVE.value:
-                    logger.info(f"[ConversationState] ✅ Encontrado HUMAN_ACTIVE: {key}")
+                # Incluir tanto HUMAN_ACTIVE como PENDING_HANDOFF (ambos esperan atención)
+                is_human_active = status == ConversationStatus.HUMAN_ACTIVE.value
+                is_pending_handoff = status == ConversationStatus.PENDING_HANDOFF.value
+
+                if is_human_active or is_pending_handoff:
+                    status_label = "HUMAN_ACTIVE" if is_human_active else "PENDING_HANDOFF"
+                    logger.info(f"[ConversationState] ✅ Encontrado {status_label}: {key}")
                     # Extraer teléfono del key
                     phone = key.replace(self.STATE_PREFIX, "")
 
@@ -493,12 +528,15 @@ class ConversationStateManager:
                     contact_info = {
                         "phone": phone,
                         "contact_id": meta.contact_id if meta else None,
-                        "status": "HUMAN_ACTIVE",
-                        "display_name": None,  # Se enriquece después con HubSpot
+                        "status": status_label,
+                        "display_name": meta.display_name if meta else None,  # Se enriquece después con HubSpot
                         "handoff_reason": meta.handoff_reason if meta else None,
                         "activated_at": meta.last_activity if meta else None,
                         "ttl_remaining": ttl if ttl > 0 else None,
-                        "is_active": True  # Flag para priorizar en UI
+                        "is_active": True,  # Flag para priorizar en UI
+                        # Campos para filtrado por asesora
+                        "owner_id": meta.assigned_owner_id if meta else None,
+                        "canal_origen": meta.canal_origen if meta else None,
                     }
 
                     contacts.append(contact_info)

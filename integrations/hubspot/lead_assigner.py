@@ -29,31 +29,33 @@ class LeadAssigner:
     # IDs de owners de HubSpot (obtener de Settings > Users & Teams)
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
     #
-    # CONFIGURACIÓN POR EQUIPOS:
-    # - equipo_redes_sociales: Instagram, Facebook, LinkedIn, YouTube, TikTok
-    # - equipo_portales: Finca Raíz, Metrocuadrado, Mercado Libre, Ciencuadras
-    # - equipo_directo: WhatsApp directo, Página Web
+    # CONFIGURACIÓN POR ASESORAS:
+    # - Luisa (87367331): metrocuadrado, finca_raiz, mercado_libre
+    # - Yubeny (88251457): pagina_web, whatsapp_directo, facebook, instagram, ciencuadras
+    # - Analista Redes (88558384): Solo métricas, NO responde mensajes
     OWNERS_CONFIG = {
-        # Equipo dedicado a Redes Sociales
-        "equipo_redes_sociales": [
-            {"name": "Hector Guerra", "id": "86997110", "active": True},
+        # === ASESORA LUISA ===
+        # Portales inmobiliarios: MetroCuadrado, Finca Raíz, Mercado Libre
+        "equipo_luisa": [
+            {"name": "Luisa", "id": "87367331", "active": True},
         ],
 
-        # Equipo para Portales Inmobiliarios
-        "equipo_portales": [
-            {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
+        # === ASESORA YUBENY ===
+        # Directo + Redes Sociales: Página Web, WhatsApp, Facebook, Instagram, Ciencuadras
+        "equipo_yubeny": [
+            {"name": "Yubeny", "id": "88251457", "active": True},
         ],
 
-        # Equipo para WhatsApp Directo y Página Web
-        "equipo_directo": [
-            {"name": "Sin nombre", "id": "87367331", "active": True},
+        # === ANALISTA REDES SOCIALES (Solo métricas - NO responde) ===
+        # NOTA: Este ID no se usa para asignación de leads, solo para filtrar métricas
+        "analista_redes": [
+            {"name": "Analista Redes", "id": "88558384", "active": False},  # Inactivo para asignación
         ],
 
-        # Equipo default (fallback - todos los trabajadores en round robin)
+        # Equipo default (fallback - ambas asesoras en round robin)
         "default": [
-            {"name": "Salo Tovar (admin)", "id": "86909130", "active": True},
-            {"name": "Sin nombre", "id": "87367331", "active": True},
-            {"name": "Hector Guerra", "id": "86997110", "active": True},
+            {"name": "Luisa", "id": "87367331", "active": True},
+            {"name": "Yubeny", "id": "88251457", "active": True},
         ],
     }
 
@@ -61,28 +63,46 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        # === REDES SOCIALES (equipo dedicado) ===
-        "instagram": "equipo_redes_sociales",
-        "facebook": "equipo_redes_sociales",
-        "linkedin": "equipo_redes_sociales",
-        "youtube": "equipo_redes_sociales",
-        "tiktok": "equipo_redes_sociales",
+        # === LUISA: Portales Inmobiliarios ===
+        "metrocuadrado": "equipo_luisa",
+        "finca_raiz": "equipo_luisa",
+        "mercado_libre": "equipo_luisa",
 
-        # === PORTALES INMOBILIARIOS ===
-        "finca_raiz": "equipo_portales",
-        "metrocuadrado": "equipo_portales",
-        "mercado_libre": "equipo_portales",
-        "ciencuadras": "equipo_portales",
-
-        # === DIRECTO ===
-        "whatsapp_directo": "equipo_directo",
-        "pagina_web": "equipo_directo",
+        # === YUBENY: Directo + Redes Sociales + Ciencuadras ===
+        "pagina_web": "equipo_yubeny",
+        "whatsapp_directo": "equipo_yubeny",
+        "facebook": "equipo_yubeny",
+        "instagram": "equipo_yubeny",
+        "ciencuadras": "equipo_yubeny",
 
         # === FALLBACK ===
         "desconocido": "default",
         "google_ads": "default",
         "referido": "default",
+        "linkedin": "default",
+        "youtube": "default",
+        "tiktok": "default",
     }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MAPEO DIRECTO CANAL → OWNER ID (para filtro del panel)
+    # ═══════════════════════════════════════════════════════════════════════════
+    CHANNEL_TO_OWNER = {
+        # Luisa (87367331)
+        "metrocuadrado": "87367331",
+        "finca_raiz": "87367331",
+        "mercado_libre": "87367331",
+
+        # Yubeny (88251457)
+        "pagina_web": "88251457",
+        "whatsapp_directo": "88251457",
+        "facebook": "88251457",
+        "instagram": "88251457",
+        "ciencuadras": "88251457",
+    }
+
+    # Canales para métricas de analista de redes sociales
+    SOCIAL_MEDIA_CHANNELS = ["facebook", "instagram", "linkedin", "youtube", "tiktok"]
 
     # Prefijo para claves de Redis
     REDIS_KEY_PREFIX = "lead_assigner"

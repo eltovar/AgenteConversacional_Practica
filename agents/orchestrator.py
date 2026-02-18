@@ -164,4 +164,9 @@ def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg
         state.history.append(f"Agent: {agent_msg}")
 
     state.last_interaction_timestamp = now
-    state_manager.update_state(state)
+
+    try:
+        state_manager.update_state(state)
+        logger.debug(f"[ORCHESTRATOR] Estado guardado exitosamente para {state.session_id}")
+    except Exception as e:
+        logger.error(f"[ORCHESTRATOR] ERROR guardando estado para {state.session_id}: {e}", exc_info=True)

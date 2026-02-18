@@ -83,10 +83,17 @@ class CRMAgent:
                 }
 
             # 3. A partir del segundo turno, intentar extraer nombre
-            extracted_name = self._extract_name_from_message(user_input, state)
-            if extracted_name:
-                state.lead_data['name'] = extracted_name
-                logger.info(f"[CRMAgent] Nombre detectado: {extracted_name}")
+            # IMPORTANTE: Solo extraer si NO tenemos nombre ya registrado
+            existing_name = state.lead_data.get('name')
+            if existing_name and str(existing_name).strip():
+                # Ya tenemos nombre, NO intentar extraer otro
+                logger.debug(f"[CRMAgent] Nombre ya existe: {existing_name}, omitiendo extracción")
+            else:
+                # No tenemos nombre, intentar extraer
+                extracted_name = self._extract_name_from_message(user_input, state)
+                if extracted_name:
+                    state.lead_data['name'] = extracted_name
+                    logger.info(f"[CRMAgent] Nombre detectado: {extracted_name}")
 
             # 4. Verificar si estamos listos para registrar (tenemos nombre)
             lead_name = state.lead_data.get('name')

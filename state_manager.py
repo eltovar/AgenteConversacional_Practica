@@ -138,6 +138,12 @@ class StateManager:
                 # Sesión no existe, crear nuevo estado
                 new_state = ConversationState(session_id=session_id)
                 logger.info(f"[StateManager] Nueva sesión creada: {session_id}")
+
+                # IMPORTANTE: Guardar inmediatamente para evitar pérdida de sesión
+                # Esto previene el bug donde mensajes consecutivos no encuentran la sesión
+                self.update_state(new_state)
+                logger.debug(f"[StateManager] Nueva sesión guardada inmediatamente: {session_id}")
+
                 return new_state
 
         except redis.RedisError as e:
@@ -161,8 +167,13 @@ class StateManager:
             json_data = state.model_dump_json()
 
             # Guardar en Redis con TTL (Time-To-Live)
-            self.client.set(key, json_data, ex=self.session_ttl)
-            logger.debug(f"[StateManager] Estado persistido para session_id={state.session_id} (TTL={self.session_ttl}s)")
+            result = self.client.set(key, json_data, ex=self.session_ttl)
+
+            # Verificar que se guardó correctamente
+            if result:
+                logger.debug(f"[StateManager] Estado persistido para session_id={state.session_id} (TTL={self.session_ttl}s)")
+            else:
+                logger.warning(f"[StateManager] Redis.set retornó False para session_id={state.session_id}")
 
         except redis.RedisError as e:
             logger.error(f"[StateManager] Error de Redis al persistir estado: {e}")
@@ -170,3 +181,11 @@ class StateManager:
         except Exception as e:
             logger.error(f"[StateManager] Error al serializar estado: {e}")
             raise
+
+    def verify_state_exists(self, session_id: str) -> bool:
+        """
+        Verifica si existe una sesión en Redis (para debugging).
+        """
+        self._ensure_redis_initialized()
+        key = f"session:{session_id}"
+        return self.client.exists(key) > 0

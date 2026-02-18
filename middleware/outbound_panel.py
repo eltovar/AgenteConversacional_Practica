@@ -510,6 +510,7 @@ async def get_active_contacts(
     filter_time: str = Query("24h", description="Filtro de tiempo: 24h, 48h, 1week, custom"),
     date_from: Optional[str] = Query(None, description="Fecha desde (ISO) para filtro custom"),
     date_to: Optional[str] = Query(None, description="Fecha hasta (ISO) para filtro custom"),
+    advisor: Optional[str] = Query(None, description="Owner ID para filtrar contactos por asesora"),
     limit: int = Query(30, ge=1, le=100),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -532,6 +533,11 @@ async def get_active_contacts(
     - 48h: Últimas 48 horas
     - 1week: Última semana
     - custom: Usar date_from y date_to
+
+    Filtro por asesora:
+    - advisor: Owner ID de HubSpot para filtrar contactos asignados a esa asesora
+      - Luisa: 87367331 (metrocuadrado, finca_raiz, mercado_libre)
+      - Yubeny: 88251457 (pagina_web, whatsapp_directo, facebook, instagram, ciencuadras)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -655,7 +661,36 @@ async def get_active_contacts(
             if contact_id:
                 seen_contact_ids.add(contact_id)
 
-        # === PASO 6: Ordenar (activos primero) ===
+        # === PASO 6: Filtrar por advisor (owner_id) si se especificó ===
+        if advisor:
+            # Importar mapeo de canales a owners
+            from integrations.hubspot.lead_assigner import LeadAssigner
+
+            # Filtrar contactos que pertenezcan al advisor especificado
+            filtered_contacts = []
+            for contact in active_contacts:
+                # Verificar si el contact tiene owner_id directo
+                contact_owner = contact.get("owner_id") or contact.get("hubspot_owner_id")
+
+                # Si no tiene owner_id, intentar inferir por canal_origen
+                if not contact_owner:
+                    canal = contact.get("canal_origen", "")
+                    contact_owner = LeadAssigner.CHANNEL_TO_OWNER.get(canal)
+
+                # Solo incluir si coincide con el advisor
+                if contact_owner == advisor:
+                    filtered_contacts.append(contact)
+                elif not contact_owner:
+                    # Si no podemos determinar el owner, incluir (para no perder contactos)
+                    # pero marcar como "sin asignar"
+                    contact["owner_status"] = "unassigned"
+                    # No incluir en panel filtrado por advisor
+                    pass
+
+            active_contacts = filtered_contacts
+            logger.info(f"[Panel] Filtrado por advisor {advisor}: {len(active_contacts)} contactos")
+
+        # === PASO 7: Ordenar (activos primero) ===
         contacts_sorted = sorted(
             active_contacts,
             key=lambda x: (
@@ -676,6 +711,7 @@ async def get_active_contacts(
         return {
             "contacts": contacts_sorted[:limit],
             "filter": filter_time,
+            "advisor": advisor,
             "active_count": active_count,
             "historical_count": len(contacts_sorted) - active_count,
             "total_count": len(contacts_sorted),
@@ -822,12 +858,12 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                 <!-- Header -->
                 <div class="bg-green-600 text-white p-4">
                     <div class="flex items-center justify-between">
-                        <h1 class="text-lg font-semibold">Asesores Comerciales</h1>
+                        <h1 id="panelTitle" class="text-lg font-semibold">Asesores Comerciales</h1>
                         <div class="flex items-center gap-2">
                             <span class="pulse text-xs bg-green-500 px-2 py-1 rounded-full">En vivo</span>
                         </div>
                     </div>
-                    <p class="text-sm opacity-90 mt-1">Inmobiliaria Proteger</p>
+                    <p id="panelSubtitle" class="text-sm opacity-90 mt-1">Inmobiliaria Proteger</p>
                 </div>
 
                 <!-- Filtros de tiempo -->
@@ -929,6 +965,19 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             const BASE_URL = '/whatsapp/panel';
             const POLLING_INTERVAL = 5000; // 5 segundos
 
+            // Leer parámetro advisor de la URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const ADVISOR_ID = urlParams.get('advisor');
+
+            // Mapeo de advisor ID a nombre para mostrar en la UI
+            const ADVISOR_NAMES = {{
+                '87367331': 'Luisa',
+                '88251457': 'Yubeny',
+                '88558384': 'Analista Redes'
+            }};
+
+            const ADVISOR_NAME = ADVISOR_ID ? (ADVISOR_NAMES[ADVISOR_ID] || `Asesor ${{ADVISOR_ID}}`) : null;
+
             let currentContactId = null;
             let currentPhone = null;
             let pollingInterval = null;
@@ -940,6 +989,11 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             async function loadContacts() {{
                 const filter = document.getElementById('timeFilter').value;
                 let url = `${{BASE_URL}}/contacts?filter_time=${{filter}}`;
+
+                // Agregar filtro por advisor si está presente en la URL
+                if (ADVISOR_ID) {{
+                    url += `&advisor=${{ADVISOR_ID}}`;
+                }}
 
                 // Agregar fechas si es filtro custom
                 if (filter === 'custom') {{
@@ -1245,6 +1299,12 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             // ═══════════════════════════════════════════════════════════════════
 
             document.addEventListener('DOMContentLoaded', () => {{
+                // Actualizar header si hay advisor filtrado
+                if (ADVISOR_NAME) {{
+                    document.getElementById('panelTitle').textContent = `Panel de ${{ADVISOR_NAME}}`;
+                    document.getElementById('panelSubtitle').textContent = 'Mis contactos asignados';
+                }}
+
                 // Cargar contactos iniciales
                 loadContacts();
 
@@ -1318,3 +1378,419 @@ async def _log_advisor_message_to_hubspot(
 
     except Exception as e:
         logger.error(f"[Panel] Error registrando en HubSpot: {e}")
+
+
+# ============================================================================
+# Dashboard de Métricas para Analista de Redes Sociales (READ-ONLY)
+# ============================================================================
+
+# Canales de redes sociales para métricas
+SOCIAL_MEDIA_CHANNELS = ["facebook", "instagram", "linkedin", "youtube", "tiktok"]
+
+
+@router.get("/metrics")
+async def get_social_media_metrics(
+    days: int = Query(7, ge=1, le=30, description="Días a analizar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Retorna métricas de leads de redes sociales.
+
+    Este endpoint es para el analista de redes sociales que solo necesita
+    ver estadísticas, no enviar mensajes ni ver conversaciones detalladas.
+
+    Métricas incluidas:
+    - Total de leads de redes sociales
+    - Leads por canal (Facebook, Instagram, etc.)
+    - Leads por día
+    - Tasa de conversión a cita (si está disponible)
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        import httpx
+        from collections import defaultdict
+
+        hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+        if not hubspot_api_key:
+            raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+        # Calcular rango de fechas
+        from zoneinfo import ZoneInfo
+        TIMEZONE = ZoneInfo("America/Bogota")
+        now = datetime.now(TIMEZONE)
+        since = now - timedelta(days=days)
+        since_ms = int(since.timestamp() * 1000)
+
+        # Buscar contactos de redes sociales en HubSpot
+        url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+        payload = {
+            "filterGroups": [{
+                "filters": [
+                    {
+                        "propertyName": "canal_origen",
+                        "operator": "IN",
+                        "values": SOCIAL_MEDIA_CHANNELS
+                    },
+                    {
+                        "propertyName": "createdate",
+                        "operator": "GTE",
+                        "value": since_ms
+                    }
+                ]
+            }],
+            "properties": [
+                "createdate",
+                "canal_origen",
+                "firstname",
+                "lastname",
+                "chatbot_score",
+                "lifecyclestage"
+            ],
+            "limit": 100,
+            "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}]
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {hubspot_api_key}"},
+                json=payload,
+                timeout=15.0
+            )
+
+            if response.status_code != 200:
+                logger.warning(f"[Metrics] HubSpot error: {response.status_code}")
+                contacts = []
+            else:
+                data = response.json()
+                contacts = data.get("results", [])
+
+        # Procesar métricas
+        leads_by_channel = defaultdict(int)
+        leads_by_day = defaultdict(int)
+        total_leads = len(contacts)
+
+        for contact in contacts:
+            props = contact.get("properties", {})
+
+            # Por canal
+            canal = props.get("canal_origen", "desconocido")
+            leads_by_channel[canal] += 1
+
+            # Por día
+            createdate = props.get("createdate")
+            if createdate:
+                try:
+                    dt = datetime.fromisoformat(createdate.replace("Z", "+00:00"))
+                    day_key = dt.strftime("%Y-%m-%d")
+                    leads_by_day[day_key] += 1
+                except Exception:
+                    pass
+
+        # Ordenar leads por día
+        leads_by_day_sorted = dict(sorted(leads_by_day.items()))
+
+        return {
+            "period_days": days,
+            "since": since.isoformat(),
+            "until": now.isoformat(),
+            "total_leads": total_leads,
+            "leads_by_channel": dict(leads_by_channel),
+            "leads_by_day": leads_by_day_sorted,
+            "channels_tracked": SOCIAL_MEDIA_CHANNELS
+        }
+
+    except Exception as e:
+        logger.error(f"[Metrics] Error obteniendo métricas: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/metrics/", response_class=HTMLResponse)
+async def metrics_dashboard_ui(x_api_key: str = Query(None, alias="key")):
+    """
+    Dashboard de métricas para analista de redes sociales.
+
+    Acceso: /whatsapp/panel/metrics/?key=TU_API_KEY
+
+    IMPORTANTE: Este dashboard es READ-ONLY.
+    No tiene capacidad de enviar mensajes ni ver conversaciones detalladas.
+    """
+    # Validar API Key via query param para acceso web
+    if not _validate_api_key(x_api_key):
+        return HTMLResponse(
+            content="""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Acceso Denegado</title></head>
+            <body style="font-family: Arial; padding: 50px; text-align: center;">
+                <h1>Acceso Denegado</h1>
+                <p>Se requiere API Key válida.</p>
+                <p>Uso: /whatsapp/panel/metrics/?key=TU_API_KEY</p>
+            </body>
+            </html>
+            """,
+            status_code=401
+        )
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Métricas Redes Sociales - Inmobiliaria Proteger</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            .stat-card {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            }}
+            .stat-card-alt {{
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            }}
+            .stat-card-green {{
+                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            }}
+        </style>
+    </head>
+    <body class="bg-gray-100 min-h-screen">
+        <!-- Header -->
+        <header class="bg-purple-700 text-white p-4 shadow-lg">
+            <div class="container mx-auto">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h1 class="text-2xl font-bold">Dashboard Redes Sociales</h1>
+                        <p class="text-purple-200 text-sm">Inmobiliaria Proteger - Analítica</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <select id="periodSelect" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
+                            <option value="7">Últimos 7 días</option>
+                            <option value="14">Últimos 14 días</option>
+                            <option value="30">Últimos 30 días</option>
+                        </select>
+                        <button id="refreshBtn" class="bg-purple-500 hover:bg-purple-400 px-4 py-2 rounded">
+                            ⟳ Actualizar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="container mx-auto p-6">
+            <!-- Stat Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="stat-card rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Total Leads</p>
+                    <p id="totalLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">Redes sociales</p>
+                </div>
+                <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Instagram</p>
+                    <p id="instagramLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">leads</p>
+                </div>
+                <div class="stat-card-green rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Facebook</p>
+                    <p id="facebookLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">leads</p>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Chart: Leads por Canal -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Leads por Canal</h3>
+                    <canvas id="channelChart"></canvas>
+                </div>
+
+                <!-- Chart: Leads por Día -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia Diaria</h3>
+                    <canvas id="dailyChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Tabla de resumen -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Resumen por Canal</h3>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b">
+                            <th class="text-left py-2 text-gray-600">Canal</th>
+                            <th class="text-right py-2 text-gray-600">Leads</th>
+                            <th class="text-right py-2 text-gray-600">%</th>
+                        </tr>
+                    </thead>
+                    <tbody id="channelTable">
+                        <tr><td colspan="3" class="text-center py-4 text-gray-400">Cargando...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Info box -->
+            <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <p class="text-blue-700 text-sm">
+                    <strong>ℹ️ Nota:</strong> Este dashboard muestra métricas de leads provenientes de
+                    redes sociales (Facebook, Instagram, LinkedIn, YouTube, TikTok).
+                    Para ver conversaciones detalladas o enviar mensajes, contacte a las asesoras.
+                </p>
+            </div>
+        </main>
+
+        <script>
+            const API_KEY = '{x_api_key}';
+            const BASE_URL = '/whatsapp/panel';
+
+            let channelChart = null;
+            let dailyChart = null;
+
+            async function loadMetrics() {{
+                const days = document.getElementById('periodSelect').value;
+
+                try {{
+                    const response = await fetch(`${{BASE_URL}}/metrics?days=${{days}}`, {{
+                        headers: {{ 'X-API-Key': API_KEY }}
+                    }});
+
+                    if (!response.ok) throw new Error('Error al cargar métricas');
+
+                    const data = await response.json();
+                    updateDashboard(data);
+
+                }} catch (error) {{
+                    console.error('Error:', error);
+                    document.getElementById('totalLeads').textContent = 'Error';
+                }}
+            }}
+
+            function updateDashboard(data) {{
+                // Update stat cards
+                document.getElementById('totalLeads').textContent = data.total_leads || 0;
+                document.getElementById('instagramLeads').textContent = data.leads_by_channel?.instagram || 0;
+                document.getElementById('facebookLeads').textContent = data.leads_by_channel?.facebook || 0;
+
+                // Update channel chart
+                updateChannelChart(data.leads_by_channel || {{}});
+
+                // Update daily chart
+                updateDailyChart(data.leads_by_day || {{}});
+
+                // Update table
+                updateChannelTable(data.leads_by_channel || {{}}, data.total_leads || 0);
+            }}
+
+            function updateChannelChart(channelData) {{
+                const ctx = document.getElementById('channelChart').getContext('2d');
+
+                const labels = Object.keys(channelData).map(c => c.charAt(0).toUpperCase() + c.slice(1));
+                const values = Object.values(channelData);
+
+                if (channelChart) channelChart.destroy();
+
+                channelChart = new Chart(ctx, {{
+                    type: 'doughnut',
+                    data: {{
+                        labels: labels,
+                        datasets: [{{
+                            data: values,
+                            backgroundColor: [
+                                '#E1306C', // Instagram
+                                '#4267B2', // Facebook
+                                '#0077B5', // LinkedIn
+                                '#FF0000', // YouTube
+                                '#000000', // TikTok
+                            ],
+                        }}]
+                    }},
+                    options: {{
+                        responsive: true,
+                        plugins: {{
+                            legend: {{
+                                position: 'bottom',
+                            }}
+                        }}
+                    }}
+                }});
+            }}
+
+            function updateDailyChart(dailyData) {{
+                const ctx = document.getElementById('dailyChart').getContext('2d');
+
+                const labels = Object.keys(dailyData).map(d => {{
+                    const date = new Date(d);
+                    return date.toLocaleDateString('es-CO', {{month: 'short', day: 'numeric'}});
+                }});
+                const values = Object.values(dailyData);
+
+                if (dailyChart) dailyChart.destroy();
+
+                dailyChart = new Chart(ctx, {{
+                    type: 'line',
+                    data: {{
+                        labels: labels,
+                        datasets: [{{
+                            label: 'Leads',
+                            data: values,
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                        }}]
+                    }},
+                    options: {{
+                        responsive: true,
+                        plugins: {{
+                            legend: {{
+                                display: false
+                            }}
+                        }},
+                        scales: {{
+                            y: {{
+                                beginAtZero: true,
+                                ticks: {{
+                                    stepSize: 1
+                                }}
+                            }}
+                        }}
+                    }}
+                }});
+            }}
+
+            function updateChannelTable(channelData, total) {{
+                const tbody = document.getElementById('channelTable');
+
+                if (Object.keys(channelData).length === 0) {{
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-gray-400">Sin datos</td></tr>';
+                    return;
+                }}
+
+                const rows = Object.entries(channelData)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([channel, count]) => {{
+                        const pct = total > 0 ? ((count / total) * 100).toFixed(1) : 0;
+                        return `
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="py-2 capitalize">${{channel}}</td>
+                                <td class="py-2 text-right font-semibold">${{count}}</td>
+                                <td class="py-2 text-right text-gray-500">${{pct}}%</td>
+                            </tr>
+                        `;
+                    }})
+                    .join('');
+
+                tbody.innerHTML = rows;
+            }}
+
+            // Event listeners
+            document.addEventListener('DOMContentLoaded', loadMetrics);
+            document.getElementById('periodSelect').addEventListener('change', loadMetrics);
+            document.getElementById('refreshBtn').addEventListener('click', loadMetrics);
+        </script>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html_content)

@@ -339,7 +339,8 @@ async def whatsapp_webhook(
             logger.info(f"[Webhook] Detectada intención de handoff por keywords")
             await state_manager.request_handoff(
                 phone_normalized,
-                reason="Cliente solicitó hablar con asesor"
+                reason="Cliente solicitó hablar con asesor",
+                contact_id=contact_info.contact_id if contact_info else None,
             )
 
         # Actualizar actividad

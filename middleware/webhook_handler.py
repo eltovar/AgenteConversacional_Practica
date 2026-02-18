@@ -99,6 +99,72 @@ def get_sofia_brain() -> SofiaBrain:
     return _sofia_brain
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# LÓGICA HÍBRIDA: should_bot_respond
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def should_bot_respond(
+    phone_normalized: str,
+    contact_id: Optional[str] = None
+) -> tuple[bool, str, Optional[str]]:
+    """
+    Determina si Sofía debe responder al mensaje.
+
+    Esta función centraliza la lógica de verificación híbrida que evita
+    colisión entre respuestas del bot y el asesor.
+
+    Verificaciones:
+    1. Estado en Redis (BOT_ACTIVE / HUMAN_ACTIVE / PENDING_HANDOFF)
+    2. Propiedad `sofia_activa` en HubSpot (si hay contact_id)
+    """
+    state_manager = get_state_manager()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 1. Verificar estado en Redis (flag temporal de intervención humana)
+    # ═══════════════════════════════════════════════════════════════════════
+    status = await state_manager.get_status(phone_normalized)
+
+    if status == ConversationStatus.HUMAN_ACTIVE:
+        logger.info(
+            f"🤫 [should_bot_respond] Bot silenciado: HUMANO_INTERVINIENDO "
+            f"(teléfono: {phone_normalized})"
+        )
+        return False, "HUMANO_INTERVINIENDO", None
+
+    if status == ConversationStatus.PENDING_HANDOFF:
+        logger.info(
+            f"⏳ [should_bot_respond] Bot en espera: PENDIENTE_HANDOFF "
+            f"(teléfono: {phone_normalized})"
+        )
+        special_message = (
+            "En un momento uno de nuestros asesores te atenderá. "
+            "Gracias por tu paciencia. 🙏"
+        )
+        return False, "PENDIENTE_HANDOFF", special_message
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 2. Verificar propiedad 'sofia_activa' en HubSpot
+    # ═══════════════════════════════════════════════════════════════════════
+    if contact_id:
+        timeline_logger = get_timeline_logger()
+        sofia_activa = await timeline_logger.is_sofia_active(contact_id)
+
+        if not sofia_activa:
+            logger.info(
+                f"🤫 [should_bot_respond] Bot silenciado: DESACTIVADO_EN_CRM "
+                f"(contact_id: {contact_id})"
+            )
+            return False, "DESACTIVADO_EN_CRM", None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Todo OK - Sofía puede responder
+    # ═══════════════════════════════════════════════════════════════════════
+    logger.debug(
+        f"✅ [should_bot_respond] Bot activo: OK (teléfono: {phone_normalized})"
+    )
+    return True, "OK", None
+
+
 @router.post("/webhook")
 async def whatsapp_webhook(
     request: Request,
@@ -112,15 +178,6 @@ async def whatsapp_webhook(
     Endpoint principal del webhook de Twilio.
 
     Recibe mensajes de WhatsApp y los procesa según el estado de la conversación.
-
-    Args:
-        From: Número del remitente (formato: whatsapp:+573001234567)
-        Body: Contenido del mensaje
-        ProfileName: Nombre del perfil de WhatsApp (opcional)
-        MessageSid: ID único del mensaje en Twilio (opcional)
-
-    Returns:
-        TwiML response con la respuesta de Sofía
     """
     logger.info(f"[Webhook] Mensaje recibido de {From}: {Body[:50]}...")
 
@@ -176,14 +233,16 @@ async def whatsapp_webhook(
             contact_info = None
 
         # ════════════════════════════════════════════════════════════
-        # PASO 4: Procesar según estado
+        # PASO 4: Verificar si Sofía debe responder (Lógica Híbrida)
         # ════════════════════════════════════════════════════════════
+        contact_id = contact_info.contact_id if contact_info else None
+        should_respond, reason, special_message = await should_bot_respond(
+            phone_normalized=phone_normalized,
+            contact_id=contact_id
+        )
 
-        if status == ConversationStatus.HUMAN_ACTIVE:
-            # Humano activo → Solo espejar a HubSpot, no responder
-            logger.info(f"[Webhook] HUMAN_ACTIVE - Espejando a HubSpot sin responder")
-
-            # Registrar mensaje en HubSpot en background
+        if not should_respond:
+            # Registrar mensaje entrante en HubSpot (siempre)
             if contact_info:
                 background_tasks.add_task(
                     _sync_message_to_hubspot,
@@ -193,167 +252,124 @@ async def whatsapp_webhook(
                     phone_normalized
                 )
 
-            # Responder vacío (sin mensaje) para que Twilio no envíe nada
+            # Si hay mensaje especial (ej: PENDING_HANDOFF), enviarlo
+            if special_message:
+                logger.info(f"[Webhook] {reason} - Enviando mensaje especial")
+                return _create_twiml_response(special_message)
+
+            # Sin mensaje especial → respuesta vacía (bot silenciado)
+            logger.info(f"[Webhook] {reason} - Bot silenciado, sin respuesta")
             return Response(content="", media_type="text/xml")
 
-        elif status == ConversationStatus.PENDING_HANDOFF:
-            # Pendiente de handoff → Mensaje de espera
-            logger.info(f"[Webhook] PENDING_HANDOFF - Enviando mensaje de espera")
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.1: Sofía está activa - Continuar procesamiento
+        # ════════════════════════════════════════════════════════════
+        logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje")
 
-            response_text = (
-                "En un momento uno de nuestros asesores te atenderá. "
-                "Gracias por tu paciencia. 🙏"
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.2: Detectar código de inmueble (alta prioridad)
+        # ════════════════════════════════════════════════════════════
+        property_code_result = detect_property_code(Body)
+        property_code_detected = property_code_result.has_code
+
+        if property_code_detected:
+            logger.info(
+                f"[Webhook] CÓDIGO DE INMUEBLE DETECTADO: {property_code_result.code} "
+                f"(contexto: {property_code_result.context})"
             )
 
-            # Registrar en HubSpot
-            if contact_info:
-                background_tasks.add_task(
-                    _sync_message_to_hubspot,
-                    contact_info.contact_id,
-                    Body,
-                    "incoming",
-                    phone_normalized
-                )
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.3: Procesar mensaje con Sofía (Single-Stream)
+        # ════════════════════════════════════════════════════════════
+        sofia = get_sofia_brain()
 
-            return _create_twiml_response(response_text)
+        # Construir contexto adicional si hay código detectado
+        lead_context = None
+        if property_code_detected:
+            lead_context = {
+                "property_code": property_code_result.code,
+                "high_intent": True,
+                "code_context": property_code_result.context
+            }
 
-        else:
-            # BOT_ACTIVE (o estado desconocido) → Verificar si Sofía está habilitada
-            logger.info(f"[Webhook] BOT_ACTIVE - Verificando si Sofía está activa")
+        # Procesar mensaje con análisis integrado (Single-Stream)
+        result = await sofia.process_message_with_analysis(
+            session_id=phone_normalized,
+            user_message=Body,
+            lead_context=lead_context
+        )
 
-            # ════════════════════════════════════════════════════════════
-            # PASO 4.1: Verificar propiedad 'sofia_activa' en HubSpot
-            # ════════════════════════════════════════════════════════════
-            # Si el asesor desactivó Sofía desde HubSpot, no respondemos
-            if contact_info:
-                timeline_logger = get_timeline_logger()
-                sofia_habilitada = await timeline_logger.is_sofia_active(contact_info.contact_id)
+        response_text = result.respuesta
+        analysis = result.analisis
 
-                if not sofia_habilitada:
-                    logger.info(
-                        f"[Webhook] Sofía DESACTIVADA en HubSpot para {phone_normalized} - "
-                        "Solo registrando mensaje sin responder"
-                    )
-                    # Solo registrar el mensaje entrante, no responder
-                    background_tasks.add_task(
-                        _sync_message_to_hubspot,
-                        contact_info.contact_id,
-                        Body,
-                        "incoming",
-                        phone_normalized
-                    )
-                    # Responder vacío para que Twilio no envíe nada
-                    return Response(content="", media_type="text/xml")
+        # Si se detectó código de inmueble, forzar handoff high
+        if property_code_detected and analysis.handoff_priority not in ["immediate", "high"]:
+            logger.info("[Webhook] Elevando prioridad de handoff por código de inmueble detectado")
+            analysis.handoff_priority = "high"
+            analysis.intencion_visita = True
 
-            # ════════════════════════════════════════════════════════════
-            # PASO 4.2: Detectar código de inmueble (alta prioridad)
-            # ════════════════════════════════════════════════════════════
-            property_code_result = detect_property_code(Body)
-            property_code_detected = property_code_result.has_code
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.4: Actuar según el análisis
+        # ════════════════════════════════════════════════════════════
+        state_manager = get_state_manager()
 
-            if property_code_detected:
-                logger.info(
-                    f"[Webhook] CÓDIGO DE INMUEBLE DETECTADO: {property_code_result.code} "
-                    f"(contexto: {property_code_result.context})"
-                )
-
-            # ════════════════════════════════════════════════════════════
-            # PASO 4.3: Sofía está activa - Procesar mensaje con Single-Stream
-            # ════════════════════════════════════════════════════════════
-            logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje (Single-Stream)")
-
-            sofia = get_sofia_brain()
-
-            # Construir contexto adicional si hay código detectado
-            lead_context = None
-            if property_code_detected:
-                lead_context = {
-                    "property_code": property_code_result.code,
-                    "high_intent": True,
-                    "code_context": property_code_result.context
-                }
-
-            # Procesar mensaje con análisis integrado (Single-Stream)
-            result = await sofia.process_message_with_analysis(
-                session_id=phone_normalized,
-                user_message=Body,
-                lead_context=lead_context
+        # Handoff inmediato si cliente enojado o lo solicita explícitamente
+        if analysis.handoff_priority == "immediate":
+            logger.info(
+                f"[Webhook] Handoff INMEDIATO detectado: "
+                f"emoción={analysis.emocion}, score={analysis.sentiment_score}"
             )
 
-            response_text = result.respuesta
-            analysis = result.analisis
-
-            # Si se detectó código de inmueble, forzar handoff high
-            if property_code_detected and analysis.handoff_priority not in ["immediate", "high"]:
-                logger.info("[Webhook] Elevando prioridad de handoff por código de inmueble detectado")
-                analysis.handoff_priority = "high"
-                analysis.intencion_visita = True
-
-            # ════════════════════════════════════════════════════════════
-            # PASO 4.4: Actuar según el análisis
-            # ════════════════════════════════════════════════════════════
-
-            # Handoff inmediato si cliente enojado o lo solicita explícitamente
-            if analysis.handoff_priority == "immediate":
-                logger.info(
-                    f"[Webhook] Handoff INMEDIATO detectado: "
-                    f"emoción={analysis.emocion}, score={analysis.sentiment_score}"
-                )
-                await state_manager.request_handoff(
-                    phone_normalized,
-                    reason=f"Handoff automático: {analysis.emocion} (score: {analysis.sentiment_score})"
-                )
-
-            # Handoff alto - cliente listo para avanzar
-            elif analysis.handoff_priority == "high":
-                logger.info(
-                    f"[Webhook] Handoff HIGH detectado: intención_visita={analysis.intencion_visita}"
-                )
-                # No cambiar estado, pero registrar para notificar al asesor
-                if contact_info:
-                    background_tasks.add_task(
-                        _notify_high_priority_lead,
-                        contact_info.contact_id,
-                        phone_normalized,
-                        analysis
-                    )
-
-            # Fallback: Detectar intención de handoff por keywords (compatibilidad)
-            elif sofia.detect_handoff_intent(Body):
-                logger.info(f"[Webhook] Detectada intención de handoff por keywords")
-                await state_manager.request_handoff(
-                    phone_normalized,
-                    reason="Cliente solicitó hablar con asesor"
-                )
-
-            # Actualizar actividad
-            await state_manager.update_activity(phone_normalized)
-
-            # ════════════════════════════════════════════════════════════
-            # PASO 4.5: Verificar horario laboral para handoff
-            # ════════════════════════════════════════════════════════════
-            # Si el cliente quiere asesor y estamos fuera de horario,
-            # agregar mensaje tranquilizador (no cerramos la puerta)
-            if should_add_out_of_hours_message(analysis.handoff_priority):
-                out_of_hours_msg = get_out_of_hours_message()
-                response_text = f"{response_text}\n\n{out_of_hours_msg}"
-                logger.info(
-                    f"[Webhook] Mensaje de fuera de horario agregado para "
-                    f"handoff {analysis.handoff_priority}"
-                )
-
-            # Sincronizar con HubSpot en background (incluye análisis)
+        # Handoff alto - cliente listo para avanzar
+        elif analysis.handoff_priority == "high":
+            logger.info(
+                f"[Webhook] Handoff HIGH detectado: intención_visita={analysis.intencion_visita}"
+            )
+            # No cambiar estado, pero registrar para notificar al asesor
             if contact_info:
                 background_tasks.add_task(
-                    _sync_conversation_with_analysis_to_hubspot,
+                    _notify_high_priority_lead,
                     contact_info.contact_id,
-                    Body,
-                    response_text,
                     phone_normalized,
                     analysis
                 )
 
-            return _create_twiml_response(response_text)
+        # Fallback: Detectar intención de handoff por keywords (compatibilidad)
+        elif sofia.detect_handoff_intent(Body):
+            logger.info(f"[Webhook] Detectada intención de handoff por keywords")
+            await state_manager.request_handoff(
+                phone_normalized,
+                reason="Cliente solicitó hablar con asesor"
+            )
+
+        # Actualizar actividad
+        await state_manager.update_activity(phone_normalized)
+
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.5: Verificar horario laboral para handoff
+        # ════════════════════════════════════════════════════════════
+        # Si el cliente quiere asesor y estamos fuera de horario,
+        # agregar mensaje tranquilizador (no cerramos la puerta)
+        if should_add_out_of_hours_message(analysis.handoff_priority):
+            out_of_hours_msg = get_out_of_hours_message()
+            response_text = f"{response_text}\n\n{out_of_hours_msg}"
+            logger.info(
+                f"[Webhook] Mensaje de fuera de horario agregado para "
+                f"handoff {analysis.handoff_priority}"
+            )
+
+        # Sincronizar con HubSpot en background (incluye análisis)
+        if contact_info:
+            background_tasks.add_task(
+                _sync_conversation_with_analysis_to_hubspot,
+                contact_info.contact_id,
+                Body,
+                response_text,
+                phone_normalized,
+                analysis
+            )
+
+        return _create_twiml_response(response_text)
 
     except Exception as e:
         logger.error(f"[Webhook] Error procesando mensaje: {e}", exc_info=True)
@@ -396,12 +412,6 @@ async def whatsapp_status_callback(
 def _create_twiml_response(message: str) -> Response:
     """
     Crea una respuesta TwiML con un mensaje.
-
-    Args:
-        message: Texto del mensaje
-
-    Returns:
-        Response con TwiML
     """
     twiml = MessagingResponse()
     twiml.message(message)
@@ -411,12 +421,6 @@ def _create_twiml_response(message: str) -> Response:
 def _create_error_response(message: str) -> Response:
     """
     Crea una respuesta de error amigable.
-
-    Args:
-        message: Mensaje de error para el usuario
-
-    Returns:
-        Response con TwiML
     """
     return _create_twiml_response(message)
 
@@ -429,12 +433,6 @@ async def _sync_message_to_hubspot(
 ) -> None:
     """
     Sincroniza un mensaje individual a HubSpot Timeline.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        message: Contenido del mensaje
-        direction: "incoming" o "outgoing"
-        phone: Número normalizado
     """
     try:
         # 1. Registrar en Timeline (visual para asesores)
@@ -478,12 +476,6 @@ async def _sync_conversation_to_hubspot(
 
     Registra ambos mensajes en el Timeline del contacto para que los asesores
     puedan ver el historial completo de la conversación.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        user_message: Mensaje del usuario
-        bot_response: Respuesta de Sofía
-        phone: Número normalizado
     """
     try:
         timeline_logger = get_timeline_logger()
@@ -531,13 +523,6 @@ async def _sync_conversation_with_analysis_to_hubspot(
 
     Incluye el análisis de sentimiento y actualiza propiedades adicionales
     basadas en la información extraída del análisis Single-Stream.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        user_message: Mensaje del usuario
-        bot_response: Respuesta de Sofía
-        phone: Número normalizado
-        analysis: MessageAnalysis con el análisis del mensaje
     """
     try:
         timeline_logger = get_timeline_logger()
@@ -598,11 +583,6 @@ async def _notify_high_priority_lead(
 
     Se llama cuando el análisis detecta handoff_priority="high",
     por ejemplo cuando el cliente expresa intención de visitar.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        phone: Número normalizado
-        analysis: MessageAnalysis con el análisis del mensaje
     """
     try:
         contact_manager = get_contact_manager()

@@ -9,7 +9,7 @@ quién está atendiendo la conversación en cada momento.
 import json
 from enum import Enum
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 
 import redis.asyncio as redis
@@ -77,6 +77,10 @@ class ConversationStateManager:
 
     # TTL por defecto: 7 días (en segundos)
     DEFAULT_TTL = 7 * 24 * 60 * 60
+
+    # TTL para HUMAN_ACTIVE: 2 horas (auto-expiración)
+    # Si el asesor no escribe en 2h, Sofía retoma automáticamente
+    HANDOFF_TTL_SECONDS = 2 * 60 * 60  # 7200 segundos = 2 horas
 
     def __init__(self, redis_url: str):
         """
@@ -280,29 +284,46 @@ class ConversationStateManager:
     async def activate_human(
         self,
         phone_normalized: str,
-        owner_id: Optional[str] = None
+        owner_id: Optional[str] = None,
+        reason: Optional[str] = None
     ) -> None:
         """
         Activa modo humano (asesor toma el control).
 
+        El estado tiene TTL de 2 horas. Si el asesor no escribe
+        en ese tiempo, Sofía retoma automáticamente.
+
         Args:
             phone_normalized: Número en formato E.164
             owner_id: ID del asesor en HubSpot (opcional)
+            reason: Razón de la activación (opcional)
         """
-        await self.set_status(phone_normalized, ConversationStatus.HUMAN_ACTIVE)
+        # Guardar estado con TTL de 2 horas
+        await self.set_status(
+            phone_normalized,
+            ConversationStatus.HUMAN_ACTIVE,
+            ttl=self.HANDOFF_TTL_SECONDS
+        )
+
+        # Calcular tiempo de expiración
+        now = datetime.now()
+        expires_at = now + timedelta(seconds=self.HANDOFF_TTL_SECONDS)
 
         meta = await self.get_meta(phone_normalized) or ConversationMeta(
             phone_normalized=phone_normalized
         )
         meta.status = ConversationStatus.HUMAN_ACTIVE
         meta.assigned_owner_id = owner_id
-        meta.last_activity = datetime.now().isoformat()
+        meta.handoff_reason = reason
+        meta.last_activity = now.isoformat()
 
-        await self.set_meta(phone_normalized, meta)
+        # Guardar metadata con mismo TTL
+        await self.set_meta(phone_normalized, meta, ttl=self.HANDOFF_TTL_SECONDS)
 
         logger.info(
             f"[ConversationState] Humano activado: {phone_normalized} "
-            f"(owner: {owner_id or 'sin asignar'})"
+            f"(owner: {owner_id or 'sin asignar'}, "
+            f"expira: {expires_at.strftime('%H:%M:%S')})"
         )
 
     async def activate_bot(self, phone_normalized: str) -> None:
@@ -325,6 +346,73 @@ class ConversationStateManager:
 
         logger.info(f"[ConversationState] Bot reactivado: {phone_normalized}")
 
+    async def refresh_human_ttl(self, phone_normalized: str) -> bool:
+        """
+        Renueva el TTL del estado HUMAN_ACTIVE.
+
+        Llamar este método cada vez que el asesor envía un mensaje
+        para mantener el control activo por 2 horas más.
+
+        Args:
+            phone_normalized: Número en formato E.164
+
+        Returns:
+            True si se renovó el TTL, False si no estaba en HUMAN_ACTIVE
+        """
+        r = await self._get_redis()
+        state_key = f"{self.STATE_PREFIX}{phone_normalized}"
+        meta_key = f"{self.META_PREFIX}{phone_normalized}"
+
+        # Verificar estado actual
+        current_status = await r.get(state_key)
+
+        if current_status != ConversationStatus.HUMAN_ACTIVE.value:
+            logger.debug(
+                f"[ConversationState] No se renovó TTL: {phone_normalized} "
+                f"no está en HUMAN_ACTIVE (estado: {current_status})"
+            )
+            return False
+
+        # Renovar TTL en ambas keys
+        await r.expire(state_key, self.HANDOFF_TTL_SECONDS)
+        await r.expire(meta_key, self.HANDOFF_TTL_SECONDS)
+
+        # Actualizar metadata con nueva actividad
+        meta = await self.get_meta(phone_normalized)
+        if meta:
+            meta.last_activity = datetime.now().isoformat()
+            await self.set_meta(phone_normalized, meta, ttl=self.HANDOFF_TTL_SECONDS)
+
+        new_expires = datetime.now() + timedelta(seconds=self.HANDOFF_TTL_SECONDS)
+        logger.info(
+            f"[ConversationState] TTL renovado: {phone_normalized} "
+            f"(nueva expiración: {new_expires.strftime('%H:%M:%S')})"
+        )
+
+        return True
+
+    async def get_human_ttl_remaining(self, phone_normalized: str) -> Optional[int]:
+        """
+        Obtiene el tiempo restante del TTL de HUMAN_ACTIVE.
+
+        Args:
+            phone_normalized: Número en formato E.164
+
+        Returns:
+            Segundos restantes o None si no está en HUMAN_ACTIVE
+        """
+        r = await self._get_redis()
+        state_key = f"{self.STATE_PREFIX}{phone_normalized}"
+
+        # Verificar estado
+        current_status = await r.get(state_key)
+        if current_status != ConversationStatus.HUMAN_ACTIVE.value:
+            return None
+
+        # Obtener TTL restante
+        ttl = await r.ttl(state_key)
+        return ttl if ttl > 0 else None
+
     # ==================== Utilidades ====================
 
     async def delete_conversation(self, phone_normalized: str) -> None:
@@ -342,3 +430,84 @@ class ConversationStateManager:
         await r.delete(state_key, meta_key)
 
         logger.info(f"[ConversationState] Conversación eliminada: {phone_normalized}")
+
+    async def get_all_human_active_contacts(self) -> list:
+        """
+        Obtiene todos los contactos actualmente en estado HUMAN_ACTIVE.
+
+        Escanea Redis buscando keys conv_state:* donde el valor es HUMAN_ACTIVE.
+        Esto permite que el panel de asesores muestre automáticamente los
+        contactos que necesitan atención humana.
+
+        Returns:
+            Lista de diccionarios con info de cada contacto:
+            [
+                {
+                    "phone": "+573001234567",
+                    "contact_id": "12345",
+                    "status": "HUMAN_ACTIVE",
+                    "display_name": None,  # Se enriquece después con HubSpot
+                    "handoff_reason": "Cliente solicitó asesor",
+                    "activated_at": "2024-01-20T10:30:00",
+                    "ttl_remaining": 7200,
+                    "is_active": True
+                }
+            ]
+        """
+        r = await self._get_redis()
+        contacts = []
+
+        # DEBUG: Log Redis URL being used
+        logger.info(f"[ConversationState] Escaneando Redis: {self.redis_url}")
+
+        try:
+            # DEBUG: Verificar conexión
+            await r.ping()
+            logger.debug("[ConversationState] Ping a Redis exitoso")
+
+            # DEBUG: Contar todas las keys con el patrón
+            keys_found = []
+            async for key in r.scan_iter(match=f"{self.STATE_PREFIX}*"):
+                keys_found.append(key)
+
+            logger.info(f"[ConversationState] Keys encontradas con patrón '{self.STATE_PREFIX}*': {len(keys_found)}")
+            if keys_found:
+                logger.debug(f"[ConversationState] Keys: {keys_found}")
+
+            # Escanear todas las keys de estado usando SCAN (eficiente)
+            async for key in r.scan_iter(match=f"{self.STATE_PREFIX}*"):
+                status = await r.get(key)
+                logger.debug(f"[ConversationState] Key: {key} -> Status: {status}")
+
+                if status == ConversationStatus.HUMAN_ACTIVE.value:
+                    logger.info(f"[ConversationState] ✅ Encontrado HUMAN_ACTIVE: {key}")
+                    # Extraer teléfono del key
+                    phone = key.replace(self.STATE_PREFIX, "")
+
+                    # Obtener metadata
+                    meta = await self.get_meta(phone)
+
+                    # Obtener TTL restante
+                    ttl = await r.ttl(key)
+
+                    contact_info = {
+                        "phone": phone,
+                        "contact_id": meta.contact_id if meta else None,
+                        "status": "HUMAN_ACTIVE",
+                        "display_name": None,  # Se enriquece después con HubSpot
+                        "handoff_reason": meta.handoff_reason if meta else None,
+                        "activated_at": meta.last_activity if meta else None,
+                        "ttl_remaining": ttl if ttl > 0 else None,
+                        "is_active": True  # Flag para priorizar en UI
+                    }
+
+                    contacts.append(contact_info)
+
+            logger.debug(
+                f"[ConversationState] Encontrados {len(contacts)} contactos en HUMAN_ACTIVE"
+            )
+
+        except Exception as e:
+            logger.error(f"[ConversationState] Error escaneando contactos activos: {e}")
+
+        return contacts

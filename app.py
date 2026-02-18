@@ -167,9 +167,6 @@ async def webhook(
     3. Si llegan más mensajes en ese tiempo → se agregan al buffer
     4. Después del timeout → procesa todos los mensajes juntos via Twilio API
     5. Todos los webhooks responden inmediatamente con TwiML vacío
-
-    IMPORTANTE: Cuando hay agregación activa, la respuesta se envía via
-    Twilio Messages API (no via TwiML response) para evitar el timeout de 15s.
     """
     try:
         # A. Detectar origen (Twilio vs JSON)
@@ -447,15 +444,6 @@ async def update_deal_stages(
     Modo de uso:
     1. Actualizar un deal específico: Enviar deal_id y contact_id
     2. Actualizar todos los deals recientes (últimas 24h): No enviar parámetros
-
-    Headers requeridos:
-        X-API-Key: Token de autenticación admin
-
-    Body (opcional):
-        {
-            "deal_id": "123456789",
-            "contact_id": "987654321"
-        }
     """
     # Validación de seguridad
     if x_api_key != os.getenv("ADMIN_API_KEY"):
@@ -514,14 +502,7 @@ async def get_lead_statistics(
     Modos de uso:
     1. Estadísticas de un trabajador específico: ?owner_id=86909130
     2. Leads sin asignar: ?check_unassigned=true
-    3. Resumen general: Sin parámetros
-
-    Headers requeridos:
-        X-API-Key: Token de autenticación admin
-
-    Query Parameters:
-        owner_id: ID del trabajador (opcional)
-        check_unassigned: Si es true, retorna leads huérfanos (opcional)
+    3. Resumen general: Sin parámetros)
     """
     # Validación de seguridad
     if x_api_key != os.getenv("ADMIN_API_KEY"):
@@ -620,15 +601,7 @@ async def check_orphan_leads(
     - Tienen chatbot_timestamp (son del chatbot)
     - Fueron creados en las últimas X horas
 
-    Headers requeridos:
         X-API-Key: Token de autenticación admin
-
-    Query Parameters:
-        hours: Ventana de tiempo en horas (default: 24)
-        send_alert: Si es true, envía alerta a webhook configurado (default: true)
-
-    Environment Variables requeridas:
-        ORPHAN_LEAD_WEBHOOK_URL: URL del webhook (Slack/Discord) - opcional
     """
     # Validación de seguridad
     if x_api_key != os.getenv("ADMIN_API_KEY"):
@@ -706,21 +679,6 @@ async def get_orphan_leads(x_api_key: str = Header(None, alias="X-API-Key")):
 
     Headers requeridos:
         X-API-Key: Token de autenticación admin
-
-    Response:
-        {
-            "count": 3,
-            "leads": [
-                {
-                    "id": "123",
-                    "name": "Juan Pérez",
-                    "phone": "+549...",
-                    "canal": "whatsapp_directo",
-                    "score": "75"
-                },
-                ...
-            ]
-        }
     """
     # Validación de seguridad
     if x_api_key != os.getenv("ADMIN_API_KEY"):

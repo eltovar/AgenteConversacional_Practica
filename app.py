@@ -21,10 +21,10 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Importar el router del middleware inteligente (lazy import)
-from middleware import get_whatsapp_router, get_outbound_panel_router
+from middleware import get_whatsapp_router, get_outbound_panel_router, get_contact_manager
 
 # Importar el router de webhooks de salida HubSpot -> WhatsApp
-from integrations.hubspot import get_outbound_router
+from integrations.hubspot import get_outbound_router, get_timeline_logger
 
 # ===== 1. CONFIGURACIÓN INICIAL Y VALIDACIÓN =====
 load_dotenv()
@@ -107,8 +107,9 @@ async def process_aggregated_messages(session_id: str, to_number: str):
     Función que se ejecuta en background para:
     1. Esperar el timeout de agregación
     2. Obtener todos los mensajes combinados
-    3. Procesar con el orchestrator
-    4. Enviar respuesta via Twilio API
+    3. REGISTRAR MENSAJE DEL CLIENTE EN HUBSPOT (para el Panel)
+    4. Procesar con el orchestrator
+    5. Enviar respuesta via Twilio API
 
     Esta función resuelve el problema del timeout de 15 segundos de Twilio.
     """
@@ -122,14 +123,44 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 
         logger.info(f"[BACKGROUND] Procesando mensajes agregados: '{combined_message[:80]}...'")
 
-        # 2. Procesar con el orchestrator
+        # 2. REGISTRAR MENSAJE DEL CLIENTE EN HUBSPOT (antes de procesar con IA)
+        # Esto asegura que el asesor vea el mensaje en el Panel inmediatamente
+        phone_normalized = session_id.replace("whatsapp:", "").replace("+", "")
+        if phone_normalized.startswith("57") and len(phone_normalized) == 12:
+            phone_normalized = f"+{phone_normalized}"
+        elif not phone_normalized.startswith("+"):
+            phone_normalized = f"+57{phone_normalized}" if len(phone_normalized) == 10 else f"+{phone_normalized}"
+
+        try:
+            ContactManager = get_contact_manager()
+            contact_manager = ContactManager()
+            contact_info = await contact_manager.identify_or_create_contact(
+                phone_raw=phone_normalized,
+                source_channel="whatsapp_directo"
+            )
+
+            if contact_info and contact_info.contact_id:
+                logger.info(f"[BACKGROUND] 📱 Registrando mensaje del cliente en HubSpot (contact_id={contact_info.contact_id})")
+                timeline_logger = get_timeline_logger()
+                await timeline_logger.log_client_message(
+                    contact_id=contact_info.contact_id,
+                    content=combined_message,
+                    session_id=phone_normalized
+                )
+            else:
+                logger.warning(f"[BACKGROUND] ⚠️ No se pudo identificar contacto para {phone_normalized}")
+        except Exception as hubspot_err:
+            logger.error(f"[BACKGROUND] Error registrando en HubSpot: {hubspot_err}")
+            # Continuar con el procesamiento aunque falle HubSpot
+
+        # 3. Procesar con el orchestrator
         result = await process_message(session_id, combined_message)
 
         if not result or not result.get("response"):
             logger.warning(f"[BACKGROUND] Orchestrator no generó respuesta para {session_id}")
             return
 
-        # 3. Enviar respuesta via Twilio API
+        # 4. Enviar respuesta via Twilio API
         if twilio_client.is_available:
             send_result = await twilio_client.send_whatsapp_message(
                 to=to_number,

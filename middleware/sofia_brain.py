@@ -1,14 +1,6 @@
 # middleware/sofia_brain.py
 """
 Cerebro de Sofía - Motor de IA con Memoria.
-
-- LangChain para orquestación
-- LLM de OpenAI gpt-4o-mini
-- Redis para memoria de conversación (últimos 10-15 mensajes)
-- respuesta + análisis en 1 llamada LLM
-
-Sofía NO puede "olvidar" lo que se dijo hace 2 minutos.
-La memoria persiste en Redis con TTL de 24 horas.
 """
 
 import os
@@ -290,6 +282,10 @@ class SofiaBrain:
             history_messages_key="history",
         )
 
+        # Verificar si hay historial previo (para evitar presentación repetida)
+        history = self._get_message_history(session_id)
+        has_previous_messages = len(history.messages) > 0
+
         # Preparar input
         input_data = {"input": user_message}
 
@@ -297,6 +293,16 @@ class SofiaBrain:
         if lead_context:
             context_str = self._format_lead_context(lead_context)
             input_data["input"] = f"{context_str}\n\nMensaje del cliente: {user_message}"
+
+        # Agregar flag de historial si ya hay conversación previa
+        if has_previous_messages:
+            history_flag = (
+                "\n\n[IMPORTANTE - CONTEXTO DE HISTORIAL]:\n"
+                "Ya te presentaste como Sofía en mensajes anteriores. "
+                "NO te vuelvas a presentar ni a saludar como si fuera la primera vez. "
+                "Continúa la conversación de forma natural."
+            )
+            input_data["input"] = history_flag + "\n" + input_data["input"]
 
         # Configuración de sesión
         config = {"configurable": {"session_id": session_id}}
@@ -409,6 +415,17 @@ class SofiaBrain:
 
         if lead_context.get("chatbot_budget"):
             parts.append(f"- Presupuesto: {lead_context['chatbot_budget']}")
+
+        # Contexto especial para links de redes sociales
+        canal_origen = lead_context.get("canal_origen", "")
+        if canal_origen in ["instagram", "facebook", "tiktok"]:
+            parts.append("")
+            parts.append("[INSTRUCCIÓN ESPECIAL - LINK DE RED SOCIAL]:")
+            parts.append("El cliente llegó enviando un link de un inmueble desde redes sociales.")
+            parts.append("YA tienes la información del inmueble del link.")
+            parts.append("Solo necesitas pedirle su NOMBRE para conectarlo con un asesor.")
+            parts.append("NO preguntes por tipo de inmueble, zona, presupuesto ni características.")
+            parts.append("NO le pidas más información sobre el inmueble.")
 
         return "\n".join(parts)
 

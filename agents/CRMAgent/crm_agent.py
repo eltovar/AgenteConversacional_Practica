@@ -130,8 +130,18 @@ class CRMAgent:
         Inyecta el historial de conversación y la metadata recopilada hasta ahora.
         """
         # Detectar si es primer mensaje para incluir presentación
+        # NOTA: Si llegó por link, _handle_link_arrival ya incluyó la presentación
         is_first_message = state.metadata.get("is_first_message", False)
-        if is_first_message:
+        llegada_por_link = state.metadata.get("llegada_por_link", False)
+        crm_history = state.lead_data.get('crm_history', [])
+
+        # Solo agregar presentación si:
+        # - Es primer mensaje
+        # - NO llegó por link (link arrival ya maneja presentación)
+        # - No hay historial previo (ya se presentó antes)
+        should_include_intro = is_first_message and not llegada_por_link and len(crm_history) == 0
+
+        if should_include_intro:
             logger.info("[CRMAgent] Primer mensaje detectado - incluirá presentación")
             state.metadata["is_first_message"] = False  # Limpiar flag
 
@@ -141,8 +151,8 @@ class CRMAgent:
 
         system_content = CRM_SYSTEM_PROMPT
 
-        # Añadir instrucciones de presentación si es primer mensaje
-        if is_first_message:
+        # Añadir instrucciones de presentación SOLO si no llegó por link y no hay historial
+        if should_include_intro:
             system_content += """
 
 **CONTEXTO ESPECIAL - PRIMER MENSAJE:**
@@ -268,6 +278,9 @@ EJEMPLO DE TONO:
         state.lead_data['crm_history'].append(f"Agent: {response_text}")
 
         logger.info(f"[CRMAgent] Respuesta generada para llegada por link de {nombre_portal}")
+
+        # Marcar como procesado para no volver a entrar en este flujo
+        state.metadata["link_procesado"] = True
 
         return {
             "response": response_text,

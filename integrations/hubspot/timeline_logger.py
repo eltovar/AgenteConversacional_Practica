@@ -476,14 +476,7 @@ class TimelineLogger:
         Returns:
             Lista de notas con formato de burbujas de chat
         """
-        endpoint = f"{self.base_url}/crm/v3/objects/notes/search"
-
-        # Construir filtros
-        filters = []
-
-        # Buscar notas asociadas al contacto
-        # Nota: HubSpot no permite filtrar directamente por asociación en search
-        # Primero obtenemos las notas asociadas al contacto
+        logger.info(f"[TimelineLogger] Buscando notas para contact_id={contact_id}, limit={limit}")
 
         # Usar endpoint de asociaciones
         assoc_endpoint = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/notes"
@@ -491,16 +484,19 @@ class TimelineLogger:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 # 1. Obtener IDs de notas asociadas al contacto
+                logger.debug(f"[TimelineLogger] GET {assoc_endpoint}")
                 assoc_response = await client.get(
                     assoc_endpoint,
                     headers=self.headers,
                     params={"limit": limit}
                 )
 
+                logger.info(f"[TimelineLogger] Asociaciones response: {assoc_response.status_code}")
+
                 if assoc_response.status_code != 200:
                     logger.warning(
                         f"[TimelineLogger] Error obteniendo asociaciones: "
-                        f"{assoc_response.status_code}"
+                        f"{assoc_response.status_code} - {assoc_response.text[:200]}"
                     )
                     return []
 
@@ -510,7 +506,10 @@ class TimelineLogger:
                     for result in assoc_data.get("results", [])
                 ]
 
+                logger.info(f"[TimelineLogger] Notas asociadas encontradas: {len(note_ids)}")
+
                 if not note_ids:
+                    logger.info(f"[TimelineLogger] No hay notas asociadas al contacto {contact_id}")
                     return []
 
                 # 2. Obtener detalles de cada nota
@@ -527,6 +526,10 @@ class TimelineLogger:
                         note_data = note_response.json()
                         props = note_data.get("properties", {})
 
+                        # Log del contenido de la nota para debug
+                        body_preview = (props.get("hs_note_body", "") or "")[:100]
+                        logger.debug(f"[TimelineLogger] Nota {note_id}: '{body_preview}...'")
+
                         # Filtrar por fecha si se especificó
                         if since and props.get("hs_timestamp"):
                             note_time = datetime.fromisoformat(
@@ -541,30 +544,37 @@ class TimelineLogger:
                             "timestamp": props.get("hs_timestamp"),
                             "created_at": note_data.get("createdAt")
                         })
+                    else:
+                        logger.warning(f"[TimelineLogger] Error obteniendo nota {note_id}: {note_response.status_code}")
+
+                logger.info(f"[TimelineLogger] Notas obtenidas con contenido: {len(notes)}")
 
                 # 3. Formatear como burbujas de chat
                 return self._format_notes_as_chat(notes)
 
         except Exception as e:
-            logger.error(f"[TimelineLogger] Error obteniendo notas: {e}")
+            logger.error(f"[TimelineLogger] Error obteniendo notas: {e}", exc_info=True)
             return []
 
     def _format_notes_as_chat(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Convierte notas de HubSpot a formato de burbujas de chat.
 
-        Detecta el tipo de mensaje por el prefijo emoji:
-        - 📱 → Cliente (izquierda, gris)
-        - 🤖 → Sofía/Bot (derecha, verde claro)
-        - 👤 → Asesor (derecha, azul)
+        Detecta el tipo de mensaje por el prefijo emoji o texto:
+        - 📱 / "Cliente:" → Cliente (izquierda, gris)
+        - 🤖 / "Bot:" / "Sofía" → Sofía/Bot (derecha, verde claro)
+        - 👤 / "Asesor:" → Asesor (derecha, azul)
         """
         bubbles = []
+
+        logger.info(f"[TimelineLogger] Procesando {len(notes) if notes else 0} notas")
 
         for note in notes:
             try:
                 # Validación de seguridad: obtener el cuerpo de la nota
                 body = note.get("body") if note else None
                 if not body:
+                    logger.debug(f"[TimelineLogger] Nota sin body: {note.get('id')}")
                     continue
 
                 # Limpiar HTML básico de HubSpot si existe
@@ -572,31 +582,34 @@ class TimelineLogger:
 
                 timestamp = note.get("timestamp")
 
-                # Detectar tipo por emoji (buscar en los primeros 20 caracteres)
-                body_prefix = body[:20] if len(body) >= 20 else body
+                # Detectar tipo por emoji O texto (buscar en los primeros 50 caracteres)
+                body_prefix = body[:50].lower() if len(body) >= 50 else body.lower()
 
-                if "📱" in body_prefix:
+                # Detección mejorada: emojis + palabras clave
+                if "📱" in body_prefix or "cliente" in body_prefix or "whatsapp" in body_prefix:
                     sender = "client"
                     sender_name = "Cliente"
                     align = "left"
-                elif "🤖" in body_prefix:
+                elif "🤖" in body_prefix or "sofía" in body_prefix or "sofia" in body_prefix or "bot" in body_prefix or "[ia]" in body_prefix:
                     sender = "bot"
                     sender_name = "Sofía"
                     align = "right"
-                elif "👤" in body_prefix:
+                elif "👤" in body_prefix or "asesor" in body_prefix:
                     sender = "advisor"
                     sender_name = "Asesor"
                     align = "right"
                 else:
-                    # Si no tiene prefijo conocido, ignorar para no mostrar notas del sistema
-                    sender = "unknown"
+                    # DEBUG: Incluir notas sin prefijo como "system" para ver qué llega
+                    # Esto ayuda a diagnosticar si hay notas que no se están mostrando
+                    sender = "system"
                     sender_name = "Sistema"
                     align = "left"
+                    logger.debug(f"[TimelineLogger] Nota sin prefijo conocido: '{body[:60]}...'")
 
                 # Limpiar prefijo y metadata del cuerpo
                 clean_body = self._clean_note_body(body)
 
-                # Solo agregar si hay contenido después de limpiar
+                # Agregar si hay contenido después de limpiar
                 if clean_body and clean_body.strip():
                     bubbles.append({
                         "id": note.get("id"),
@@ -610,6 +623,8 @@ class TimelineLogger:
             except Exception as e:
                 logger.warning(f"[TimelineLogger] Error formateando nota: {e}")
                 continue
+
+        logger.info(f"[TimelineLogger] Burbujas generadas: {len(bubbles)}")
 
         # Ordenar por timestamp (más antiguo primero)
         try:

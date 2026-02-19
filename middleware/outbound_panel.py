@@ -303,6 +303,90 @@ async def send_message(
         )
 
 
+@router.post("/send-template")
+async def send_template_message(
+    background_tasks: BackgroundTasks,
+    to: str = Form(..., description="Número de destino (+573001234567)"),
+    contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Envía un mensaje de Template (plantilla) de WhatsApp para reactivar conversación.
+
+    Este endpoint se usa cuando la ventana de 24 horas está cerrada.
+    Los templates son mensajes pre-aprobados por Meta que pueden enviarse
+    fuera de la ventana de 24 horas.
+
+    NOTA: Requiere tener un template configurado en Twilio.
+    """
+    # Validar API Key
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Normalizar número
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(to)
+
+    if not validation.is_valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Número inválido: {validation.error_message}"
+        )
+
+    phone_normalized = validation.normalized
+
+    # Verificar disponibilidad de Twilio
+    if not twilio_client.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail="Twilio no está configurado correctamente"
+        )
+
+    # Template de reactivación predefinido
+    # NOTA: Este template debe estar aprobado en tu cuenta de Twilio/WhatsApp Business
+    template_message = (
+        "¡Hola! Soy del equipo de Inmobiliaria Proteger. "
+        "¿Sigues interesado/a en nuestros servicios inmobiliarios? "
+        "Estamos aquí para ayudarte."
+    )
+
+    logger.info(f"[Panel] Enviando template a {phone_normalized}")
+
+    # Enviar mensaje (usando force porque es template)
+    result = await twilio_client.send_whatsapp_message(
+        to=phone_normalized,
+        body=template_message
+    )
+
+    if result["status"] == "success":
+        # Registrar en HubSpot Timeline (background)
+        if contact_id:
+            background_tasks.add_task(
+                _log_advisor_message_to_hubspot,
+                contact_id,
+                f"[TEMPLATE] {template_message}",
+                phone_normalized,
+                "Template via Panel"
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message_sid": result.get("message_sid"),
+                "to": phone_normalized,
+                "contact_id": contact_id,
+                "template_sent": True,
+                "message": "Template enviado. La conversación se reabrirá cuando el cliente responda."
+            }
+        )
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error enviando template: {result.get('message')}"
+        )
+
+
 @router.get("/window-status/{phone}")
 async def get_window_status(
     phone: str,
@@ -952,6 +1036,24 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
 
                 <!-- Input de mensaje -->
                 <div class="bg-gray-100 p-4 border-t">
+                    <!-- Warning de ventana cerrada con botón de template -->
+                    <div id="windowWarning" class="hidden mb-3 p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <span class="text-orange-600">⚠️</span>
+                                <span class="text-sm text-orange-700">Ventana de 24h cerrada. El cliente no ha escrito recientemente.</span>
+                            </div>
+                            <button
+                                type="button"
+                                id="sendTemplateBtn"
+                                onclick="sendTemplateMessage()"
+                                class="bg-blue-500 text-white text-sm px-3 py-1 rounded hover:bg-blue-600"
+                            >
+                                Enviar Template
+                            </button>
+                        </div>
+                    </div>
+
                     <form id="sendForm" class="flex gap-2">
                         <input type="hidden" id="selectedPhone" value="">
                         <input type="hidden" id="selectedContactId" value="">
@@ -1091,6 +1193,8 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
 
             async function checkWindowStatus(phone) {{
                 console.log('[Panel] Verificando ventana 24h para:', phone);
+                const windowWarning = document.getElementById('windowWarning');
+
                 try {{
                     const response = await fetch(
                         `${{BASE_URL}}/window-status/${{encodeURIComponent(phone)}}`,
@@ -1108,16 +1212,19 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                         statusDiv.textContent = `Ventana: ${{data.message}}`;
                         // Asegurar que el botón esté habilitado
                         document.getElementById('sendBtn').disabled = false;
+                        // Ocultar warning de ventana cerrada
+                        windowWarning.classList.add('hidden');
                     }} else {{
                         statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
-                        statusDiv.textContent = 'Ventana cerrada (>24h) - El mensaje puede no entregarse';
-                        // NO deshabilitar el botón - permitir intentar enviar
-                        // El servidor responderá con warning si no se puede
+                        statusDiv.textContent = 'Ventana cerrada (>24h)';
+                        // Mostrar warning con botón de template
+                        windowWarning.classList.remove('hidden');
                         console.warn('[Panel] Ventana de 24h cerrada. Último mensaje:', data.last_message_time);
                     }}
                 }} catch (error) {{
                     console.error('[Panel] Error verificando ventana:', error);
-                    // En caso de error, no bloquear
+                    // En caso de error, ocultar warning
+                    windowWarning.classList.add('hidden');
                     const statusDiv = document.getElementById('windowStatus');
                     statusDiv.classList.add('hidden');
                 }}
@@ -1320,6 +1427,74 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                     document.getElementById('sendBtn').disabled = false;
                     document.getElementById('messageInput').disabled = false;
                     resultDiv.classList.remove('hidden');
+
+                    // Ocultar mensaje después de 5 segundos
+                    setTimeout(() => resultDiv.classList.add('hidden'), 5000);
+                }}
+            }}
+
+            // Función para enviar template cuando la ventana está cerrada
+            async function sendTemplateMessage() {{
+                console.log('[Panel] sendTemplateMessage() iniciado');
+
+                const phone = document.getElementById('selectedPhone').value;
+                const contactId = document.getElementById('selectedContactId').value;
+                const resultDiv = document.getElementById('sendResult');
+
+                if (!phone) {{
+                    alert('Selecciona un contacto primero');
+                    return;
+                }}
+
+                // Confirmar antes de enviar
+                if (!confirm('¿Enviar mensaje de reactivación (Template) a este contacto?\\n\\nEsto enviará un mensaje predefinido para reabrir la conversación.')) {{
+                    return;
+                }}
+
+                // Deshabilitar botón mientras envía
+                const templateBtn = document.getElementById('sendTemplateBtn');
+                templateBtn.disabled = true;
+                templateBtn.textContent = 'Enviando...';
+
+                try {{
+                    const formData = new FormData();
+                    formData.append('to', phone);
+                    formData.append('contact_id', contactId);
+                    formData.append('use_template', 'true');
+
+                    console.log('[Panel] Enviando POST template a:', `${{BASE_URL}}/send-template`);
+
+                    const response = await fetch(`${{BASE_URL}}/send-template`, {{
+                        method: 'POST',
+                        headers: {{ 'X-API-Key': API_KEY }},
+                        body: formData
+                    }});
+
+                    const data = await response.json();
+                    console.log('[Panel] Respuesta template:', data);
+
+                    if (data.status === 'success') {{
+                        resultDiv.className = 'mt-2 text-sm text-green-600';
+                        resultDiv.textContent = 'Template enviado correctamente. La ventana se reabrirá cuando el cliente responda.';
+                        resultDiv.classList.remove('hidden');
+
+                        // Ocultar warning
+                        document.getElementById('windowWarning').classList.add('hidden');
+
+                        // Recargar historial
+                        setTimeout(() => loadChatHistory(contactId), 1000);
+                    }} else {{
+                        throw new Error(data.detail || data.message || 'Error enviando template');
+                    }}
+
+                }} catch (error) {{
+                    console.error('[Panel] Error en sendTemplateMessage:', error);
+                    resultDiv.className = 'mt-2 text-sm text-red-600';
+                    resultDiv.textContent = `Error: ${{error.message}}`;
+                    resultDiv.classList.remove('hidden');
+                }} finally {{
+                    templateBtn.disabled = false;
+                    templateBtn.textContent = 'Enviar Template';
 
                     // Ocultar mensaje después de 5 segundos
                     setTimeout(() => resultDiv.classList.add('hidden'), 5000);

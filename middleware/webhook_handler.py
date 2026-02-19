@@ -35,12 +35,26 @@ from .outbound_panel import update_last_client_message
 # Detector de códigos de inmuebles
 from utils.property_code_detector import detect_property_code
 
+# Detector de links de portales y redes sociales
+from utils.link_detector import LinkDetector, PortalOrigen
+
 # Módulo de horarios laborales
 from utils.business_hours import (
     is_business_hours,
     get_out_of_hours_message,
     should_add_out_of_hours_message
 )
+
+# Instancia global del detector de links
+_link_detector: Optional[LinkDetector] = None
+
+
+def get_link_detector() -> LinkDetector:
+    """Obtiene el detector de links (lazy init)."""
+    global _link_detector
+    if _link_detector is None:
+        _link_detector = LinkDetector()
+    return _link_detector
 
 
 # Router de FastAPI para el middleware
@@ -279,17 +293,51 @@ async def whatsapp_webhook(
             )
 
         # ════════════════════════════════════════════════════════════
+        # PASO 4.2.1: Detectar links de redes sociales (alta prioridad)
+        # ════════════════════════════════════════════════════════════
+        link_detector = get_link_detector()
+        link_result = link_detector.analizar_mensaje(Body)
+        social_media_link_detected = False
+        social_media_portal = None
+
+        # Verificar si es un link de red social con contenido de inmueble
+        REDES_SOCIALES = [
+            PortalOrigen.INSTAGRAM,
+            PortalOrigen.FACEBOOK,
+            PortalOrigen.TIKTOK,
+            PortalOrigen.YOUTUBE,
+            PortalOrigen.LINKEDIN,
+        ]
+
+        if link_result.tiene_link and link_result.portal in REDES_SOCIALES:
+            social_media_link_detected = True
+            social_media_portal = link_result.portal
+            logger.info(
+                f"[Webhook] LINK DE RED SOCIAL DETECTADO: {link_result.portal.value} "
+                f"(es_inmueble: {link_result.es_inmueble}, url: {link_result.url_original})"
+            )
+
+        # ════════════════════════════════════════════════════════════
         # PASO 4.3: Procesar mensaje con Sofía (Single-Stream)
         # ════════════════════════════════════════════════════════════
         sofia = get_sofia_brain()
 
-        # Construir contexto adicional si hay código detectado
+        # Construir contexto adicional si hay código o link de red social detectado
         lead_context = None
         if property_code_detected:
             lead_context = {
                 "property_code": property_code_result.code,
                 "high_intent": True,
                 "code_context": property_code_result.context
+            }
+        elif social_media_link_detected:
+            # Link de red social con posible inmueble
+            lead_context = {
+                "social_media_link": True,
+                "social_media_portal": social_media_portal.value if social_media_portal else None,
+                "social_media_url": link_result.url_original,
+                "es_inmueble": link_result.es_inmueble,
+                "high_intent": True
             }
 
         # Procesar mensaje con análisis integrado (Single-Stream)
@@ -307,6 +355,24 @@ async def whatsapp_webhook(
             logger.info("[Webhook] Elevando prioridad de handoff por código de inmueble detectado")
             analysis.handoff_priority = "high"
             analysis.intencion_visita = True
+
+        # Si se detectó link de red social con contenido de inmueble, forzar handoff high
+        # Los links de Instagram/Facebook/TikTok usualmente son videos de propiedades
+        if social_media_link_detected and analysis.handoff_priority not in ["immediate", "high"]:
+            logger.info(
+                f"[Webhook] Elevando prioridad de handoff por link de {social_media_portal.value} "
+                f"(es_inmueble: {link_result.es_inmueble})"
+            )
+            analysis.handoff_priority = "high"
+            analysis.link_redes_sociales = True
+            # Guardar info del link para HubSpot
+            if not hasattr(analysis, 'social_media_info'):
+                analysis.social_media_info = {}
+            analysis.social_media_info = {
+                "portal": social_media_portal.value if social_media_portal else None,
+                "url": link_result.url_original,
+                "es_inmueble": link_result.es_inmueble
+            }
 
         # ════════════════════════════════════════════════════════════
         # PASO 4.4: Actuar según el análisis
@@ -563,6 +629,23 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 f"Score: {analysis.sentiment_score}/10 - {analysis.emocion}"
             )
 
+        # Registrar si el cliente envió link de red social
+        if analysis.link_redes_sociales:
+            properties["chatbot_social_media_link"] = "true"
+            # Si tiene info adicional del link
+            if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
+                portal = analysis.social_media_info.get("portal", "desconocido")
+                properties["chatbot_canal_origen"] = portal
+
+        # Registrar indicadores sospechosos si existen
+        if analysis.suspicious_indicators and len(analysis.suspicious_indicators) > 0:
+            # Almacenar los indicadores separados por coma
+            properties["chatbot_suspicious_indicators"] = ", ".join(analysis.suspicious_indicators)
+            logger.info(
+                f"[HubSpot Sync] Indicadores sospechosos detectados para {phone}: "
+                f"{analysis.suspicious_indicators}"
+            )
+
         await contact_manager.update_contact_info(contact_id, properties)
 
         logger.debug(
@@ -583,32 +666,45 @@ async def _notify_high_priority_lead(
     Notifica sobre un lead de alta prioridad.
 
     Se llama cuando el análisis detecta handoff_priority="high",
-    por ejemplo cuando el cliente expresa intención de visitar.
+    por ejemplo cuando el cliente expresa intención de visitar o
+    envía un link de redes sociales con un inmueble.
     """
     try:
         contact_manager = get_contact_manager()
 
+        # Construir razón del lead caliente
+        reasons = []
+        if analysis.intencion_visita:
+            reasons.append("Intención de visita")
+        if analysis.link_redes_sociales:
+            reasons.append("Link de red social")
+            # Si tiene info del portal, incluirla
+            if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
+                portal = analysis.social_media_info.get("portal", "")
+                if portal:
+                    reasons.append(f"Portal: {portal}")
+
+        reason_str = ", ".join(reasons) if reasons else f"Handoff: {analysis.handoff_priority}"
+
         # Actualizar propiedades para marcar como lead caliente
         properties = {
             "chatbot_hot_lead": "true",
-            "chatbot_hot_lead_reason": (
-                f"Intención visita: {analysis.intencion_visita}, "
-                f"Handoff: {analysis.handoff_priority}"
-            ),
+            "chatbot_hot_lead_reason": reason_str,
             "chatbot_timestamp": datetime.now().isoformat(),
         }
+
+        # Agregar URL del link si existe
+        if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
+            url = analysis.social_media_info.get("url")
+            if url:
+                properties["chatbot_social_media_url"] = url[:500]  # Truncar si es muy largo
 
         await contact_manager.update_contact_info(contact_id, properties)
 
         logger.info(
             f"[Webhook] Lead de alta prioridad marcado: {phone} | "
-            f"Intención visita: {analysis.intencion_visita}"
+            f"Razón: {reason_str}"
         )
-
-        # TODO: Enviar notificación a webhook de Slack/Teams si está configurado
-        # webhook_url = os.getenv("HOT_LEAD_WEBHOOK_URL")
-        # if webhook_url:
-        #     await _send_hot_lead_notification(webhook_url, contact_id, phone, analysis)
 
     except Exception as e:
         logger.error(f"[Webhook] Error notificando lead de alta prioridad: {e}")

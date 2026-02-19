@@ -43,7 +43,13 @@ class MessageAnalysis:
     intencion_visita: bool = False
     pregunta_tecnica: bool = False
     handoff_priority: str = "none"
+    link_redes_sociales: bool = False  # True si envió link de Instagram/Facebook/TikTok
+    suspicious_indicators: list = None  # Lista de indicadores sospechosos
     summary_update: Optional[str] = None
+
+    def __post_init__(self):
+        if self.suspicious_indicators is None:
+            self.suspicious_indicators = []
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -56,6 +62,8 @@ class MessageAnalysis:
             intencion_visita=data.get("intencion_visita", False),
             pregunta_tecnica=data.get("pregunta_tecnica", False),
             handoff_priority=data.get("handoff_priority", "none"),
+            link_redes_sociales=data.get("link_redes_sociales", False),
+            suspicious_indicators=data.get("suspicious_indicators", []),
             summary_update=data.get("summary_update")
         )
 

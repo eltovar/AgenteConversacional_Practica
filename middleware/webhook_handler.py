@@ -258,6 +258,7 @@ async def whatsapp_webhook(
         if not should_respond:
             # Registrar mensaje entrante en HubSpot (siempre)
             if contact_info:
+                logger.info(f"[Webhook] 📱 Registrando mensaje del cliente en HubSpot (contact_id={contact_info.contact_id})")
                 background_tasks.add_task(
                     _sync_message_to_hubspot,
                     contact_info.contact_id,
@@ -265,6 +266,8 @@ async def whatsapp_webhook(
                     "incoming",
                     phone_normalized
                 )
+            else:
+                logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Mensaje NO se guardará en HubSpot")
 
             # Si hay mensaje especial (ej: PENDING_HANDOFF), enviarlo
             if special_message:
@@ -427,6 +430,7 @@ async def whatsapp_webhook(
 
         # Sincronizar con HubSpot en background (incluye análisis)
         if contact_info:
+            logger.info(f"[Webhook] 📱 Registrando conversación en HubSpot (contact_id={contact_info.contact_id})")
             background_tasks.add_task(
                 _sync_conversation_with_analysis_to_hubspot,
                 contact_info.contact_id,
@@ -435,6 +439,8 @@ async def whatsapp_webhook(
                 phone_normalized,
                 analysis
             )
+        else:
+            logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Conversación NO se guardará en HubSpot")
 
         return _create_twiml_response(response_text)
 

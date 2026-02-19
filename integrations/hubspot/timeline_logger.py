@@ -165,15 +165,15 @@ class TimelineLogger:
             response = await client.post(endpoint, headers=self.headers, json=payload)
 
             if response.status_code == 201:
-                logger.debug(
-                    f"[TimelineLogger] Nota creada (fallback): contact={event.contact_id}"
+                logger.info(
+                    f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, sender={event.sender.value}"
                 )
                 return True
 
             else:
                 logger.error(
-                    f"[TimelineLogger] Error creando nota: "
-                    f"{response.status_code} - {response.text}"
+                    f"[TimelineLogger] ❌ Error creando nota para contact={event.contact_id}: "
+                    f"{response.status_code} - {response.text[:200]}"
                 )
                 return False
 

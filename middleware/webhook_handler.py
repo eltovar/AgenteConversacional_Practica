@@ -798,3 +798,125 @@ async def admin_get_status(phone: str):
     except Exception as e:
         logger.error(f"[Admin] Error obteniendo estado: {e}")
         return {"error": str(e)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# Endpoint para Webhooks de HubSpot (FASE 2)
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/hubspot/webhook")
+async def hubspot_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Endpoint para recibir webhooks de HubSpot.
+
+    Este endpoint permite que HubSpot notifique cuando cambian propiedades
+    importantes del contacto, como `sofia_activa`.
+    """
+    try:
+        # Parsear payload (HubSpot envía array de eventos)
+        payload = await request.json()
+        logger.info(f"[HubSpot Webhook] Recibido payload: {payload}")
+
+        # HubSpot envía una lista de eventos
+        events = payload if isinstance(payload, list) else [payload]
+
+        for event in events:
+            property_name = event.get("propertyName", "")
+            property_value = event.get("propertyValue", "")
+            contact_id = str(event.get("objectId", ""))
+            subscription_type = event.get("subscriptionType", "")
+
+            # Solo procesar cambios en sofia_activa
+            if property_name == "sofia_activa" and contact_id:
+                logger.info(
+                    f"[HubSpot Webhook] sofia_activa cambió a '{property_value}' "
+                    f"para contacto {contact_id}"
+                )
+
+                # Obtener teléfono del contacto desde HubSpot
+                phone = await _get_contact_phone_from_hubspot(contact_id)
+
+                if phone:
+                    state_manager = get_state_manager()
+
+                    if property_value.lower() in ["false", "no", "0", ""]:
+                        # Sofia desactivada → Activar HUMAN_ACTIVE
+                        await state_manager.activate_human(
+                            phone_normalized=phone,
+                            contact_id=contact_id,
+                            reason="Desactivado desde HubSpot CRM"
+                        )
+                        logger.info(f"[HubSpot Webhook] HUMAN_ACTIVE activado para {phone}")
+
+                    elif property_value.lower() in ["true", "yes", "1", "si", "sí"]:
+                        # Sofia activada → Reactivar BOT_ACTIVE
+                        await state_manager.activate_bot(phone)
+                        logger.info(f"[HubSpot Webhook] BOT_ACTIVE activado para {phone}")
+
+        return {"status": "ok", "processed": len(events)}
+
+    except Exception as e:
+        logger.error(f"[HubSpot Webhook] Error procesando webhook: {e}", exc_info=True)
+        # Retornar 200 para evitar que HubSpot reintente
+        return {"status": "error", "message": str(e)}
+
+
+async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
+    """
+    Obtiene el teléfono de un contacto de HubSpot.
+
+    Args:
+        contact_id: ID del contacto en HubSpot
+
+    Returns:
+        Teléfono normalizado o None si no se encuentra
+    """
+    import httpx
+
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key:
+        logger.warning("[HubSpot Webhook] HUBSPOT_API_KEY no configurada")
+        return None
+
+    try:
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        params = {"properties": "phone,whatsapp_id"}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {hubspot_api_key}"},
+                params=params,
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                props = data.get("properties", {})
+
+                # Preferir whatsapp_id, luego phone
+                phone = props.get("whatsapp_id") or props.get("phone")
+
+                if phone:
+                    # Normalizar teléfono
+                    normalizer = PhoneNormalizer()
+                    validation = normalizer.normalize(phone)
+                    if validation.is_valid:
+                        return validation.normalized
+
+                logger.warning(f"[HubSpot Webhook] Contacto {contact_id} sin teléfono válido")
+                return None
+
+            else:
+                logger.warning(
+                    f"[HubSpot Webhook] Error obteniendo contacto {contact_id}: "
+                    f"{response.status_code}"
+                )
+                return None
+
+    except Exception as e:
+        logger.error(f"[HubSpot Webhook] Error consultando HubSpot: {e}")
+        return None

@@ -23,8 +23,12 @@ from prompts.crm_prompts import (
     LINK_ARRIVAL_CONTEXT,
     NAME_EXTRACTION_PROMPT
 )
-from integrations.hubspot.lead_assigner import lead_assigner, orphan_alert_system
+from integrations.hubspot.lead_assigner import lead_assigner, orphan_alert_system, LeadAssigner
 from llm_client import llama_client
+
+# Importación para activar HUMAN_ACTIVE en el panel
+import os
+import redis.asyncio as aioredis
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from logging_config import logger
 import json
@@ -467,6 +471,14 @@ EJEMPLO DE TONO:
             # Preparar metadata de propiedad
             metadata = state.lead_data.get('metadata', {})
 
+            # ASIGNACIÓN DE CANAL (mover antes de calcular score para evitar UnboundLocalError)
+            # Primero verificar si el canal viene de state.metadata (llegada por link)
+            # Si no, usar detect_channel_origin para detectarlo de lead_data.metadata
+            if state.metadata.get("canal_origen"):
+                channel_origin = state.metadata["canal_origen"]
+            else:
+                channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
+
             # Calcular score de calidad del lead (incluye bonus por canal y código)
             score_data = {
                 "firstname": name_parts["firstname"],
@@ -500,15 +512,7 @@ EJEMPLO DE TONO:
 
             chatbot_preference = " | ".join(preference_parts) if preference_parts else ""
 
-            # ASIGNACIÓN AUTOMÁTICA (antes de crear propiedades para incluir canal)
-            # Primero verificar si el canal viene de state.metadata (llegada por link)
-            # Si no, usar detect_channel_origin para detectarlo de lead_data.metadata
-            if state.metadata.get("canal_origen"):
-                channel_origin = state.metadata["canal_origen"]
-            else:
-                channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
-
-            # Obtener pipeline y stage basado en canal de origen
+            # Obtener pipeline y stage basado en canal de origen (channel_origin ya fue asignado arriba)
             pipeline_config = get_target_pipeline(channel_origin)
             analytics_source = get_analytics_source(channel_origin)
 
@@ -600,6 +604,24 @@ EJEMPLO DE TONO:
                 dealstage=pipeline_config.get("stage_id")
             )
             logger.info(f"[CRMAgent] Deal creado exitosamente: {deal_id}")
+
+            # ═══════════════════════════════════════════════════════════════
+            # ACTIVAR HUMAN_ACTIVE PARA QUE APAREZCA EN EL PANEL
+            # ═══════════════════════════════════════════════════════════════
+            # Esto hace que el contacto aparezca automáticamente en el panel
+            # de asesores con badge "En espera", como en WhatsApp Web
+            try:
+                await self._activate_human_in_panel(
+                    phone_normalized=normalized_phone,
+                    contact_id=contact_id,
+                    owner_id=owner_id,
+                    reason=f"Lead registrado via CRM - {metadata.get('tipo_operacion', 'consulta')}",
+                    display_name=lead_name,
+                    canal_origen=channel_origin
+                )
+                logger.info(f"[CRMAgent] ✅ HUMAN_ACTIVE activado - Contacto aparecerá en panel")
+            except Exception as e:
+                logger.warning(f"[CRMAgent] No se pudo activar HUMAN_ACTIVE: {e}")
 
             # ALERTAS PARA LEADS HUÉRFANOS
             if not owner_id:
@@ -753,6 +775,74 @@ EJEMPLO DE TONO:
         except Exception as e:
             logger.warning(f"[CRMAgent] No se pudo parsear presupuesto a número '{budget_str}': {e}")
             return 0
+
+
+    async def _activate_human_in_panel(
+        self,
+        phone_normalized: str,
+        contact_id: str,
+        owner_id: str = None,
+        reason: str = None,
+        display_name: str = None,
+        canal_origen: str = None
+    ) -> None:
+        """
+        Activa HUMAN_ACTIVE en Redis para que el contacto aparezca
+        automáticamente en el panel de asesores.
+
+        Este método replica la lógica de ConversationStateManager.activate_human()
+        pero se ejecuta directamente desde CRMAgent para evitar dependencias circulares.
+        """
+        from datetime import datetime, timedelta
+        import json
+
+        # Configuración
+        STATE_PREFIX = "conv_state:"
+        META_PREFIX = "conv_meta:"
+        HANDOFF_TTL_SECONDS = 2 * 60 * 60  # 2 horas
+
+        # Obtener URL de Redis
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+        try:
+            # Conectar a Redis
+            r = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+
+            # 1. Guardar estado HUMAN_ACTIVE con TTL de 2 horas
+            state_key = f"{STATE_PREFIX}{phone_normalized}"
+            await r.set(state_key, "HUMAN_ACTIVE", ex=HANDOFF_TTL_SECONDS)
+
+            # 2. Guardar metadata para el panel
+            now = datetime.now()
+            expires_at = now + timedelta(seconds=HANDOFF_TTL_SECONDS)
+
+            meta = {
+                "phone_normalized": phone_normalized,
+                "contact_id": contact_id,
+                "status": "HUMAN_ACTIVE",
+                "last_activity": now.isoformat(),
+                "handoff_reason": reason,
+                "assigned_owner_id": owner_id,
+                "canal_origen": canal_origen,
+                "display_name": display_name,
+                "message_count": 0,
+                "created_at": now.isoformat()
+            }
+
+            meta_key = f"{META_PREFIX}{phone_normalized}"
+            await r.set(meta_key, json.dumps(meta), ex=HANDOFF_TTL_SECONDS)
+
+            await r.close()
+
+            logger.info(
+                f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized} "
+                f"(owner: {owner_id or 'sin asignar'}, "
+                f"expira: {expires_at.strftime('%H:%M:%S')})"
+            )
+
+        except Exception as e:
+            logger.error(f"[CRMAgent] Error activando HUMAN_ACTIVE en Redis: {e}")
+            raise
 
 
 # Instancia global (Singleton)

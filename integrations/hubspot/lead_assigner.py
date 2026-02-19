@@ -30,9 +30,6 @@ class LeadAssigner:
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
     #
     # CONFIGURACIÓN POR ASESORAS:
-    # - Luisa (87367331): metrocuadrado, finca_raiz, mercado_libre
-    # - Yubeny (88251457): pagina_web, whatsapp_directo, facebook, instagram, ciencuadras
-    # - Analista Redes (88558384): Solo métricas, NO responde mensajes
     OWNERS_CONFIG = {
         # === ASESORA LUISA ===
         # Portales inmobiliarios: MetroCuadrado, Finca Raíz, Mercado Libre

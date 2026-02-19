@@ -561,41 +561,61 @@ class TimelineLogger:
         bubbles = []
 
         for note in notes:
-            body = note.get("body", "")
-            timestamp = note.get("timestamp")
+            try:
+                # Validación de seguridad: obtener el cuerpo de la nota
+                body = note.get("body") if note else None
+                if not body:
+                    continue
 
-            # Detectar tipo por emoji
-            if "📱" in body[:15]:
-                sender = "client"
-                sender_name = "Cliente"
-                align = "left"
-            elif "🤖" in body[:15]:
-                sender = "bot"
-                sender_name = "Sofía"
-                align = "right"
-            elif "👤" in body[:15]:
-                sender = "advisor"
-                sender_name = "Asesor"
-                align = "right"
-            else:
-                sender = "unknown"
-                sender_name = "Sistema"
-                align = "left"
+                # Limpiar HTML básico de HubSpot si existe
+                body = body.replace('<p>', '').replace('</p>', '').replace('<br>', '\n').strip()
 
-            # Limpiar prefijo y metadata del cuerpo
-            clean_body = self._clean_note_body(body)
+                timestamp = note.get("timestamp")
 
-            bubbles.append({
-                "id": note.get("id"),
-                "sender": sender,
-                "sender_name": sender_name,
-                "message": clean_body,
-                "timestamp": timestamp,
-                "align": align
-            })
+                # Detectar tipo por emoji (buscar en los primeros 20 caracteres)
+                body_prefix = body[:20] if len(body) >= 20 else body
+
+                if "📱" in body_prefix:
+                    sender = "client"
+                    sender_name = "Cliente"
+                    align = "left"
+                elif "🤖" in body_prefix:
+                    sender = "bot"
+                    sender_name = "Sofía"
+                    align = "right"
+                elif "👤" in body_prefix:
+                    sender = "advisor"
+                    sender_name = "Asesor"
+                    align = "right"
+                else:
+                    # Si no tiene prefijo conocido, ignorar para no mostrar notas del sistema
+                    sender = "unknown"
+                    sender_name = "Sistema"
+                    align = "left"
+
+                # Limpiar prefijo y metadata del cuerpo
+                clean_body = self._clean_note_body(body)
+
+                # Solo agregar si hay contenido después de limpiar
+                if clean_body and clean_body.strip():
+                    bubbles.append({
+                        "id": note.get("id"),
+                        "sender": sender,
+                        "sender_name": sender_name,
+                        "message": clean_body,
+                        "timestamp": timestamp,
+                        "align": align
+                    })
+
+            except Exception as e:
+                logger.warning(f"[TimelineLogger] Error formateando nota: {e}")
+                continue
 
         # Ordenar por timestamp (más antiguo primero)
-        bubbles.sort(key=lambda x: x.get("timestamp") or "")
+        try:
+            bubbles.sort(key=lambda x: x.get("timestamp") or "")
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error ordenando burbujas: {e}")
 
         return bubbles
 

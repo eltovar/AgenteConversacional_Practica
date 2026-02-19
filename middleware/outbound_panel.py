@@ -2,13 +2,6 @@
 """
 Este módulo proporciona endpoints API y UI para que los asesores envíen
 mensajes de WhatsApp directamente, sustituyendo el Inbox bloqueado de HubSpot.
-
-Características:
-- UI mínima con caja de texto y botón de envío
-- Validación de ventana de 24 horas de WhatsApp
-- Marcado de mensaje con message_source="Manual via Panel"
-- Pausa automática de Sofía al enviar mensaje manual
-- Registro en Timeline de HubSpot
 """
 
 import os
@@ -424,12 +417,31 @@ async def get_history_by_contact_id(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
+    # Validar que contact_id sea numérico (ID de HubSpot)
+    if not contact_id or not contact_id.isdigit():
+        logger.warning(f"[Panel] contact_id inválido recibido: '{contact_id}'")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "contact_id": contact_id,
+                "messages": [],
+                "count": 0,
+                "error": "ID de contacto inválido (debe ser numérico)"
+            }
+        )
+
     try:
         timeline_logger = get_timeline_logger()
         messages = await timeline_logger.get_notes_for_contact(
             contact_id=contact_id,
             limit=limit
         )
+
+        # Asegurar que messages sea una lista válida
+        if messages is None:
+            messages = []
+
+        logger.info(f"[Panel] Historial cargado: {len(messages)} mensajes para contact_id={contact_id}")
 
         return {
             "contact_id": contact_id,
@@ -438,8 +450,17 @@ async def get_history_by_contact_id(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error obteniendo historial: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log del error pero retornar 200 con lista vacía para evitar 502
+        logger.error(f"[Panel] Error obteniendo historial para {contact_id}: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "contact_id": contact_id,
+                "messages": [],
+                "count": 0,
+                "error": f"Error interno: {str(e)}"
+            }
+        )
 
 
 @router.get("/debug/redis")
@@ -1034,18 +1055,32 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             }}
 
             async function loadChatHistory(contactId) {{
+                console.log('[Panel] Cargando historial para contact_id:', contactId);
                 try {{
                     const response = await fetch(`${{BASE_URL}}/history/${{contactId}}?limit=50`, {{
                         headers: {{ 'X-API-Key': API_KEY }}
                     }});
 
-                    if (!response.ok) throw new Error('Error al cargar historial');
+                    console.log('[Panel] Respuesta de historial:', response.status);
 
                     const data = await response.json();
-                    renderChatBubbles(data.messages);
+                    console.log('[Panel] Datos recibidos:', data);
+
+                    // Verificar si hay error en la respuesta (aunque sea 200)
+                    if (data.error) {{
+                        console.warn('[Panel] Error en respuesta:', data.error);
+                    }}
+
+                    // Renderizar mensajes (puede estar vacío)
+                    renderChatBubbles(data.messages || []);
+
+                    // Mostrar mensaje si no hay historial
+                    if (!data.messages || data.messages.length === 0) {{
+                        console.log('[Panel] Sin mensajes en historial');
+                    }}
 
                 }} catch (error) {{
-                    console.error('Error cargando historial:', error);
+                    console.error('[Panel] Error cargando historial:', error);
                     document.getElementById('chatMessages').innerHTML = `
                         <div class="flex items-center justify-center h-full text-red-500">
                             <p>Error al cargar historial: ${{error.message}}</p>
@@ -1055,6 +1090,7 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             }}
 
             async function checkWindowStatus(phone) {{
+                console.log('[Panel] Verificando ventana 24h para:', phone);
                 try {{
                     const response = await fetch(
                         `${{BASE_URL}}/window-status/${{encodeURIComponent(phone)}}`,
@@ -1062,18 +1098,28 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                     );
 
                     const data = await response.json();
+                    console.log('[Panel] Estado de ventana:', data);
+
                     const statusDiv = document.getElementById('windowStatus');
                     statusDiv.classList.remove('hidden');
 
                     if (data.window_open) {{
                         statusDiv.className = 'text-sm bg-green-100 text-green-700 px-3 py-1 rounded-full';
                         statusDiv.textContent = `Ventana: ${{data.message}}`;
+                        // Asegurar que el botón esté habilitado
+                        document.getElementById('sendBtn').disabled = false;
                     }} else {{
                         statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
-                        statusDiv.textContent = 'Ventana cerrada (requiere template)';
+                        statusDiv.textContent = 'Ventana cerrada (>24h) - El mensaje puede no entregarse';
+                        // NO deshabilitar el botón - permitir intentar enviar
+                        // El servidor responderá con warning si no se puede
+                        console.warn('[Panel] Ventana de 24h cerrada. Último mensaje:', data.last_message_time);
                     }}
                 }} catch (error) {{
-                    console.error('Error verificando ventana:', error);
+                    console.error('[Panel] Error verificando ventana:', error);
+                    // En caso de error, no bloquear
+                    const statusDiv = document.getElementById('windowStatus');
+                    statusDiv.classList.add('hidden');
                 }}
             }}
 
@@ -1211,13 +1257,17 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
 
             async function sendMessage(e) {{
                 e.preventDefault();
+                console.log('[Panel] sendMessage() iniciado');
 
                 const phone = document.getElementById('selectedPhone').value;
                 const contactId = document.getElementById('selectedContactId').value;
                 const message = document.getElementById('messageInput').value.trim();
                 const resultDiv = document.getElementById('sendResult');
 
+                console.log('[Panel] Datos de envío:', {{ phone, contactId, messageLength: message.length }});
+
                 if (!phone || !message) {{
+                    console.warn('[Panel] Validación fallida: phone o message vacío');
                     resultDiv.className = 'mt-2 text-sm text-red-600';
                     resultDiv.textContent = 'Selecciona un contacto y escribe un mensaje';
                     resultDiv.classList.remove('hidden');
@@ -1234,13 +1284,18 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                     formData.append('body', message);
                     formData.append('contact_id', contactId);
 
+                    console.log('[Panel] Enviando POST a:', `${{BASE_URL}}/send-message`);
+
                     const response = await fetch(`${{BASE_URL}}/send-message`, {{
                         method: 'POST',
                         headers: {{ 'X-API-Key': API_KEY }},
                         body: formData
                     }});
 
+                    console.log('[Panel] Respuesta HTTP:', response.status, response.statusText);
+
                     const data = await response.json();
+                    console.log('[Panel] Respuesta JSON:', data);
 
                     if (data.status === 'success') {{
                         resultDiv.className = 'mt-2 text-sm text-green-600';
@@ -1250,6 +1305,7 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                         // Recargar historial
                         setTimeout(() => loadChatHistory(contactId), 1000);
                     }} else if (data.status === 'warning') {{
+                        console.warn('[Panel] Warning del servidor:', data.message);
                         resultDiv.className = 'mt-2 text-sm text-orange-600';
                         resultDiv.textContent = data.message;
                     }} else {{
@@ -1257,6 +1313,7 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                     }}
 
                 }} catch (error) {{
+                    console.error('[Panel] Error en sendMessage:', error);
                     resultDiv.className = 'mt-2 text-sm text-red-600';
                     resultDiv.textContent = `Error: ${{error.message}}`;
                 }} finally {{
@@ -1299,6 +1356,8 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             // ═══════════════════════════════════════════════════════════════════
 
             document.addEventListener('DOMContentLoaded', () => {{
+                console.log('[Panel] Inicializando panel de asesores...');
+
                 // Actualizar header si hay advisor filtrado
                 if (ADVISOR_NAME) {{
                     document.getElementById('panelTitle').textContent = `Panel de ${{ADVISOR_NAME}}`;
@@ -1328,15 +1387,28 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
                 // Aplicar fechas custom
                 document.getElementById('applyDatesBtn').addEventListener('click', loadContacts);
 
-                // Enviar mensaje
-                document.getElementById('sendForm').addEventListener('submit', sendMessage);
+                // Enviar mensaje - Form submit
+                const sendForm = document.getElementById('sendForm');
+                if (sendForm) {{
+                    sendForm.addEventListener('submit', sendMessage);
+                    console.log('[Panel] Event listener de sendForm configurado');
+                }} else {{
+                    console.error('[Panel] ERROR: No se encontró el formulario sendForm');
+                }}
 
                 // Enviar con Ctrl+Enter
-                document.getElementById('messageInput').addEventListener('keydown', function(e) {{
-                    if (e.ctrlKey && e.key === 'Enter') {{
-                        sendMessage(e);
-                    }}
-                }});
+                const messageInput = document.getElementById('messageInput');
+                if (messageInput) {{
+                    messageInput.addEventListener('keydown', function(e) {{
+                        if (e.ctrlKey && e.key === 'Enter') {{
+                            console.log('[Panel] Ctrl+Enter presionado');
+                            sendMessage(e);
+                        }}
+                    }});
+                    console.log('[Panel] Event listener de Ctrl+Enter configurado');
+                }}
+
+                console.log('[Panel] Inicialización completada');
             }});
 
             // Detener polling cuando se cierra la pestaña

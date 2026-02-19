@@ -21,7 +21,8 @@ from prompts.crm_prompts import (
     CRM_CONFIRMATION_TEMPLATE,
     PROPERTY_EXTRACTION_PROMPT,
     LINK_ARRIVAL_CONTEXT,
-    NAME_EXTRACTION_PROMPT
+    NAME_EXTRACTION_PROMPT,
+    FIRST_MESSAGE_CONTEXT
 )
 from integrations.hubspot.lead_assigner import lead_assigner, orphan_alert_system, LeadAssigner
 from llm_client import llama_client
@@ -153,17 +154,7 @@ class CRMAgent:
 
         # Añadir instrucciones de presentación SOLO si no llegó por link y no hay historial
         if should_include_intro:
-            system_content += """
-
-**CONTEXTO ESPECIAL - PRIMER MENSAJE:**
-Este es el PRIMER contacto del cliente. Debes:
-1. Incluir una breve presentación al inicio (Sofía, asesora virtual de Inmobiliaria Proteger)
-2. Responder a la necesidad del cliente
-3. Todo en un mensaje fluido y natural
-
-EJEMPLO DE TONO:
-"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. [continúa con la respuesta]..."
-"""
+            system_content += "\n\n" + FIRST_MESSAGE_CONTEXT
 
         if context_info:
             system_content += f"\n\nDATOS YA RECOPILADOS DEL CLIENTE:\n{context_info}\nNo vuelvas a preguntar por estos datos."

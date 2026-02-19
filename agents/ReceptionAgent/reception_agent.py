@@ -4,8 +4,8 @@ from agents.ReceptionAgent.reception_tool import RECEPTION_TOOLS, classify_inten
 from prompts.reception_prompts import (
     RECEPTION_SYSTEM_PROMPT,
     CLARIFICATION_PROMPTS,
-    SOFIA_PERSONALITY
 )
+from prompts.sofia_personality import GREETING_PREFIX
 from prompts.crm_prompts import PROPERTY_EXTRACTION_PROMPT
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -140,7 +140,7 @@ class ReceptionAgent:
                         clarification = random.choice(CLARIFICATION_PROMPTS)
                         # Si es primer mensaje, añadir presentación
                         if is_first_message:
-                            response_text = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {clarification}"
+                            response_text = GREETING_PREFIX + clarification
                             state.metadata["is_first_message"] = False
                         else:
                             response_text = clarification
@@ -151,7 +151,7 @@ class ReceptionAgent:
                         state.status = ConversationStatus.AWAITING_CLARIFICATION
                         fallback_clarification = CLARIFICATION_PROMPTS[0]
                         if is_first_message:
-                            response_text = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {fallback_clarification}"
+                            response_text = GREETING_PREFIX + fallback_clarification
                             state.metadata["is_first_message"] = False
                         else:
                             response_text = fallback_clarification
@@ -170,7 +170,7 @@ class ReceptionAgent:
 
         fallback_response = CLARIFICATION_PROMPTS[0]
         if is_first_message:
-            fallback_response = f"¡Hola! Soy Sofía, asesora virtual de Inmobiliaria Proteger. {fallback_response}"
+            fallback_response = GREETING_PREFIX + fallback_response
             state.metadata["is_first_message"] = False
 
         return {

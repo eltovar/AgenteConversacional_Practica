@@ -2,15 +2,6 @@
 """
 Sistema de agregación de mensajes para manejar múltiples mensajes
 enviados en rápida sucesión por el mismo usuario.
-
-Problema: Un cliente envía varios mensajes seguidos (WhatsApp típico):
-  [15:00:01] "Hola"
-  [15:00:02] "busco apartamento"
-  [15:00:03] "en el poblado"
-  [15:00:04] "de 2 habitaciones"
-
-Sin agregación: Sofía responde 4 veces.
-Con agregación: Sofía espera 30 segundos, combina todo, responde 1 vez.
 """
 
 import asyncio
@@ -26,13 +17,6 @@ AGGREGATION_TIMEOUT = int(os.getenv("MESSAGE_AGGREGATION_TIMEOUT", "30"))
 class MessageAggregator:
     """
     Agregador de mensajes usando Redis para persistencia y locks distribuidos.
-
-    Flujo:
-    1. Mensaje llega → se agrega al buffer en Redis
-    2. Se inicia un timer de AGGREGATION_TIMEOUT segundos
-    3. Si llegan más mensajes en ese tiempo → se agregan al buffer
-    4. Cuando el timer expira → se procesan todos los mensajes juntos
-    5. Durante el timer, nuevos webhooks reciben respuesta "procesando"
     """
 
     def __init__(self):
@@ -70,15 +54,7 @@ class MessageAggregator:
 
     async def add_message_to_buffer(self, session_id: str, message: str) -> Dict[str, Any]:
         """
-        Agrega un mensaje al buffer y determina si debe procesarse ahora o esperar.
-
-        Returns:
-            {
-                "should_process": bool,  # True si este mensaje debe iniciar procesamiento
-                "is_aggregating": bool,  # True si hay mensajes acumulándose
-                "buffer_count": int,     # Número de mensajes en buffer
-                "wait_message": str      # Mensaje para mostrar mientras espera (si aplica)
-            }
+        Agrega un mensaje al buffer y determina si debe procesarse ahora o esperar
         """
         if not self._redis_available:
             # Sin Redis, procesar inmediatamente (comportamiento legacy)

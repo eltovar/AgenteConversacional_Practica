@@ -38,5 +38,15 @@ langchain-postgres==0.0.12
 psycopg[binary]==3.2.3
 psycopg2-binary>=2.9.0
 
+# Scheduler para seguimiento automático
+APScheduler>=3.10.0
+
+# Parser de fechas en lenguaje natural (español)
+dateparser>=1.2.0
+
+# Jinja2 Templates (para Panel de Asesores)
+jinja2>=3.1.0
+aiofiles>=23.0.0
+
 # Testing (opcional)
 pytest>=8.0.0

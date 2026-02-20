@@ -17,6 +17,11 @@
 ---
 
 # FASE 1: Sistema de Templates Multiples
+Quiero una manera de que las asesoras puedan hacer sus propopios template, asi que se deberá mplementar un módulo de gestión de assets de comunicación que permita a los usuarios finales realizar un CRUD (Create, Read, Update, Delete) de plantillas personalizadas, con una interfaz de inyección de variables para automatizar el envío de mensajes.
+Custom Template Engine: El sistema debe permitir crear estructuras de mensajes con placeholders (ej: {{nombre_cliente}}).
+Los template de deberan guardarse
+Event Trigger (El botón): El botón de "Agregar template" debe disparar un modal de entrada de datos que valide el contenido antes de la persistencia.
+
 
 ## Estado Actual
 
@@ -675,6 +680,115 @@ async def export_metrics_csv(
 
 ---
 
+# FASE 10 NOTAS DE HUBSPOT
+Tras revisar crm_agent.py, hubspot_client.py y sofia_brain.py
+Se ha detecyyado Falta el método de creación de notas en el Cliente: El archivo hubspot_client.py tiene métodos para crear contactos y deals, pero no tiene una función para crear notas (Engagement de tipo Note).
+
+Lógica de Handoff incompleta: En crm_agent.py, cuando se activa el estado HUMAN_ACTIVE (líneas 315-380), el sistema guarda la metadata en Redis para el panel, pero no realiza ninguna llamada a HubSpot para registrar una nota que diga "El cliente ha sido transferido" o para guardar el resumen de la conversación que generó Sofía.
+
+Falta de Asociaciones: Como sospechábamos, para que algo aparezca en "Actividades", debe enviarse como un objeto note con una asociación explícita al contacto (associationTypeId: 202).
+
+Plan de Acción
+Para solucionar esto, debemos realizar dos cambios:
+
+En hubspot_client.py: Añadir el método Notes.
+
+En crm_agent.py: Invocar ese método justo antes de activar el modo humano, enviando el resumen de la conversación.
+
+``` python
+import logging
+import httpx
+import os
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+# Configuración de entorno
+HUBSPOT_ACCESS_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN")
+
+# --- PARCHE PARA hubspot_client.py ---
+
+async def create_note(contact_id: str, body: str):
+    """
+    Crea una nota en HubSpot y la asocia al contacto para que aparezca en 'Actividades'.
+    ID de Asociación 202: Nota a Contacto.
+    """
+    url = "https://api.hubapi.com/crm/v3/objects/notes"
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "properties": {
+            "hs_note_body": body,
+            "hs_timestamp": datetime.utcnow().isoformat() + "Z"
+        },
+        "associations": [
+            {
+                "to": {"id": contact_id},
+                "types": [
+                    {
+                        "associationCategory": "HUBSPOT_DEFINED",
+                        "associationTypeId": 202 
+                    }
+                ]
+            }
+        ]
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload, timeout=10.0)
+            if response.status_code == 201:
+                logger.info(f"[HubSpot] ✅ Nota creada y asociada al contacto {contact_id}")
+                return response.json().get("id")
+            else:
+                logger.error(f"[HubSpot] ❌ Error al crear nota: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"[HubSpot] ❌ Fallo de conexión al crear nota: {str(e)}")
+            return None
+
+# --- INTEGRACIÓN EN crm_agent.py (Lógica de Handoff) ---
+
+async def execute_handoff_with_log(contact_id: str, reason: str, summary: str):
+    """
+    Lógica mejorada para crm_agent.py: 
+    1. Crea la nota en HubSpot con el resumen para que la asesora la vea en Actividades.
+    2. Luego activa el estado en Redis.
+    """
+    # Formateamos la nota para que sea legible en el Timeline de HubSpot
+    full_note = (
+        f"🤖 **TRANSFERENCIA A HUMANO**\n"
+        f"**Motivo:** {reason}\n"
+        f"**Resumen de conversación:**\n{summary}\n"
+        f"---"
+    )
+    
+    # 1. Intentar crear la nota en HubSpot
+    await create_note(contact_id, full_note)
+    
+    # 2. Proceder con la lógica de Redis que ya tienes en crm_agent.py
+    # (Actualizar status a HUMAN_ACTIVE, etc.)
+    logger.info(f"[Handoff] Registro completado en HubSpot para contacto {contact_id}")
+
+# --- REVISIÓN DE LOG CLIENTE ---
+
+async def log_client_message(contact_id: str, message_body: str):
+    """
+    Asegura que el mensaje del cliente aparezca en HubSpot y el Panel.
+    """
+    formatted_body = f"📱 Cliente: {message_body}"
+    await create_note(contact_id, formatted_body)
+```
+
+
+
+
+---
+
 # Orden de Implementacion Recomendado
 
 ## Sprint 1: Core (Alta prioridad)
@@ -766,3 +880,4 @@ state.metadata["link_procesado"] = True
 - Transcripcion con OpenAI Whisper (~$9/mes)
 - Almacenamiento con Cloudinary (gratis)
 - Ver detalles en plan original (archivo de plan)
+

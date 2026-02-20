@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metricas Redes Sociales - Inmobiliaria Proteger</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/whatsapp/panel/static/metrics.css">
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-purple-700 text-white p-4 shadow-lg">
+        <div class="container mx-auto">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold">Dashboard Redes Sociales</h1>
+                    <p class="text-purple-200 text-sm">Inmobiliaria Proteger - Analitica</p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <select id="periodSelect" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
+                        <option value="7">Ultimos 7 dias</option>
+                        <option value="14">Ultimos 14 dias</option>
+                        <option value="30">Ultimos 30 dias</option>
+                    </select>
+                    <button id="refreshBtn" class="bg-purple-500 hover:bg-purple-400 px-4 py-2 rounded">
+                        &#10227; Actualizar
+                    </button>
+                    <button id="exportBtn" onclick="exportCSV()" class="bg-green-500 hover:bg-green-400 px-4 py-2 rounded">
+                        &#128202; Exportar CSV
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto p-6">
+        <!-- Stat Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="stat-card rounded-lg p-6 text-white shadow-lg">
+                <p class="text-sm opacity-80">Total Leads</p>
+                <p id="totalLeads" class="text-4xl font-bold">-</p>
+                <p class="text-sm opacity-80 mt-2">Redes sociales</p>
+            </div>
+            <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
+                <p class="text-sm opacity-80">Instagram</p>
+                <p id="instagramLeads" class="text-4xl font-bold">-</p>
+                <p class="text-sm opacity-80 mt-2">leads</p>
+            </div>
+            <div class="stat-card-green rounded-lg p-6 text-white shadow-lg">
+                <p class="text-sm opacity-80">Facebook</p>
+                <p id="facebookLeads" class="text-4xl font-bold">-</p>
+                <p class="text-sm opacity-80 mt-2">leads</p>
+            </div>
+            <div class="stat-card-tiktok rounded-lg p-6 text-white shadow-lg">
+                <p class="text-sm opacity-80">TikTok</p>
+                <p id="tiktokLeads" class="text-4xl font-bold">-</p>
+                <p class="text-sm opacity-80 mt-2">leads</p>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Chart: Leads por Canal -->
+            <div class="bg-white rounded-lg shadow-lg p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Leads por Canal</h3>
+                <canvas id="channelChart"></canvas>
+            </div>
+
+            <!-- Chart: Leads por Dia -->
+            <div class="bg-white rounded-lg shadow-lg p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia Diaria</h3>
+                <canvas id="dailyChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Tabla de resumen -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
+            <h3 class="text-lg font-semibold mb-4 text-gray-700">Resumen por Canal</h3>
+            <table class="w-full">
+                <thead>
+                    <tr class="border-b">
+                        <th class="text-left py-2 text-gray-600">Canal</th>
+                        <th class="text-right py-2 text-gray-600">Leads</th>
+                        <th class="text-right py-2 text-gray-600">%</th>
+                    </tr>
+                </thead>
+                <tbody id="channelTable">
+                    <tr><td colspan="3" class="text-center py-4 text-gray-400">Cargando...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Info box -->
+        <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p class="text-blue-700 text-sm">
+                <strong>&#8505;&#65039; Nota:</strong> Este dashboard muestra metricas de leads provenientes de
+                redes sociales (Facebook, Instagram, LinkedIn, YouTube, TikTok).
+                Para ver conversaciones detalladas o enviar mensajes, contacte a las asesoras.
+            </p>
+        </div>
+    </main>
+
+    <!-- Script con variables inyectadas desde el servidor -->
+    <script>
+        // Variables inyectadas por Jinja2
+        const API_KEY = '{{ api_key }}';
+        const BASE_URL = '{{ base_url }}';
+    </script>
+    <script src="/whatsapp/panel/static/metrics.js"></script>
+</body>
+</html>

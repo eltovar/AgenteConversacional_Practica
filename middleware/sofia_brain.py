@@ -38,6 +38,10 @@ class MessageAnalysis:
     link_redes_sociales: bool = False  # True si envió link de Instagram/Facebook/TikTok
     suspicious_indicators: list = None  # Lista de indicadores sospechosos
     summary_update: Optional[str] = None
+    # Campos para detección de citas
+    fecha_cita_mencionada: Optional[str] = None  # ISO format (YYYY-MM-DD)
+    hora_cita_mencionada: Optional[str] = None   # HH:MM format
+    cita_confirmada: bool = False  # True si el cliente confirma una cita propuesta
 
     def __post_init__(self):
         if self.suspicious_indicators is None:
@@ -56,7 +60,10 @@ class MessageAnalysis:
             handoff_priority=data.get("handoff_priority", "none"),
             link_redes_sociales=data.get("link_redes_sociales", False),
             suspicious_indicators=data.get("suspicious_indicators", []),
-            summary_update=data.get("summary_update")
+            summary_update=data.get("summary_update"),
+            fecha_cita_mencionada=data.get("fecha_cita_mencionada"),
+            hora_cita_mencionada=data.get("hora_cita_mencionada"),
+            cita_confirmada=data.get("cita_confirmada", False)
         )
 
 
@@ -78,12 +85,12 @@ class SofiaBrain:
     """
     Cerebro de Sofía con memoria persistente.
 
-    Características:
-    - Memoria de últimos 10-15 mensajes por conversación
-    - Usa OpenAI gpt-4o-mini
-    - Integración con perfil de HubSpot para contexto adicional
-    - TTL de 24 horas en Redis
-    - respuesta + análisis en 1 llamada LLM
+    SEGREGACIÓN POR CANAL:
+    El session_id ahora incluye el canal de origen para evitar que
+    el mismo teléfono desde diferentes portales comparta historial de chat.
+
+    Formato: {phone}:{canal}
+    Ejemplo: +573001234567:instagram
     """
 
     # Número máximo de mensajes a mantener en memoria
@@ -91,6 +98,9 @@ class SofiaBrain:
 
     # TTL de la sesión en segundos (24 horas)
     SESSION_TTL = 24 * 60 * 60
+
+    # Canal por defecto para compatibilidad
+    DEFAULT_CANAL = "default"
 
     def __init__(
         self,
@@ -102,13 +112,6 @@ class SofiaBrain:
     ):
         """
         Inicializa el cerebro de Sofía.
-
-        Args:
-            redis_url: URL de conexión a Redis
-            openai_api_key: API key de OpenAI (opcional, usa env var)
-            model: Modelo de OpenAI a usar (default: gpt-4o-mini)
-            temperature: Temperatura del modelo (default: 0.3)
-            use_single_stream: Usar procesamiento Single-Stream (default: True)
         """
         self.redis_url = redis_url
         self.use_single_stream = use_single_stream
@@ -140,12 +143,26 @@ class SofiaBrain:
         mode = "Single-Stream" if use_single_stream else "Legacy"
         logger.info(f"[SofiaBrain] Inicializado con OpenAI {model} (modo: {mode})")
 
+    def _build_session_id(self, phone: str, canal: Optional[str] = None) -> str:
+        """
+        Construye el session_id con segregación por canal.
+
+        Args:
+            phone: Número de teléfono normalizado
+            canal: Canal de origen (instagram, finca_raiz, etc.)
+
+        Returns:
+            Session ID en formato phone:canal
+        """
+        canal_safe = canal or self.DEFAULT_CANAL
+        return f"{phone}:{canal_safe}"
+
     def _get_message_history(self, session_id: str) -> RedisChatMessageHistory:
         """
         Obtiene el historial de mensajes de Redis.
 
         Args:
-            session_id: ID de sesión (número de teléfono normalizado)
+            session_id: ID de sesión (formato phone:canal)
 
         Returns:
             RedisChatMessageHistory configurado
@@ -161,7 +178,8 @@ class SofiaBrain:
         self,
         session_id: str,
         user_message: str,
-        lead_context: Optional[Dict[str, Any]] = None
+        lead_context: Optional[Dict[str, Any]] = None,
+        canal: Optional[str] = None
     ) -> str:
         """
         Procesa un mensaje del usuario y genera respuesta.
@@ -171,24 +189,25 @@ class SofiaBrain:
         y retorna solo la respuesta.
 
         Args:
-            session_id: ID de sesión (número normalizado, ej: "+573001234567")
+            session_id: ID de sesión (teléfono normalizado)
             user_message: Mensaje del usuario
-            lead_context: Contexto adicional del lead desde HubSpot (opcional)
-
-        Returns:
-            Respuesta generada por Sofía
+            lead_context: Contexto adicional del lead
+            canal: Canal de origen para segregación de historial
         """
+        # Construir session_id con canal para segregación
+        composite_session_id = self._build_session_id(session_id, canal)
+
         if self.use_single_stream:
             # Usar Single-Stream y extraer solo la respuesta
             result = await self.process_message_with_analysis(
-                session_id=session_id,
+                session_id=composite_session_id,
                 user_message=user_message,
                 lead_context=lead_context
             )
             return result.respuesta
 
         # Modo legacy: proceso original sin análisis
-        return await self._process_message_legacy(session_id, user_message, lead_context)
+        return await self._process_message_legacy(composite_session_id, user_message, lead_context)
 
     async def _process_message_legacy(
         self,
@@ -257,20 +276,6 @@ class SofiaBrain:
     ) -> SingleStreamResponse:
         """
         Procesa un mensaje y retorna respuesta + análisis en una sola llamada LLM.
-
-        Este método implementa Single-Stream Processing:
-        - Una sola llamada al LLM
-        - Respuesta natural para el cliente
-        - Análisis de emoción, intención, prioridad de handoff
-        - Actualización de resumen del cliente
-
-        Args:
-            session_id: ID de sesión (número normalizado)
-            user_message: Mensaje del usuario
-            lead_context: Contexto adicional del lead desde HubSpot
-
-        Returns:
-            SingleStreamResponse con respuesta y análisis completo
         """
         logger.info(f"[SofiaBrain] Procesando mensaje Single-Stream de {session_id}")
 
@@ -457,18 +462,25 @@ class SofiaBrain:
         except Exception as e:
             logger.warning(f"[SofiaBrain] Error recortando historial: {e}")
 
-    async def get_conversation_summary(self, session_id: str) -> str:
+    async def get_conversation_summary(
+        self,
+        session_id: str,
+        canal: Optional[str] = None
+    ) -> str:
         """
         Genera un resumen de la conversación para HubSpot.
 
         Args:
-            session_id: ID de sesión
+            session_id: ID de sesión (teléfono)
+            canal: Canal de origen para segregación
 
         Returns:
             Resumen de la conversación
         """
         try:
-            history = self._get_message_history(session_id)
+            # Construir session_id con canal
+            composite_session_id = self._build_session_id(session_id, canal)
+            history = self._get_message_history(composite_session_id)
             messages = history.messages
 
             if not messages:
@@ -488,17 +500,24 @@ class SofiaBrain:
             logger.error(f"[SofiaBrain] Error obteniendo resumen: {e}")
             return "Error al obtener resumen de conversación."
 
-    async def clear_history(self, session_id: str) -> None:
+    async def clear_history(
+        self,
+        session_id: str,
+        canal: Optional[str] = None
+    ) -> None:
         """
         Limpia el historial de una conversación.
 
         Args:
-            session_id: ID de sesión
+            session_id: ID de sesión (teléfono)
+            canal: Canal de origen para segregación
         """
         try:
-            history = self._get_message_history(session_id)
+            # Construir session_id con canal
+            composite_session_id = self._build_session_id(session_id, canal)
+            history = self._get_message_history(composite_session_id)
             history.clear()
-            logger.info(f"[SofiaBrain] Historial limpiado para {session_id}")
+            logger.info(f"[SofiaBrain] Historial limpiado para {composite_session_id}")
         except Exception as e:
             logger.error(f"[SofiaBrain] Error limpiando historial: {e}")
 

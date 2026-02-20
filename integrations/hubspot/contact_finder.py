@@ -38,14 +38,6 @@ class ContactInfo:
 class ContactFinder:
     """
     Buscador de contactos en HubSpot con caché en Redis.
-
-    Orden de búsqueda:
-    1. whatsapp_id (propiedad personalizada, más precisa)
-    2. hs_whatsapp_phone_number (propiedad nativa de HubSpot)
-    3. mobilephone
-    4. phone
-
-    La búsqueda se realiza con el número en formato E.164 y también sin prefijo.
     """
 
     # Propiedades a buscar en orden de prioridad
@@ -74,10 +66,6 @@ class ContactFinder:
     def __init__(self, redis_url: Optional[str] = None):
         """
         Inicializa el buscador de contactos.
-
-        Args:
-            redis_url: URL de conexión a Redis. Si no se proporciona,
-                      usa REDIS_PUBLIC_URL o REDIS_URL del entorno.
         """
         self.api_key = os.getenv("HUBSPOT_API_KEY")
         self.base_url = "https://api.hubapi.com"
@@ -164,16 +152,6 @@ class ContactFinder:
     def _generate_phone_variants(self, phone_e164: str) -> List[str]:
         """
         Genera variantes del número para búsqueda.
-
-        Args:
-            phone_e164: Número en formato E.164 (ej: +573001234567)
-
-        Returns:
-            Lista de variantes a buscar:
-            - +573001234567 (E.164 completo)
-            - 573001234567 (sin +)
-            - 3001234567 (número nacional)
-            - 03001234567 (con 0 inicial)
         """
         variants = [phone_e164]
 
@@ -202,13 +180,6 @@ class ContactFinder:
     ) -> Optional[Dict[str, Any]]:
         """
         Busca un contacto por una propiedad específica.
-
-        Args:
-            property_name: Nombre de la propiedad (phone, mobilephone, etc.)
-            value: Valor a buscar
-
-        Returns:
-            Diccionario con datos del contacto o None si no se encuentra
         """
         endpoint = f"{self.base_url}/crm/v3/objects/contacts/search"
 
@@ -257,13 +228,6 @@ class ContactFinder:
     ) -> Optional[ContactInfo]:
         """
         Busca un contacto por número de teléfono.
-
-        Args:
-            phone_e164: Número en formato E.164 (+573001234567)
-            use_cache: Si True, usa caché de Redis
-
-        Returns:
-            ContactInfo si se encuentra, None si no existe
         """
         # 1. Intentar desde caché
         if use_cache:
@@ -323,13 +287,6 @@ class ContactFinder:
     ) -> ContactInfo:
         """
         Busca un contacto o lo crea si no existe.
-
-        Args:
-            phone_e164: Número en formato E.164
-            default_properties: Propiedades para el nuevo contacto si se crea
-
-        Returns:
-            ContactInfo del contacto encontrado o creado
         """
         # Intentar encontrar primero
         contact = await self.find_by_phone(phone_e164)
@@ -390,14 +347,6 @@ class ContactFinder:
     ) -> bool:
         """
         Actualiza el estado de Sofía en el contacto.
-
-        Args:
-            vid: ID del contacto en HubSpot
-            status: "activa" o "pausada"
-            phone_e164: Número para invalidar caché (opcional)
-
-        Returns:
-            True si se actualizó correctamente
         """
         endpoint = f"{self.base_url}/crm/v3/objects/contacts/{vid}"
 

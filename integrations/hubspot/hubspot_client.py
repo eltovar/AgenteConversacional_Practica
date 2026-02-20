@@ -14,12 +14,6 @@ from logging_config import logger
 class HubSpotClient:
     """
     Cliente asíncrono para interactuar con HubSpot CRM API v3.
-
-    Features:
-    - Retry logic automático con exponential backoff (3 intentos)
-    - Manejo de rate limits (429)
-    - Timeout de 15 segundos por request
-    - Deduplicación por whatsapp_id único
     """
 
     def __init__(self):
@@ -192,3 +186,72 @@ class HubSpotClient:
         deal_id = response["id"]
         logger.info(f"[HubSpotClient] Deal creado: {deal_id} (asociado a contacto {contact_id})")
         return deal_id
+
+    async def create_note(
+        self,
+        contact_id: str,
+        body: str,
+        owner_id: Optional[str] = None,
+        timestamp: Optional[str] = None
+    ) -> str:
+        """
+        Crea una nota en HubSpot y la asocia a un contacto.
+        """
+        from datetime import datetime, timezone
+
+        endpoint = "/crm/v3/objects/notes"
+
+        # Preparar propiedades de la nota
+        properties = {
+            "hs_note_body": body,
+            "hs_timestamp": timestamp or datetime.now(timezone.utc).isoformat()
+        }
+
+        # Agregar owner si se proporciona
+        if owner_id:
+            properties["hubspot_owner_id"] = owner_id
+
+        payload = {
+            "properties": properties,
+            "associations": [
+                {
+                    "to": {"id": contact_id},
+                    "types": [
+                        {
+                            "associationCategory": "HUBSPOT_DEFINED",
+                            "associationTypeId": 202  # 202 = Note asociada a Contact
+                        }
+                    ]
+                }
+            ]
+        }
+
+        try:
+            response = await self._request("POST", endpoint, payload)
+            note_id = response.get("id")
+            logger.info(f"[HubSpotClient] Nota creada: {note_id} (asociada a contacto {contact_id})")
+            return note_id
+
+        except Exception as e:
+            logger.error(f"[HubSpotClient] Error creando nota para contacto {contact_id}: {e}")
+            raise
+
+    async def get_contact(self, contact_id: str, properties: Optional[list] = None) -> Dict[str, Any]:
+        """
+        Obtiene los datos de un contacto por su ID.
+        """
+        endpoint = f"/crm/v3/objects/contacts/{contact_id}"
+
+        if properties:
+            # Agregar propiedades como query params
+            props_str = ",".join(properties)
+            endpoint += f"?properties={props_str}"
+
+        try:
+            response = await self._request("GET", endpoint)
+            logger.debug(f"[HubSpotClient] Contacto obtenido: {contact_id}")
+            return response
+
+        except Exception as e:
+            logger.error(f"[HubSpotClient] Error obteniendo contacto {contact_id}: {e}")
+            raise

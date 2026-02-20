@@ -1,0 +1,13 @@
+/* Stat cards with gradient backgrounds */
+.stat-card {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+.stat-card-alt {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+.stat-card-green {
+    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+}
+.stat-card-tiktok {
+    background: linear-gradient(135deg, #000000 0%, #25f4ee 50%, #fe2c55 100%);
+}

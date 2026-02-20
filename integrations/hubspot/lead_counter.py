@@ -12,12 +12,6 @@ from logging_config import logger
 class LeadCounter:
     """
     Cuenta leads sin responder agrupados por trabajador.
-
-    Características:
-    - Identifica leads sin actividad reciente del trabajador
-    - Agrupa por canal de origen
-    - Genera mensajes de notificación formateados
-    - Soporta filtrado por ventana de tiempo
     """
 
     # Emojis para cada canal
@@ -52,29 +46,6 @@ class LeadCounter:
     ) -> Dict[str, Any]:
         """
         Obtiene conteo de leads pendientes para un trabajador.
-
-        Args:
-            owner_id: ID del owner en HubSpot
-            hours_window: Ventana de tiempo en horas para considerar "pendiente"
-
-        Returns:
-            {
-                "total": 4,
-                "por_canal": {
-                    "whatsapp_directo": 2,
-                    "finca_raiz": 1,
-                    "instagram": 1
-                },
-                "leads": [
-                    {
-                        "id": "123",
-                        "name": "Juan Pérez",
-                        "canal": "whatsapp_directo",
-                        "timestamp": "2026-01-27T10:00:00Z"
-                    },
-                    ...
-                ]
-            }
         """
         try:
             # Calcular timestamp límite (hace X horas)
@@ -122,12 +93,6 @@ class LeadCounter:
     ) -> Dict[str, Any]:
         """
         Obtiene conteo de leads huérfanos (sin owner asignado).
-
-        Args:
-            hours_window: Ventana de tiempo en horas (default: 7 días)
-
-        Returns:
-            Diccionario con conteo de leads sin asignar
         """
         try:
             cutoff_timestamp = int(
@@ -170,13 +135,6 @@ class LeadCounter:
     ) -> str:
         """
         Genera mensaje de notificación para el trabajador.
-
-        Args:
-            owner_id: ID del owner
-            hours_window: Ventana de tiempo en horas
-
-        Returns:
-            Mensaje formateado listo para enviar
         """
         data = await self.get_pending_leads_count(owner_id, hours_window)
 
@@ -250,13 +208,6 @@ class LeadCounter:
     ) -> List[Dict[str, Any]]:
         """
         Busca leads pendientes de respuesta para un owner específico.
-
-        Args:
-            owner_id: ID del owner
-            cutoff_timestamp: Timestamp en ms (límite inferior)
-
-        Returns:
-            Lista de leads con información básica
         """
         try:
             # Construir filtros para búsqueda
@@ -324,12 +275,6 @@ class LeadCounter:
     ) -> List[Dict[str, Any]]:
         """
         Busca leads sin owner asignado (huérfanos).
-
-        Args:
-            cutoff_timestamp: Timestamp en ms (límite inferior)
-
-        Returns:
-            Lista de leads huérfanos
         """
         try:
             # Filtros para leads sin owner
@@ -431,13 +376,6 @@ async def check_orphan_leads_threshold(
 ) -> Optional[str]:
     """
     Verifica si el número de leads huérfanos supera un umbral.
-
-    Args:
-        counter: Instancia de LeadCounter
-        threshold: Número máximo de leads sin asignar permitidos
-
-    Returns:
-        Mensaje de alerta si se supera el umbral, None si todo OK
     """
     data = await counter.get_unassigned_leads_count(hours_window=168)  # 7 días
 

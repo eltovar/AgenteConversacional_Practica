@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(test -d:*)"
+      "Bash(test -d:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

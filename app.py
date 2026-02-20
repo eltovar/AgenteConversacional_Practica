@@ -7,7 +7,9 @@ Incluye sistema de agregación de mensajes para manejar múltiples mensajes segu
 
 from fastapi import FastAPI, HTTPException, Response, Form, Request, Header, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from pathlib import Path
 from agents.orchestrator import process_message
 from agents.InfoAgent.info_agent import agent
 from utils.message_aggregator import message_aggregator, AGGREGATION_TIMEOUT
@@ -17,8 +19,12 @@ import uvicorn
 import os
 import json
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+# Scheduler para seguimiento automático
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 # Importar el router del middleware inteligente (lazy import)
 from middleware import get_whatsapp_router, get_outbound_panel_router, get_contact_manager
@@ -61,6 +67,11 @@ app.include_router(get_outbound_router())
 # UI y API para que asesores envíen mensajes directamente por WhatsApp
 # Endpoints: /whatsapp/panel/, /whatsapp/panel/send-message, etc.
 app.include_router(get_outbound_panel_router())
+
+# ===== ARCHIVOS ESTÁTICOS DEL PANEL =====
+# Servir CSS, JS y otros archivos estáticos del Panel de Asesores
+PANEL_STATIC_PATH = Path(__file__).parent / "middleware" / "PanelAsesores"
+app.mount("/whatsapp/panel/static", StaticFiles(directory=str(PANEL_STATIC_PATH)), name="panel_static")
 
 # ===== 2. STARTUP EVENT (CRÍTICO PARA RAG) =====
 @app.get("/")
@@ -108,13 +119,6 @@ class MessageResponse(BaseModel):
 # ===== 4. FUNCIÓN DE PROCESAMIENTO EN BACKGROUND =====
 async def process_aggregated_messages(session_id: str, to_number: str):
     """
-    Función que se ejecuta en background para:
-    1. Esperar el timeout de agregación
-    2. Obtener todos los mensajes combinados
-    3. REGISTRAR MENSAJE DEL CLIENTE EN HUBSPOT (para el Panel)
-    4. Procesar con el orchestrator
-    5. Enviar respuesta via Twilio API
-
     Esta función resuelve el problema del timeout de 15 segundos de Twilio.
     """
     try:
@@ -235,13 +239,6 @@ async def webhook(
     """
     Maneja mensajes de Twilio (Form Data) y JSON estándar.
     Incluye sistema de AGREGACIÓN para manejar múltiples mensajes seguidos.
-
-    Flujo con agregación (30 segundos por defecto):
-    1. Mensaje llega → se agrega al buffer
-    2. Si es el primer mensaje → inicia procesamiento en BACKGROUND
-    3. Si llegan más mensajes en ese tiempo → se agregan al buffer
-    4. Después del timeout → procesa todos los mensajes juntos via Twilio API
-    5. Todos los webhooks responden inmediatamente con TwiML vacío
     """
     try:
         # A. Detectar origen (Twilio vs JSON)
@@ -811,7 +808,418 @@ async def get_orphan_leads(x_api_key: str = Header(None, alias="X-API-Key")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ===== 6. ENTRYPOINT =====
+# ===== 6. SCHEDULER PARA SEGUIMIENTO AUTOMÁTICO =====
+
+# Scheduler global
+scheduler = AsyncIOScheduler()
+
+# Configuración de seguimiento (vía variables de entorno)
+FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() == "true"
+FOLLOWUP_DELAY_HOURS = int(os.getenv("FOLLOWUP_DELAY_HOURS", "24"))
+FOLLOWUP_TEMPLATE_ID = os.getenv("FOLLOWUP_TEMPLATE_ID", "seguimiento_24h")
+
+
+async def check_and_send_followups():
+    """
+    Verifica contactos que no han respondido en 24h y envía template de seguimiento.
+
+    Se ejecuta cada hora vía APScheduler.
+
+    Lógica:
+    1. Buscar contactos con último mensaje > 24h
+    2. Verificar que no se les haya enviado followup reciente (7 días)
+    3. Enviar template de seguimiento
+    4. Marcar como enviado en Redis (TTL 7 días)
+    """
+    if not FOLLOWUP_ENABLED:
+        return
+
+    logger.info("[FOLLOWUP] Iniciando verificación de seguimientos pendientes...")
+
+    try:
+        import redis.asyncio as redis_async
+        from utils.twilio_client import twilio_client
+
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        r = redis_async.from_url(redis_url, encoding="utf-8", decode_responses=True)
+
+        # Prefijos
+        LAST_MSG_PREFIX = "last_client_msg:"
+        FOLLOWUP_SENT_PREFIX = "followup_sent:"
+
+        # Calcular umbral de tiempo (24h atrás)
+        threshold = datetime.now(timezone.utc) - timedelta(hours=FOLLOWUP_DELAY_HOURS)
+
+        followups_sent = 0
+        contacts_checked = 0
+
+        # Buscar contactos con ventana de 24h
+        async for key in r.scan_iter(match=f"{LAST_MSG_PREFIX}*"):
+            contacts_checked += 1
+            phone = key.replace(LAST_MSG_PREFIX, "")
+
+            try:
+                # Obtener timestamp del último mensaje
+                last_msg_str = await r.get(key)
+                if not last_msg_str:
+                    continue
+
+                last_msg_time = datetime.fromisoformat(last_msg_str.replace("Z", "+00:00"))
+
+                # Verificar si pasaron más de 24h
+                if last_msg_time > threshold:
+                    continue  # Aún en ventana activa, no necesita followup
+
+                # Verificar si ya enviamos followup recientemente
+                followup_key = f"{FOLLOWUP_SENT_PREFIX}{phone}"
+                if await r.exists(followup_key):
+                    continue  # Ya se envió followup
+
+                # Verificar que el contacto no esté en conversación activa
+                state_key = f"conv_state:{phone}"
+                status = await r.get(state_key)
+                if status in ["HUMAN_ACTIVE", "IN_CONVERSATION"]:
+                    continue  # Hay conversación activa, no enviar followup automático
+
+                # Enviar template de seguimiento
+                logger.info(f"[FOLLOWUP] Enviando seguimiento a {phone}")
+
+                # Obtener nombre del contacto (si está disponible)
+                contact_name = "cliente"
+                meta_key = f"conv_meta:{phone}"
+                meta_str = await r.get(meta_key)
+                if meta_str:
+                    try:
+                        meta = json.loads(meta_str)
+                        contact_name = meta.get("display_name", "cliente").split()[0]  # Primer nombre
+                    except Exception:
+                        pass
+
+                # Construir mensaje de seguimiento
+                followup_message = f"¡Hola {contact_name}! ¿Pudiste revisar la información que te enviamos? Estamos aquí para resolver cualquier duda. 😊"
+
+                # Enviar via Twilio
+                if twilio_client.is_available:
+                    result = await twilio_client.send_whatsapp_message(
+                        to=phone,
+                        body=followup_message
+                    )
+
+                    if result.get("status") == "success":
+                        # Marcar como enviado (TTL 7 días para no repetir)
+                        await r.set(followup_key, datetime.now(timezone.utc).isoformat(), ex=7*24*60*60)
+                        followups_sent += 1
+                        logger.info(f"[FOLLOWUP] ✅ Seguimiento enviado a {phone}")
+                    else:
+                        logger.warning(f"[FOLLOWUP] ❌ Error enviando a {phone}: {result.get('message')}")
+
+            except Exception as contact_err:
+                logger.error(f"[FOLLOWUP] Error procesando {phone}: {contact_err}")
+                continue
+
+        await r.close()
+        logger.info(f"[FOLLOWUP] Completado. Contactos revisados: {contacts_checked}, Seguimientos enviados: {followups_sent}")
+
+    except Exception as e:
+        logger.error(f"[FOLLOWUP] Error general: {e}", exc_info=True)
+
+
+def start_followup_scheduler():
+    """Inicia el scheduler para seguimiento automático."""
+    if not FOLLOWUP_ENABLED:
+        logger.info("[FOLLOWUP] Sistema de seguimiento automático DESHABILITADO (FOLLOWUP_ENABLED=false)")
+        return
+
+    logger.info(f"[FOLLOWUP] Sistema de seguimiento automático HABILITADO")
+    logger.info(f"[FOLLOWUP] - Delay: {FOLLOWUP_DELAY_HOURS} horas")
+    logger.info(f"[FOLLOWUP] - Template: {FOLLOWUP_TEMPLATE_ID}")
+
+    # Programar ejecución cada hora
+    scheduler.add_job(
+        check_and_send_followups,
+        trigger=IntervalTrigger(hours=1),
+        id="followup_job",
+        name="Seguimiento automático 24h",
+        replace_existing=True
+    )
+
+    scheduler.start()
+    logger.info("[FOLLOWUP] Scheduler iniciado. Próxima ejecución en 1 hora.")
+
+
+# ===== 6.2 SCHEDULER PARA RECORDATORIOS DE CITAS =====
+
+APPOINTMENT_REMINDERS_ENABLED = os.getenv("APPOINTMENT_REMINDERS_ENABLED", "false").lower() == "true"
+
+
+async def check_appointment_reminders():
+    """
+    Verifica citas que necesitan recordatorio (24h antes) o seguimiento (24h después).
+
+    Se ejecuta cada hora via APScheduler.
+    - 24h ANTES: Envía recordatorio de la cita
+    - 24h DESPUÉS (si status=completed): Envía template preguntando experiencia
+    """
+    if not APPOINTMENT_REMINDERS_ENABLED:
+        return
+
+    logger.info("[APPOINTMENTS] Iniciando verificación de recordatorios...")
+
+    try:
+        from middleware.appointment_manager import AppointmentManager, AppointmentStatus
+        from middleware.outbound_panel import _get_template
+        from utils.twilio_client import twilio_client
+
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        apt_manager = AppointmentManager(redis_url)
+
+        reminders_sent = 0
+        followups_sent = 0
+
+        # ========== RECORDATORIOS (24h ANTES) ==========
+        try:
+            appointments_for_reminder = await apt_manager.get_appointments_needing_reminder()
+            logger.info(f"[APPOINTMENTS] Citas que necesitan recordatorio: {len(appointments_for_reminder)}")
+
+            for apt in appointments_for_reminder:
+                try:
+                    # Obtener template de recordatorio
+                    template = await _get_template("cita_recordatorio")
+                    if not template:
+                        logger.error("[APPOINTMENTS] Template 'cita_recordatorio' no encontrado")
+                        continue
+
+                    # Formatear mensaje
+                    from utils.date_parser import AppointmentDateParser
+                    apt_dt = apt.scheduled_dt
+                    fecha_formateada = AppointmentDateParser.format_appointment_for_message(apt_dt)
+
+                    message = template["body"].format(
+                        nombre=apt.contact_name or "cliente",
+                        fecha=apt_dt.strftime("%d de %B"),
+                        hora=apt_dt.strftime("%H:%M")
+                    )
+
+                    # Enviar vía Twilio
+                    if twilio_client.is_available:
+                        result = await twilio_client.send_whatsapp_message(
+                            to=apt.phone_normalized,
+                            body=message
+                        )
+
+                        if result.get("status") == "success":
+                            await apt_manager.mark_reminder_sent(apt.phone_normalized, apt.canal)
+                            reminders_sent += 1
+                            logger.info(f"[APPOINTMENTS] Recordatorio enviado a {apt.phone_normalized}")
+                        else:
+                            logger.warning(f"[APPOINTMENTS] Error enviando recordatorio: {result.get('message')}")
+                    else:
+                        logger.warning("[APPOINTMENTS] Twilio no disponible para enviar recordatorio")
+
+                except Exception as e:
+                    logger.error(f"[APPOINTMENTS] Error procesando recordatorio: {e}")
+
+        except Exception as e:
+            logger.error(f"[APPOINTMENTS] Error obteniendo citas para recordatorio: {e}")
+
+        # ========== SEGUIMIENTO POST-CITA (24h DESPUÉS) ==========
+        try:
+            appointments_for_followup = await apt_manager.get_appointments_needing_followup()
+            logger.info(f"[APPOINTMENTS] Citas que necesitan seguimiento: {len(appointments_for_followup)}")
+
+            for apt in appointments_for_followup:
+                try:
+                    # Obtener template de seguimiento
+                    template = await _get_template("seguimiento_visita")
+                    if not template:
+                        logger.error("[APPOINTMENTS] Template 'seguimiento_visita' no encontrado")
+                        continue
+
+                    # Formatear mensaje
+                    message = template["body"].format(
+                        nombre=apt.contact_name or "cliente"
+                    )
+
+                    # Marcar flag para detectar respuesta → HUMAN_ACTIVE
+                    import redis.asyncio as redis_async
+                    r = redis_async.from_url(redis_url, encoding="utf-8", decode_responses=True)
+                    await r.set(
+                        f"appointment_followup_pending:{apt.phone_normalized}:{apt.canal}",
+                        "true",
+                        ex=7 * 24 * 60 * 60  # 7 días TTL
+                    )
+                    await r.close()
+
+                    # Enviar vía Twilio
+                    if twilio_client.is_available:
+                        result = await twilio_client.send_whatsapp_message(
+                            to=apt.phone_normalized,
+                            body=message
+                        )
+
+                        if result.get("status") == "success":
+                            await apt_manager.mark_followup_sent(apt.phone_normalized, apt.canal)
+                            followups_sent += 1
+                            logger.info(f"[APPOINTMENTS] Seguimiento enviado a {apt.phone_normalized}")
+                        else:
+                            logger.warning(f"[APPOINTMENTS] Error enviando seguimiento: {result.get('message')}")
+                    else:
+                        logger.warning("[APPOINTMENTS] Twilio no disponible para enviar seguimiento")
+
+                except Exception as e:
+                    logger.error(f"[APPOINTMENTS] Error procesando seguimiento: {e}")
+
+        except Exception as e:
+            logger.error(f"[APPOINTMENTS] Error obteniendo citas para seguimiento: {e}")
+
+        await apt_manager.close()
+
+        logger.info(
+            f"[APPOINTMENTS] Completado. Recordatorios: {reminders_sent}, Seguimientos: {followups_sent}"
+        )
+
+    except Exception as e:
+        logger.error(f"[APPOINTMENTS] Error general: {e}", exc_info=True)
+
+
+# ===== 6.3 VERIFICADOR DE TIMEOUTS (CLIENTE vs ASESOR) =====
+
+async def check_conversation_timeouts():
+    """
+    Verifica conversaciones con timeout y reactiva Sofía si corresponde.
+
+    Reglas:
+    - Si CLIENTE no responde en 24h: Sofía retoma CON contexto
+    - Si ASESOR no responde en 72h: Sofía retoma automáticamente
+
+    Se ejecuta cada hora via APScheduler.
+    """
+    logger.info("[TIMEOUTS] Verificando timeouts de conversaciones...")
+
+    try:
+        from middleware.conversation_state import ConversationStateManager, ConversationStatus
+
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        state_manager = ConversationStateManager(redis_url)
+
+        import redis.asyncio as redis_async
+        r = redis_async.from_url(redis_url, encoding="utf-8", decode_responses=True)
+
+        timeouts_processed = 0
+        client_timeouts = 0
+        advisor_timeouts = 0
+
+        # Buscar todas las conversaciones HUMAN_ACTIVE o IN_CONVERSATION
+        async for key in r.scan_iter(match="conv_state:*"):
+            try:
+                status_str = await r.get(key)
+                if status_str not in ["HUMAN_ACTIVE", "IN_CONVERSATION"]:
+                    continue
+
+                # Extraer phone y canal de la key
+                key_without_prefix = key.replace("conv_state:", "")
+                parts = key_without_prefix.rsplit(":", 1)
+                phone = parts[0]
+                canal = parts[1] if len(parts) > 1 else None
+
+                # Verificar timeout
+                timeout_type = await state_manager.check_conversation_timeout(phone, canal)
+
+                if timeout_type == "client_timeout":
+                    # Cliente no respondió en 24h - Sofía retoma con contexto
+                    logger.info(f"[TIMEOUTS] Cliente timeout: {phone}:{canal or 'default'} - Sofía retoma con contexto")
+
+                    # Marcar flag para que Sofía sepa dar contexto
+                    await r.set(
+                        f"sofia_retake_context:{phone}:{canal or 'default'}",
+                        "client_timeout",
+                        ex=24 * 60 * 60  # 24h TTL
+                    )
+
+                    # Reactivar bot
+                    await state_manager.activate_bot(phone, canal)
+                    client_timeouts += 1
+                    timeouts_processed += 1
+
+                elif timeout_type == "advisor_timeout":
+                    # Asesor no respondió en 72h - Sofía retoma
+                    logger.info(f"[TIMEOUTS] Asesor timeout: {phone}:{canal or 'default'} - Sofía retoma")
+
+                    # Marcar flag para contexto
+                    await r.set(
+                        f"sofia_retake_context:{phone}:{canal or 'default'}",
+                        "advisor_timeout",
+                        ex=24 * 60 * 60
+                    )
+
+                    # Reactivar bot
+                    await state_manager.activate_bot(phone, canal)
+                    advisor_timeouts += 1
+                    timeouts_processed += 1
+
+            except Exception as e:
+                logger.error(f"[TIMEOUTS] Error procesando {key}: {e}")
+
+        await r.close()
+
+        logger.info(
+            f"[TIMEOUTS] Completado. Total: {timeouts_processed} "
+            f"(cliente: {client_timeouts}, asesor: {advisor_timeouts})"
+        )
+
+    except Exception as e:
+        logger.error(f"[TIMEOUTS] Error general: {e}", exc_info=True)
+
+
+def start_appointment_scheduler():
+    """Inicia el scheduler para recordatorios de citas."""
+    if not APPOINTMENT_REMINDERS_ENABLED:
+        logger.info("[APPOINTMENTS] Sistema de recordatorios DESHABILITADO (APPOINTMENT_REMINDERS_ENABLED=false)")
+        return
+
+    logger.info("[APPOINTMENTS] Sistema de recordatorios HABILITADO")
+
+    scheduler.add_job(
+        check_appointment_reminders,
+        trigger=IntervalTrigger(hours=1),
+        id="appointment_reminders_job",
+        name="Recordatorios de citas",
+        replace_existing=True
+    )
+
+    logger.info("[APPOINTMENTS] Scheduler de citas iniciado")
+
+
+def start_timeout_checker():
+    """Inicia el job de verificación de timeouts."""
+    scheduler.add_job(
+        check_conversation_timeouts,
+        trigger=IntervalTrigger(hours=1),
+        id="timeout_checker_job",
+        name="Verificador de timeouts",
+        replace_existing=True
+    )
+    logger.info("[TIMEOUTS] Verificador de timeouts iniciado")
+
+
+# Iniciar scheduler en startup
+@app.on_event("startup")
+async def startup_scheduler():
+    """Inicia todos los schedulers."""
+    start_followup_scheduler()
+    start_appointment_scheduler()
+    start_timeout_checker()
+
+
+@app.on_event("shutdown")
+async def shutdown_scheduler():
+    """Detiene el scheduler al cerrar la aplicación."""
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+        logger.info("[FOLLOWUP] Scheduler detenido")
+
+
+# ===== 7. ENTRYPOINT =====
 if __name__ == "__main__":
     # Railway inyecta la variable PORT automáticamente
     # Default cambiado a 8001 para evitar conflictos con otros proyectos locales

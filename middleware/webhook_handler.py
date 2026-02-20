@@ -217,6 +217,51 @@ async def whatsapp_webhook(
         # Necesario para calcular la ventana de 24 horas de WhatsApp
         background_tasks.add_task(update_last_client_message, phone_normalized)
 
+        # Actualizar timestamp en ConversationMeta para TTL diferenciado
+        background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
+
+        # ════════════════════════════════════════════════════════════
+        # DETECCIÓN DE RESPUESTA A TEMPLATE DE SEGUIMIENTO
+        # ════════════════════════════════════════════════════════════
+        # Si el cliente responde a un template de seguimiento post-cita,
+        # activar HUMAN_ACTIVE automáticamente
+        followup_detected, followup_canal = await _check_followup_response(phone_normalized)
+
+        if followup_detected:
+            logger.info(f"[Webhook] Respuesta a template de seguimiento detectada - Activando HUMAN_ACTIVE (canal: {followup_canal})")
+
+            state_manager = get_state_manager()
+            await state_manager.activate_human(
+                phone_normalized=phone_normalized,
+                reason="Respuesta a seguimiento post-visita",
+                canal_origen=followup_canal
+            )
+
+            # Registrar mensaje en HubSpot si tenemos contacto
+            contact_manager = get_contact_manager()
+            try:
+                contact_info = await contact_manager.identify_or_create_contact(
+                    phone_raw=From,
+                    source_channel="whatsapp_directo"
+                )
+                if contact_info:
+                    background_tasks.add_task(
+                        _sync_message_to_hubspot,
+                        contact_info.contact_id,
+                        Body,
+                        "incoming",
+                        phone_normalized
+                    )
+            except Exception:
+                pass
+
+            # Enviar respuesta indicando que un asesor le atenderá
+            response_msg = (
+                "¡Gracias por tu respuesta! "
+                "En un momento uno de nuestros asesores te contactará para darte seguimiento."
+            )
+            return _create_twiml_response(response_msg)
+
         # ════════════════════════════════════════════════════════════
         # PASO 2: Consultar estado de la conversación
         # ════════════════════════════════════════════════════════════
@@ -481,6 +526,56 @@ async def whatsapp_status_callback(
 # ════════════════════════════════════════════════════════════════════
 # Funciones auxiliares
 # ════════════════════════════════════════════════════════════════════
+
+async def _update_client_timestamp(phone_normalized: str, canal: Optional[str] = None):
+    """
+    Actualiza timestamp del mensaje del cliente en ConversationMeta.
+    Usado para calcular TTL de 24h si cliente deja de responder.
+    """
+    try:
+        state_manager = get_state_manager()
+        await state_manager.update_client_message_timestamp(phone_normalized, canal)
+    except Exception as e:
+        logger.error(f"[Webhook] Error actualizando timestamp cliente: {e}")
+
+
+async def _check_followup_response(phone_normalized: str) -> tuple:
+    """
+    Verifica si el mensaje es respuesta a un template de seguimiento de cita.
+
+    Busca en Redis si hay un flag de followup pendiente para este contacto.
+    Si existe, lo elimina y retorna información para activar HUMAN_ACTIVE.
+
+    Returns:
+        Tupla (found: bool, canal: Optional[str]) - True y el canal si hay followup pendiente
+    """
+    try:
+        config = get_config()
+        import redis.asyncio as redis_async
+        r = redis_async.from_url(config.redis_url, encoding="utf-8", decode_responses=True)
+
+        # Buscar si hay followup pendiente para cualquier canal
+        found = False
+        canal = None
+        async for key in r.scan_iter(match=f"appointment_followup_pending:{phone_normalized}:*"):
+            # Extraer el canal del key (formato: appointment_followup_pending:{phone}:{canal})
+            parts = key.split(":")
+            if len(parts) >= 3:
+                canal = parts[-1]  # Último segmento es el canal
+
+            # Encontrado - eliminar el flag y marcar como encontrado
+            await r.delete(key)
+            found = True
+            logger.info(f"[Webhook] Followup pendiente detectado y eliminado: {key} (canal: {canal})")
+            break  # Solo necesitamos encontrar uno
+
+        await r.close()
+        return found, canal
+
+    except Exception as e:
+        logger.error(f"[Webhook] Error verificando followup response: {e}")
+        return False, None
+
 
 def _create_twiml_response(message: str) -> Response:
     """

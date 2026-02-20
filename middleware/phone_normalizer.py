@@ -1,18 +1,6 @@
 # middleware/phone_normalizer.py
 """
 Normalizador de Números Telefónicos para Colombia.
-
-CRÍTICO: Este módulo asegura que todos los números se conviertan al formato E.164
-estándar (+573XXXXXXXXX) para evitar duplicados en HubSpot.
-
-Casos manejados:
-- whatsapp:+573001234567 → +573001234567 (formato Twilio)
-- +573001234567 → +573001234567 (ya normalizado)
-- 573001234567 → +573001234567 (sin +)
-- 3001234567 → +573001234567 (sin código de país)
-- 03001234567 → +573001234567 (con 0 inicial local)
-- +57 300 123 4567 → +573001234567 (con espacios)
-- (300) 123-4567 → +573001234567 (formato local con paréntesis)
 """
 
 import re

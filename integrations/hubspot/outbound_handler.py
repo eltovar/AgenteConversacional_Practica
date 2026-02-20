@@ -4,12 +4,6 @@ Webhook de salida: HubSpot -> Twilio.
 
 Maneja los mensajes que los asesores envían desde HubSpot Inbox
 y los reenvía al cliente por WhatsApp.
-
-Características:
-- Validación de origen (evitar loops)
-- Mapeo de ThreadID a número de teléfono
-- Pausa automática de Sofía cuando el asesor interviene
-- Sincronización de estado en Redis y HubSpot
 """
 
 import os
@@ -142,11 +136,6 @@ class OutboundHandler:
     ) -> None:
         """
         Guarda el mapeo entre ThreadID de HubSpot y número de teléfono.
-
-        Args:
-            thread_id: ID del hilo de conversación en HubSpot
-            phone_e164: Número de teléfono en formato E.164
-            contact_id: ID del contacto en HubSpot
         """
         redis_client = self._get_redis()
         if not redis_client:
@@ -251,14 +240,6 @@ class OutboundHandler:
         Sincroniza el estado en:
         1. Redis (middleware/conversation_state)
         2. HubSpot (propiedad sofia_status)
-
-        Args:
-            contact_id: ID del contacto en HubSpot
-            phone_e164: Número de teléfono
-            reason: Razón de la pausa
-
-        Returns:
-            True si se pausó correctamente
         """
         success = True
 
@@ -320,13 +301,6 @@ class OutboundHandler:
     ) -> Dict[str, Any]:
         """
         Procesa el webhook de salida desde HubSpot.
-
-        Args:
-            payload: Datos del webhook
-            background_tasks: FastAPI BackgroundTasks para registro async
-
-        Returns:
-            Dict con resultado del procesamiento
         """
         logger.info(f"[OutboundHandler] Webhook recibido: {json.dumps(payload, default=str)[:500]}")
 
@@ -405,12 +379,6 @@ class OutboundHandler:
     async def _get_phone_from_contact(self, contact_id: str) -> Optional[str]:
         """
         Obtiene el teléfono de un contacto por su ID.
-
-        Args:
-            contact_id: ID del contacto en HubSpot
-
-        Returns:
-            Número de teléfono en formato E.164 o None
         """
         import httpx
 

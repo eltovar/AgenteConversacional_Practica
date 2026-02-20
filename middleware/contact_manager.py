@@ -4,13 +4,6 @@ Gestor de Contactos para el Middleware.
 
 Este módulo maneja la identificación y creación de contactos en HubSpot,
 utilizando el número de teléfono normalizado como identificador único.
-
-Flujo:
-1. Recibe número de Twilio (cualquier formato)
-2. Normaliza a E.164 (+573XXXXXXXXX)
-3. Busca en HubSpot por whatsapp_id
-4. Si no existe, crea lead básico
-5. Retorna contact_id para uso posterior
 """
 
 from typing import Optional, Dict, Any
@@ -50,8 +43,6 @@ class ContactManager:
         """
         Inicializa el gestor de contactos.
 
-        Args:
-            hubspot_client: Cliente de HubSpot (opcional, se crea si no se provee)
         """
         self.normalizer = PhoneNormalizer()
         self._hubspot_client = hubspot_client
@@ -77,16 +68,6 @@ class ContactManager:
         1. El número esté normalizado correctamente
         2. No se creen duplicados en HubSpot
         3. Siempre se retorne un contact_id válido
-
-        Args:
-            phone_raw: Número en cualquier formato (ej: "whatsapp:+573001234567")
-            source_channel: Canal de origen para nuevos contactos
-
-        Returns:
-            ContactInfo con los datos del contacto
-
-        Raises:
-            ValueError: Si el número no es válido
         """
         # Paso 1: Normalizar el número
         validation = self.normalizer.normalize(phone_raw)
@@ -148,19 +129,6 @@ class ContactManager:
     ) -> str:
         """
         Crea un lead básico con la información mínima.
-
-        El lead se crea con:
-        - whatsapp_id: Número normalizado (identificador único)
-        - phone: Número normalizado
-        - canal_origen: Canal de donde llegó
-        - chatbot_timestamp: Momento de creación
-
-        Args:
-            phone_normalized: Número en formato E.164
-            source_channel: Canal de origen
-
-        Returns:
-            contact_id del nuevo contacto
         """
         properties = {
             # Identificador único - CRÍTICO para evitar duplicados
@@ -228,11 +196,5 @@ class ContactManager:
         Normaliza un número sin interactuar con HubSpot.
 
         Útil para validación previa o comparaciones.
-
-        Args:
-            phone_raw: Número en cualquier formato
-
-        Returns:
-            PhoneValidationResult con el resultado de la normalización
         """
         return self.normalizer.normalize(phone_raw)

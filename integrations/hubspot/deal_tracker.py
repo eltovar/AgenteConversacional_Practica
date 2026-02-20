@@ -21,17 +21,6 @@ class DealStageTracker:
     4. Se completa visita → Deal se mueve a "Visita Realizada"
     """
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # CONFIGURACIÓN DE ETAPAS
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    # IDs de las etapas del pipeline (obtener de HubSpot Settings > Objects > Deals > Pipelines)
-    # Para obtener IDs:
-    # 1. Ve a Settings > Objects > Deals > Pipelines
-    # 2. Selecciona tu pipeline
-    # 3. Los IDs están en la URL o puedes usar la API:
-    #    GET https://api.hubapi.com/crm/v3/pipelines/deals
-
     STAGE_IDS = {
         "nuevo_lead": os.getenv("HUBSPOT_DEAL_STAGE", "appointmentscheduled"),  # Default desde .env
         "en_conversacion": "1275156340",  # TODO: Reemplazar con ID real de HubSpot
@@ -70,14 +59,6 @@ class DealStageTracker:
     ) -> Optional[str]:
         """
         Verifica si hay actividad reciente y actualiza la etapa del deal si corresponde.
-
-        Args:
-            deal_id: ID del deal en HubSpot
-            contact_id: ID del contacto asociado
-            force_check: Si es True, verifica incluso si el deal ya fue actualizado hoy
-
-        Returns:
-            Nuevo stage_id si hubo cambio, None si no se actualizó
         """
         try:
             # 1. Obtener etapa actual del deal
@@ -113,13 +94,6 @@ class DealStageTracker:
     ) -> bool:
         """
         Verifica si se agendó una visita y actualiza a "Visita Agendada".
-
-        Args:
-            deal_id: ID del deal
-            contact_id: ID del contacto
-
-        Returns:
-            True si se detectó visita agendada y se actualizó
         """
         try:
             current_stage = await self._get_deal_stage(deal_id)
@@ -157,12 +131,6 @@ class DealStageTracker:
     async def _get_deal_stage(self, deal_id: str) -> Optional[str]:
         """
         Obtiene la etapa actual de un deal.
-
-        Args:
-            deal_id: ID del deal
-
-        Returns:
-            stage_id del deal o None si falla
         """
         try:
             endpoint = f"/crm/v3/objects/deals/{deal_id}"
@@ -181,13 +149,6 @@ class DealStageTracker:
     async def _update_deal_stage(self, deal_id: str, new_stage_id: str) -> bool:
         """
         Actualiza la etapa de un deal.
-
-        Args:
-            deal_id: ID del deal
-            new_stage_id: Nuevo stage_id
-
-        Returns:
-            True si se actualizó correctamente
         """
         try:
             endpoint = f"/crm/v3/objects/deals/{deal_id}"
@@ -208,13 +169,6 @@ class DealStageTracker:
     async def _has_recent_activity(self, contact_id: str, hours: int = 24) -> bool:
         """
         Verifica si un contacto tiene actividad reciente.
-
-        Args:
-            contact_id: ID del contacto
-            hours: Ventana de tiempo en horas
-
-        Returns:
-            True si hay actividad en la ventana de tiempo
         """
         try:
             activities = await self._get_contact_activities(
@@ -237,14 +191,6 @@ class DealStageTracker:
     ) -> List[Dict[str, Any]]:
         """
         Obtiene actividades recientes de un contacto.
-
-        Args:
-            contact_id: ID del contacto
-            activity_types: Lista de tipos de actividad (CALL, EMAIL, NOTE, etc.)
-            since_hours: Ventana de tiempo en horas
-
-        Returns:
-            Lista de actividades
         """
         try:
             # Calcular timestamp de inicio
@@ -259,7 +205,7 @@ class DealStageTracker:
             # Alternativa: usar v1 API o implementar filtrado post-fetch
             response = await self.hubspot._request("GET", endpoint)
 
-            # TODO: Implementar filtrado por timestamp y tipo
+            # Implementar filtrado por timestamp y tipo
             # Por ahora retornamos todas las actividades
             results = response.get("results", [])
 
@@ -273,12 +219,6 @@ class DealStageTracker:
     def get_stage_name(self, stage_id: str) -> str:
         """
         Retorna el nombre legible de una etapa dado su ID.
-
-        Args:
-            stage_id: ID de la etapa
-
-        Returns:
-            Nombre de la etapa o el ID si no se encuentra
         """
         for name, sid in self.STAGE_IDS.items():
             if sid == stage_id:
@@ -296,13 +236,6 @@ async def auto_update_deal_stages_batch(
 ) -> Dict[str, int]:
     """
     Actualiza etapas de múltiples deals en batch.
-
-    Args:
-        tracker: Instancia de DealStageTracker
-        deal_contact_pairs: Lista de tuplas (deal_id, contact_id)
-
-    Returns:
-        Diccionario con estadísticas de actualización
     """
     stats = {
         "checked": 0,

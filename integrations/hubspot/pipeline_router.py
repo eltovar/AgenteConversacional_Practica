@@ -60,12 +60,6 @@ CANAL_TO_ANALYTICS_SOURCE = {
 def get_target_pipeline(channel: str) -> Dict[str, Any]:
     """
     Determina Pipeline, Stage y Owner basándose en el canal de origen.
-
-    Args:
-        channel: Identificador del canal (ej: "instagram", "finca_raiz")
-
-    Returns:
-        Dict con pipeline_id, stage_id, owner_id y analytics_source
     """
     channel_clean = channel.lower().strip() if channel else "desconocido"
 
@@ -127,12 +121,6 @@ def is_social_media_channel(channel: str) -> bool:
 def get_analytics_source(channel: str) -> str:
     """
     Obtiene el valor de hs_analytics_source para HubSpot.
-
-    Args:
-        channel: Identificador del canal
-
-    Returns:
-        Valor para hs_analytics_source (ej: "SOCIAL_MEDIA", "ORGANIC_SEARCH")
     """
     if not channel:
         return "OTHER_CAMPAIGNS"
@@ -142,12 +130,6 @@ def get_analytics_source(channel: str) -> str:
 def get_display_name(channel: str) -> str:
     """
     Obtiene el nombre para mostrar de un canal.
-
-    Args:
-        channel: Identificador del canal (ej: "instagram", "finca_raiz")
-
-    Returns:
-        Nombre formateado (ej: "Instagram", "Finca Raíz")
     """
     display_names = {
         "instagram": "Instagram",

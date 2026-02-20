@@ -158,7 +158,10 @@ Debes responder SIEMPRE en formato JSON con la siguiente estructura:
         "handoff_priority": "none|low|medium|high|immediate",
         "link_redes_sociales": false,
         "suspicious_indicators": [],
-        "summary_update": "Resumen breve de lo nuevo aprendido del cliente (o null)"
+        "summary_update": "Resumen breve de lo nuevo aprendido del cliente (o null)",
+        "fecha_cita_mencionada": null,
+        "hora_cita_mencionada": null,
+        "cita_confirmada": false
     }}
 }}
 
@@ -207,7 +210,40 @@ GUÍA PARA EL ANÁLISIS:
 
 - summary_update: Frase corta con información nueva del cliente
   Ejemplos: "Busca apartamento 3 hab en Laureles", "Presupuesto $300M", "Nombre: Carlos"
-  Usa null si no hay información nueva relevante"""
+  Usa null si no hay información nueva relevante
+
+- fecha_cita_mencionada: Cuando el cliente menciona una fecha para cita o visita
+  IMPORTANTE: Convierte expresiones de fecha a formato ISO (YYYY-MM-DD)
+  Ejemplos de conversión:
+  - "mañana" → fecha de mañana (ej: "2024-03-16")
+  - "el lunes" → próximo lunes
+  - "en 3 días" → fecha calculada
+  - "el 15 de marzo" → "2024-03-15"
+  - "pasado mañana" → fecha calculada
+  - "la próxima semana" → siguiente lunes
+  Usa null si no hay mención de fecha
+
+- hora_cita_mencionada: Si el cliente menciona una hora específica
+  Formato: HH:MM (24 horas)
+  Ejemplos:
+  - "a las 3" → "15:00" (asume PM para citas)
+  - "3pm" → "15:00"
+  - "en la tarde" → "15:00"
+  - "en la mañana" → "10:00"
+  - "al mediodía" → "12:00"
+  Usa null si no hay hora mencionada
+
+- cita_confirmada: true SOLO si el cliente CONFIRMA explícitamente una cita propuesta
+  Ejemplos de confirmación:
+  - "Sí, confirmo la cita"
+  - "Perfecto, ahí estaré"
+  - "De acuerdo, nos vemos el lunes"
+  - "Listo, quedamos así"
+  Usar false si:
+  - Solo está preguntando disponibilidad
+  - Está negociando horarios
+  - Dice "tal vez", "quizás", "lo pienso"
+  - Es la primera mención de una posible cita"""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -2,31 +2,42 @@
 """
 Módulo para registrar conversaciones en el Timeline de HubSpot usando Notes API.
 
-Permite que los asesores vean el historial de conversaciones de Sofía
-directamente en la ficha del contacto en HubSpot.
+Permite que los asesores vean el historial de conversaciones de Sofía directamente en la ficha del contacto en HubSpot.
 
 Nota: Timeline Events API requiere permisos especiales (403 bloqueado).
-      Este módulo usa exclusivamente Notes API (Engagements) que funciona
-      con los permisos estándar de crm.objects.contacts.write.
-
-Características:
-- Registro asíncrono (no bloquea la respuesta al cliente)
-- Cola de eventos para batch processing
-- Diferenciación visual entre mensajes de bot/cliente/asesor
-- Verificación de propiedad 'sofia_activa' para control de asesor
+      Este módulo usa exclusivamente Notes API (Engagements) que funciona con los permisos estándar de crm.objects.contacts.write.
 """
 
 import os
 import asyncio
+import json
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
 import httpx
+import redis.asyncio as aioredis
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from logging_config import logger
+
+
+# ============================================================================
+# Rate Limiting Configuration
+# ============================================================================
+
+# HubSpot API limit: 100 requests per 10 seconds
+# Using semaphore to limit concurrent requests
+HUBSPOT_MAX_CONCURRENT_REQUESTS = 5  # Max concurrent requests
+HUBSPOT_REQUEST_DELAY = 0.15  # Delay between requests (seconds)
+
+# Cache TTL for associations (5 minutes)
+ASSOCIATIONS_CACHE_TTL = 300  # seconds
+
+# Retry configuration for 429 errors
+MAX_RETRIES_429 = 3
+INITIAL_BACKOFF_429 = 2  # seconds
 
 
 class MessageDirection(Enum):
@@ -62,17 +73,10 @@ class TimelineLogger:
     """
     Logger de eventos para HubSpot Timeline.
 
-    Uso:
-        logger = TimelineLogger()
-
-        # Registrar mensaje del cliente
-        await logger.log_client_message(contact_id, "Hola, busco apartamento")
-
-        # Registrar respuesta de Sofía
-        await logger.log_bot_message(contact_id, "¡Hola! Soy Sofía...")
-
-        # Registrar mensaje del asesor
-        await logger.log_advisor_message(contact_id, "Hola, soy Carlos...")
+    Incluye:
+    - Rate limiting con semáforo para evitar 429
+    - Caché Redis para asociaciones (5 min TTL)
+    - Retry con backoff exponencial para errores 429
     """
 
     def __init__(self):
@@ -92,7 +96,129 @@ class TimelineLogger:
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._worker_running = False
 
-        logger.info("[TimelineLogger] Inicializado con Notes API (Engagements)")
+        # Rate limiting: semáforo para limitar requests concurrentes
+        self._request_semaphore = asyncio.Semaphore(HUBSPOT_MAX_CONCURRENT_REQUESTS)
+
+        # Redis para caché de asociaciones
+        self._redis: Optional[aioredis.Redis] = None
+        self._redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+        logger.info("[TimelineLogger] Inicializado con Notes API (Rate Limiting + Cache)")
+
+    async def _get_redis(self) -> aioredis.Redis:
+        """Lazy initialization de conexión Redis para caché."""
+        if self._redis is None:
+            self._redis = aioredis.from_url(
+                self._redis_url,
+                encoding="utf-8",
+                decode_responses=True
+            )
+        return self._redis
+
+    async def _get_cached_associations(self, contact_id: str) -> Optional[List[str]]:
+        """
+        Obtiene asociaciones de caché Redis.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+
+        Returns:
+            Lista de note_ids o None si no está en caché
+        """
+        try:
+            r = await self._get_redis()
+            cache_key = f"hs_assoc:contact:{contact_id}:notes"
+            cached = await r.get(cache_key)
+
+            if cached:
+                note_ids = json.loads(cached)
+                logger.debug(f"[TimelineLogger] Cache HIT: {len(note_ids)} asociaciones para {contact_id}")
+                return note_ids
+
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error leyendo caché: {e}")
+
+        return None
+
+    async def _set_cached_associations(self, contact_id: str, note_ids: List[str]) -> None:
+        """
+        Guarda asociaciones en caché Redis con TTL de 5 minutos.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            note_ids: Lista de IDs de notas asociadas
+        """
+        try:
+            r = await self._get_redis()
+            cache_key = f"hs_assoc:contact:{contact_id}:notes"
+            await r.set(cache_key, json.dumps(note_ids), ex=ASSOCIATIONS_CACHE_TTL)
+            logger.debug(f"[TimelineLogger] Cache SET: {len(note_ids)} asociaciones para {contact_id}")
+
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error guardando caché: {e}")
+
+    async def _rate_limited_request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        **kwargs
+    ) -> httpx.Response:
+        """
+        Ejecuta una request con rate limiting y retry para 429.
+
+        Args:
+            client: Cliente httpx
+            method: GET, POST, PATCH, etc.
+            url: URL del endpoint
+            **kwargs: Argumentos adicionales para la request
+
+        Returns:
+            Response de httpx
+        """
+        async with self._request_semaphore:
+            # Pequeño delay entre requests para evitar ráfagas
+            await asyncio.sleep(HUBSPOT_REQUEST_DELAY)
+
+            for attempt in range(MAX_RETRIES_429):
+                try:
+                    if method.upper() == "GET":
+                        response = await client.get(url, **kwargs)
+                    elif method.upper() == "POST":
+                        response = await client.post(url, **kwargs)
+                    elif method.upper() == "PATCH":
+                        response = await client.patch(url, **kwargs)
+                    else:
+                        raise ValueError(f"Método HTTP no soportado: {method}")
+
+                    # Si es 429, aplicar backoff exponencial
+                    if response.status_code == 429:
+                        retry_after = response.headers.get("Retry-After", INITIAL_BACKOFF_429)
+                        try:
+                            wait_time = int(retry_after)
+                        except (ValueError, TypeError):
+                            wait_time = INITIAL_BACKOFF_429 * (2 ** attempt)
+
+                        logger.warning(
+                            f"[TimelineLogger] Rate limit 429 - esperando {wait_time}s "
+                            f"(intento {attempt + 1}/{MAX_RETRIES_429})"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    return response
+
+                except httpx.TimeoutException:
+                    if attempt < MAX_RETRIES_429 - 1:
+                        wait_time = INITIAL_BACKOFF_429 * (2 ** attempt)
+                        logger.warning(f"[TimelineLogger] Timeout - reintentando en {wait_time}s")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
+
+            # Si llegamos aquí, agotamos los reintentos
+            logger.error(f"[TimelineLogger] Agotados {MAX_RETRIES_429} reintentos para {url}")
+            return response  # Retornar última respuesta (probablemente 429)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -102,15 +228,6 @@ class TimelineLogger:
     async def _create_timeline_event(self, event: TimelineEvent) -> bool:
         """
         Crea una nota en el Timeline del contacto usando Notes API.
-
-        Timeline Events API está bloqueada (403) en cuentas sin permisos especiales.
-        Este método usa directamente Notes API que funciona con permisos estándar.
-
-        Args:
-            event: Evento a registrar
-
-        Returns:
-            True si se creó exitosamente
         """
         # Usar directamente Notes API (Timeline Events bloqueado por HubSpot 403)
         return await self._create_note(event)
@@ -118,15 +235,9 @@ class TimelineLogger:
     async def _create_note(self, event: TimelineEvent) -> bool:
         """
         Crea una nota en el contacto usando Notes API.
-
         Este es el método principal para registrar conversaciones en HubSpot,
         ya que Timeline Events API requiere permisos especiales (403 bloqueado).
 
-        Args:
-            event: Evento a registrar como nota
-
-        Returns:
-            True si se creó exitosamente
         """
         endpoint = f"{self.base_url}/crm/v3/objects/notes"
 
@@ -184,12 +295,6 @@ class TimelineLogger:
         Consulta la propiedad 'sofia_activa' del contacto en HubSpot.
         Si la propiedad no existe o es 'true', Sofía responde.
         Si es 'false', el asesor humano tiene el control.
-
-        Args:
-            contact_id: ID del contacto en HubSpot
-
-        Returns:
-            True si Sofía debe responder, False si está silenciada
         """
         endpoint = f"{self.base_url}/crm/v3/objects/contacts/{contact_id}"
         params = {"properties": "sofia_activa"}
@@ -231,13 +336,6 @@ class TimelineLogger:
     async def set_sofia_active(self, contact_id: str, active: bool) -> bool:
         """
         Actualiza el estado de Sofía para un contacto.
-
-        Args:
-            contact_id: ID del contacto en HubSpot
-            active: True para activar Sofía, False para silenciarla
-
-        Returns:
-            True si se actualizó exitosamente
         """
         endpoint = f"{self.base_url}/crm/v3/objects/contacts/{contact_id}"
 
@@ -281,14 +379,6 @@ class TimelineLogger:
     ) -> bool:
         """
         Registra un mensaje del cliente.
-
-        Args:
-            contact_id: ID del contacto en HubSpot (vid)
-            content: Contenido del mensaje
-            session_id: ID de sesión de WhatsApp
-
-        Returns:
-            True si se registró exitosamente
         """
         event = TimelineEvent(
             contact_id=contact_id,
@@ -333,14 +423,6 @@ class TimelineLogger:
     ) -> bool:
         """
         Registra un mensaje del asesor humano.
-
-        Args:
-            contact_id: ID del contacto en HubSpot (vid)
-            content: Contenido del mensaje
-            session_id: ID de sesión de WhatsApp
-
-        Returns:
-            True si se registró exitosamente
         """
         event = TimelineEvent(
             contact_id=contact_id,
@@ -361,16 +443,6 @@ class TimelineLogger:
     ) -> bool:
         """
         Método genérico para registrar cualquier mensaje.
-
-        Args:
-            contact_id: ID del contacto
-            content: Contenido del mensaje
-            sender: "client", "bot", o "advisor"
-            direction: "inbound" o "outbound"
-            session_id: ID de sesión
-
-        Returns:
-            True si se registró exitosamente
         """
         sender_enum = MessageSender(sender)
         direction_enum = MessageDirection(direction)
@@ -391,9 +463,6 @@ class TimelineLogger:
     def queue_event(self, event: TimelineEvent) -> None:
         """
         Agrega un evento a la cola para procesamiento en background.
-
-        Args:
-            event: Evento a encolar
         """
         try:
             self._event_queue.put_nowait(event)
@@ -468,43 +537,50 @@ class TimelineLogger:
         """
         Obtiene las notas asociadas a un contacto.
 
-        Args:
-            contact_id: ID del contacto en HubSpot
-            limit: Máximo de notas a retornar
-            since: Filtrar notas desde esta fecha (opcional)
-
-        Returns:
-            Lista de notas con formato de burbujas de chat
+        Incluye:
+        - Caché de asociaciones (5 min TTL) para evitar requests repetidas
+        - Rate limiting con semáforo para evitar 429
+        - Retry con backoff exponencial si recibe 429
         """
         logger.info(f"[TimelineLogger] Buscando notas para contact_id={contact_id}, limit={limit}")
 
-        # Usar endpoint de asociaciones
-        assoc_endpoint = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/notes"
-
         try:
+            # 1. Verificar caché de asociaciones primero
+            note_ids = await self._get_cached_associations(contact_id)
+
             async with httpx.AsyncClient(timeout=15.0) as client:
-                # 1. Obtener IDs de notas asociadas al contacto
-                logger.debug(f"[TimelineLogger] GET {assoc_endpoint}")
-                assoc_response = await client.get(
-                    assoc_endpoint,
-                    headers=self.headers,
-                    params={"limit": limit}
-                )
+                # Si no está en caché, obtener de HubSpot con rate limiting
+                if note_ids is None:
+                    assoc_endpoint = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/notes"
 
-                logger.info(f"[TimelineLogger] Asociaciones response: {assoc_response.status_code}")
+                    logger.debug(f"[TimelineLogger] GET {assoc_endpoint} (con rate limiting)")
 
-                if assoc_response.status_code != 200:
-                    logger.warning(
-                        f"[TimelineLogger] Error obteniendo asociaciones: "
-                        f"{assoc_response.status_code} - {assoc_response.text[:200]}"
+                    assoc_response = await self._rate_limited_request(
+                        client,
+                        "GET",
+                        assoc_endpoint,
+                        headers=self.headers,
+                        params={"limit": limit}
                     )
-                    return []
 
-                assoc_data = assoc_response.json()
-                note_ids = [
-                    result["toObjectId"]
-                    for result in assoc_data.get("results", [])
-                ]
+                    logger.info(f"[TimelineLogger] Asociaciones response: {assoc_response.status_code}")
+
+                    if assoc_response.status_code != 200:
+                        logger.warning(
+                            f"[TimelineLogger] Error obteniendo asociaciones: "
+                            f"{assoc_response.status_code} - {assoc_response.text[:200]}"
+                        )
+                        return []
+
+                    assoc_data = assoc_response.json()
+                    note_ids = [
+                        str(result["toObjectId"])
+                        for result in assoc_data.get("results", [])
+                    ]
+
+                    # Guardar en caché para próximas consultas
+                    if note_ids:
+                        await self._set_cached_associations(contact_id, note_ids)
 
                 logger.info(f"[TimelineLogger] Notas asociadas encontradas: {len(note_ids)}")
 
@@ -512,40 +588,65 @@ class TimelineLogger:
                     logger.info(f"[TimelineLogger] No hay notas asociadas al contacto {contact_id}")
                     return []
 
-                # 2. Obtener detalles de cada nota
+                # 2. Obtener detalles de notas usando BATCH API (evita múltiples requests)
+                # HubSpot permite hasta 100 IDs por batch request
                 notes = []
-                for note_id in note_ids[:limit]:
-                    note_endpoint = f"{self.base_url}/crm/v3/objects/notes/{note_id}"
-                    note_response = await client.get(
-                        note_endpoint,
+                batch_size = 100
+                note_ids_limited = note_ids[:limit]
+
+                for i in range(0, len(note_ids_limited), batch_size):
+                    batch_ids = note_ids_limited[i:i + batch_size]
+
+                    batch_endpoint = f"{self.base_url}/crm/v3/objects/notes/batch/read"
+                    batch_payload = {
+                        "inputs": [{"id": str(nid)} for nid in batch_ids],
+                        "properties": ["hs_note_body", "hs_timestamp"]
+                    }
+
+                    logger.debug(f"[TimelineLogger] Batch request para {len(batch_ids)} notas (con rate limiting)")
+
+                    # Usar rate limiting también para batch
+                    batch_response = await self._rate_limited_request(
+                        client,
+                        "POST",
+                        batch_endpoint,
                         headers=self.headers,
-                        params={"properties": "hs_note_body,hs_timestamp"}
+                        json=batch_payload
                     )
 
-                    if note_response.status_code == 200:
-                        note_data = note_response.json()
-                        props = note_data.get("properties", {})
+                    if batch_response.status_code == 200:
+                        batch_data = batch_response.json()
 
-                        # Log del contenido de la nota para debug
-                        body_preview = (props.get("hs_note_body", "") or "")[:100]
-                        logger.debug(f"[TimelineLogger] Nota {note_id}: '{body_preview}...'")
+                        for result in batch_data.get("results", []):
+                            props = result.get("properties", {})
+                            note_id = result.get("id")
 
-                        # Filtrar por fecha si se especificó
-                        if since and props.get("hs_timestamp"):
-                            note_time = datetime.fromisoformat(
-                                props["hs_timestamp"].replace("Z", "+00:00")
-                            )
-                            if note_time < since:
-                                continue
+                            # Log del contenido de la nota para debug
+                            body_preview = (props.get("hs_note_body", "") or "")[:100]
+                            logger.debug(f"[TimelineLogger] Nota {note_id}: '{body_preview}...'")
 
-                        notes.append({
-                            "id": note_id,
-                            "body": props.get("hs_note_body", ""),
-                            "timestamp": props.get("hs_timestamp"),
-                            "created_at": note_data.get("createdAt")
-                        })
+                            # Filtrar por fecha si se especificó
+                            if since and props.get("hs_timestamp"):
+                                try:
+                                    note_time = datetime.fromisoformat(
+                                        props["hs_timestamp"].replace("Z", "+00:00")
+                                    )
+                                    if note_time < since:
+                                        continue
+                                except (ValueError, TypeError):
+                                    pass
+
+                            notes.append({
+                                "id": note_id,
+                                "body": props.get("hs_note_body", ""),
+                                "timestamp": props.get("hs_timestamp"),
+                                "created_at": result.get("createdAt")
+                            })
                     else:
-                        logger.warning(f"[TimelineLogger] Error obteniendo nota {note_id}: {note_response.status_code}")
+                        logger.warning(
+                            f"[TimelineLogger] Error en batch request: "
+                            f"{batch_response.status_code} - {batch_response.text[:200]}"
+                        )
 
                 logger.info(f"[TimelineLogger] Notas obtenidas con contenido: {len(notes)}")
 
@@ -559,11 +660,6 @@ class TimelineLogger:
     def _format_notes_as_chat(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Convierte notas de HubSpot a formato de burbujas de chat.
-
-        Detecta el tipo de mensaje por el prefijo emoji o texto:
-        - 📱 / "Cliente:" → Cliente (izquierda, gris)
-        - 🤖 / "Bot:" / "Sofía" → Sofía/Bot (derecha, verde claro)
-        - 👤 / "Asesor:" → Asesor (derecha, azul)
         """
         bubbles = []
 
@@ -598,13 +694,18 @@ class TimelineLogger:
                     sender = "advisor"
                     sender_name = "Asesor"
                     align = "right"
+                elif "[template" in body_prefix or "[panel" in body_prefix:
+                    # Mensajes enviados desde el panel (templates)
+                    sender = "advisor"
+                    sender_name = "Asesor (Template)"
+                    align = "right"
                 else:
-                    # DEBUG: Incluir notas sin prefijo como "system" para ver qué llega
-                    # Esto ayuda a diagnosticar si hay notas que no se están mostrando
-                    sender = "system"
-                    sender_name = "Sistema"
+                    # Notas manuales de HubSpot (sin emoji del chatbot)
+                    # Estas son notas creadas directamente en HubSpot por el equipo
+                    sender = "manual_note"
+                    sender_name = "📝 Nota HubSpot"
                     align = "left"
-                    logger.debug(f"[TimelineLogger] Nota sin prefijo conocido: '{body[:60]}...'")
+                    logger.debug(f"[TimelineLogger] Nota manual detectada: '{body[:60]}...'")
 
                 # Limpiar prefijo y metadata del cuerpo
                 clean_body = self._clean_note_body(body)
@@ -637,11 +738,6 @@ class TimelineLogger:
     def _clean_note_body(self, body: str) -> str:
         """
         Limpia el cuerpo de la nota removiendo prefijos y metadata.
-
-        Remueve:
-        - Prefijos de emoji [📱], [🤖], [👤]
-        - Línea de timestamp al final
-        - Separadores ---
         """
         if not body:
             return ""
@@ -677,27 +773,18 @@ class TimelineLogger:
         self,
         since: datetime,
         until: Optional[datetime] = None,
-        limit: int = 50
-    ) -> List[Dict[str, Any]]:
+        limit: int = 50,
+        after: Optional[str] = None  # Cursor para paginación
+    ) -> Dict[str, Any]:
         """
         Busca contactos que han tenido interacción con asesor.
 
         Estrategia: Buscar notas con prefijo 👤 (asesor) y obtener
         los contactos asociados.
 
-        Args:
-            since: Fecha desde la cual buscar
-            until: Fecha hasta (opcional, default: ahora)
-            limit: Máximo de contactos a retornar
-
-        Returns:
-            Lista de contactos con información básica
+        Incluye rate limiting para evitar errores 429.
         """
         endpoint = f"{self.base_url}/crm/v3/objects/notes/search"
-
-        # Buscar notas que contengan el emoji de asesor
-        # HubSpot Search no soporta CONTAINS para texto completo,
-        # así que buscamos todas las notas recientes y filtramos
 
         since_ms = int(since.timestamp() * 1000)
         until_ms = int((until or datetime.utcnow()).timestamp() * 1000)
@@ -721,13 +808,17 @@ class TimelineLogger:
                 {"propertyName": "hs_timestamp", "direction": "DESCENDING"}
             ],
             "properties": ["hs_note_body", "hs_timestamp"],
-            "limit": 100  # Obtener más para filtrar
+            "limit": 100
         }
+
+        if after:
+            payload["after"] = after
 
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
-                response = await client.post(
-                    endpoint,
+                # Búsqueda con rate limiting
+                response = await self._rate_limited_request(
+                    client, "POST", endpoint,
                     headers=self.headers,
                     json=payload
                 )
@@ -737,61 +828,76 @@ class TimelineLogger:
                         f"[TimelineLogger] Error buscando notas: "
                         f"{response.status_code} - {response.text}"
                     )
-                    return []
+                    return {"contacts": [], "paging": {"next_after": None}}
 
                 data = response.json()
                 notes = data.get("results", [])
+                next_after = data.get("paging", {}).get("next", {}).get("after")
 
                 # Filtrar notas de asesor (contienen 👤)
-                advisor_note_ids = []
-                for note in notes:
-                    body = note.get("properties", {}).get("hs_note_body", "")
-                    if "👤" in body:
-                        advisor_note_ids.append(note["id"])
+                advisor_note_ids = [
+                    note["id"] for note in notes
+                    if "👤" in note.get("properties", {}).get("hs_note_body", "")
+                ]
 
                 if not advisor_note_ids:
-                    return []
+                    return {"contacts": [], "paging": {"next_after": next_after}}
 
-                # Obtener contactos asociados a estas notas
+                # Obtener contactos asociados con rate limiting
                 contact_ids = set()
                 for note_id in advisor_note_ids[:limit]:
-                    assoc_endpoint = f"{self.base_url}/crm/v4/objects/notes/{note_id}/associations/contacts"
-                    assoc_response = await client.get(
-                        assoc_endpoint,
+                    assoc_endpoint = (
+                        f"{self.base_url}/crm/v4/objects/notes/{note_id}/associations/contacts"
+                    )
+                    assoc_response = await self._rate_limited_request(
+                        client, "GET", assoc_endpoint,
                         headers=self.headers
                     )
 
                     if assoc_response.status_code == 200:
                         assoc_data = assoc_response.json()
                         for result in assoc_data.get("results", []):
-                            contact_ids.add(result["toObjectId"])
+                            contact_ids.add(str(result["toObjectId"]))
 
-                # Obtener detalles de contactos
+                if not contact_ids:
+                    return {"contacts": [], "paging": {"next_after": next_after}}
+
+                # Obtener detalles de contactos usando BATCH API
                 contacts = []
-                for contact_id in list(contact_ids)[:limit]:
-                    contact_endpoint = f"{self.base_url}/crm/v3/objects/contacts/{contact_id}"
-                    contact_response = await client.get(
-                        contact_endpoint,
-                        headers=self.headers,
-                        params={"properties": "firstname,lastname,phone,email"}
-                    )
+                contact_ids_list = list(contact_ids)[:limit]
 
-                    if contact_response.status_code == 200:
-                        contact_data = contact_response.json()
-                        props = contact_data.get("properties", {})
+                batch_endpoint = f"{self.base_url}/crm/v3/objects/contacts/batch/read"
+                batch_payload = {
+                    "inputs": [{"id": cid} for cid in contact_ids_list],
+                    "properties": ["firstname", "lastname", "phone", "email"]
+                }
+
+                batch_response = await self._rate_limited_request(
+                    client, "POST", batch_endpoint,
+                    headers=self.headers,
+                    json=batch_payload
+                )
+
+                if batch_response.status_code == 200:
+                    batch_data = batch_response.json()
+                    for result in batch_data.get("results", []):
+                        props = result.get("properties", {})
                         contacts.append({
-                            "id": contact_id,
+                            "id": result.get("id"),
                             "firstname": props.get("firstname", ""),
                             "lastname": props.get("lastname", ""),
                             "phone": props.get("phone", ""),
                             "email": props.get("email", ""),
                         })
 
-                return contacts
+                return {
+                    "contacts": contacts,
+                    "paging": {"next_after": next_after}
+                }
 
         except Exception as e:
             logger.error(f"[TimelineLogger] Error buscando contactos: {e}")
-            return []
+            return {"contacts": [], "paging": {"next_after": None}}
 
 
 # Instancia singleton

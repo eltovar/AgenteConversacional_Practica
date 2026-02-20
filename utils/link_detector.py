@@ -40,14 +40,7 @@ class LinkDetectionResult:
 
 class LinkDetector:
     """
-    Detecta y clasifica links de portales inmobiliarios en mensajes de WhatsApp.
-
-    Uso:
-        detector = LinkDetector()
-        resultado = detector.analizar_mensaje("Hola, vi este apartamento https://www.fincaraiz.com.co/apartamento/123")
-
-        if resultado.tiene_link:
-            print(f"Link de: {resultado.portal}")
+    Detecta y clasifica links de portales inmobiliarios en mensajes de WhatsApp
     """
 
     # Patrones de URL por portal (orden importa: más específicos primero)
@@ -163,12 +156,6 @@ class LinkDetector:
     def analizar_mensaje(self, mensaje: str) -> LinkDetectionResult:
         """
         Analiza un mensaje buscando links de portales inmobiliarios.
-
-        Args:
-            mensaje: Texto del mensaje del usuario
-
-        Returns:
-            LinkDetectionResult con información del link detectado
         """
         if not mensaje:
             return self._resultado_sin_link()

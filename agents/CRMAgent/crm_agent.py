@@ -135,11 +135,7 @@ class CRMAgent:
         is_first_message = state.metadata.get("is_first_message", False)
         llegada_por_link = state.metadata.get("llegada_por_link", False)
         crm_history = state.lead_data.get('crm_history', [])
-
-        # Solo agregar presentación si:
-        # - Es primer mensaje
-        # - NO llegó por link (link arrival ya maneja presentación)
-        # - No hay historial previo (ya se presentó antes)
+        
         should_include_intro = is_first_message and not llegada_por_link and len(crm_history) == 0
 
         if should_include_intro:
@@ -672,16 +668,6 @@ class CRMAgent:
     def _format_features_as_text(self, features) -> str:
         """
         Convierte las características a formato texto multilínea para HubSpot.
-
-        Input puede ser:
-        - Lista: ["3 habitaciones", "2 baños", "parqueadero"]
-        - String: "3 habitaciones, 2 baños"
-        - None/vacío
-
-        Output:
-        "• 3 habitaciones
-        • 2 baños
-        • parqueadero"
         """
         if not features:
             return ""
@@ -723,14 +709,6 @@ class CRMAgent:
     def _parse_budget_to_number(self, budget_str: str) -> int:
         """
         Convierte un string de presupuesto a número entero para HubSpot.
-        Maneja formatos comunes en español:
-        - "200 millones" → 200000000
-        - "200millones" → 200000000
-        - "2.5 millones" → 2500000
-        - "500 mil" → 500000
-        - "200.000.000" → 200000000
-        - "200,000,000" → 200000000
-        - "$200.000.000" → 200000000
         """
         import re
 
@@ -796,6 +774,12 @@ class CRMAgent:
 
         Este método replica la lógica de ConversationStateManager.activate_human()
         pero se ejecuta directamente desde CRMAgent para evitar dependencias circulares.
+
+        SEGREGACIÓN POR CANAL:
+        Las keys ahora incluyen el canal de origen para evitar colisiones
+        entre el mismo teléfono desde diferentes portales.
+
+        Formato: conv_state:{phone}:{canal}
         """
         from datetime import datetime, timedelta
         import json
@@ -803,17 +787,22 @@ class CRMAgent:
         # Configuración
         STATE_PREFIX = "conv_state:"
         META_PREFIX = "conv_meta:"
-        HANDOFF_TTL_SECONDS = 2 * 60 * 60  # 2 horas
+        HANDOFF_TTL_SECONDS = 72 * 60 * 60  # 72 horas (igual que ConversationStateManager)
+        DEFAULT_CANAL = "default"
 
         # Obtener URL de Redis
         redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+        # Usar canal o default
+        canal_safe = canal_origen or DEFAULT_CANAL
 
         try:
             # Conectar a Redis
             r = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
 
-            # 1. Guardar estado HUMAN_ACTIVE con TTL de 2 horas
-            state_key = f"{STATE_PREFIX}{phone_normalized}"
+            # 1. Guardar estado HUMAN_ACTIVE con TTL y CANAL
+            # Key con canal: conv_state:{phone}:{canal}
+            state_key = f"{STATE_PREFIX}{phone_normalized}:{canal_safe}"
             await r.set(state_key, "HUMAN_ACTIVE", ex=HANDOFF_TTL_SECONDS)
 
             # 2. Guardar metadata para el panel
@@ -833,13 +822,14 @@ class CRMAgent:
                 "created_at": now.isoformat()
             }
 
-            meta_key = f"{META_PREFIX}{phone_normalized}"
+            # Key con canal: conv_meta:{phone}:{canal}
+            meta_key = f"{META_PREFIX}{phone_normalized}:{canal_safe}"
             await r.set(meta_key, json.dumps(meta), ex=HANDOFF_TTL_SECONDS)
 
             await r.close()
 
             logger.info(
-                f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized} "
+                f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized}:{canal_safe} "
                 f"(owner: {owner_id or 'sin asignar'}, "
                 f"expira: {expires_at.strftime('%H:%M:%S')})"
             )

@@ -5,12 +5,16 @@ mensajes de WhatsApp directamente, sustituyendo el Inbox bloqueado de HubSpot.
 """
 
 import os
+import json
+import re
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 
-from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from pathlib import Path
 import redis.asyncio as redis
 
 from logging_config import logger
@@ -23,6 +27,10 @@ from integrations.hubspot import get_timeline_logger
 
 # Router de FastAPI para el panel de envío
 router = APIRouter(prefix="/whatsapp/panel", tags=["Panel de Envío"])
+
+# Configuración de Jinja2 Templates
+TEMPLATES_DIR = Path(__file__).parent / "PanelAsesores"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 # ============================================================================
@@ -37,6 +45,85 @@ WHATSAPP_WINDOW_SECONDS = 24 * 60 * 60
 
 # Prefijo en Redis para almacenar último mensaje del cliente
 LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
+
+# Prefijo en Redis para almacenar templates de WhatsApp
+TEMPLATE_PREFIX = "whatsapp_template:"
+
+# Templates predefinidos (se cargan a Redis si no existen)
+DEFAULT_TEMPLATES = {
+    "reactivacion_general": {
+        "id": "reactivacion_general",
+        "name": "Reactivación General",
+        "category": "reactivacion",
+        "body": "¡Hola {nombre}! Soy del equipo de Inmobiliaria Proteger. ¿Sigues interesado/a en nuestros servicios inmobiliarios? Estamos aquí para ayudarte.",
+        "variables": ["nombre"],
+        "is_default": True
+    },
+    "cita_confirmacion": {
+        "id": "cita_confirmacion",
+        "name": "Confirmación de Cita",
+        "category": "cita",
+        "body": "¡Hola {nombre}! Te confirmamos tu cita para el {fecha} a las {hora}. Te esperamos en {direccion}. ¿Nos confirmas tu asistencia?",
+        "variables": ["nombre", "fecha", "hora", "direccion"],
+        "is_default": True
+    },
+    "cita_recordatorio": {
+        "id": "cita_recordatorio",
+        "name": "Recordatorio de Cita",
+        "category": "cita",
+        "body": "¡Hola {nombre}! Te recordamos que mañana {fecha} tienes cita a las {hora}. ¡Te esperamos!",
+        "variables": ["nombre", "fecha", "hora"],
+        "is_default": True
+    },
+    "seguimiento_visita": {
+        "id": "seguimiento_visita",
+        "name": "Seguimiento Post-Visita",
+        "category": "seguimiento",
+        "body": "¡Hola {nombre}! Esperamos que la visita al inmueble haya sido de tu agrado. ¿Te gustaría agendar otra visita o tienes alguna pregunta?",
+        "variables": ["nombre"],
+        "is_default": True
+    },
+    "seguimiento_24h": {
+        "id": "seguimiento_24h",
+        "name": "Seguimiento 24 horas",
+        "category": "seguimiento",
+        "body": "¡Hola {nombre}! ¿Pudiste revisar la información que te enviamos? Estamos aquí para resolver cualquier duda.",
+        "variables": ["nombre"],
+        "is_default": True
+    },
+    "cita_cancelacion": {
+        "id": "cita_cancelacion",
+        "name": "Cancelación de Cita",
+        "category": "cita",
+        "body": "¡Hola {nombre}! Lamentamos informarte que la cita del {fecha} a las {hora} ha sido cancelada. ¿Te gustaría reagendarla para otro momento?",
+        "variables": ["nombre", "fecha", "hora"],
+        "is_default": True
+    },
+    "cita_reagendar": {
+        "id": "cita_reagendar",
+        "name": "Reagendar Cita",
+        "category": "cita",
+        "body": "¡Hola {nombre}! ¿Te gustaría reagendar tu cita? Tenemos disponibilidad el {fecha} a las {hora}. ¿Te funciona?",
+        "variables": ["nombre", "fecha", "hora"],
+        "is_default": True
+    },
+    "promocion_general": {
+        "id": "promocion_general",
+        "name": "Promoción General",
+        "category": "promocion",
+        "body": "¡Hola {nombre}! Tenemos una promoción especial para ti. ¿Te gustaría conocer los detalles?",
+        "variables": ["nombre"],
+        "is_default": True
+    },
+    "agradecimiento": {
+        "id": "agradecimiento",
+        "name": "Agradecimiento",
+        "category": "seguimiento",
+        "body": "¡Hola {nombre}! Gracias por confiar en Inmobiliaria Proteger. Fue un placer atenderte. Si necesitas algo más, aquí estamos para ayudarte.",
+        "variables": ["nombre"],
+        "is_default": True
+    },
+}
 
 
 @dataclass
@@ -74,12 +161,6 @@ async def check_24h_window(phone_normalized: str) -> WindowStatus:
     WhatsApp solo permite enviar mensajes de texto libre durante 24 horas
     después del último mensaje del cliente. Fuera de esa ventana,
     solo se pueden enviar Templates pre-aprobados.
-
-    Args:
-        phone_normalized: Número en formato E.164
-
-    Returns:
-        WindowStatus con el estado de la ventana
     """
     try:
         r = await _get_redis_client()
@@ -168,6 +249,97 @@ async def update_last_client_message(phone_normalized: str) -> None:
 
 
 # ============================================================================
+# Funciones CRUD de Templates
+# ============================================================================
+
+async def _init_default_templates():
+    """Inicializa templates predefinidos en Redis si no existen."""
+    try:
+        r = await _get_redis_client()
+        for template_id, template_data in DEFAULT_TEMPLATES.items():
+            key = f"{TEMPLATE_PREFIX}{template_id}"
+            if not await r.exists(key):
+                await r.set(key, json.dumps(template_data))
+                logger.debug(f"[Templates] Template predefinido creado: {template_id}")
+    except Exception as e:
+        logger.error(f"[Templates] Error inicializando templates: {e}")
+
+
+async def _get_all_templates() -> list:
+    """Obtiene todos los templates de Redis."""
+    try:
+        r = await _get_redis_client()
+        templates = []
+        async for key in r.scan_iter(match=f"{TEMPLATE_PREFIX}*"):
+            data = await r.get(key)
+            if data:
+                template = json.loads(data)
+                templates.append(template)
+
+        # Ordenar por categoría y nombre
+        templates.sort(key=lambda x: (x.get("category", ""), x.get("name", "")))
+        return templates
+    except Exception as e:
+        logger.error(f"[Templates] Error obteniendo templates: {e}")
+        return []
+
+
+async def _get_template(template_id: str) -> Optional[dict]:
+    """Obtiene un template específico de Redis."""
+    try:
+        r = await _get_redis_client()
+        key = f"{TEMPLATE_PREFIX}{template_id}"
+        data = await r.get(key)
+        if data:
+            return json.loads(data)
+        return None
+    except Exception as e:
+        logger.error(f"[Templates] Error obteniendo template {template_id}: {e}")
+        return None
+
+
+async def _save_template(template_data: dict) -> bool:
+    """Guarda o actualiza un template en Redis."""
+    try:
+        r = await _get_redis_client()
+        template_id = template_data.get("id")
+        if not template_id:
+            return False
+
+        key = f"{TEMPLATE_PREFIX}{template_id}"
+        await r.set(key, json.dumps(template_data))
+        logger.info(f"[Templates] Template guardado: {template_id}")
+        return True
+    except Exception as e:
+        logger.error(f"[Templates] Error guardando template: {e}")
+        return False
+
+
+async def _delete_template(template_id: str) -> bool:
+    """Elimina un template de Redis."""
+    try:
+        r = await _get_redis_client()
+        key = f"{TEMPLATE_PREFIX}{template_id}"
+
+        # Verificar que existe y no es default
+        data = await r.get(key)
+        if data:
+            template = json.loads(data)
+            if template.get("is_default"):
+                logger.warning(f"[Templates] No se puede eliminar template predefinido: {template_id}")
+                return False
+
+        result = await r.delete(key)
+        if result > 0:
+            logger.info(f"[Templates] Template eliminado: {template_id}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"[Templates] Error eliminando template: {e}")
+        return False
+
+
+# ============================================================================
 # Endpoints de API
 # ============================================================================
 
@@ -177,6 +349,7 @@ async def send_message(
     to: str = Form(..., description="Número de destino (+573001234567)"),
     body: str = Form(..., description="Contenido del mensaje"),
     contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
+    canal: Optional[str] = Form(None, description="Canal de origen para segregación"),
     force_send: bool = Form(False, description="Forzar envío aunque ventana esté cerrada"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -191,6 +364,10 @@ async def send_message(
     5. Envía el mensaje por Twilio
     6. Registra en Timeline de HubSpot (background)
 
+    SEGREGACIÓN POR CANAL:
+    Si se proporciona el parámetro canal, se usa para identificar
+    la conversación correcta en sistemas multicanal.
+
     Headers requeridos:
         X-API-Key: Token de autenticación admin
 
@@ -198,6 +375,7 @@ async def send_message(
         to: Número de destino
         body: Contenido del mensaje
         contact_id: ID del contacto en HubSpot (opcional)
+        canal: Canal de origen para segregación (opcional)
         force_send: Enviar aunque ventana esté cerrada (requiere Template)
     """
     # Validar API Key
@@ -255,14 +433,47 @@ async def send_message(
             logger.warning(f"[Panel] No se pudo obtener contacto: {e}")
             # Continuar sin contact_id
 
-    # Pausar Sofía automáticamente (activar modo humano)
+    # Pausar Sofía y cambiar a IN_CONVERSATION (asesora está chateando activamente)
+    # SEGREGACIÓN POR CANAL: Usar el canal proporcionado para operaciones de estado
     try:
         redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
         state_manager = ConversationStateManager(redis_url)
-        await state_manager.activate_human(phone_normalized)
-        logger.info(f"[Panel] Sofía pausada automáticamente para {phone_normalized}")
+
+        canal_info = f":{canal}" if canal else ""
+
+        # Verificar estado actual (con canal)
+        current_status = await state_manager.get_status(phone_normalized, canal)
+
+        if current_status in [ConversationStatus.HUMAN_ACTIVE, ConversationStatus.PENDING_HANDOFF]:
+            # Ya está en espera, cambiar a IN_CONVERSATION (asesora está atendiendo)
+            await state_manager.set_status(
+                phone_normalized,
+                ConversationStatus.IN_CONVERSATION,
+                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                canal=canal
+            )
+            logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
+        elif current_status == ConversationStatus.IN_CONVERSATION:
+            # Ya está en conversación, solo refrescar TTL
+            await state_manager.set_status(
+                phone_normalized,
+                ConversationStatus.IN_CONVERSATION,
+                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                canal=canal
+            )
+            logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {phone_normalized}{canal_info}")
+        else:
+            # Era BOT_ACTIVE o CLOSED, activar humano y cambiar a IN_CONVERSATION
+            await state_manager.activate_human(phone_normalized, canal_origen=canal)
+            await state_manager.set_status(
+                phone_normalized,
+                ConversationStatus.IN_CONVERSATION,
+                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                canal=canal
+            )
+            logger.info(f"[Panel] Sofía pausada y estado IN_CONVERSATION para {phone_normalized}{canal_info}")
     except Exception as e:
-        logger.warning(f"[Panel] No se pudo pausar Sofía: {e}")
+        logger.warning(f"[Panel] Error manejando estado: {e}")
 
     # Enviar mensaje
     result = await twilio_client.send_whatsapp_message(
@@ -281,6 +492,13 @@ async def send_message(
                 "Manual via Panel"  # message_source
             )
 
+        # Actualizar timestamp del asesor para TTL diferenciado
+        background_tasks.add_task(
+            _update_advisor_timestamp,
+            phone_normalized,
+            canal
+        )
+
         return JSONResponse(
             status_code=200,
             content={
@@ -288,6 +506,7 @@ async def send_message(
                 "message_sid": result.get("message_sid"),
                 "to": phone_normalized,
                 "contact_id": contact_id,
+                "canal": canal,
                 "window_status": {
                     "is_open": window_status.is_open,
                     "time_remaining": window_status.time_remaining_seconds
@@ -307,7 +526,10 @@ async def send_message(
 async def send_template_message(
     background_tasks: BackgroundTasks,
     to: str = Form(..., description="Número de destino (+573001234567)"),
+    template_id: str = Form("reactivacion_general", description="ID del template a usar"),
+    variables: str = Form("{}", description="JSON con variables para el template"),
     contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
+    canal: Optional[str] = Form(None, description="Canal de origen para segregación"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -316,8 +538,6 @@ async def send_template_message(
     Este endpoint se usa cuando la ventana de 24 horas está cerrada.
     Los templates son mensajes pre-aprobados por Meta que pueden enviarse
     fuera de la ventana de 24 horas.
-
-    NOTA: Requiere tener un template configurado en Twilio.
     """
     # Validar API Key
     if not _validate_api_key(x_api_key):
@@ -342,15 +562,40 @@ async def send_template_message(
             detail="Twilio no está configurado correctamente"
         )
 
-    # Template de reactivación predefinido
-    # NOTA: Este template debe estar aprobado en tu cuenta de Twilio/WhatsApp Business
-    template_message = (
-        "¡Hola! Soy del equipo de Inmobiliaria Proteger. "
-        "¿Sigues interesado/a en nuestros servicios inmobiliarios? "
-        "Estamos aquí para ayudarte."
-    )
+    # Inicializar templates predefinidos si es necesario
+    await _init_default_templates()
 
-    logger.info(f"[Panel] Enviando template a {phone_normalized}")
+    # Obtener template de Redis
+    template = await _get_template(template_id)
+    if not template:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Template '{template_id}' no encontrado"
+        )
+
+    # Parsear variables
+    try:
+        vars_dict = json.loads(variables) if variables else {}
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Variables JSON inválidas"
+        )
+
+    # Reemplazar variables en el body del template
+    template_body = template.get("body", "")
+    try:
+        # Usar format_map para manejar variables faltantes graciosamente
+        class SafeDict(dict):
+            def __missing__(self, key):
+                return f"{{{key}}}"  # Mantiene {variable} si no se proporciona
+
+        template_message = template_body.format_map(SafeDict(vars_dict))
+    except Exception as e:
+        logger.warning(f"[Panel] Error formateando template: {e}")
+        template_message = template_body  # Usar el body sin formato si hay error
+
+    logger.info(f"[Panel] Enviando template '{template_id}' a {phone_normalized}")
 
     # Enviar mensaje (usando force porque es template)
     result = await twilio_client.send_whatsapp_message(
@@ -364,7 +609,7 @@ async def send_template_message(
             background_tasks.add_task(
                 _log_advisor_message_to_hubspot,
                 contact_id,
-                f"[TEMPLATE] {template_message}",
+                f"[TEMPLATE: {template.get('name', template_id)}] {template_message}",
                 phone_normalized,
                 "Template via Panel"
             )
@@ -376,6 +621,9 @@ async def send_template_message(
                 "message_sid": result.get("message_sid"),
                 "to": phone_normalized,
                 "contact_id": contact_id,
+                "canal": canal,
+                "template_id": template_id,
+                "template_name": template.get("name"),
                 "template_sent": True,
                 "message": "Template enviado. La conversación se reabrirá cuando el cliente responda."
             }
@@ -385,6 +633,341 @@ async def send_template_message(
             status_code=500,
             detail=f"Error enviando template: {result.get('message')}"
         )
+
+
+# ============================================================================
+# Endpoints CRUD de Templates
+# ============================================================================
+
+@router.get("/templates")
+async def list_templates(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Lista todos los templates disponibles."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Inicializar templates predefinidos si es necesario
+    await _init_default_templates()
+
+    templates = await _get_all_templates()
+
+    # Agrupar por categoría
+    categories = {}
+    for t in templates:
+        cat = t.get("category", "otros")
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(t)
+
+    return {
+        "templates": templates,
+        "by_category": categories,
+        "total": len(templates)
+    }
+
+
+@router.get("/templates/{template_id}")
+async def get_template_by_id(
+    template_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Obtiene un template específico."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    template = await _get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
+
+    return template
+
+
+@router.post("/templates")
+async def create_template(
+    name: str = Form(..., description="Nombre del template"),
+    category: str = Form(..., description="Categoría: reactivacion, cita, seguimiento, recordatorio, promocion"),
+    body: str = Form(..., description="Cuerpo del mensaje con variables {nombre}, {fecha}, etc."),
+    variables: str = Form("[]", description="JSON array de nombres de variables"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Crea un nuevo template."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Generar ID único basado en nombre
+    template_id = re.sub(r'[^a-z0-9_]', '_', name.lower().strip())
+    template_id = re.sub(r'_+', '_', template_id).strip('_')
+
+    # Verificar que no existe
+    existing = await _get_template(template_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya existe un template con ID '{template_id}'"
+        )
+
+    # Parsear variables
+    try:
+        vars_list = json.loads(variables) if variables else []
+    except json.JSONDecodeError:
+        vars_list = []
+
+    # Crear template
+    template_data = {
+        "id": template_id,
+        "name": name.strip(),
+        "category": category.strip(),
+        "body": body.strip(),
+        "variables": vars_list,
+        "is_default": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    success = await _save_template(template_data)
+    if not success:
+        raise HTTPException(status_code=500, detail="Error guardando template")
+
+    return JSONResponse(
+        status_code=201,
+        content={
+            "status": "success",
+            "template": template_data,
+            "message": f"Template '{name}' creado exitosamente"
+        }
+    )
+
+
+@router.put("/templates/{template_id}")
+async def update_template(
+    template_id: str,
+    name: str = Form(None, description="Nombre del template"),
+    category: str = Form(None, description="Categoría"),
+    body: str = Form(None, description="Cuerpo del mensaje"),
+    variables: str = Form(None, description="JSON array de variables"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Actualiza un template existente."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Obtener template existente
+    template = await _get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
+
+    # Actualizar campos proporcionados
+    if name is not None:
+        template["name"] = name.strip()
+    if category is not None:
+        template["category"] = category.strip()
+    if body is not None:
+        template["body"] = body.strip()
+    if variables is not None:
+        try:
+            template["variables"] = json.loads(variables)
+        except json.JSONDecodeError:
+            pass
+
+    template["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    success = await _save_template(template)
+    if not success:
+        raise HTTPException(status_code=500, detail="Error actualizando template")
+
+    return {
+        "status": "success",
+        "template": template,
+        "message": f"Template '{template_id}' actualizado"
+    }
+
+
+@router.delete("/templates/{template_id}")
+async def delete_template(
+    template_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Elimina un template (no se pueden eliminar templates predefinidos)."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Verificar que existe
+    template = await _get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
+
+    # Verificar que no es predefinido
+    if template.get("is_default"):
+        raise HTTPException(
+            status_code=403,
+            detail="No se pueden eliminar templates predefinidos"
+        )
+
+    success = await _delete_template(template_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Error eliminando template")
+
+    return {
+        "status": "success",
+        "message": f"Template '{template_id}' eliminado"
+    }
+
+
+# ============================================================================
+# Endpoint para editar nombre de contacto
+# ============================================================================
+
+@router.patch("/contacts/{contact_id}/name")
+async def update_contact_name(
+    contact_id: str,
+    firstname: str = Form(..., description="Nombre del contacto"),
+    lastname: str = Form("", description="Apellido del contacto (opcional)"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Actualiza el nombre del contacto en HubSpot.
+
+    Permite a los asesores corregir nombres de contactos directamente
+    desde el panel sin ir a HubSpot.
+    """
+    logger.info(f"[Panel] PATCH nombre - contact_id={contact_id}, firstname={firstname}, lastname={lastname}")
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Validar contact_id
+    if not contact_id or contact_id == "null" or contact_id == "undefined":
+        logger.error(f"[Panel] contact_id inválido: {contact_id}")
+        raise HTTPException(status_code=400, detail="ID de contacto inválido")
+
+    # Validar que sea numérico (IDs de HubSpot son numéricos)
+    try:
+        int(contact_id)
+    except ValueError:
+        logger.error(f"[Panel] contact_id no es numérico: {contact_id}")
+        raise HTTPException(status_code=400, detail="ID de contacto debe ser numérico")
+
+    import httpx
+
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key:
+        logger.error("[Panel] HUBSPOT_API_KEY no configurada")
+        raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+    payload = {
+        "properties": {
+            "firstname": firstname.strip(),
+            "lastname": lastname.strip()
+        }
+    }
+
+    logger.debug(f"[Panel] Enviando PATCH a HubSpot: {url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.patch(
+                url,
+                headers={
+                    "Authorization": f"Bearer {hubspot_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json=payload
+            )
+
+            logger.info(f"[Panel] Respuesta HubSpot: {response.status_code}")
+
+            if response.status_code == 200:
+                logger.info(f"[Panel] Nombre actualizado para contacto {contact_id}: {firstname} {lastname}")
+                return {
+                    "status": "success",
+                    "message": "Nombre actualizado correctamente",
+                    "contact_id": contact_id,
+                    "firstname": firstname,
+                    "lastname": lastname,
+                    "display_name": f"{firstname} {lastname}".strip()
+                }
+            elif response.status_code == 404:
+                logger.warning(f"[Panel] Contacto no encontrado en HubSpot: {contact_id}")
+                raise HTTPException(
+                    status_code=404,
+                    detail="Contacto no encontrado en HubSpot"
+                )
+            else:
+                logger.error(f"[Panel] Error actualizando nombre: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Error de HubSpot: {response.text[:200]}"
+                )
+
+    except httpx.TimeoutException:
+        logger.error(f"[Panel] Timeout actualizando nombre para {contact_id}")
+        raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
+    except HTTPException:
+        raise  # Re-raise HTTPExceptions sin modificar
+    except Exception as e:
+        logger.error(f"[Panel] Error inesperado actualizando nombre: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# ============================================================================
+# Endpoint para cerrar conversación (eliminar de Redis)
+# ============================================================================
+
+@router.delete("/contacts/{phone}/close")
+async def close_conversation(
+    phone: str,
+    canal: Optional[str] = None,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Cierra una conversación eliminándola de Redis.
+
+    Esto hace que el contacto desaparezca del panel de "activos"
+    y reactiva a Sofía para futuras conversaciones.
+
+    SEGREGACIÓN POR CANAL:
+    Si se proporciona el parámetro canal, solo se elimina la conversación
+    de ese canal específico. Si no se proporciona, se intenta eliminar
+    con el canal por defecto.
+
+    Args:
+        phone: Número de teléfono normalizado (E.164)
+        canal: Canal de origen (instagram, finca_raiz, etc.)
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Normalizar teléfono si no está normalizado
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+
+    phone_normalized = validation.normalized if validation.is_valid else phone
+
+    try:
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        state_manager = ConversationStateManager(redis_url)
+
+        # Eliminar conversación de Redis CON CANAL
+        await state_manager.delete_conversation(phone_normalized, canal)
+
+        # También intentar con el teléfono original si es diferente
+        if phone != phone_normalized:
+            await state_manager.delete_conversation(phone, canal)
+
+        canal_info = f":{canal}" if canal else ""
+        logger.info(f"[Panel] Conversación cerrada para {phone_normalized}{canal_info}")
+
+        return {
+            "status": "success",
+            "message": "Conversación cerrada correctamente",
+            "phone": phone_normalized,
+            "canal": canal
+        }
+
+    except Exception as e:
+        logger.error(f"[Panel] Error cerrando conversación: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/window-status/{phone}")
@@ -433,13 +1016,6 @@ async def get_conversation_history(
 
     Este endpoint consulta las notas en HubSpot asociadas al contacto
     para mostrar el historial de mensajes.
-
-    Args:
-        phone: Número telefónico
-        limit: Máximo de mensajes a retornar
-
-    Returns:
-        Historial de conversación como burbujas de chat
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -486,14 +1062,22 @@ async def get_conversation_history(
 async def get_history_by_contact_id(
     contact_id: str,
     limit: int = Query(50, ge=1, le=100),
+    canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
+    phone: Optional[str] = Query(None, description="Teléfono para buscar historial de Sofía"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Obtiene el historial de conversación por contact_id.
 
+    SEGREGACIÓN POR CANAL:
+    Si se proporciona el parámetro canal y phone, también se obtiene
+    el historial de Sofía desde Redis (segregado por canal).
+
     Args:
         contact_id: ID del contacto en HubSpot
         limit: Máximo de mensajes a retornar
+        canal: Canal de origen para segregación
+        phone: Teléfono normalizado para buscar historial de Sofía
 
     Returns:
         Historial de conversación como burbujas de chat
@@ -510,27 +1094,37 @@ async def get_history_by_contact_id(
                 "contact_id": contact_id,
                 "messages": [],
                 "count": 0,
+                "canal": canal,
                 "error": "ID de contacto inválido (debe ser numérico)"
             }
         )
 
     try:
         timeline_logger = get_timeline_logger()
+
+        # Obtener notas de HubSpot
         messages = await timeline_logger.get_notes_for_contact(
             contact_id=contact_id,
             limit=limit
         )
 
+        # Log para debug de segregación
+        if canal:
+            logger.info(f"[Panel] Historial solicitado con canal={canal}, phone={phone}")
+
         # Asegurar que messages sea una lista válida
         if messages is None:
             messages = []
 
-        logger.info(f"[Panel] Historial cargado: {len(messages)} mensajes para contact_id={contact_id}")
+        canal_info = f", canal={canal}" if canal else ""
+        logger.info(f"[Panel] Historial cargado: {len(messages)} mensajes para contact_id={contact_id}{canal_info}")
 
         return {
             "contact_id": contact_id,
             "messages": messages,
-            "count": len(messages)
+            "count": len(messages),
+            "canal": canal,
+            "phone": phone
         }
 
     except Exception as e:
@@ -542,6 +1136,7 @@ async def get_history_by_contact_id(
                 "contact_id": contact_id,
                 "messages": [],
                 "count": 0,
+                "canal": canal,
                 "error": f"Error interno: {str(e)}"
             }
         )
@@ -632,17 +1227,6 @@ async def get_active_contacts(
 
     Esto permite que los contactos aparezcan automáticamente en el panel
     cuando se activa HUMAN_ACTIVE, como en WhatsApp Web.
-
-    Filtros disponibles:
-    - 24h: Últimas 24 horas
-    - 48h: Últimas 48 horas
-    - 1week: Última semana
-    - custom: Usar date_from y date_to
-
-    Filtro por asesora:
-    - advisor: Owner ID de HubSpot para filtrar contactos asignados a esa asesora
-      - Luisa: 87367331 (metrocuadrado, finca_raiz, mercado_libre)
-      - Yubeny: 88251457 (pagina_web, whatsapp_directo, facebook, instagram, ciencuadras)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -720,6 +1304,89 @@ async def get_active_contacts(
             since = now - timedelta(hours=24)
             until = now
 
+        # === PASO 3.5: Filtrar contactos activos por fecha de activación ===
+        # Esto asegura que si se filtra por "48h", solo muestre contactos
+        # que fueron activados dentro de las últimas 48h
+        if filter_time != "all":
+            filtered_active = []
+            for contact in active_contacts:
+                activated_at = contact.get("activated_at")
+                if activated_at:
+                    try:
+                        # Parsear fecha de activación
+                        if isinstance(activated_at, str):
+                            activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+                        else:
+                            activated_dt = activated_at
+
+                        # Asegurar timezone
+                        if activated_dt.tzinfo is None:
+                            activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
+
+                        # Incluir si está dentro del rango
+                        if since <= activated_dt <= until:
+                            # Calcular tiempo desde activación para mostrar
+                            time_ago = now - activated_dt.astimezone(TIMEZONE)
+                            if time_ago.total_seconds() < 3600:
+                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
+                            elif time_ago.total_seconds() < 86400:
+                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
+                            else:
+                                contact["time_ago"] = f"hace {int(time_ago.days)} días"
+
+                            filtered_active.append(contact)
+                        else:
+                            logger.debug(
+                                f"[Panel] Contacto {contact.get('phone')} excluido por filtro de tiempo "
+                                f"(activado: {activated_dt}, filtro desde: {since})"
+                            )
+                    except (ValueError, TypeError) as e:
+                        # Si no podemos parsear la fecha, incluir el contacto
+                        logger.debug(f"[Panel] Error parseando fecha de activación: {e}")
+                        filtered_active.append(contact)
+                else:
+                    # Si no tiene fecha de activación, intentar usar last_activity como fallback
+                    last_activity = contact.get("last_activity")
+                    if last_activity:
+                        try:
+                            if isinstance(last_activity, str):
+                                activity_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+                            else:
+                                activity_dt = last_activity
+
+                            if activity_dt.tzinfo is None:
+                                activity_dt = activity_dt.replace(tzinfo=TIMEZONE)
+
+                            # Filtrar por last_activity si no hay activated_at
+                            if since <= activity_dt <= until:
+                                time_ago = now - activity_dt.astimezone(TIMEZONE)
+                                if time_ago.total_seconds() < 3600:
+                                    contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
+                                elif time_ago.total_seconds() < 86400:
+                                    contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
+                                else:
+                                    contact["time_ago"] = f"hace {int(time_ago.days)} días"
+                                filtered_active.append(contact)
+                            else:
+                                logger.debug(
+                                    f"[Panel] Contacto {contact.get('phone')} excluido por filtro (usando last_activity)"
+                                )
+                        except (ValueError, TypeError) as e:
+                            # Si tampoco podemos parsear last_activity, incluir como reciente
+                            logger.debug(f"[Panel] Error parseando last_activity: {e}")
+                            contact["time_ago"] = "reciente"
+                            filtered_active.append(contact)
+                    else:
+                        # Sin ninguna fecha disponible, incluir como reciente
+                        contact["time_ago"] = "reciente"
+                        filtered_active.append(contact)
+
+            logger.info(
+                f"[Panel] Contactos activos después de filtro de tiempo: "
+                f"{len(filtered_active)}/{len(active_contacts)}"
+            )
+            active_contacts = filtered_active
+
         # === PASO 4: Obtener historial de HubSpot (si hay espacio) ===
         remaining_slots = limit - len(active_contacts)
         historical_contacts = []
@@ -727,11 +1394,14 @@ async def get_active_contacts(
         if remaining_slots > 0:
             try:
                 timeline_logger = get_timeline_logger()
-                historical_contacts = await timeline_logger.get_contacts_with_advisor_activity(
+                result = await timeline_logger.get_contacts_with_advisor_activity(
                     since=since,
                     until=until,
                     limit=remaining_slots
                 )
+
+                # Extraer contactos del resultado (nuevo formato con paginación)
+                historical_contacts = result.get("contacts", []) if isinstance(result, dict) else result
 
                 # Marcar como no activos y enriquecer
                 for contact in historical_contacts:
@@ -782,15 +1452,18 @@ async def get_active_contacts(
                     canal = contact.get("canal_origen", "")
                     contact_owner = LeadAssigner.CHANNEL_TO_OWNER.get(canal)
 
-                # Solo incluir si coincide con el advisor
+                # Incluir si coincide con el advisor O si no tiene owner asignado
+                # (para no perder contactos activos en espera)
                 if contact_owner == advisor:
                     filtered_contacts.append(contact)
                 elif not contact_owner:
-                    # Si no podemos determinar el owner, incluir (para no perder contactos)
-                    # pero marcar como "sin asignar"
+                    # Sin owner asignado -> incluir para que no se pierda
                     contact["owner_status"] = "unassigned"
-                    # No incluir en panel filtrado por advisor
-                    pass
+                    filtered_contacts.append(contact)
+                    logger.debug(
+                        f"[Panel] Contacto {contact.get('phone')} sin owner, "
+                        f"incluido como unassigned"
+                    )
 
             active_contacts = filtered_contacts
             logger.info(f"[Panel] Filtrado por advisor {advisor}: {len(active_contacts)} contactos")
@@ -813,6 +1486,19 @@ async def get_active_contacts(
 
         active_count = len([c for c in contacts_sorted if c.get("is_active")])
 
+        # Log para diagnóstico
+        logger.info(
+            f"[Panel] Retornando {len(contacts_sorted[:limit])} contactos "
+            f"(activos: {active_count}, advisor: {advisor})"
+        )
+        for c in contacts_sorted[:limit]:
+            logger.debug(
+                f"[Panel] -> {c.get('phone', 'N/A')} | "
+                f"active={c.get('is_active')} | "
+                f"owner={c.get('owner_id', 'N/A')} | "
+                f"status={c.get('owner_status', 'assigned')}"
+            )
+
         return {
             "contacts": contacts_sorted[:limit],
             "filter": filter_time,
@@ -832,12 +1518,6 @@ async def get_active_contacts(
 async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
     """
     Obtiene información básica de un contacto de HubSpot.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-
-    Returns:
-        Diccionario con firstname, lastname, email o None si falla
     """
     import httpx
 
@@ -872,9 +1552,9 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
 # ============================================================================
 
 @router.get("/", response_class=HTMLResponse)
-async def panel_ui(x_api_key: str = Query(None, alias="key")):
+async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     """
-    Interfaz web del panel de envío para asesores - WhatsApp Web Style.
+    Interfaz web del panel de envio para asesores - WhatsApp Web Style.
 
     Acceso: /whatsapp/panel/?key=TU_API_KEY
     """
@@ -887,7 +1567,7 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             <head><title>Acceso Denegado</title></head>
             <body style="font-family: Arial; padding: 50px; text-align: center;">
                 <h1>Acceso Denegado</h1>
-                <p>Se requiere API Key válida.</p>
+                <p>Se requiere API Key valida.</p>
                 <p>Uso: /whatsapp/panel/?key=TU_API_KEY</p>
             </body>
             </html>
@@ -895,706 +1575,19 @@ async def panel_ui(x_api_key: str = Query(None, alias="key")):
             status_code=401
         )
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Panel de Asesores - WhatsApp</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            /* Custom scrollbar */
-            ::-webkit-scrollbar {{ width: 6px; }}
-            ::-webkit-scrollbar-track {{ background: #f1f1f1; }}
-            ::-webkit-scrollbar-thumb {{ background: #c1c1c1; border-radius: 3px; }}
-            ::-webkit-scrollbar-thumb:hover {{ background: #a1a1a1; }}
-
-            /* Chat bubbles */
-            .bubble-client {{
-                background: white;
-                border-radius: 0 8px 8px 8px;
-                max-width: 80%;
-            }}
-            .bubble-bot {{
-                background: #dcf8c6;
-                border-radius: 8px 0 8px 8px;
-                max-width: 80%;
-            }}
-            .bubble-advisor {{
-                background: #e3f2fd;
-                border-radius: 8px 0 8px 8px;
-                max-width: 80%;
-            }}
-
-            /* WhatsApp background pattern */
-            .chat-bg {{
-                background-color: #e5ddd5;
-                background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23d4cfc5' fill-opacity='0.4'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
-            }}
-
-            /* Contact list item */
-            .contact-item {{
-                transition: background-color 0.2s;
-            }}
-            .contact-item:hover {{
-                background-color: #f5f5f5;
-            }}
-            .contact-item.active {{
-                background-color: #e8f5e9;
-            }}
-
-            /* Pulse animation for polling indicator */
-            .pulse {{
-                animation: pulse 2s infinite;
-            }}
-            @keyframes pulse {{
-                0%, 100% {{ opacity: 1; }}
-                50% {{ opacity: 0.5; }}
-            }}
-        </style>
-    </head>
-    <body class="bg-gray-100 h-screen overflow-hidden">
-        <div class="flex h-full">
-            <!-- ═══════════════════════════════════════════════════════════════ -->
-            <!-- SIDEBAR: Lista de Contactos -->
-            <!-- ═══════════════════════════════════════════════════════════════ -->
-            <div class="w-1/3 bg-white border-r flex flex-col">
-                <!-- Header -->
-                <div class="bg-green-600 text-white p-4">
-                    <div class="flex items-center justify-between">
-                        <h1 id="panelTitle" class="text-lg font-semibold">Asesores Comerciales</h1>
-                        <div class="flex items-center gap-2">
-                            <span class="pulse text-xs bg-green-500 px-2 py-1 rounded-full">En vivo</span>
-                        </div>
-                    </div>
-                    <p id="panelSubtitle" class="text-sm opacity-90 mt-1">Inmobiliaria Proteger</p>
-                </div>
-
-                <!-- Filtros de tiempo -->
-                <div class="p-3 bg-gray-50 border-b">
-                    <div class="flex flex-wrap gap-2">
-                        <select id="timeFilter" class="text-sm border rounded px-2 py-1 flex-1">
-                            <option value="24h">Últimas 24 horas</option>
-                            <option value="48h">Últimas 48 horas</option>
-                            <option value="1week">Última semana</option>
-                            <option value="custom">Personalizado</option>
-                        </select>
-                        <button id="refreshBtn" class="bg-green-600 text-white px-3 py-1 rounded text-sm hover:bg-green-700">
-                            ⟳
-                        </button>
-                    </div>
-                    <!-- Fechas personalizadas (oculto por defecto) -->
-                    <div id="customDates" class="hidden mt-2 flex gap-2">
-                        <input type="date" id="dateFrom" class="text-sm border rounded px-2 py-1 flex-1">
-                        <input type="date" id="dateTo" class="text-sm border rounded px-2 py-1 flex-1">
-                        <button id="applyDatesBtn" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">OK</button>
-                    </div>
-                </div>
-
-                <!-- Lista de contactos -->
-                <div id="contactsList" class="flex-1 overflow-y-auto">
-                    <div class="p-4 text-center text-gray-500">
-                        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
-                        <p class="mt-2 text-sm">Cargando contactos...</p>
-                    </div>
-                </div>
-
-                <!-- Info de actualización y contadores -->
-                <div class="p-2 bg-gray-50 border-t text-xs text-gray-500">
-                    <div class="flex justify-between items-center">
-                        <span id="activeCounter" class="text-green-600 font-medium"></span>
-                        <span id="lastUpdate">Actualización: --</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ═══════════════════════════════════════════════════════════════ -->
-            <!-- MAIN: Área de Chat -->
-            <!-- ═══════════════════════════════════════════════════════════════ -->
-            <div class="w-2/3 flex flex-col">
-                <!-- Header del chat (contacto seleccionado) -->
-                <div id="chatHeader" class="bg-gray-100 p-4 border-b flex items-center justify-between">
-                    <div>
-                        <h2 id="contactName" class="font-semibold text-gray-700">Selecciona un contacto</h2>
-                        <p id="contactPhone" class="text-sm text-gray-500"></p>
-                    </div>
-                    <div id="windowStatus" class="hidden text-sm"></div>
-                </div>
-
-                <!-- Área de mensajes -->
-                <div id="chatMessages" class="flex-1 overflow-y-auto chat-bg p-4">
-                    <div class="flex items-center justify-center h-full text-gray-500">
-                        <div class="text-center">
-                            <svg class="w-16 h-16 mx-auto mb-4 text-gray-300" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-                            </svg>
-                            <p>Selecciona un contacto para ver la conversación</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Input de mensaje -->
-                <div class="bg-gray-100 p-4 border-t">
-                    <!-- Warning de ventana cerrada con botón de template -->
-                    <div id="windowWarning" class="hidden mb-3 p-3 bg-orange-50 border border-orange-200 rounded-lg">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                                <span class="text-orange-600">⚠️</span>
-                                <span class="text-sm text-orange-700">Ventana de 24h cerrada. El cliente no ha escrito recientemente.</span>
-                            </div>
-                            <button
-                                type="button"
-                                id="sendTemplateBtn"
-                                onclick="sendTemplateMessage()"
-                                class="bg-blue-500 text-white text-sm px-3 py-1 rounded hover:bg-blue-600"
-                            >
-                                Enviar Template
-                            </button>
-                        </div>
-                    </div>
-
-                    <form id="sendForm" class="flex gap-2">
-                        <input type="hidden" id="selectedPhone" value="">
-                        <input type="hidden" id="selectedContactId" value="">
-                        <textarea
-                            id="messageInput"
-                            placeholder="Escribe un mensaje..."
-                            class="flex-1 border rounded-lg p-3 resize-none focus:outline-none focus:ring-2 focus:ring-green-500"
-                            rows="2"
-                            disabled
-                        ></textarea>
-                        <button
-                            type="submit"
-                            id="sendBtn"
-                            class="bg-green-600 text-white px-6 rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-                            disabled
-                        >
-                            <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                            </svg>
-                        </button>
-                    </form>
-                    <div id="sendResult" class="mt-2 text-sm hidden"></div>
-                </div>
-            </div>
-        </div>
-
-        <script>
-            // ═══════════════════════════════════════════════════════════════════
-            // CONFIGURACIÓN
-            // ═══════════════════════════════════════════════════════════════════
-            const API_KEY = '{x_api_key}';
-            const BASE_URL = '/whatsapp/panel';
-            const POLLING_INTERVAL = 5000; // 5 segundos
-
-            // Leer parámetro advisor de la URL
-            const urlParams = new URLSearchParams(window.location.search);
-            const ADVISOR_ID = urlParams.get('advisor');
-
-            // Mapeo de advisor ID a nombre para mostrar en la UI
-            const ADVISOR_NAMES = {{
-                '87367331': 'Luisa',
-                '88251457': 'Yubeny',
-                '88558384': 'Analista Redes'
-            }};
-
-            const ADVISOR_NAME = ADVISOR_ID ? (ADVISOR_NAMES[ADVISOR_ID] || `Asesor ${{ADVISOR_ID}}`) : null;
-
-            let currentContactId = null;
-            let currentPhone = null;
-            let pollingInterval = null;
-
-            // ═══════════════════════════════════════════════════════════════════
-            // FUNCIONES DE CARGA DE DATOS
-            // ═══════════════════════════════════════════════════════════════════
-
-            async function loadContacts() {{
-                const filter = document.getElementById('timeFilter').value;
-                let url = `${{BASE_URL}}/contacts?filter_time=${{filter}}`;
-
-                // Agregar filtro por advisor si está presente en la URL
-                if (ADVISOR_ID) {{
-                    url += `&advisor=${{ADVISOR_ID}}`;
-                }}
-
-                // Agregar fechas si es filtro custom
-                if (filter === 'custom') {{
-                    const dateFrom = document.getElementById('dateFrom').value;
-                    const dateTo = document.getElementById('dateTo').value;
-                    if (dateFrom) url += `&date_from=${{dateFrom}}T00:00:00`;
-                    if (dateTo) url += `&date_to=${{dateTo}}T23:59:59`;
-                }}
-
-                try {{
-                    const response = await fetch(url, {{
-                        headers: {{ 'X-API-Key': API_KEY }}
-                    }});
-
-                    if (!response.ok) throw new Error('Error al cargar contactos');
-
-                    const data = await response.json();
-                    renderContactsList(data.contacts);
-                    updateLastUpdateTime();
-
-                    // Actualizar contador de activos
-                    const activeCounter = document.getElementById('activeCounter');
-                    if (data.active_count > 0) {{
-                        activeCounter.innerHTML = `<span class="inline-block w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>${{data.active_count}} en espera`;
-                    }} else {{
-                        activeCounter.textContent = '';
-                    }}
-
-                }} catch (error) {{
-                    console.error('Error cargando contactos:', error);
-                    document.getElementById('contactsList').innerHTML = `
-                        <div class="p-4 text-center text-red-500">
-                            <p>Error al cargar contactos</p>
-                            <p class="text-sm">${{error.message}}</p>
-                        </div>
-                    `;
-                }}
-            }}
-
-            async function loadChatHistory(contactId) {{
-                console.log('[Panel] Cargando historial para contact_id:', contactId);
-                try {{
-                    const response = await fetch(`${{BASE_URL}}/history/${{contactId}}?limit=50`, {{
-                        headers: {{ 'X-API-Key': API_KEY }}
-                    }});
-
-                    console.log('[Panel] Respuesta de historial:', response.status);
-
-                    const data = await response.json();
-                    console.log('[Panel] Datos recibidos:', data);
-
-                    // Verificar si hay error en la respuesta (aunque sea 200)
-                    if (data.error) {{
-                        console.warn('[Panel] Error en respuesta:', data.error);
-                    }}
-
-                    // Renderizar mensajes (puede estar vacío)
-                    renderChatBubbles(data.messages || []);
-
-                    // Mostrar mensaje si no hay historial
-                    if (!data.messages || data.messages.length === 0) {{
-                        console.log('[Panel] Sin mensajes en historial');
-                    }}
-
-                }} catch (error) {{
-                    console.error('[Panel] Error cargando historial:', error);
-                    document.getElementById('chatMessages').innerHTML = `
-                        <div class="flex items-center justify-center h-full text-red-500">
-                            <p>Error al cargar historial: ${{error.message}}</p>
-                        </div>
-                    `;
-                }}
-            }}
-
-            async function checkWindowStatus(phone) {{
-                console.log('[Panel] Verificando ventana 24h para:', phone);
-                const windowWarning = document.getElementById('windowWarning');
-
-                try {{
-                    const response = await fetch(
-                        `${{BASE_URL}}/window-status/${{encodeURIComponent(phone)}}`,
-                        {{ headers: {{ 'X-API-Key': API_KEY }} }}
-                    );
-
-                    const data = await response.json();
-                    console.log('[Panel] Estado de ventana:', data);
-
-                    const statusDiv = document.getElementById('windowStatus');
-                    statusDiv.classList.remove('hidden');
-
-                    if (data.window_open) {{
-                        statusDiv.className = 'text-sm bg-green-100 text-green-700 px-3 py-1 rounded-full';
-                        statusDiv.textContent = `Ventana: ${{data.message}}`;
-                        // Asegurar que el botón esté habilitado
-                        document.getElementById('sendBtn').disabled = false;
-                        // Ocultar warning de ventana cerrada
-                        windowWarning.classList.add('hidden');
-                    }} else {{
-                        statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
-                        statusDiv.textContent = 'Ventana cerrada (>24h)';
-                        // Mostrar warning con botón de template
-                        windowWarning.classList.remove('hidden');
-                        console.warn('[Panel] Ventana de 24h cerrada. Último mensaje:', data.last_message_time);
-                    }}
-                }} catch (error) {{
-                    console.error('[Panel] Error verificando ventana:', error);
-                    // En caso de error, ocultar warning
-                    windowWarning.classList.add('hidden');
-                    const statusDiv = document.getElementById('windowStatus');
-                    statusDiv.classList.add('hidden');
-                }}
-            }}
-
-            // ═══════════════════════════════════════════════════════════════════
-            // FUNCIONES DE RENDERIZADO
-            // ═══════════════════════════════════════════════════════════════════
-
-            function renderContactsList(contacts) {{
-                const container = document.getElementById('contactsList');
-
-                if (!contacts || contacts.length === 0) {{
-                    container.innerHTML = `
-                        <div class="p-4 text-center text-gray-500">
-                            <p>No hay contactos esperando atención</p>
-                            <p class="text-sm mt-1">Los contactos aparecerán automáticamente cuando Sofía haga handoff</p>
-                        </div>
-                    `;
-                    return;
-                }}
-
-                container.innerHTML = contacts.map(contact => {{
-                    const isActive = contact.is_active === true;
-                    const contactId = contact.contact_id || contact.id || '';
-                    const phone = contact.phone || '';
-                    const displayName = contact.display_name || 'Sin nombre';
-
-                    return `
-                        <div class="contact-item p-3 border-b cursor-pointer ${{isActive ? 'bg-green-50 border-l-4 border-green-500' : ''}} ${{contactId === currentContactId ? 'active' : ''}}"
-                             onclick="selectContact('${{contactId}}', '${{phone}}', '${{displayName.replace(/'/g, "\\'")}}')">
-                            <div class="flex items-center gap-3">
-                                <div class="w-10 h-10 ${{isActive ? 'bg-green-500' : 'bg-gray-300'}} rounded-full flex items-center justify-center text-white font-semibold">
-                                    ${{(displayName || '?').charAt(0).toUpperCase()}}
-                                </div>
-                                <div class="flex-1 min-w-0">
-                                    <p class="font-medium text-gray-800 truncate">${{displayName}}</p>
-                                    <p class="text-sm text-gray-500 truncate">${{phone || contact.email || 'Sin contacto'}}</p>
-                                    ${{contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate">${{contact.handoff_reason}}</p>` : ''}}
-                                </div>
-                                <div class="text-right">
-                                    ${{isActive
-                                        ? `<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
-                                           ${{contact.ttl_display ? `<p class="text-xs text-gray-400 mt-1">${{contact.ttl_display}}</p>` : ''}}`
-                                        : contact.conversation_status === 'BOT_ACTIVE'
-                                        ? '<span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Bot</span>'
-                                        : '<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>'
-                                    }}
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }}).join('');
-            }}
-
-            function renderChatBubbles(messages) {{
-                const container = document.getElementById('chatMessages');
-
-                if (!messages || messages.length === 0) {{
-                    container.innerHTML = `
-                        <div class="flex items-center justify-center h-full text-gray-500">
-                            <p>No hay mensajes en el historial</p>
-                        </div>
-                    `;
-                    return;
-                }}
-
-                container.innerHTML = messages.map(msg => {{
-                    const isRight = msg.align === 'right';
-                    const bubbleClass = msg.sender === 'client' ? 'bubble-client'
-                                      : msg.sender === 'bot' ? 'bubble-bot'
-                                      : 'bubble-advisor';
-
-                    const timestamp = msg.timestamp
-                        ? new Date(msg.timestamp).toLocaleTimeString('es-CO', {{hour: '2-digit', minute: '2-digit'}})
-                        : '';
-
-                    return `
-                        <div class="flex ${{isRight ? 'justify-end' : 'justify-start'}} mb-3">
-                            <div class="${{bubbleClass}} p-3 shadow-sm">
-                                <p class="text-xs font-semibold text-gray-600 mb-1">${{msg.sender_name || msg.sender}}</p>
-                                <p class="text-gray-800 whitespace-pre-wrap">${{escapeHtml(msg.message)}}</p>
-                                <p class="text-xs text-gray-500 text-right mt-1">${{timestamp}}</p>
-                            </div>
-                        </div>
-                    `;
-                }}).join('');
-
-                // Scroll al final
-                container.scrollTop = container.scrollHeight;
-            }}
-
-            function escapeHtml(text) {{
-                if (!text) return '';
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }}
-
-            function updateLastUpdateTime() {{
-                const now = new Date().toLocaleTimeString('es-CO');
-                document.getElementById('lastUpdate').textContent = `Última actualización: ${{now}}`;
-            }}
-
-            // ═══════════════════════════════════════════════════════════════════
-            // FUNCIONES DE INTERACCIÓN
-            // ═══════════════════════════════════════════════════════════════════
-
-            function selectContact(contactId, phone, displayName) {{
-                currentContactId = contactId;
-                currentPhone = phone;
-
-                // Actualizar header
-                document.getElementById('contactName').textContent = displayName;
-                document.getElementById('contactPhone').textContent = phone;
-
-                // Habilitar input
-                document.getElementById('messageInput').disabled = false;
-                document.getElementById('sendBtn').disabled = false;
-                document.getElementById('selectedPhone').value = phone;
-                document.getElementById('selectedContactId').value = contactId;
-
-                // Cargar historial
-                loadChatHistory(contactId);
-
-                // Verificar ventana de 24h
-                if (phone) {{
-                    checkWindowStatus(phone);
-                }}
-
-                // Actualizar lista (marcar activo)
-                document.querySelectorAll('.contact-item').forEach(el => {{
-                    el.classList.remove('active');
-                }});
-                event.currentTarget.classList.add('active');
-            }}
-
-            async function sendMessage(e) {{
-                e.preventDefault();
-                console.log('[Panel] sendMessage() iniciado');
-
-                const phone = document.getElementById('selectedPhone').value;
-                const contactId = document.getElementById('selectedContactId').value;
-                const message = document.getElementById('messageInput').value.trim();
-                const resultDiv = document.getElementById('sendResult');
-
-                console.log('[Panel] Datos de envío:', {{ phone, contactId, messageLength: message.length }});
-
-                if (!phone || !message) {{
-                    console.warn('[Panel] Validación fallida: phone o message vacío');
-                    resultDiv.className = 'mt-2 text-sm text-red-600';
-                    resultDiv.textContent = 'Selecciona un contacto y escribe un mensaje';
-                    resultDiv.classList.remove('hidden');
-                    return;
-                }}
-
-                // Deshabilitar mientras envía
-                document.getElementById('sendBtn').disabled = true;
-                document.getElementById('messageInput').disabled = true;
-
-                try {{
-                    const formData = new FormData();
-                    formData.append('to', phone);
-                    formData.append('body', message);
-                    formData.append('contact_id', contactId);
-
-                    console.log('[Panel] Enviando POST a:', `${{BASE_URL}}/send-message`);
-
-                    const response = await fetch(`${{BASE_URL}}/send-message`, {{
-                        method: 'POST',
-                        headers: {{ 'X-API-Key': API_KEY }},
-                        body: formData
-                    }});
-
-                    console.log('[Panel] Respuesta HTTP:', response.status, response.statusText);
-
-                    const data = await response.json();
-                    console.log('[Panel] Respuesta JSON:', data);
-
-                    if (data.status === 'success') {{
-                        resultDiv.className = 'mt-2 text-sm text-green-600';
-                        resultDiv.textContent = 'Mensaje enviado correctamente';
-                        document.getElementById('messageInput').value = '';
-
-                        // Recargar historial
-                        setTimeout(() => loadChatHistory(contactId), 1000);
-                    }} else if (data.status === 'warning') {{
-                        console.warn('[Panel] Warning del servidor:', data.message);
-                        resultDiv.className = 'mt-2 text-sm text-orange-600';
-                        resultDiv.textContent = data.message;
-                    }} else {{
-                        throw new Error(data.detail || data.message || 'Error desconocido');
-                    }}
-
-                }} catch (error) {{
-                    console.error('[Panel] Error en sendMessage:', error);
-                    resultDiv.className = 'mt-2 text-sm text-red-600';
-                    resultDiv.textContent = `Error: ${{error.message}}`;
-                }} finally {{
-                    document.getElementById('sendBtn').disabled = false;
-                    document.getElementById('messageInput').disabled = false;
-                    resultDiv.classList.remove('hidden');
-
-                    // Ocultar mensaje después de 5 segundos
-                    setTimeout(() => resultDiv.classList.add('hidden'), 5000);
-                }}
-            }}
-
-            // Función para enviar template cuando la ventana está cerrada
-            async function sendTemplateMessage() {{
-                console.log('[Panel] sendTemplateMessage() iniciado');
-
-                const phone = document.getElementById('selectedPhone').value;
-                const contactId = document.getElementById('selectedContactId').value;
-                const resultDiv = document.getElementById('sendResult');
-
-                if (!phone) {{
-                    alert('Selecciona un contacto primero');
-                    return;
-                }}
-
-                // Confirmar antes de enviar
-                if (!confirm('¿Enviar mensaje de reactivación (Template) a este contacto?\\n\\nEsto enviará un mensaje predefinido para reabrir la conversación.')) {{
-                    return;
-                }}
-
-                // Deshabilitar botón mientras envía
-                const templateBtn = document.getElementById('sendTemplateBtn');
-                templateBtn.disabled = true;
-                templateBtn.textContent = 'Enviando...';
-
-                try {{
-                    const formData = new FormData();
-                    formData.append('to', phone);
-                    formData.append('contact_id', contactId);
-                    formData.append('use_template', 'true');
-
-                    console.log('[Panel] Enviando POST template a:', `${{BASE_URL}}/send-template`);
-
-                    const response = await fetch(`${{BASE_URL}}/send-template`, {{
-                        method: 'POST',
-                        headers: {{ 'X-API-Key': API_KEY }},
-                        body: formData
-                    }});
-
-                    const data = await response.json();
-                    console.log('[Panel] Respuesta template:', data);
-
-                    if (data.status === 'success') {{
-                        resultDiv.className = 'mt-2 text-sm text-green-600';
-                        resultDiv.textContent = 'Template enviado correctamente. La ventana se reabrirá cuando el cliente responda.';
-                        resultDiv.classList.remove('hidden');
-
-                        // Ocultar warning
-                        document.getElementById('windowWarning').classList.add('hidden');
-
-                        // Recargar historial
-                        setTimeout(() => loadChatHistory(contactId), 1000);
-                    }} else {{
-                        throw new Error(data.detail || data.message || 'Error enviando template');
-                    }}
-
-                }} catch (error) {{
-                    console.error('[Panel] Error en sendTemplateMessage:', error);
-                    resultDiv.className = 'mt-2 text-sm text-red-600';
-                    resultDiv.textContent = `Error: ${{error.message}}`;
-                    resultDiv.classList.remove('hidden');
-                }} finally {{
-                    templateBtn.disabled = false;
-                    templateBtn.textContent = 'Enviar Template';
-
-                    // Ocultar mensaje después de 5 segundos
-                    setTimeout(() => resultDiv.classList.add('hidden'), 5000);
-                }}
-            }}
-
-            // ═══════════════════════════════════════════════════════════════════
-            // POLLING
-            // ═══════════════════════════════════════════════════════════════════
-
-            function startPolling() {{
-                if (pollingInterval) clearInterval(pollingInterval);
-
-                pollingInterval = setInterval(async () => {{
-                    // Actualizar lista de contactos
-                    await loadContacts();
-
-                    // Actualizar chat si hay contacto seleccionado
-                    if (currentContactId) {{
-                        await loadChatHistory(currentContactId);
-                    }}
-                }}, POLLING_INTERVAL);
-            }}
-
-            function stopPolling() {{
-                if (pollingInterval) {{
-                    clearInterval(pollingInterval);
-                    pollingInterval = null;
-                }}
-            }}
-
-            // ═══════════════════════════════════════════════════════════════════
-            // EVENT LISTENERS
-            // ═══════════════════════════════════════════════════════════════════
-
-            document.addEventListener('DOMContentLoaded', () => {{
-                console.log('[Panel] Inicializando panel de asesores...');
-
-                // Actualizar header si hay advisor filtrado
-                if (ADVISOR_NAME) {{
-                    document.getElementById('panelTitle').textContent = `Panel de ${{ADVISOR_NAME}}`;
-                    document.getElementById('panelSubtitle').textContent = 'Mis contactos asignados';
-                }}
-
-                // Cargar contactos iniciales
-                loadContacts();
-
-                // Iniciar polling
-                startPolling();
-
-                // Filtro de tiempo
-                document.getElementById('timeFilter').addEventListener('change', function() {{
-                    const customDates = document.getElementById('customDates');
-                    if (this.value === 'custom') {{
-                        customDates.classList.remove('hidden');
-                    }} else {{
-                        customDates.classList.add('hidden');
-                        loadContacts();
-                    }}
-                }});
-
-                // Botón refresh
-                document.getElementById('refreshBtn').addEventListener('click', loadContacts);
-
-                // Aplicar fechas custom
-                document.getElementById('applyDatesBtn').addEventListener('click', loadContacts);
-
-                // Enviar mensaje - Form submit
-                const sendForm = document.getElementById('sendForm');
-                if (sendForm) {{
-                    sendForm.addEventListener('submit', sendMessage);
-                    console.log('[Panel] Event listener de sendForm configurado');
-                }} else {{
-                    console.error('[Panel] ERROR: No se encontró el formulario sendForm');
-                }}
-
-                // Enviar con Ctrl+Enter
-                const messageInput = document.getElementById('messageInput');
-                if (messageInput) {{
-                    messageInput.addEventListener('keydown', function(e) {{
-                        if (e.ctrlKey && e.key === 'Enter') {{
-                            console.log('[Panel] Ctrl+Enter presionado');
-                            sendMessage(e);
-                        }}
-                    }});
-                    console.log('[Panel] Event listener de Ctrl+Enter configurado');
-                }}
-
-                console.log('[Panel] Inicialización completada');
-            }});
-
-            // Detener polling cuando se cierra la pestaña
-            window.addEventListener('beforeunload', stopPolling);
-        </script>
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(content=html_content)
-
+    # Mapeo de advisor ID a nombre para mostrar en la UI
+    advisor_names = {
+        '87367331': 'Luisa',
+        '88251457': 'Yubeny',
+        '88558384': 'Analista Redes'
+    }
+
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "api_key": x_api_key,
+        "base_url": "/whatsapp/panel",
+        "advisor_names": advisor_names
+    })
 
 # ============================================================================
 # Funciones de background
@@ -1627,6 +1620,20 @@ async def _log_advisor_message_to_hubspot(
         logger.error(f"[Panel] Error registrando en HubSpot: {e}")
 
 
+async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] = None) -> None:
+    """
+    Actualiza timestamp del mensaje del asesor en ConversationMeta.
+    Usado para calcular TTL de 72h si asesor deja de responder.
+    """
+    try:
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        state_manager = ConversationStateManager(redis_url)
+        await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
+        logger.debug(f"[Panel] Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
+    except Exception as e:
+        logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
+
+
 # ============================================================================
 # Dashboard de Métricas para Analista de Redes Sociales (READ-ONLY)
 # ============================================================================
@@ -1645,12 +1652,6 @@ async def get_social_media_metrics(
 
     Este endpoint es para el analista de redes sociales que solo necesita
     ver estadísticas, no enviar mensajes ni ver conversaciones detalladas.
-
-    Métricas incluidas:
-    - Total de leads de redes sociales
-    - Leads por canal (Facebook, Instagram, etc.)
-    - Leads por día
-    - Tasa de conversión a cita (si está disponible)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1692,6 +1693,7 @@ async def get_social_media_metrics(
                 "canal_origen",
                 "firstname",
                 "lastname",
+                "phone",
                 "chatbot_score",
                 "lifecyclestage"
             ],
@@ -1708,15 +1710,19 @@ async def get_social_media_metrics(
             )
 
             if response.status_code != 200:
-                logger.warning(f"[Metrics] HubSpot error: {response.status_code}")
-                contacts = []
-            else:
-                data = response.json()
-                contacts = data.get("results", [])
+                logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
+                )
+
+            data = response.json()
+            contacts = data.get("results", [])
 
         # Procesar métricas
         leads_by_channel = defaultdict(int)
         leads_by_day = defaultdict(int)
+        contacts_by_channel = defaultdict(list)  # Lista de contactos por canal
         total_leads = len(contacts)
 
         for contact in contacts:
@@ -1725,6 +1731,19 @@ async def get_social_media_metrics(
             # Por canal
             canal = props.get("canal_origen", "desconocido")
             leads_by_channel[canal] += 1
+
+            # Extraer nombre y teléfono para la lista
+            firstname = props.get("firstname", "")
+            lastname = props.get("lastname", "")
+            phone = props.get("phone", "")
+            nombre_completo = f"{firstname} {lastname}".strip() or "Sin nombre"
+
+            # Agregar a la lista de contactos por canal
+            contacts_by_channel[canal].append({
+                "nombre": nombre_completo,
+                "telefono": phone or "Sin teléfono",
+                "fecha_creacion": props.get("createdate", "")[:10] if props.get("createdate") else ""
+            })
 
             # Por día
             createdate = props.get("createdate")
@@ -1746,6 +1765,7 @@ async def get_social_media_metrics(
             "total_leads": total_leads,
             "leads_by_channel": dict(leads_by_channel),
             "leads_by_day": leads_by_day_sorted,
+            "contacts_by_channel": dict(contacts_by_channel),  # Lista de contactos
             "channels_tracked": SOCIAL_MEDIA_CHANNELS
         }
 
@@ -1754,15 +1774,94 @@ async def get_social_media_metrics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/metrics/", response_class=HTMLResponse)
-async def metrics_dashboard_ui(x_api_key: str = Query(None, alias="key")):
+@router.get("/metrics/export")
+async def export_metrics_csv(
+    days: int = Query(7, ge=1, le=30, description="Días a analizar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
     """
-    Dashboard de métricas para analista de redes sociales.
+    Exporta métricas de redes sociales a formato CSV.
+
+    Genera un archivo CSV descargable con:
+    - Resumen por canal de origen
+    - Leads por día
+    """
+    from fastapi.responses import Response
+    from io import StringIO
+    import csv
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Obtener datos de métricas
+    metrics_data = await get_social_media_metrics(days=days, x_api_key=x_api_key)
+
+    # Crear CSV en memoria
+    output = StringIO()
+    writer = csv.writer(output)
+
+    # Sección: Resumen
+    writer.writerow(["=== MÉTRICAS DE REDES SOCIALES ==="])
+    writer.writerow([f"Periodo: últimos {days} días"])
+    writer.writerow([f"Desde: {metrics_data['since'][:10]}"])
+    writer.writerow([f"Hasta: {metrics_data['until'][:10]}"])
+    writer.writerow([f"Total leads: {metrics_data['total_leads']}"])
+    writer.writerow([])
+
+    # Sección: Por canal
+    writer.writerow(["=== LEADS POR CANAL ==="])
+    writer.writerow(["Canal", "Cantidad", "Porcentaje"])
+
+    total = metrics_data["total_leads"]
+    for canal, count in sorted(metrics_data["leads_by_channel"].items(), key=lambda x: -x[1]):
+        pct = (count / total * 100) if total > 0 else 0
+        writer.writerow([canal, count, f"{pct:.1f}%"])
+
+    writer.writerow([])
+
+    # Sección: Por día
+    writer.writerow(["=== LEADS POR DÍA ==="])
+    writer.writerow(["Fecha", "Cantidad"])
+
+    for day, count in metrics_data["leads_by_day"].items():
+        writer.writerow([day, count])
+
+    writer.writerow([])
+
+    # Sección: Contactos por canal (nombre y teléfono)
+    writer.writerow(["=== DETALLE DE CONTACTOS POR CANAL ==="])
+    contacts_by_channel = metrics_data.get("contacts_by_channel", {})
+
+    for canal in sorted(contacts_by_channel.keys()):
+        contactos = contacts_by_channel[canal]
+        writer.writerow([])
+        writer.writerow([f"--- {canal.upper()} ({len(contactos)} leads) ---"])
+        writer.writerow(["Nombre", "Teléfono", "Fecha Creación"])
+
+        for contacto in contactos:
+            writer.writerow([
+                contacto.get("nombre", "Sin nombre"),
+                contacto.get("telefono", "Sin teléfono"),
+                contacto.get("fecha_creacion", "")
+            ])
+
+    # Generar nombre de archivo
+    from datetime import datetime
+    filename = f"metricas_redes_{days}d_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/metrics/", response_class=HTMLResponse)
+async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, alias="key")):
+    """
+    Dashboard de metricas para analista de redes sociales.
 
     Acceso: /whatsapp/panel/metrics/?key=TU_API_KEY
-
-    IMPORTANTE: Este dashboard es READ-ONLY.
-    No tiene capacidad de enviar mensajes ni ver conversaciones detalladas.
     """
     # Validar API Key via query param para acceso web
     if not _validate_api_key(x_api_key):
@@ -1773,7 +1872,7 @@ async def metrics_dashboard_ui(x_api_key: str = Query(None, alias="key")):
             <head><title>Acceso Denegado</title></head>
             <body style="font-family: Arial; padding: 50px; text-align: center;">
                 <h1>Acceso Denegado</h1>
-                <p>Se requiere API Key válida.</p>
+                <p>Se requiere API Key valida.</p>
                 <p>Uso: /whatsapp/panel/metrics/?key=TU_API_KEY</p>
             </body>
             </html>
@@ -1781,263 +1880,8 @@ async def metrics_dashboard_ui(x_api_key: str = Query(None, alias="key")):
             status_code=401
         )
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Métricas Redes Sociales - Inmobiliaria Proteger</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-            .stat-card {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            }}
-            .stat-card-alt {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            }}
-            .stat-card-green {{
-                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            }}
-        </style>
-    </head>
-    <body class="bg-gray-100 min-h-screen">
-        <!-- Header -->
-        <header class="bg-purple-700 text-white p-4 shadow-lg">
-            <div class="container mx-auto">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h1 class="text-2xl font-bold">Dashboard Redes Sociales</h1>
-                        <p class="text-purple-200 text-sm">Inmobiliaria Proteger - Analítica</p>
-                    </div>
-                    <div class="flex items-center gap-4">
-                        <select id="periodSelect" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
-                            <option value="7">Últimos 7 días</option>
-                            <option value="14">Últimos 14 días</option>
-                            <option value="30">Últimos 30 días</option>
-                        </select>
-                        <button id="refreshBtn" class="bg-purple-500 hover:bg-purple-400 px-4 py-2 rounded">
-                            ⟳ Actualizar
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </header>
-
-        <main class="container mx-auto p-6">
-            <!-- Stat Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div class="stat-card rounded-lg p-6 text-white shadow-lg">
-                    <p class="text-sm opacity-80">Total Leads</p>
-                    <p id="totalLeads" class="text-4xl font-bold">-</p>
-                    <p class="text-sm opacity-80 mt-2">Redes sociales</p>
-                </div>
-                <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
-                    <p class="text-sm opacity-80">Instagram</p>
-                    <p id="instagramLeads" class="text-4xl font-bold">-</p>
-                    <p class="text-sm opacity-80 mt-2">leads</p>
-                </div>
-                <div class="stat-card-green rounded-lg p-6 text-white shadow-lg">
-                    <p class="text-sm opacity-80">Facebook</p>
-                    <p id="facebookLeads" class="text-4xl font-bold">-</p>
-                    <p class="text-sm opacity-80 mt-2">leads</p>
-                </div>
-            </div>
-
-            <!-- Charts -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <!-- Chart: Leads por Canal -->
-                <div class="bg-white rounded-lg shadow-lg p-6">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Leads por Canal</h3>
-                    <canvas id="channelChart"></canvas>
-                </div>
-
-                <!-- Chart: Leads por Día -->
-                <div class="bg-white rounded-lg shadow-lg p-6">
-                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia Diaria</h3>
-                    <canvas id="dailyChart"></canvas>
-                </div>
-            </div>
-
-            <!-- Tabla de resumen -->
-            <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
-                <h3 class="text-lg font-semibold mb-4 text-gray-700">Resumen por Canal</h3>
-                <table class="w-full">
-                    <thead>
-                        <tr class="border-b">
-                            <th class="text-left py-2 text-gray-600">Canal</th>
-                            <th class="text-right py-2 text-gray-600">Leads</th>
-                            <th class="text-right py-2 text-gray-600">%</th>
-                        </tr>
-                    </thead>
-                    <tbody id="channelTable">
-                        <tr><td colspan="3" class="text-center py-4 text-gray-400">Cargando...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Info box -->
-            <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <p class="text-blue-700 text-sm">
-                    <strong>ℹ️ Nota:</strong> Este dashboard muestra métricas de leads provenientes de
-                    redes sociales (Facebook, Instagram, LinkedIn, YouTube, TikTok).
-                    Para ver conversaciones detalladas o enviar mensajes, contacte a las asesoras.
-                </p>
-            </div>
-        </main>
-
-        <script>
-            const API_KEY = '{x_api_key}';
-            const BASE_URL = '/whatsapp/panel';
-
-            let channelChart = null;
-            let dailyChart = null;
-
-            async function loadMetrics() {{
-                const days = document.getElementById('periodSelect').value;
-
-                try {{
-                    const response = await fetch(`${{BASE_URL}}/metrics?days=${{days}}`, {{
-                        headers: {{ 'X-API-Key': API_KEY }}
-                    }});
-
-                    if (!response.ok) throw new Error('Error al cargar métricas');
-
-                    const data = await response.json();
-                    updateDashboard(data);
-
-                }} catch (error) {{
-                    console.error('Error:', error);
-                    document.getElementById('totalLeads').textContent = 'Error';
-                }}
-            }}
-
-            function updateDashboard(data) {{
-                // Update stat cards
-                document.getElementById('totalLeads').textContent = data.total_leads || 0;
-                document.getElementById('instagramLeads').textContent = data.leads_by_channel?.instagram || 0;
-                document.getElementById('facebookLeads').textContent = data.leads_by_channel?.facebook || 0;
-
-                // Update channel chart
-                updateChannelChart(data.leads_by_channel || {{}});
-
-                // Update daily chart
-                updateDailyChart(data.leads_by_day || {{}});
-
-                // Update table
-                updateChannelTable(data.leads_by_channel || {{}}, data.total_leads || 0);
-            }}
-
-            function updateChannelChart(channelData) {{
-                const ctx = document.getElementById('channelChart').getContext('2d');
-
-                const labels = Object.keys(channelData).map(c => c.charAt(0).toUpperCase() + c.slice(1));
-                const values = Object.values(channelData);
-
-                if (channelChart) channelChart.destroy();
-
-                channelChart = new Chart(ctx, {{
-                    type: 'doughnut',
-                    data: {{
-                        labels: labels,
-                        datasets: [{{
-                            data: values,
-                            backgroundColor: [
-                                '#E1306C', // Instagram
-                                '#4267B2', // Facebook
-                                '#0077B5', // LinkedIn
-                                '#FF0000', // YouTube
-                                '#000000', // TikTok
-                            ],
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true,
-                        plugins: {{
-                            legend: {{
-                                position: 'bottom',
-                            }}
-                        }}
-                    }}
-                }});
-            }}
-
-            function updateDailyChart(dailyData) {{
-                const ctx = document.getElementById('dailyChart').getContext('2d');
-
-                const labels = Object.keys(dailyData).map(d => {{
-                    const date = new Date(d);
-                    return date.toLocaleDateString('es-CO', {{month: 'short', day: 'numeric'}});
-                }});
-                const values = Object.values(dailyData);
-
-                if (dailyChart) dailyChart.destroy();
-
-                dailyChart = new Chart(ctx, {{
-                    type: 'line',
-                    data: {{
-                        labels: labels,
-                        datasets: [{{
-                            label: 'Leads',
-                            data: values,
-                            borderColor: '#667eea',
-                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                            fill: true,
-                            tension: 0.3,
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true,
-                        plugins: {{
-                            legend: {{
-                                display: false
-                            }}
-                        }},
-                        scales: {{
-                            y: {{
-                                beginAtZero: true,
-                                ticks: {{
-                                    stepSize: 1
-                                }}
-                            }}
-                        }}
-                    }}
-                }});
-            }}
-
-            function updateChannelTable(channelData, total) {{
-                const tbody = document.getElementById('channelTable');
-
-                if (Object.keys(channelData).length === 0) {{
-                    tbody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-gray-400">Sin datos</td></tr>';
-                    return;
-                }}
-
-                const rows = Object.entries(channelData)
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([channel, count]) => {{
-                        const pct = total > 0 ? ((count / total) * 100).toFixed(1) : 0;
-                        return `
-                            <tr class="border-b hover:bg-gray-50">
-                                <td class="py-2 capitalize">${{channel}}</td>
-                                <td class="py-2 text-right font-semibold">${{count}}</td>
-                                <td class="py-2 text-right text-gray-500">${{pct}}%</td>
-                            </tr>
-                        `;
-                    }})
-                    .join('');
-
-                tbody.innerHTML = rows;
-            }}
-
-            // Event listeners
-            document.addEventListener('DOMContentLoaded', loadMetrics);
-            document.getElementById('periodSelect').addEventListener('change', loadMetrics);
-            document.getElementById('refreshBtn').addEventListener('click', loadMetrics);
-        </script>
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(content=html_content)
+    return templates.TemplateResponse("metrics.html", {
+        "request": request,
+        "api_key": x_api_key,
+        "base_url": "/whatsapp/panel"
+    })

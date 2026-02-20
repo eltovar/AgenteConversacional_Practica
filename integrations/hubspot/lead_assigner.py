@@ -14,22 +14,13 @@ from datetime import datetime, timezone, timedelta
 class LeadAssigner:
     """
     Asignador de leads por Round Robin con soporte para múltiples canales.
-
-    Características:
-    - Persistencia del índice en Redis
-    - Mapeo canal_origen → equipo de asignación
-    - Fallback seguro si Redis no está disponible
-    - Sistema de alertas para leads huérfanos
     """
-
     # ═══════════════════════════════════════════════════════════════════════════
     # CONFIGURACIÓN DE EQUIPOS Y CANALES
     # ═══════════════════════════════════════════════════════════════════════════
-
+    
     # IDs de owners de HubSpot (obtener de Settings > Users & Teams)
     # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
-    #
-    # CONFIGURACIÓN POR ASESORAS:
     OWNERS_CONFIG = {
         # === ASESORA LUISA ===
         # Portales inmobiliarios: MetroCuadrado, Finca Raíz, Mercado Libre
@@ -107,9 +98,6 @@ class LeadAssigner:
     def __init__(self, redis_client: Optional[redis.Redis] = None):
         """
         Inicializa el asignador con cliente Redis opcional.
-
-        Args:
-            redis_client: Cliente Redis existente. Si es None, intentará crear uno.
         """
         self.redis = redis_client
         self._redis_available = False
@@ -163,12 +151,6 @@ class LeadAssigner:
     def get_next_owner(self, channel_origin: str = "whatsapp_directo") -> Optional[str]:
         """
         Retorna el ID del siguiente owner en rotación para el canal especificado.
-
-        Args:
-            channel_origin: Identificador del canal de origen del lead
-
-        Returns:
-            hubspot_owner_id del siguiente owner, o None si no hay owners disponibles
         """
         # Determinar equipo basado en canal
         team = self.CHANNEL_TO_TEAM.get(channel_origin, "default")
@@ -235,13 +217,6 @@ class LeadAssigner:
     def detect_channel_origin(self, metadata: Dict[str, Any], session_id: str) -> str:
         """
         Detecta el canal de origen basado en metadata y session_id.
-
-        Args:
-            metadata: Diccionario con metadata del lead
-            session_id: ID de sesión (puede contener información del canal)
-
-        Returns:
-            Identificador del canal de origen
         """
         # 1. Verificar si hay canal explícito en metadata
         explicit_channel = metadata.get("canal_origen") or metadata.get("source") or metadata.get("utm_source")
@@ -270,12 +245,6 @@ class LeadAssigner:
     def reset_index(self, team: str = "default") -> bool:
         """
         Reinicia el índice de rotación para un equipo (útil para testing).
-
-        Args:
-            team: Nombre del equipo
-
-        Returns:
-            True si se reinició correctamente, False en caso de error
         """
         if not self._redis_available:
             logger.warning("[LeadAssigner] Redis no disponible para reiniciar índice")
@@ -381,12 +350,6 @@ class OrphanLeadAlert:
     def get_pending_alerts(self, limit: int = 10) -> List[Dict]:
         """
         Retorna las alertas pendientes de leads huérfanos.
-
-        Args:
-            limit: Número máximo de alertas a retornar
-
-        Returns:
-            Lista de alertas
         """
         if not self._redis_available:
             return []
@@ -407,12 +370,6 @@ class OrphanLeadAlert:
 class OrphanLeadMonitor:
     """
     Monitorea activamente leads sin owner en HubSpot y envía alertas.
-
-    Características:
-    - Búsqueda periódica en HubSpot de leads sin asignar
-    - Alertas a Slack/Discord via webhook
-    - Almacenamiento en Redis de leads detectados
-    - Integración con sistema de logging
     """
 
     REDIS_KEY_ORPHANS = "lead_assigner:orphan_leads_detected"
@@ -420,10 +377,6 @@ class OrphanLeadMonitor:
     def __init__(self, hubspot_client, redis_client: Optional[redis.Redis] = None):
         """
         Inicializa el monitor con cliente HubSpot y Redis.
-
-        Args:
-            hubspot_client: Instancia de HubSpotClient
-            redis_client: Cliente Redis opcional
         """
         self.hubspot = hubspot_client
         self.redis = redis_client
@@ -509,10 +462,6 @@ class OrphanLeadMonitor:
     async def _send_alert(self, orphan_leads: List[Dict], hours_window: int):
         """
         Envía alertas sobre leads huérfanos por múltiples canales.
-
-        Args:
-            orphan_leads: Lista de leads sin asignar
-            hours_window: Ventana de tiempo usada en la búsqueda
         """
         # 1. Log a consola (siempre)
         logger.warning(

@@ -80,9 +80,9 @@ class ConversationStateManager:
     # TTL por defecto: 7 días (en segundos)
     DEFAULT_TTL = 7 * 24 * 60 * 60
 
-    # TTL para HUMAN_ACTIVE: 2 horas (auto-expiración)
-    # Si el asesor no escribe en 2h, Sofía retoma automáticamente
-    HANDOFF_TTL_SECONDS = 2 * 60 * 60  # 7200 segundos = 2 horas
+    # TTL para HUMAN_ACTIVE: 72 horas (auto-expiración)
+    # Si el asesor no escribe en 72h, Sofía retoma automáticamente
+    HANDOFF_TTL_SECONDS = 72 * 60 * 60  # 259200 segundos = 72 horas (3 días)
 
     def __init__(self, redis_url: str):
         """

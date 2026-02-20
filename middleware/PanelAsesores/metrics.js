@@ -26,7 +26,7 @@ async function loadMetrics() {
     }
 }
 
-async function exportCSV() {
+async function exportExcel() {
     const days = document.getElementById('periodSelect').value;
     const exportBtn = document.getElementById('exportBtn');
 
@@ -34,7 +34,7 @@ async function exportCSV() {
     exportBtn.textContent = 'Exportando...';
 
     try {
-        const response = await fetch(`${BASE_URL}/metrics/export?days=${days}`, {
+        const response = await fetch(`${BASE_URL}/metrics/export-excel?days=${days}`, {
             headers: { 'X-API-Key': API_KEY }
         });
 
@@ -46,7 +46,7 @@ async function exportCSV() {
 
         // Obtener nombre del archivo del header
         const disposition = response.headers.get('Content-Disposition');
-        let filename = `metricas_${days}d.csv`;
+        let filename = `metricas_${days}d.xlsx`;
         if (disposition) {
             const match = disposition.match(/filename=([^;]+)/);
             if (match) filename = match[1];
@@ -66,7 +66,30 @@ async function exportCSV() {
         alert('Error al exportar: ' + error.message);
     } finally {
         exportBtn.disabled = false;
-        exportBtn.textContent = '&#128202; Exportar CSV';
+        exportBtn.innerHTML = '&#128202; Exportar Excel';
+    }
+}
+
+// Función legacy para CSV (por compatibilidad)
+async function exportCSV() {
+    const days = document.getElementById('periodSelect').value;
+    try {
+        const response = await fetch(`${BASE_URL}/metrics/export?days=${days}`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+        if (!response.ok) throw new Error('Error al exportar');
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `metricas_${days}d.csv`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        a.remove();
+    } catch (error) {
+        console.error('Error exportando CSV:', error);
+        alert('Error al exportar CSV: ' + error.message);
     }
 }
 

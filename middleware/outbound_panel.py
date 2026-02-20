@@ -7,6 +7,8 @@ mensajes de WhatsApp directamente, sustituyendo el Inbox bloqueado de HubSpot.
 import os
 import json
 import re
+import html
+from io import BytesIO
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -1642,6 +1644,61 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
 SOCIAL_MEDIA_CHANNELS = ["facebook", "instagram", "linkedin", "youtube", "tiktok"]
 
 
+# ============================================================================
+# Funciones de sanitización para exportación Excel
+# ============================================================================
+
+def sanitize_text(text: str) -> str:
+    """Elimina HTML, emojis de control y caracteres especiales."""
+    if not text or not isinstance(text, str):
+        return ""
+
+    # 1. Decodificar HTML entities (&amp; → &)
+    text = html.unescape(text)
+
+    # 2. Eliminar etiquetas HTML
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # 3. Eliminar emojis de control
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # símbolos & pictogramas
+        "\U0001F680-\U0001F6FF"  # transporte & mapa
+        "\U0001F1E0-\U0001F1FF"  # banderas
+        "\U00002702-\U000027B0"  # dingbats
+        "\U0001F900-\U0001F9FF"  # suplementarios
+        "]+",
+        flags=re.UNICODE
+    )
+    text = emoji_pattern.sub('', text)
+
+    # 4. Limpiar espacios múltiples
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
+
+
+def format_phone_excel(phone: str) -> str:
+    """Normaliza número de teléfono para Excel."""
+    if not phone:
+        return "Sin teléfono"
+    # Eliminar todo excepto números y +
+    cleaned = re.sub(r'[^\d+]', '', str(phone))
+    return cleaned or "Sin teléfono"
+
+
+def format_date_excel(iso_date: str) -> str:
+    """Convierte fecha ISO a DD/MM/YYYY HH:mm."""
+    if not iso_date:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso_date).replace("Z", "+00:00"))
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(iso_date)[:10] if iso_date else ""
+
+
 @router.get("/metrics")
 async def get_social_media_metrics(
     days: int = Query(7, ge=1, le=30, description="Días a analizar"),
@@ -1742,7 +1799,9 @@ async def get_social_media_metrics(
             contacts_by_channel[canal].append({
                 "nombre": nombre_completo,
                 "telefono": phone or "Sin teléfono",
-                "fecha_creacion": props.get("createdate", "")[:10] if props.get("createdate") else ""
+                "fecha_creacion": props.get("createdate", ""),
+                "status": props.get("lifecyclestage", "lead"),
+                "score": props.get("chatbot_score", ""),
             })
 
             # Por día
@@ -1854,6 +1913,173 @@ async def export_metrics_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+@router.get("/metrics/export-excel")
+async def export_metrics_excel(
+    days: int = Query(7, ge=1, le=30, description="Días a analizar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Exporta métricas de redes sociales a formato Excel profesional.
+
+    Genera un archivo .xlsx con:
+    - Hoja "Resumen": Métricas agregadas por canal
+    - Hoja "Contactos": Detalle de todos los leads con formato profesional
+    - Hojas por canal: Si hay >5 contactos por canal
+    """
+    from fastapi.responses import Response
+    import pandas as pd
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        # Obtener datos de métricas
+        metrics_data = await get_social_media_metrics(days=days, x_api_key=x_api_key)
+
+        # Crear buffer en memoria para el archivo Excel
+        output = BytesIO()
+
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+
+            # ========== FORMATOS ==========
+            header_format = workbook.add_format({
+                'bold': True,
+                'font_color': 'white',
+                'bg_color': '#1F4E79',  # Azul marino
+                'border': 1,
+                'align': 'center',
+                'valign': 'vcenter',
+                'text_wrap': True
+            })
+
+            title_format = workbook.add_format({
+                'bold': True,
+                'font_size': 14,
+                'font_color': 'white',
+                'bg_color': '#1F4E79',
+                'align': 'center',
+                'valign': 'vcenter',
+            })
+
+            # ========== HOJA 1: RESUMEN GENERAL ==========
+            summary_data = {
+                'Métrica': [
+                    'Período Analizado',
+                    'Total Leads',
+                    'Instagram',
+                    'Facebook',
+                    'TikTok',
+                    'LinkedIn',
+                    'YouTube'
+                ],
+                'Valor': [
+                    f"Últimos {days} días",
+                    metrics_data['total_leads'],
+                    metrics_data['leads_by_channel'].get('instagram', 0),
+                    metrics_data['leads_by_channel'].get('facebook', 0),
+                    metrics_data['leads_by_channel'].get('tiktok', 0),
+                    metrics_data['leads_by_channel'].get('linkedin', 0),
+                    metrics_data['leads_by_channel'].get('youtube', 0),
+                ]
+            }
+            df_summary = pd.DataFrame(summary_data)
+            df_summary.to_excel(writer, sheet_name='Resumen', index=False, startrow=1)
+
+            ws_summary = writer.sheets['Resumen']
+            ws_summary.merge_range('A1:B1', 'RESUMEN DE MÉTRICAS - REDES SOCIALES', title_format)
+            ws_summary.set_column('A:A', 25)
+            ws_summary.set_column('B:B', 20)
+            ws_summary.freeze_panes(2, 0)
+
+            # Aplicar formato a encabezados de resumen
+            for col_num, col_name in enumerate(df_summary.columns):
+                ws_summary.write(1, col_num, col_name, header_format)
+
+            # ========== HOJA 2: DETALLE DE CONTACTOS ==========
+            all_contacts = []
+            contacts_by_channel = metrics_data.get('contacts_by_channel', {})
+
+            for canal, contactos in contacts_by_channel.items():
+                for c in contactos:
+                    all_contacts.append({
+                        'Fecha Registro': format_date_excel(c.get('fecha_creacion', '')),
+                        'Canal': canal.capitalize(),
+                        'Nombre': sanitize_text(c.get('nombre', 'Sin nombre')),
+                        'Teléfono': format_phone_excel(c.get('telefono', '')),
+                        'Status': str(c.get('status', 'lead')).capitalize(),
+                        'Score': c.get('score', '') or '-'
+                    })
+
+            if all_contacts:
+                df_contacts = pd.DataFrame(all_contacts)
+
+                # Ordenar columnas
+                cols_order = ['Fecha Registro', 'Canal', 'Nombre', 'Teléfono', 'Status', 'Score']
+                df_contacts = df_contacts.reindex(columns=cols_order)
+
+                df_contacts.to_excel(writer, sheet_name='Contactos', index=False, startrow=0)
+
+                ws_contacts = writer.sheets['Contactos']
+
+                # Aplicar formato a encabezados
+                for col_num, col_name in enumerate(df_contacts.columns):
+                    ws_contacts.write(0, col_num, col_name, header_format)
+
+                # Auto-ajustar columnas
+                for col_num, col_name in enumerate(df_contacts.columns):
+                    try:
+                        max_len = max(
+                            df_contacts[col_name].astype(str).map(len).max(),
+                            len(col_name)
+                        ) + 2
+                        ws_contacts.set_column(col_num, col_num, min(max_len, 40))
+                    except Exception:
+                        ws_contacts.set_column(col_num, col_num, 15)
+
+                # Freeze pane y auto-filter
+                ws_contacts.freeze_panes(1, 0)
+                ws_contacts.autofilter(0, 0, len(df_contacts), len(df_contacts.columns) - 1)
+
+            # ========== HOJAS POR CANAL (si >5 contactos) ==========
+            for canal, contactos in contacts_by_channel.items():
+                if len(contactos) > 5:
+                    canal_data = []
+                    for c in contactos:
+                        canal_data.append({
+                            'Fecha': format_date_excel(c.get('fecha_creacion', '')),
+                            'Nombre': sanitize_text(c.get('nombre', '')),
+                            'Teléfono': format_phone_excel(c.get('telefono', '')),
+                        })
+
+                    df_canal = pd.DataFrame(canal_data)
+                    sheet_name = canal.capitalize()[:31]  # Excel limita a 31 chars
+                    df_canal.to_excel(writer, sheet_name=sheet_name, index=False)
+
+                    ws_canal = writer.sheets[sheet_name]
+                    for col_num, col_name in enumerate(df_canal.columns):
+                        ws_canal.write(0, col_num, col_name, header_format)
+                        ws_canal.set_column(col_num, col_num, 20)
+                    ws_canal.freeze_panes(1, 0)
+                    ws_canal.autofilter(0, 0, len(df_canal), len(df_canal.columns) - 1)
+
+        # Preparar respuesta
+        output.seek(0)
+        filename = f"metricas_redes_{days}d_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+
+        return Response(
+            content=output.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Metrics] Error exportando Excel: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error generando Excel: {str(e)}")
 
 
 @router.get("/metrics/", response_class=HTMLResponse)

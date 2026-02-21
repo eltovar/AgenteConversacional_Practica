@@ -913,7 +913,7 @@ async def update_contact_name(
 
 
 # ============================================================================
-# Endpoint para cerrar conversación (eliminar de Redis)
+# Endpoint para cerrar conversación (transicionar a BOT_ACTIVE)
 # ============================================================================
 
 @router.delete("/contacts/{phone}/close")
@@ -923,15 +923,19 @@ async def close_conversation(
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
-    Cierra una conversación eliminándola de Redis.
+    Cierra una conversación transicionando a BOT_ACTIVE.
 
-    Esto hace que el contacto desaparezca del panel de "activos"
-    y reactiva a Sofía para futuras conversaciones.
+    Esto hace que:
+    1. El contacto desaparezca del panel de "activos" (HUMAN_ACTIVE/IN_CONVERSATION)
+    2. Sofía retome la conversación automáticamente cuando el cliente escriba
+    3. Se preserve el contexto de la conversación
+
+    IMPORTANTE: Ya NO elimina la conversación de Redis, sino que la transiciona
+    a BOT_ACTIVE para que Sofía pueda continuar con contexto.
 
     SEGREGACIÓN POR CANAL:
-    Si se proporciona el parámetro canal, solo se elimina la conversación
-    de ese canal específico. Si no se proporciona, se intenta eliminar
-    con el canal por defecto.
+    Si se proporciona el parámetro canal, solo se cierra la conversación
+    de ese canal específico.
 
     Args:
         phone: Número de teléfono normalizado (E.164)
@@ -950,21 +954,26 @@ async def close_conversation(
         redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
         state_manager = ConversationStateManager(redis_url)
 
-        # Eliminar conversación de Redis CON CANAL
-        await state_manager.delete_conversation(phone_normalized, canal)
+        # Transicionar a BOT_ACTIVE en lugar de eliminar
+        # Esto permite que Sofía retome la conversación con contexto
+        await state_manager.activate_bot(phone_normalized, canal=canal)
 
         # También intentar con el teléfono original si es diferente
         if phone != phone_normalized:
-            await state_manager.delete_conversation(phone, canal)
+            await state_manager.activate_bot(phone, canal=canal)
 
         canal_info = f":{canal}" if canal else ""
-        logger.info(f"[Panel] Conversación cerrada para {phone_normalized}{canal_info}")
+        logger.info(
+            f"[Panel] Conversación cerrada y transicionada a BOT_ACTIVE: "
+            f"{phone_normalized}{canal_info}"
+        )
 
         return {
             "status": "success",
-            "message": "Conversación cerrada correctamente",
+            "message": "Conversación cerrada - Sofía retomará automáticamente",
             "phone": phone_normalized,
-            "canal": canal
+            "canal": canal,
+            "new_status": "BOT_ACTIVE"
         }
 
     except Exception as e:

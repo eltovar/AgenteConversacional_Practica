@@ -935,6 +935,46 @@ async def admin_get_status(phone: str):
         return {"error": str(e)}
 
 
+@router.post("/admin/cleanup-duplicates/{phone}")
+async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None):
+    """
+    Limpia estados duplicados para un teléfono.
+
+    Cuando un contacto tiene múltiples estados en diferentes canales
+    (ej: conv_state:+57xxx:whatsapp_directo Y conv_state:+57xxx:default),
+    esta función consolida al canal especificado o al más restrictivo.
+
+    Args:
+        phone: Número de teléfono
+        keep_canal: Canal a mantener (opcional, si no se especifica mantiene el más restrictivo)
+
+    Returns:
+        Número de keys eliminadas
+    """
+    try:
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(phone)
+
+        if not validation.is_valid:
+            return {"error": "Número inválido", "details": validation.error_message}
+
+        state_manager = get_state_manager()
+        deleted = await state_manager.cleanup_duplicate_states(
+            validation.normalized,
+            keep_canal=keep_canal
+        )
+
+        return {
+            "phone": validation.normalized,
+            "duplicates_deleted": deleted,
+            "keep_canal": keep_canal or "most_restrictive"
+        }
+
+    except Exception as e:
+        logger.error(f"[Admin] Error limpiando duplicados: {e}")
+        return {"error": str(e)}
+
+
 # ════════════════════════════════════════════════════════════════════
 # Endpoint para Webhooks de HubSpot (FASE 2)
 # ════════════════════════════════════════════════════════════════════

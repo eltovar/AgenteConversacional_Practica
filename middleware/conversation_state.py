@@ -164,7 +164,8 @@ class ConversationStateManager:
         """
         Busca una key con fallback a formato legacy.
 
-        Intenta primero el formato nuevo (con canal), luego el legacy (sin canal).
+        Cuando canal=None, busca TODAS las keys con cualquier canal y retorna
+        el estado más restrictivo (HUMAN_ACTIVE > IN_CONVERSATION > PENDING_HANDOFF > BOT_ACTIVE).
 
         Args:
             prefix: Prefijo de la key
@@ -176,14 +177,43 @@ class ConversationStateManager:
         """
         r = await self._get_redis()
 
-        # 1. Intentar key nueva con canal
+        # 1. Si se especifica canal, buscar esa key específica
         if canal:
             new_key = self._build_key(prefix, phone, canal)
             value = await r.get(new_key)
             if value is not None:
                 return new_key, value, False
+        else:
+            # 2. Sin canal especificado: buscar TODAS las keys con cualquier canal
+            # y retornar el estado más restrictivo
+            pattern = f"{prefix}{phone}:*"
+            found_keys = []
 
-        # 2. Fallback a key legacy (sin canal)
+            async for key in r.scan_iter(match=pattern):
+                value = await r.get(key)
+                if value is not None:
+                    found_keys.append((key, value))
+
+            if found_keys:
+                # Prioridad de estados (más restrictivo primero)
+                priority = {
+                    "HUMAN_ACTIVE": 0,
+                    "IN_CONVERSATION": 1,
+                    "PENDING_HANDOFF": 2,
+                    "BOT_ACTIVE": 3
+                }
+
+                # Ordenar por prioridad y retornar el más restrictivo
+                found_keys.sort(key=lambda x: priority.get(x[1], 99))
+                most_restrictive = found_keys[0]
+
+                logger.debug(
+                    f"[ConversationState] Búsqueda sin canal: encontradas {len(found_keys)} keys, "
+                    f"retornando más restrictivo: {most_restrictive[0]} = {most_restrictive[1]}"
+                )
+                return most_restrictive[0], most_restrictive[1], False
+
+        # 3. Fallback a key legacy (sin canal)
         legacy_key = f"{prefix}{phone}"
         value = await r.get(legacy_key)
         if value is not None:
@@ -789,6 +819,80 @@ class ConversationStateManager:
             await r.delete(legacy_state, legacy_meta)
 
         logger.info(f"[ConversationState] Conversación eliminada: {phone_normalized}:{canal or 'default'}")
+
+    async def cleanup_duplicate_states(
+        self,
+        phone_normalized: str,
+        keep_canal: Optional[str] = None
+    ) -> int:
+        """
+        Limpia estados duplicados para un mismo teléfono.
+
+        Cuando un contacto tiene múltiples estados en diferentes canales
+        (ej: conv_state:+57xxx:whatsapp_directo Y conv_state:+57xxx:default),
+        esta función consolida al canal especificado o al más reciente.
+
+        Args:
+            phone_normalized: Número en formato E.164
+            keep_canal: Canal a mantener (si None, mantiene el más restrictivo)
+
+        Returns:
+            Número de keys eliminadas
+        """
+        r = await self._get_redis()
+        pattern = f"{self.STATE_PREFIX}{phone_normalized}:*"
+
+        # Encontrar todas las keys para este teléfono
+        all_keys = []
+        async for key in r.scan_iter(match=pattern):
+            value = await r.get(key)
+            if value is not None:
+                # Extraer canal del key
+                canal = key.split(":")[-1]
+                all_keys.append((key, value, canal))
+
+        if len(all_keys) <= 1:
+            # No hay duplicados
+            return 0
+
+        logger.info(
+            f"[ConversationState] Encontrados {len(all_keys)} estados duplicados "
+            f"para {phone_normalized}: {[(k[2], k[1]) for k in all_keys]}"
+        )
+
+        # Determinar qué canal mantener
+        if keep_canal:
+            # Mantener el canal especificado
+            to_keep = [k for k in all_keys if k[2] == keep_canal]
+            to_delete = [k for k in all_keys if k[2] != keep_canal]
+        else:
+            # Mantener el estado más restrictivo
+            priority = {
+                "HUMAN_ACTIVE": 0,
+                "IN_CONVERSATION": 1,
+                "PENDING_HANDOFF": 2,
+                "BOT_ACTIVE": 3
+            }
+            all_keys.sort(key=lambda x: priority.get(x[1], 99))
+            to_keep = [all_keys[0]]
+            to_delete = all_keys[1:]
+
+        # Eliminar duplicados
+        deleted_count = 0
+        for key, value, canal in to_delete:
+            meta_key = key.replace(self.STATE_PREFIX, self.META_PREFIX)
+            await r.delete(key, meta_key)
+            deleted_count += 1
+            logger.info(
+                f"[ConversationState] Eliminado estado duplicado: {key} ({value})"
+            )
+
+        if to_keep:
+            logger.info(
+                f"[ConversationState] Estado conservado: {to_keep[0][0]} ({to_keep[0][1]})"
+            )
+
+        return deleted_count
 
     async def get_all_human_active_contacts(self) -> list:
         """

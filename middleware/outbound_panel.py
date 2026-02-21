@@ -1985,6 +1985,16 @@ async def get_social_media_metrics(
         # Ordenar leads por día
         leads_by_day_sorted = dict(sorted(leads_by_day.items()))
 
+        # Log para debug - verificar datos extraídos
+        logger.info(f"[Metrics] Total leads encontrados: {total_leads}")
+        logger.info(f"[Metrics] Leads por canal: {dict(leads_by_channel)}")
+        for canal, contactos in contacts_by_channel.items():
+            logger.info(f"[Metrics] Canal '{canal}': {len(contactos)} contactos")
+            if contactos:
+                # Mostrar primer contacto como ejemplo
+                ejemplo = contactos[0]
+                logger.info(f"[Metrics] Ejemplo contacto: nombre='{ejemplo.get('nombre')}', tel='{ejemplo.get('telefono')}'")
+
         return {
             "period_days": days,
             "since": since.isoformat(),

@@ -1020,8 +1020,8 @@ async function sendMessage(e) {
             resultDiv.textContent = 'Mensaje enviado correctamente';
             document.getElementById('messageInput').value = '';
 
-            // Recargar historial
-            setTimeout(() => loadChatHistory(contactId), 1000);
+            // Recargar historial (2.5s delay para que HubSpot indexe la nota)
+            setTimeout(() => loadChatHistory(contactId), 2500);
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -1142,8 +1142,8 @@ async function sendTemplateMessage() {
             // Resetear selector
             if (selector) selector.value = '';
 
-            // Recargar historial
-            setTimeout(() => loadChatHistory(contactId), 1000);
+            // Recargar historial (2.5s delay para que HubSpot indexe la nota)
+            setTimeout(() => loadChatHistory(contactId), 2500);
         } else {
             throw new Error(data.detail || data.message || 'Error enviando template');
         }

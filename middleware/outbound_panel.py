@@ -8,6 +8,7 @@ import os
 import json
 import re
 import html
+import asyncio
 from io import BytesIO
 from typing import Optional
 from datetime import datetime, timezone, timedelta
@@ -1260,12 +1261,15 @@ async def get_active_contacts(
             for contact in active_contacts:
                 logger.debug(f"[Panel] Contacto activo: {contact}")
 
-        # === PASO 2: Enriquecer contactos activos con HubSpot ===
+        # === PASO 2: Enriquecer contactos activos con HubSpot (PARALELO) ===
         contact_manager = ContactManager()
-        for contact in active_contacts:
+
+        async def _enrich_single_contact(contact: dict) -> dict:
+            """Enriquece un contacto individual con datos de HubSpot."""
             phone = contact.get("phone", "")
+
+            # Buscar contact_id si no lo tenemos
             if phone and not contact.get("contact_id"):
-                # Intentar buscar contact_id si no lo tenemos
                 try:
                     contact_id = await contact_manager._search_contact(phone)
                     if contact_id:
@@ -1276,8 +1280,6 @@ async def get_active_contacts(
             # Si tenemos contact_id, obtener nombre de HubSpot
             if contact.get("contact_id"):
                 try:
-                    # Obtener info básica del contacto
-                    timeline_logger = get_timeline_logger()
                     hs_info = await _get_hubspot_contact_info(contact["contact_id"])
                     if hs_info:
                         firstname = hs_info.get("firstname", "")
@@ -1297,6 +1299,21 @@ async def get_active_contacts(
                 hours = ttl // 3600
                 minutes = (ttl % 3600) // 60
                 contact["ttl_display"] = f"Expira en {hours}h {minutes}m"
+
+            return contact
+
+        # Ejecutar enriquecimiento en paralelo para todos los contactos
+        if active_contacts:
+            enriched_contacts = await asyncio.gather(
+                *[_enrich_single_contact(contact) for contact in active_contacts],
+                return_exceptions=True
+            )
+            # Filtrar excepciones y mantener contactos válidos
+            active_contacts = [
+                c for c in enriched_contacts
+                if isinstance(c, dict)
+            ]
+            logger.info(f"[Panel] Enriquecimiento paralelo completado: {len(active_contacts)} contactos")
 
         # === PASO 3: Calcular rango de tiempo para historial ===
         if filter_time == "24h":

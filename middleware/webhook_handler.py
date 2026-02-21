@@ -145,6 +145,14 @@ async def should_bot_respond(
         )
         return False, "HUMANO_INTERVINIENDO", None
 
+    # FIX: También verificar IN_CONVERSATION (asesor chateando activamente)
+    if status == ConversationStatus.IN_CONVERSATION:
+        logger.info(
+            f"🤫 [should_bot_respond] Bot silenciado: ASESOR_EN_CONVERSACION "
+            f"(teléfono: {phone_normalized})"
+        )
+        return False, "ASESOR_EN_CONVERSACION", None
+
     if status == ConversationStatus.PENDING_HANDOFF:
         logger.info(
             f"⏳ [should_bot_respond] Bot en espera: PENDIENTE_HANDOFF "
@@ -472,6 +480,32 @@ async def whatsapp_webhook(
                 f"[Webhook] Mensaje de fuera de horario agregado para "
                 f"handoff {analysis.handoff_priority}"
             )
+
+        # ════════════════════════════════════════════════════════════
+        # PASO 4.6: RE-CHECK estado ANTES de enviar (anti race-condition)
+        # ════════════════════════════════════════════════════════════
+        # Verificar si un asesor intervino mientras Sofía procesaba
+        final_status = await state_manager.get_status(phone_normalized)
+        if final_status in [
+            ConversationStatus.HUMAN_ACTIVE,
+            ConversationStatus.IN_CONVERSATION,
+            ConversationStatus.PENDING_HANDOFF
+        ]:
+            logger.warning(
+                f"[Webhook] ⚠️ RACE CONDITION EVITADA: Estado cambió a {final_status.value} "
+                f"mientras Sofía procesaba. NO se enviará respuesta del bot."
+            )
+            # Guardar en HubSpot pero NO enviar respuesta
+            if contact_info:
+                background_tasks.add_task(
+                    _sync_conversation_with_analysis_to_hubspot,
+                    contact_info.contact_id,
+                    Body,
+                    f"[BOT BLOQUEADO - {final_status.value}] {response_text}",
+                    phone_normalized,
+                    analysis
+                )
+            return Response(content="", media_type="text/xml")
 
         # Sincronizar con HubSpot en background (incluye análisis)
         if contact_info:

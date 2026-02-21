@@ -13,6 +13,7 @@ from datetime import datetime
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer, PhoneValidationResult
 from integrations.hubspot.hubspot_client import HubSpotClient
+from integrations.hubspot.lead_assigner import lead_assigner
 
 
 @dataclass
@@ -129,7 +130,11 @@ class ContactManager:
     ) -> str:
         """
         Crea un lead básico con la información mínima.
+        Incluye asignación automática de owner basada en el canal de origen.
         """
+        # Obtener owner basado en el canal de origen
+        owner_id = lead_assigner.get_next_owner(source_channel)
+
         properties = {
             # Identificador único - CRÍTICO para evitar duplicados
             "whatsapp_id": phone_normalized,
@@ -144,6 +149,11 @@ class ContactManager:
             # Lifecycle stage inicial
             "lifecyclestage": "lead",
         }
+
+        # Asignar owner si está disponible
+        if owner_id:
+            properties["hubspot_owner_id"] = owner_id
+            logger.info(f"[ContactManager] Lead asignado a owner ID: {owner_id} (canal: {source_channel})")
 
         try:
             contact_id = await self.hubspot.create_contact(properties)

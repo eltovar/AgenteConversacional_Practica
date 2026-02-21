@@ -1648,55 +1648,190 @@ SOCIAL_MEDIA_CHANNELS = ["facebook", "instagram", "linkedin", "youtube", "tiktok
 # Funciones de sanitización para exportación Excel
 # ============================================================================
 
+# Patrón para eliminar emojis (compilado una vez para eficiencia)
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # símbolos & pictogramas
+    "\U0001F680-\U0001F6FF"  # transporte & mapa
+    "\U0001F1E0-\U0001F1FF"  # banderas
+    "\U00002702-\U000027B0"  # dingbats
+    "\U0001F900-\U0001F9FF"  # suplementarios
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols extended
+    "\U00002300-\U000023FF"  # misc technical
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0001F000-\U0001F02F"  # mahjong
+    "]+",
+    flags=re.UNICODE
+)
+
+# Tags de HubSpot y otros sistemas CRM
+HUBSPOT_TAGS_PATTERN = re.compile(
+    r'(\{\{[^}]+\}\})|'           # {{contact.property}}
+    r'(\{%[^%]+%\})|'             # {% if condition %}
+    r'(\[\[[^\]]+\]\])|'          # [[merge_field]]
+    r'(hs-[a-zA-Z0-9_-]+)|'       # hs-cta-wrapper, hs-menu, etc.
+    r'(hubspot[_\-]?[a-zA-Z0-9]*)|'  # hubspot_*, hubspot-*
+    r'(__hs[a-zA-Z0-9_]+)|'       # __hsFormSelectors
+    r'(data-hs[a-zA-Z0-9\-_="\']+)|'  # data-hs-*
+    r'(mkt-[a-zA-Z0-9_-]+)',      # mkt-*
+    flags=re.IGNORECASE
+)
+
+
 def sanitize_text(text: str) -> str:
-    """Elimina HTML, emojis de control y caracteres especiales."""
+    """
+    Sanitización profunda: elimina HTML, emojis, tags de HubSpot y caracteres especiales.
+
+    Procesa:
+    - Etiquetas HTML (<p>, <br>, <div>, etc.)
+    - Entidades HTML (&amp;, &nbsp;, etc.)
+    - Emojis y símbolos unicode
+    - Tags de HubSpot ({{contact.name}}, hs-*, etc.)
+    - URLs y enlaces
+    - Caracteres de control
+    - Espacios múltiples
+    """
     if not text or not isinstance(text, str):
         return ""
 
-    # 1. Decodificar HTML entities (&amp; → &)
+    # Convertir a string si no lo es
+    text = str(text)
+
+    # 1. Decodificar HTML entities (&amp; → &, &nbsp; → espacio)
     text = html.unescape(text)
 
-    # 2. Eliminar etiquetas HTML
-    text = re.sub(r'<[^>]+>', '', text)
+    # 2. Eliminar etiquetas HTML completas
+    text = re.sub(r'<[^>]+>', ' ', text)
 
-    # 3. Eliminar emojis de control
-    emoji_pattern = re.compile(
-        "["
-        "\U0001F600-\U0001F64F"  # emoticons
-        "\U0001F300-\U0001F5FF"  # símbolos & pictogramas
-        "\U0001F680-\U0001F6FF"  # transporte & mapa
-        "\U0001F1E0-\U0001F1FF"  # banderas
-        "\U00002702-\U000027B0"  # dingbats
-        "\U0001F900-\U0001F9FF"  # suplementarios
-        "]+",
-        flags=re.UNICODE
-    )
-    text = emoji_pattern.sub('', text)
+    # 3. Eliminar tags de HubSpot y CRM
+    text = HUBSPOT_TAGS_PATTERN.sub('', text)
 
-    # 4. Limpiar espacios múltiples
+    # 4. Eliminar URLs
+    text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', '', text)
+    text = re.sub(r'www\.[^\s<>"{}|\\^`\[\]]+', '', text)
+
+    # 5. Eliminar emojis
+    text = EMOJI_PATTERN.sub('', text)
+
+    # 6. Eliminar caracteres de control y no imprimibles
+    text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', text)
+
+    # 7. Normalizar guiones y caracteres especiales
+    text = re.sub(r'[–—]', '-', text)  # Guiones largos a normal
+    text = re.sub(r'[""''„‚]', '"', text)  # Comillas tipográficas
+    text = re.sub(r'[•●○◦▪▫]', '-', text)  # Bullets a guión
+
+    # 8. Limpiar espacios múltiples y trim
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
 
 
+def sanitize_name(firstname: str, lastname: str) -> str:
+    """
+    Sanitiza y combina nombre y apellido.
+    Elimina prefijos de HubSpot, emojis y caracteres extraños.
+    """
+    first = sanitize_text(firstname or "")
+    last = sanitize_text(lastname or "")
+
+    # Combinar y limpiar
+    full_name = f"{first} {last}".strip()
+
+    # Si está vacío o solo tiene caracteres especiales
+    if not full_name or len(full_name) < 2:
+        return "Sin nombre"
+
+    # Capitalizar cada palabra
+    return ' '.join(word.capitalize() for word in full_name.split())
+
+
 def format_phone_excel(phone: str) -> str:
-    """Normaliza número de teléfono para Excel."""
+    """
+    Normaliza número de teléfono para Excel.
+    Mantiene solo dígitos y el símbolo +.
+    """
     if not phone:
         return "Sin teléfono"
+
+    # Convertir a string y limpiar
+    phone_str = str(phone).strip()
+
     # Eliminar todo excepto números y +
-    cleaned = re.sub(r'[^\d+]', '', str(phone))
-    return cleaned or "Sin teléfono"
+    cleaned = re.sub(r'[^\d+]', '', phone_str)
+
+    # Validar que tenga al menos 7 dígitos
+    digits_only = re.sub(r'\D', '', cleaned)
+    if len(digits_only) < 7:
+        return "Sin teléfono"
+
+    return cleaned
 
 
 def format_date_excel(iso_date: str) -> str:
-    """Convierte fecha ISO a DD/MM/YYYY HH:mm."""
+    """
+    Convierte fecha ISO a DD/MM/YYYY HH:mm.
+    Maneja múltiples formatos de entrada.
+    """
     if not iso_date:
         return ""
+
+    date_str = str(iso_date).strip()
+
+    # Intentar parsear como ISO
     try:
-        dt = datetime.fromisoformat(str(iso_date).replace("Z", "+00:00"))
+        # Manejar formato con Z o sin timezone
+        if 'Z' in date_str:
+            date_str = date_str.replace("Z", "+00:00")
+
+        dt = datetime.fromisoformat(date_str)
         return dt.strftime("%d/%m/%Y %H:%M")
     except Exception:
-        return str(iso_date)[:10] if iso_date else ""
+        pass
+
+    # Intentar extraer solo la fecha si falla
+    try:
+        # Buscar patrón YYYY-MM-DD
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
+        if match:
+            dt = datetime.strptime(match.group(1), "%Y-%m-%d")
+            return dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    # Retornar los primeros 10 caracteres como fallback
+    return date_str[:10] if len(date_str) >= 10 else date_str
+
+
+def format_status_excel(status: str) -> str:
+    """
+    Formatea el status/lifecyclestage de HubSpot a texto legible.
+    """
+    if not status:
+        return "Lead"
+
+    status_clean = sanitize_text(str(status).lower())
+
+    # Mapeo de status de HubSpot a español
+    status_map = {
+        'subscriber': 'Suscriptor',
+        'lead': 'Lead',
+        'marketingqualifiedlead': 'MQL',
+        'salesqualifiedlead': 'SQL',
+        'opportunity': 'Oportunidad',
+        'customer': 'Cliente',
+        'evangelist': 'Evangelista',
+        'other': 'Otro',
+        'new': 'Nuevo',
+        'open': 'Abierto',
+        'in_progress': 'En Proceso',
+        'closed': 'Cerrado',
+    }
+
+    return status_map.get(status_clean, status_clean.capitalize())
 
 
 @router.get("/metrics")
@@ -1752,7 +1887,10 @@ async def get_social_media_metrics(
                 "lastname",
                 "phone",
                 "chatbot_score",
-                "lifecyclestage"
+                "lifecyclestage",
+                "hs_lead_status",       # Motivo/status del lead
+                "message",              # Mensaje inicial (si existe)
+                "notes_last_updated",   # Notas recientes
             ],
             "limit": 100,
             "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}]
@@ -1785,23 +1923,53 @@ async def get_social_media_metrics(
         for contact in contacts:
             props = contact.get("properties", {})
 
-            # Por canal
-            canal = props.get("canal_origen", "desconocido")
+            # Por canal - sanitizado
+            canal_raw = props.get("canal_origen", "desconocido")
+            canal = sanitize_text(canal_raw).lower() or "desconocido"
             leads_by_channel[canal] += 1
 
-            # Extraer nombre y teléfono para la lista
+            # Extraer y sanitizar nombre
             firstname = props.get("firstname", "")
             lastname = props.get("lastname", "")
-            phone = props.get("phone", "")
-            nombre_completo = f"{firstname} {lastname}".strip() or "Sin nombre"
+            nombre_completo = sanitize_name(firstname, lastname)
+
+            # Extraer y formatear teléfono
+            phone = format_phone_excel(props.get("phone", ""))
+
+            # Extraer fecha y formatear
+            fecha_raw = props.get("createdate", "")
+
+            # Extraer motivo (combinar hs_lead_status con message si existe)
+            motivo_parts = []
+            hs_lead_status = props.get("hs_lead_status", "")
+            if hs_lead_status:
+                motivo_parts.append(sanitize_text(hs_lead_status))
+            message = props.get("message", "")
+            if message:
+                # Truncar mensaje a 100 caracteres
+                msg_clean = sanitize_text(message)[:100]
+                if msg_clean:
+                    motivo_parts.append(msg_clean)
+
+            motivo = " - ".join(motivo_parts) if motivo_parts else "Consulta general"
+
+            # Extraer status y formatear
+            status = format_status_excel(props.get("lifecyclestage", "lead"))
+
+            # Score
+            score_raw = props.get("chatbot_score", "")
+            score = sanitize_text(str(score_raw)) if score_raw else "-"
 
             # Agregar a la lista de contactos por canal
+            # LLAVES CONSISTENTES para toda la cadena
             contacts_by_channel[canal].append({
-                "nombre": nombre_completo,
-                "telefono": phone or "Sin teléfono",
-                "fecha_creacion": props.get("createdate", ""),
-                "status": props.get("lifecyclestage", "lead"),
-                "score": props.get("chatbot_score", ""),
+                "fecha": fecha_raw,                 # Se formatea en Excel
+                "canal": canal.capitalize(),        # Canal ya sanitizado
+                "nombre": nombre_completo,          # Ya sanitizado
+                "telefono": phone,                  # Ya formateado
+                "motivo": motivo,                   # Nuevo campo
+                "status": status,                   # Ya formateado
+                "score": score,                     # Sanitizado
             })
 
             # Por día
@@ -1887,7 +2055,7 @@ async def export_metrics_csv(
 
     writer.writerow([])
 
-    # Sección: Contactos por canal (nombre y teléfono)
+    # Sección: Contactos por canal (con todas las columnas)
     writer.writerow(["=== DETALLE DE CONTACTOS POR CANAL ==="])
     contacts_by_channel = metrics_data.get("contacts_by_channel", {})
 
@@ -1895,13 +2063,16 @@ async def export_metrics_csv(
         contactos = contacts_by_channel[canal]
         writer.writerow([])
         writer.writerow([f"--- {canal.upper()} ({len(contactos)} leads) ---"])
-        writer.writerow(["Nombre", "Teléfono", "Fecha Creación"])
+        writer.writerow(["Fecha", "Canal", "Nombre", "Teléfono", "Motivo", "Status"])
 
         for contacto in contactos:
             writer.writerow([
+                format_date_excel(contacto.get("fecha", "")),
+                contacto.get("canal", canal.capitalize()),
                 contacto.get("nombre", "Sin nombre"),
                 contacto.get("telefono", "Sin teléfono"),
-                contacto.get("fecha_creacion", "")
+                contacto.get("motivo", "Consulta general"),
+                contacto.get("status", "Lead"),
             ])
 
     # Generar nombre de archivo
@@ -2004,20 +2175,22 @@ async def export_metrics_excel(
 
             for canal, contactos in contacts_by_channel.items():
                 for c in contactos:
+                    # Los datos ya vienen sanitizados desde get_social_media_metrics
                     all_contacts.append({
-                        'Fecha Registro': format_date_excel(c.get('fecha_creacion', '')),
-                        'Canal': canal.capitalize(),
-                        'Nombre': sanitize_text(c.get('nombre', 'Sin nombre')),
-                        'Teléfono': format_phone_excel(c.get('telefono', '')),
-                        'Status': str(c.get('status', 'lead')).capitalize(),
-                        'Score': c.get('score', '') or '-'
+                        'Fecha Registro': format_date_excel(c.get('fecha', '')),
+                        'Canal': c.get('canal', canal.capitalize()),
+                        'Nombre': c.get('nombre', 'Sin nombre'),
+                        'Teléfono': c.get('telefono', 'Sin teléfono'),
+                        'Motivo': c.get('motivo', 'Consulta general'),
+                        'Status': c.get('status', 'Lead'),
+                        'Score': c.get('score', '-'),
                     })
 
             if all_contacts:
                 df_contacts = pd.DataFrame(all_contacts)
 
-                # Ordenar columnas
-                cols_order = ['Fecha Registro', 'Canal', 'Nombre', 'Teléfono', 'Status', 'Score']
+                # Ordenar columnas según requerimiento
+                cols_order = ['Fecha Registro', 'Canal', 'Nombre', 'Teléfono', 'Motivo', 'Status', 'Score']
                 df_contacts = df_contacts.reindex(columns=cols_order)
 
                 df_contacts.to_excel(writer, sheet_name='Contactos', index=False, startrow=0)
@@ -2048,10 +2221,13 @@ async def export_metrics_excel(
                 if len(contactos) > 5:
                     canal_data = []
                     for c in contactos:
+                        # Datos ya sanitizados desde get_social_media_metrics
                         canal_data.append({
-                            'Fecha': format_date_excel(c.get('fecha_creacion', '')),
-                            'Nombre': sanitize_text(c.get('nombre', '')),
-                            'Teléfono': format_phone_excel(c.get('telefono', '')),
+                            'Fecha': format_date_excel(c.get('fecha', '')),
+                            'Nombre': c.get('nombre', 'Sin nombre'),
+                            'Teléfono': c.get('telefono', 'Sin teléfono'),
+                            'Motivo': c.get('motivo', 'Consulta general'),
+                            'Status': c.get('status', 'Lead'),
                         })
 
                     df_canal = pd.DataFrame(canal_data)

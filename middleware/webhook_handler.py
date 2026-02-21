@@ -623,7 +623,7 @@ async def _sync_message_to_hubspot(
         contact_manager = get_contact_manager()
         properties = {
             "chatbot_conversation": f"[{direction.upper()}] {message[:500]}",
-            "chatbot_timestamp": datetime.now().isoformat(),
+            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
         }
         await contact_manager.update_contact_info(contact_id, properties)
 
@@ -669,7 +669,7 @@ async def _sync_conversation_to_hubspot(
 
         properties = {
             "chatbot_conversation": summary[-3000:],
-            "chatbot_timestamp": datetime.now().isoformat(),
+            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
         }
         await contact_manager.update_contact_info(contact_id, properties)
 
@@ -716,7 +716,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
 
         properties = {
             "chatbot_conversation": summary[-3000:],
-            "chatbot_timestamp": datetime.now().isoformat(),
+            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
         }
 
         # Agregar summary_update si existe nueva información
@@ -791,7 +791,7 @@ async def _notify_high_priority_lead(
         properties = {
             "chatbot_hot_lead": "true",
             "chatbot_hot_lead_reason": reason_str,
-            "chatbot_timestamp": datetime.now().isoformat(),
+            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
         }
 
         # Agregar URL del link si existe

@@ -139,7 +139,7 @@ class ContactManager:
 
             # Metadata del chatbot
             "canal_origen": source_channel,
-            "chatbot_timestamp": datetime.now().isoformat(),
+            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
 
             # Lifecycle stage inicial
             "lifecyclestage": "lead",

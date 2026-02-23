@@ -6,6 +6,11 @@ Permite que los asesores vean el historial de conversaciones de Sofía directame
 
 Nota: Timeline Events API requiere permisos especiales (403 bloqueado).
       Este módulo usa exclusivamente Notes API (Engagements) que funciona con los permisos estándar de crm.objects.contacts.write.
+
+OPTIMIZACIONES v2.0:
+- Idempotencia con external_id basado en MessageSid de Twilio
+- Exponential backoff para errores 429 en creación de notas
+- Caché Redis para evitar notas duplicadas
 """
 
 import os
@@ -39,6 +44,10 @@ ASSOCIATIONS_CACHE_TTL = 300  # seconds
 MAX_RETRIES_429 = 3
 INITIAL_BACKOFF_429 = 2  # seconds
 
+# Idempotencia: TTL para cache de notas procesadas (24 horas)
+NOTE_IDEMPOTENCY_TTL = 86400  # seconds
+NOTE_IDEMPOTENCY_PREFIX = "hs_note_processed:"
+
 
 class MessageDirection(Enum):
     """Dirección del mensaje."""
@@ -55,7 +64,14 @@ class MessageSender(Enum):
 
 @dataclass
 class TimelineEvent:
-    """Representa un evento para registrar en el Timeline."""
+    """
+    Representa un evento para registrar en el Timeline.
+
+    IDEMPOTENCIA v2.0:
+    - external_id: Identificador único del mensaje (MessageSid de Twilio)
+    - Si external_id está presente, se verifica en Redis antes de crear la nota
+    - Evita duplicados cuando llegan webhooks repetidos
+    """
     contact_id: str
     content: str
     sender: MessageSender
@@ -63,6 +79,7 @@ class TimelineEvent:
     session_id: Optional[str] = None
     timestamp: Optional[datetime] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    external_id: Optional[str] = None  # MessageSid de Twilio para idempotencia
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -232,13 +249,84 @@ class TimelineLogger:
         # Usar directamente Notes API (Timeline Events bloqueado por HubSpot 403)
         return await self._create_note(event)
 
+    async def _is_note_already_processed(self, external_id: str) -> bool:
+        """
+        Verifica si una nota con este external_id ya fue procesada.
+
+        IDEMPOTENCIA: Usa Redis para trackear MessageSids ya procesados.
+        Evita crear notas duplicadas cuando llegan webhooks repetidos.
+
+        Args:
+            external_id: MessageSid de Twilio
+
+        Returns:
+            True si ya fue procesada, False si es nueva
+        """
+        if not external_id:
+            return False
+
+        try:
+            r = await self._get_redis()
+            cache_key = f"{NOTE_IDEMPOTENCY_PREFIX}{external_id}"
+            exists = await r.exists(cache_key)
+
+            if exists:
+                logger.info(
+                    f"[TimelineLogger] Nota ya procesada (idempotencia): {external_id}"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error verificando idempotencia: {e}")
+            # En caso de error, permitir crear (mejor duplicado que perdido)
+            return False
+
+    async def _mark_note_as_processed(self, external_id: str) -> None:
+        """
+        Marca un external_id como procesado en Redis.
+
+        Args:
+            external_id: MessageSid de Twilio
+        """
+        if not external_id:
+            return
+
+        try:
+            r = await self._get_redis()
+            cache_key = f"{NOTE_IDEMPOTENCY_PREFIX}{external_id}"
+            await r.set(cache_key, "1", ex=NOTE_IDEMPOTENCY_TTL)
+            logger.debug(f"[TimelineLogger] Nota marcada como procesada: {external_id}")
+
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error marcando nota procesada: {e}")
+
     async def _create_note(self, event: TimelineEvent) -> bool:
         """
         Crea una nota en el contacto usando Notes API.
+
+        OPTIMIZACIONES v2.0:
+        - Idempotencia: Verifica external_id (MessageSid) antes de crear
+        - Rate Limiting: Usa semáforo y backoff exponencial para 429
+        - Caché: Marca notas procesadas en Redis (TTL 24h)
+
         Este es el método principal para registrar conversaciones en HubSpot,
         ya que Timeline Events API requiere permisos especiales (403 bloqueado).
-
         """
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO 1: Verificar idempotencia con external_id
+        # ═══════════════════════════════════════════════════════════════════
+        if event.external_id:
+            if await self._is_note_already_processed(event.external_id):
+                logger.info(
+                    f"[TimelineLogger] Nota duplicada ignorada: external_id={event.external_id}"
+                )
+                return True  # Retornar True porque ya se procesó exitosamente antes
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO 2: Preparar payload de la nota
+        # ═══════════════════════════════════════════════════════════════════
         endpoint = f"{self.base_url}/crm/v3/objects/notes"
 
         # Formatear el contenido de la nota
@@ -272,12 +360,24 @@ class TimelineLogger:
             ]
         }
 
+        # ═══════════════════════════════════════════════════════════════════
+        # PASO 3: Crear nota con rate limiting y retry para 429
+        # ═══════════════════════════════════════════════════════════════════
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(endpoint, headers=self.headers, json=payload)
+            response = await self._rate_limited_request(
+                client, "POST", endpoint,
+                headers=self.headers,
+                json=payload
+            )
 
             if response.status_code == 201:
+                # Marcar como procesada para idempotencia futura
+                if event.external_id:
+                    await self._mark_note_as_processed(event.external_id)
+
                 logger.info(
-                    f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, sender={event.sender.value}"
+                    f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, "
+                    f"sender={event.sender.value}, external_id={event.external_id or 'N/A'}"
                 )
                 return True
 
@@ -375,17 +475,28 @@ class TimelineLogger:
         self,
         contact_id: str,
         content: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> bool:
         """
         Registra un mensaje del cliente.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            content: Contenido del mensaje
+            session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
+
+        Returns:
+            True si se registró exitosamente
         """
         event = TimelineEvent(
             contact_id=contact_id,
             content=content,
             sender=MessageSender.CLIENT,
             direction=MessageDirection.INBOUND,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         return await self._create_timeline_event(event)
 
@@ -393,7 +504,8 @@ class TimelineLogger:
         self,
         contact_id: str,
         content: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> bool:
         """
         Registra un mensaje de Sofía (bot).
@@ -402,6 +514,7 @@ class TimelineLogger:
             contact_id: ID del contacto en HubSpot (vid)
             content: Contenido del mensaje
             session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
 
         Returns:
             True si se registró exitosamente
@@ -411,7 +524,8 @@ class TimelineLogger:
             content=content,
             sender=MessageSender.BOT,
             direction=MessageDirection.OUTBOUND,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         return await self._create_timeline_event(event)
 
@@ -419,17 +533,25 @@ class TimelineLogger:
         self,
         contact_id: str,
         content: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> bool:
         """
         Registra un mensaje del asesor humano.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            content: Contenido del mensaje
+            session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
         """
         event = TimelineEvent(
             contact_id=contact_id,
             content=content,
             sender=MessageSender.ADVISOR,
             direction=MessageDirection.OUTBOUND,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         return await self._create_timeline_event(event)
 
@@ -439,10 +561,19 @@ class TimelineLogger:
         content: str,
         sender: str,
         direction: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> bool:
         """
         Método genérico para registrar cualquier mensaje.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            content: Contenido del mensaje
+            sender: Tipo de emisor ("client", "bot", "advisor")
+            direction: Dirección ("inbound", "outbound")
+            session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
         """
         sender_enum = MessageSender(sender)
         direction_enum = MessageDirection(direction)
@@ -452,7 +583,8 @@ class TimelineLogger:
             content=content,
             sender=sender_enum,
             direction=direction_enum,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         return await self._create_timeline_event(event)
 
@@ -474,15 +606,25 @@ class TimelineLogger:
         self,
         contact_id: str,
         content: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> None:
-        """Encola un mensaje del cliente para registro en background."""
+        """
+        Encola un mensaje del cliente para registro en background.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            content: Contenido del mensaje
+            session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
+        """
         event = TimelineEvent(
             contact_id=contact_id,
             content=content,
             sender=MessageSender.CLIENT,
             direction=MessageDirection.INBOUND,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         self.queue_event(event)
 
@@ -490,15 +632,25 @@ class TimelineLogger:
         self,
         contact_id: str,
         content: str,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        external_id: Optional[str] = None
     ) -> None:
-        """Encola un mensaje de Sofía para registro en background."""
+        """
+        Encola un mensaje de Sofía para registro en background.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+            content: Contenido del mensaje
+            session_id: ID de sesión de WhatsApp
+            external_id: MessageSid de Twilio (para idempotencia)
+        """
         event = TimelineEvent(
             contact_id=contact_id,
             content=content,
             sender=MessageSender.BOT,
             direction=MessageDirection.OUTBOUND,
-            session_id=session_id
+            session_id=session_id,
+            external_id=external_id
         )
         self.queue_event(event)
 

@@ -724,6 +724,46 @@ function updateLastUpdateTime() {
     document.getElementById('lastUpdate').textContent = `Ultima actualizacion: ${now}`;
 }
 
+/**
+ * Muestra u oculta el indicador de sincronizacion.
+ * Se usa durante el delay de 2.5s despues de enviar mensajes.
+ *
+ * @param {boolean} show - true para mostrar, false para ocultar
+ */
+function showSyncingState(show) {
+    const chatContainer = document.getElementById('chatMessages');
+    const syncIndicatorId = 'syncingIndicator';
+
+    if (show) {
+        // Verificar si ya existe
+        if (document.getElementById(syncIndicatorId)) return;
+
+        // Crear indicador de sincronizacion
+        const indicator = document.createElement('div');
+        indicator.id = syncIndicatorId;
+        indicator.className = 'flex justify-center items-center py-2 text-gray-500 text-sm animate-pulse';
+        indicator.innerHTML = `
+            <svg class="animate-spin h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Sincronizando con HubSpot...
+        `;
+
+        // Agregar al final del chat
+        if (chatContainer) {
+            chatContainer.appendChild(indicator);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+    } else {
+        // Remover indicador
+        const indicator = document.getElementById(syncIndicatorId);
+        if (indicator) {
+            indicator.remove();
+        }
+    }
+}
+
 // =========================================================================
 // FUNCIONES DE EDICION DE NOMBRE
 // =========================================================================
@@ -1020,8 +1060,14 @@ async function sendMessage(e) {
             resultDiv.textContent = 'Mensaje enviado correctamente';
             document.getElementById('messageInput').value = '';
 
+            // Mostrar estado "Sincronizando" durante el delay
+            showSyncingState(true);
+
             // Recargar historial (2.5s delay para que HubSpot indexe la nota)
-            setTimeout(() => loadChatHistory(contactId), 2500);
+            setTimeout(() => {
+                loadChatHistory(contactId);
+                showSyncingState(false);
+            }, 2500);
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -1142,8 +1188,14 @@ async function sendTemplateMessage() {
             // Resetear selector
             if (selector) selector.value = '';
 
+            // Mostrar estado "Sincronizando" durante el delay
+            showSyncingState(true);
+
             // Recargar historial (2.5s delay para que HubSpot indexe la nota)
-            setTimeout(() => loadChatHistory(contactId), 2500);
+            setTimeout(() => {
+                loadChatHistory(contactId);
+                showSyncingState(false);
+            }, 2500);
         } else {
             throw new Error(data.detail || data.message || 'Error enviando template');
         }
@@ -1163,13 +1215,24 @@ async function sendTemplateMessage() {
 }
 
 // =========================================================================
-// POLLING
+// POLLING con Page Visibility API
 // =========================================================================
+
+// Estado de visibilidad de la pestaña
+let isTabVisible = true;
+let pendingRefresh = false;  // Si hay refresh pendiente cuando la pestaña estaba oculta
 
 function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
 
     pollingInterval = setInterval(async () => {
+        // Solo hacer polling si la pestaña está visible
+        if (!isTabVisible) {
+            pendingRefresh = true;
+            console.log('[Panel] Polling omitido - pestaña inactiva');
+            return;
+        }
+
         // Actualizar lista de contactos
         await loadContacts();
 
@@ -1184,6 +1247,32 @@ function stopPolling() {
     if (pollingInterval) {
         clearInterval(pollingInterval);
         pollingInterval = null;
+    }
+}
+
+/**
+ * Maneja cambios de visibilidad de la pestaña.
+ * Optimización: Pausa polling cuando el usuario no está mirando.
+ */
+function handleVisibilityChange() {
+    if (document.hidden) {
+        // Pestaña oculta: marcar como invisible
+        isTabVisible = false;
+        console.log('[Panel] Pestaña oculta - polling pausado');
+    } else {
+        // Pestaña visible: reactivar
+        isTabVisible = true;
+        console.log('[Panel] Pestaña visible - polling activo');
+
+        // Si hay refresh pendiente, ejecutarlo inmediatamente
+        if (pendingRefresh) {
+            pendingRefresh = false;
+            console.log('[Panel] Ejecutando refresh pendiente...');
+            loadContacts();
+            if (currentContactId) {
+                loadChatHistory(currentContactId);
+            }
+        }
     }
 }
 
@@ -1252,3 +1341,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Detener polling cuando se cierra la pestana
 window.addEventListener('beforeunload', stopPolling);
+
+// Page Visibility API: Pausar/reanudar polling segun visibilidad
+document.addEventListener('visibilitychange', handleVisibilityChange);

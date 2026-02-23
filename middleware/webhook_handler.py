@@ -943,13 +943,6 @@ async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None)
     Cuando un contacto tiene múltiples estados en diferentes canales
     (ej: conv_state:+57xxx:whatsapp_directo Y conv_state:+57xxx:default),
     esta función consolida al canal especificado o al más restrictivo.
-
-    Args:
-        phone: Número de teléfono
-        keep_canal: Canal a mantener (opcional, si no se especifica mantiene el más restrictivo)
-
-    Returns:
-        Número de keys eliminadas
     """
     try:
         normalizer = PhoneNormalizer()

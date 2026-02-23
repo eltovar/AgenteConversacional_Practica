@@ -175,11 +175,11 @@
     </div>
 
     <!-- Script con variables inyectadas desde el servidor -->
-    <script>
+    <script type="text/javascript">
         // Variables inyectadas por Jinja2
         const API_KEY = '{{ api_key }}';
         const BASE_URL = '{{ base_url }}';
-        const ADVISOR_NAMES = {{ advisor_names | tojson }};
+        const ADVISOR_NAMES = '{{ advisor_names | tojson }}';
     </script>
     <script src="/whatsapp/panel/static/index.js"></script>
 </body>

@@ -23,9 +23,11 @@ from logging_config import logger
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 
 def get_bogota_now() -> datetime:
+    """Retorna datetime actual en zona horaria de Bogotá."""
     return datetime.now(TIMEZONE_BOGOTA)
 
 def get_bogota_now_iso() -> str:
+    """Retorna datetime actual en formato ISO."""
     return get_bogota_now().isoformat()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -33,12 +35,14 @@ def get_bogota_now_iso() -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class ConversationStatus(str, Enum):
+    """Estados posibles de una conversación."""
     BOT_ACTIVE = "BOT_ACTIVE"
     HUMAN_ACTIVE = "HUMAN_ACTIVE"
     IN_CONVERSATION = "IN_CONVERSATION"
 
 @dataclass
 class ConversationMeta:
+    """Metadatos persistidos en Redis para cada conversación."""
     phone_normalized: str
     contact_id: Optional[str] = None
     status: str = "BOT_ACTIVE"
@@ -55,6 +59,7 @@ class ConversationMeta:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class ConversationStateManager:
+    """Maneja la persistencia de estados y metadatos en Redis."""
     STATE_PREFIX = "conv_state:"
     META_PREFIX = "conv_meta:"
     ACTIVE_CONTACTS_SET = "active_conversations_index"
@@ -77,13 +82,14 @@ class ConversationStateManager:
         )
 
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:
+        """Recupera metadatos de Redis filtrando campos inválidos de forma segura."""
         meta_key = f"{self.META_PREFIX}{phone}:{canal.lower()}"
         try:
             data = await self.redis.get(meta_key)
             if not data: return None
             payload = json.loads(data)
             
-            # Mapeo de compatibilidad: si viene 'advisor' (CRM) o 'owner' usarlo como assigned_owner_id
+            # Mapeos de compatibilidad para datos legacy
             if 'advisor' in payload and not payload.get('assigned_owner_id'):
                 payload['assigned_owner_id'] = payload['advisor']
             if 'phone' in payload and not payload.get('phone_normalized'):
@@ -91,7 +97,8 @@ class ConversationStateManager:
             if 'name' in payload and not payload.get('display_name'):
                 payload['display_name'] = payload['name']
                 
-            # Filtrar solo los campos que existen en la dataclass ConversationMeta de forma segura
+            # --- SOLUCIÓN AL ERROR DE INTROSPECCIÓN ---
+            # Usamos la función fields() de dataclasses para obtener los nombres válidos
             valid_fields = {f.name for f in fields(ConversationMeta)}
             filtered_payload = {k: v for k, v in payload.items() if k in valid_fields}
             
@@ -101,7 +108,7 @@ class ConversationStateManager:
             return None
 
     async def get_active_contacts(self) -> List[Dict[str, Any]]:
-        """Retorna contactos asegurando que los campos de filtro existan."""
+        """Retorna la lista de contactos activos procesando el índice de Redis."""
         contacts = []
         try:
             members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
@@ -112,13 +119,13 @@ class ConversationStateManager:
                 status = await self.redis.get(state_key)
                 
                 if not status:
+                    # Limpieza automática si la llave de estado expiró
                     await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
                     continue
 
                 meta = await self.get_meta(phone, canal)
                 ttl = await self.redis.ttl(state_key)
                 
-                # Construimos el diccionario con los nombres exactos que espera el filtro del panel
                 contacts.append({
                     "phone": phone,
                     "canal": canal,
@@ -131,11 +138,13 @@ class ConversationStateManager:
                     "contact_id": meta.contact_id if meta else None
                 })
         except Exception as e:
-            logger.error(f"[ConversationState] Error en lista: {e}")
+            logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
         return contacts
 
     async def get_all_human_active_contacts(self) -> List[Dict[str, Any]]:
+        """Alias para obtener contactos activos."""
         return await self.get_active_contacts()
 
     async def close(self):
+        """Cierra la conexión a Redis."""
         await self.redis.close()

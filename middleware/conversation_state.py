@@ -1,8 +1,7 @@
 # middleware/conversation_state.py
 """
 Gestor de Estado de Conversación para el Middleware.
-Solución a errores de variables indefinidas y sincronización de Redis.
-v2.1: Corregido error de argumentos faltantes en get_meta (Pylint E1120).
+v2.3: Corrección de error de introspección en get_meta y limpieza de argumentos.
 """
 
 import json
@@ -10,8 +9,8 @@ import uuid
 import os
 from enum import Enum
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
+from datetime import datetime
+from dataclasses import dataclass, field, fields
 from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
@@ -24,24 +23,13 @@ from logging_config import logger
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 
 def get_bogota_now() -> datetime:
-    """Retorna datetime actual en zona horaria de Bogotá."""
     return datetime.now(TIMEZONE_BOGOTA)
 
 def get_bogota_now_iso() -> str:
-    """Retorna datetime actual en formato ISO."""
     return get_bogota_now().isoformat()
 
-def parse_datetime_safe(dt_str: Any) -> Optional[datetime]:
-    """Convierte string ISO a objeto datetime de forma segura."""
-    if not dt_str or not isinstance(dt_str, str):
-        return None
-    try:
-        return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-    except Exception:
-        return None
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# ENUMS Y MODELOS
+# MODELOS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class ConversationStatus(str, Enum):
@@ -67,13 +55,10 @@ class ConversationMeta:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class ConversationStateManager:
-    """
-    Gestiona el estado (Bot/Humano) y la indexación de contactos en Redis.
-    """
     STATE_PREFIX = "conv_state:"
     META_PREFIX = "conv_meta:"
     ACTIVE_CONTACTS_SET = "active_conversations_index"
-    HANDOFF_TTL_SECONDS = 86400  # 24 Horas
+    HANDOFF_TTL_SECONDS = 86400
 
     def __init__(self, redis_url: str = None):
         if not redis_url:
@@ -90,80 +75,33 @@ class ConversationStateManager:
             decode_responses=True,
             socket_timeout=5.0
         )
-        logger.info(f"[ConversationState] Conectado a Redis: {self.redis_url[:20]}...")
-
-    async def get_status(self, phone: str, canal: str = "whatsapp") -> str:
-        """Obtiene el estado actual. Canal opcional para compatibilidad."""
-        state_key = f"{self.STATE_PREFIX}{phone}:{canal.lower()}"
-        status = await self.redis.get(state_key)
-        return status or ConversationStatus.BOT_ACTIVE
-
-    async def is_bot_active(self, phone: str, canal: str = "whatsapp") -> bool:
-        """Verifica si el bot está manejando la charla."""
-        status = await self.get_status(phone, canal)
-        return status == ConversationStatus.BOT_ACTIVE
 
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:
-        """
-        Obtiene la metadata de un contacto desde Redis.
-        Se agrega canal="whatsapp" por defecto para evitar Pylint E1120 en app.py.
-        """
         meta_key = f"{self.META_PREFIX}{phone}:{canal.lower()}"
         try:
             data = await self.redis.get(meta_key)
-            if not data:
-                return None
-            
+            if not data: return None
             payload = json.loads(data)
-            return ConversationMeta(**payload)
+            
+            # Mapeo de compatibilidad: si viene 'advisor' (CRM) o 'owner' usarlo como assigned_owner_id
+            if 'advisor' in payload and not payload.get('assigned_owner_id'):
+                payload['assigned_owner_id'] = payload['advisor']
+            if 'phone' in payload and not payload.get('phone_normalized'):
+                payload['phone_normalized'] = payload['phone']
+            if 'name' in payload and not payload.get('display_name'):
+                payload['display_name'] = payload['name']
+                
+            # Filtrar solo los campos que existen en la dataclass ConversationMeta de forma segura
+            valid_fields = {f.name for f in fields(ConversationMeta)}
+            filtered_payload = {k: v for k, v in payload.items() if k in valid_fields}
+            
+            return ConversationMeta(**filtered_payload)
         except Exception as e:
-            logger.error(f"[ConversationState] Error leyendo meta para {phone}: {e}")
+            logger.error(f"[ConversationState] Error en get_meta para {phone}: {e}")
             return None
 
-    async def activate_human(self, phone: str, canal: str, meta_data: Dict[str, Any]):
-        """Activa el modo humano."""
-        canal_safe = canal.lower()
-        state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
-        meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
-        index_member = f"{phone}:{canal_safe}"
-
-        try:
-            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE, ex=self.HANDOFF_TTL_SECONDS)
-            
-            if "status" not in meta_data:
-                meta_data["status"] = ConversationStatus.HUMAN_ACTIVE
-            if "created_at" not in meta_data:
-                meta_data["created_at"] = get_bogota_now_iso()
-            
-            await self.redis.set(meta_key, json.dumps(meta_data), ex=self.HANDOFF_TTL_SECONDS)
-            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
-            
-            logger.info(f"[ConversationState] {phone} pasado a HUMANO.")
-            return True
-        except Exception as e:
-            logger.error(f"[ConversationState] Fallo al activar humano: {e}")
-            return False
-
-    async def activate_bot(self, phone: str, canal: str = "whatsapp"):
-        """Devuelve el control al Bot."""
-        canal_safe = canal.lower()
-        state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
-        meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
-        index_member = f"{phone}:{canal_safe}"
-
-        try:
-            await self.redis.delete(state_key)
-            await self.redis.delete(meta_key)
-            await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)
-            
-            logger.info(f"[ConversationState] {phone} devuelto al BOT.")
-            return True
-        except Exception as e:
-            logger.error(f"[ConversationState] Fallo al activar bot: {e}")
-            return False
-
     async def get_active_contacts(self) -> List[Dict[str, Any]]:
-        """Retorna la lista de contactos activos para el panel."""
+        """Retorna contactos asegurando que los campos de filtro existan."""
         contacts = []
         try:
             members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
@@ -179,24 +117,25 @@ class ConversationStateManager:
 
                 meta = await self.get_meta(phone, canal)
                 ttl = await self.redis.ttl(state_key)
+                
+                # Construimos el diccionario con los nombres exactos que espera el filtro del panel
                 contacts.append({
                     "phone": phone,
                     "canal": canal,
                     "status": status,
-                    "display_name": meta.display_name if meta else "Cliente",
-                    "last_activity": meta.last_activity if meta else None,
+                    "display_name": (meta.display_name if meta else None) or "Cliente Nuevo",
+                    "last_activity": meta.last_activity if meta else get_bogota_now_iso(),
                     "owner_id": meta.assigned_owner_id if meta else None,
-                    "handoff_reason": meta.handoff_reason if meta else None,
-                    "ttl_remaining": ttl
+                    "handoff_reason": meta.handoff_reason if meta else "Transferencia manual",
+                    "ttl_remaining": ttl,
+                    "contact_id": meta.contact_id if meta else None
                 })
         except Exception as e:
-            logger.error(f"[ConversationState] Error en lista de contactos: {e}")
+            logger.error(f"[ConversationState] Error en lista: {e}")
         return contacts
 
     async def get_all_human_active_contacts(self) -> List[Dict[str, Any]]:
-        """Alias para compatibilidad con versiones anteriores de app.py."""
         return await self.get_active_contacts()
 
     async def close(self):
-        """Cierra la conexión a Redis."""
         await self.redis.close()

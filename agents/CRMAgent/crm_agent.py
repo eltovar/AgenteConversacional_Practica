@@ -777,8 +777,12 @@ class CRMAgent:
         HANDOFF_TTL_SECONDS = 72 * 60 * 60  # 72 horas (igual que ConversationStateManager)
         DEFAULT_CANAL = "default"
 
-        # Obtener URL de Redis
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Obtener URL de Redis (UNIFICADO con ConversationStateManager)
+        # En Railway usar REDIS_URL (conexión interna), fuera usar REDIS_PUBLIC_URL
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
 
         # Usar canal o default
         canal_safe = canal_origen or DEFAULT_CANAL

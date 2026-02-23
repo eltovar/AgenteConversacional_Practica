@@ -24,6 +24,7 @@ from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
+from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from integrations.hubspot import get_timeline_logger
 
@@ -52,83 +53,6 @@ LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
 # Prefijo en Redis para almacenar templates de WhatsApp
 TEMPLATE_PREFIX = "whatsapp_template:"
 
-# Templates predefinidos (se cargan a Redis si no existen)
-DEFAULT_TEMPLATES = {
-    "reactivacion_general": {
-        "id": "reactivacion_general",
-        "name": "Reactivación General",
-        "category": "reactivacion",
-        "body": "¡Hola {nombre}! Soy del equipo de Inmobiliaria Proteger. ¿Sigues interesado/a en nuestros servicios inmobiliarios? Estamos aquí para ayudarte.",
-        "variables": ["nombre"],
-        "is_default": True
-    },
-    "cita_confirmacion": {
-        "id": "cita_confirmacion",
-        "name": "Confirmación de Cita",
-        "category": "cita",
-        "body": "¡Hola {nombre}! Te confirmamos tu cita para el {fecha} a las {hora}. Te esperamos en {direccion}. ¿Nos confirmas tu asistencia?",
-        "variables": ["nombre", "fecha", "hora", "direccion"],
-        "is_default": True
-    },
-    "cita_recordatorio": {
-        "id": "cita_recordatorio",
-        "name": "Recordatorio de Cita",
-        "category": "cita",
-        "body": "¡Hola {nombre}! Te recordamos que mañana {fecha} tienes cita a las {hora}. ¡Te esperamos!",
-        "variables": ["nombre", "fecha", "hora"],
-        "is_default": True
-    },
-    "seguimiento_visita": {
-        "id": "seguimiento_visita",
-        "name": "Seguimiento Post-Visita",
-        "category": "seguimiento",
-        "body": "¡Hola {nombre}! Esperamos que la visita al inmueble haya sido de tu agrado. ¿Te gustaría agendar otra visita o tienes alguna pregunta?",
-        "variables": ["nombre"],
-        "is_default": True
-    },
-    "seguimiento_24h": {
-        "id": "seguimiento_24h",
-        "name": "Seguimiento 24 horas",
-        "category": "seguimiento",
-        "body": "¡Hola {nombre}! ¿Pudiste revisar la información que te enviamos? Estamos aquí para resolver cualquier duda.",
-        "variables": ["nombre"],
-        "is_default": True
-    },
-    "cita_cancelacion": {
-        "id": "cita_cancelacion",
-        "name": "Cancelación de Cita",
-        "category": "cita",
-        "body": "¡Hola {nombre}! Lamentamos informarte que la cita del {fecha} a las {hora} ha sido cancelada. ¿Te gustaría reagendarla para otro momento?",
-        "variables": ["nombre", "fecha", "hora"],
-        "is_default": True
-    },
-    "cita_reagendar": {
-        "id": "cita_reagendar",
-        "name": "Reagendar Cita",
-        "category": "cita",
-        "body": "¡Hola {nombre}! ¿Te gustaría reagendar tu cita? Tenemos disponibilidad el {fecha} a las {hora}. ¿Te funciona?",
-        "variables": ["nombre", "fecha", "hora"],
-        "is_default": True
-    },
-    "promocion_general": {
-        "id": "promocion_general",
-        "name": "Promoción General",
-        "category": "promocion",
-        "body": "¡Hola {nombre}! Tenemos una promoción especial para ti. ¿Te gustaría conocer los detalles?",
-        "variables": ["nombre"],
-        "is_default": True
-    },
-    "agradecimiento": {
-        "id": "agradecimiento",
-        "name": "Agradecimiento",
-        "category": "seguimiento",
-        "body": "¡Hola {nombre}! Gracias por confiar en Inmobiliaria Proteger. Fue un placer atenderte. Si necesitas algo más, aquí estamos para ayudarte.",
-        "variables": ["nombre"],
-        "is_default": True
-    },
-}
-
-
 @dataclass
 class WindowStatus:
     """Estado de la ventana de 24 horas."""
@@ -152,8 +76,12 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
 
 
 async def _get_redis_client():
-    """Obtiene cliente Redis."""
-    redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+    """Obtiene cliente Redis (UNIFICADO con ConversationStateManager)."""
+    # En Railway usar REDIS_URL (conexión interna), fuera usar REDIS_PUBLIC_URL
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    redis_url = os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
     return redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
 
 
@@ -229,9 +157,6 @@ async def update_last_client_message(phone_normalized: str) -> None:
     Actualiza el timestamp del último mensaje del cliente.
 
     Llamar desde webhook_handler cuando llega un mensaje del cliente.
-
-    Args:
-        phone_normalized: Número en formato E.164
     """
     try:
         r = await _get_redis_client()
@@ -341,7 +266,6 @@ async def _delete_template(template_id: str) -> bool:
         logger.error(f"[Templates] Error eliminando template: {e}")
         return False
 
-
 # ============================================================================
 # Endpoints de API
 # ============================================================================
@@ -358,28 +282,6 @@ async def send_message(
 ):
     """
     Envía un mensaje de WhatsApp desde el panel de asesores.
-
-    Este endpoint:
-    1. Valida la API Key
-    2. Normaliza el número telefónico
-    3. Verifica la ventana de 24 horas de WhatsApp
-    4. Pausa automáticamente a Sofía (HUMAN_ACTIVE)
-    5. Envía el mensaje por Twilio
-    6. Registra en Timeline de HubSpot (background)
-
-    SEGREGACIÓN POR CANAL:
-    Si se proporciona el parámetro canal, se usa para identificar
-    la conversación correcta en sistemas multicanal.
-
-    Headers requeridos:
-        X-API-Key: Token de autenticación admin
-
-    Form data:
-        to: Número de destino
-        body: Contenido del mensaje
-        contact_id: ID del contacto en HubSpot (opcional)
-        canal: Canal de origen para segregación (opcional)
-        force_send: Enviar aunque ventana esté cerrada (requiere Template)
     """
     # Validar API Key
     if not _validate_api_key(x_api_key):
@@ -439,7 +341,11 @@ async def send_message(
     # Pausar Sofía y cambiar a IN_CONVERSATION (asesora está chateando activamente)
     # SEGREGACIÓN POR CANAL: Usar el canal proporcionado para operaciones de estado
     try:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
         state_manager = ConversationStateManager(redis_url)
 
         canal_info = f":{canal}" if canal else ""
@@ -952,7 +858,11 @@ async def close_conversation(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     try:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
         state_manager = ConversationStateManager(redis_url)
 
         # Transicionar a BOT_ACTIVE en lugar de eliminar
@@ -1017,7 +927,11 @@ async def reset_bot_state(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     try:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
         state_manager = ConversationStateManager(redis_url)
 
         results = []
@@ -1116,12 +1030,6 @@ async def get_window_status(
 ):
     """
     Consulta el estado de la ventana de 24 horas para un número.
-
-    Args:
-        phone: Número telefónico
-
-    Returns:
-        Estado de la ventana de 24 horas
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1211,15 +1119,6 @@ async def get_history_by_contact_id(
     SEGREGACIÓN POR CANAL:
     Si se proporciona el parámetro canal y phone, también se obtiene
     el historial de Sofía desde Redis (segregado por canal).
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        limit: Máximo de mensajes a retornar
-        canal: Canal de origen para segregación
-        phone: Teléfono normalizado para buscar historial de Sofía
-
-    Returns:
-        Historial de conversación como burbujas de chat
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1292,7 +1191,11 @@ async def debug_redis(
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     try:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
 
         r = await _get_redis_client()
 
@@ -1355,17 +1258,6 @@ async def get_active_contacts(
 ):
     """
     Retorna lista de contactos combinando dos fuentes:
-
-    1. **Redis (Tiempo Real)** - Contactos en estado HUMAN_ACTIVE
-       - Aparecen primero con badge "En espera"
-       - Se detectan automáticamente cuando Sofía hace handoff
-
-    2. **HubSpot Notes (Histórico)** - Contactos con interacción previa de asesor
-       - Filtrados por rango de tiempo
-       - Aparecen después de los activos
-
-    Esto permite que los contactos aparezcan automáticamente en el panel
-    cuando se activa HUMAN_ACTIVE, como en WhatsApp Web.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1377,7 +1269,11 @@ async def get_active_contacts(
         now = datetime.now(TIMEZONE)
 
         # === PASO 1: Obtener contactos ACTIVOS de Redis ===
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
         logger.info(f"[Panel] Usando Redis URL: {redis_url}")
         state_manager = ConversationStateManager(redis_url)
 
@@ -1858,7 +1754,11 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     Usado para calcular TTL de 72h si asesor deja de responder.
     """
     try:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        # Redis URL unificado (Railway interna, local pública)
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
         state_manager = ConversationStateManager(redis_url)
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
         logger.debug(f"[Panel] Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
@@ -1914,15 +1814,6 @@ HUBSPOT_TAGS_PATTERN = re.compile(
 def sanitize_text(text: str) -> str:
     """
     Sanitización profunda: elimina HTML, emojis, tags de HubSpot y caracteres especiales.
-
-    Procesa:
-    - Etiquetas HTML (<p>, <br>, <div>, etc.)
-    - Entidades HTML (&amp;, &nbsp;, etc.)
-    - Emojis y símbolos unicode
-    - Tags de HubSpot ({{contact.name}}, hs-*, etc.)
-    - URLs y enlaces
-    - Caracteres de control
-    - Espacios múltiples
     """
     if not text or not isinstance(text, str):
         return ""
@@ -2509,7 +2400,7 @@ async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, al
     if not _validate_api_key(x_api_key):
         return HTMLResponse(
             content="""
-            <!DOCTYPE html>
+            <!DOCTYPE html>`x
             <html>
             <head><title>Acceso Denegado</title></head>
             <body style="font-family: Arial; padding: 50px; text-align: center;">

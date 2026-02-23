@@ -135,7 +135,12 @@ class ConversationStateManager:
                     "owner_id": meta.assigned_owner_id if meta else None,
                     "handoff_reason": meta.handoff_reason if meta else "Transferencia manual",
                     "ttl_remaining": ttl,
-                    "contact_id": meta.contact_id if meta else None
+                    "contact_id": meta.contact_id if meta else None,
+                    # === CAMPOS CRÍTICOS PARA EL PANEL ===
+                    "is_active": True,  # Marcar como activo para el panel
+                    "canal_origen": (meta.canal_origen if meta else canal) or canal,  # Segregación por equipo
+                    "activated_at": meta.created_at if meta else get_bogota_now_iso(),  # Filtro de tiempo
+                    "conversation_status": "active"  # Badge "En espera" del panel
                 })
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
@@ -144,6 +149,156 @@ class ConversationStateManager:
     async def get_all_human_active_contacts(self) -> List[Dict[str, Any]]:
         """Alias para obtener contactos activos."""
         return await self.get_active_contacts()
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # MÉTODOS DE COMPATIBILIDAD PARA app.py Y outbound_panel.py
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    async def get_status(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationStatus]:
+        """
+        Obtiene el estado actual de una conversación.
+
+        Args:
+            phone: Número de teléfono normalizado
+            canal: Canal de origen (default: whatsapp)
+
+        Returns:
+            ConversationStatus o None si no existe
+        """
+        state_key = f"{self.STATE_PREFIX}{phone}:{canal.lower()}"
+        try:
+            status_str = await self.redis.get(state_key)
+            if not status_str:
+                return None
+            return ConversationStatus(status_str)
+        except ValueError:
+            # Estado no reconocido, retornar None
+            logger.warning(f"[ConversationState] Estado no reconocido: {status_str}")
+            return None
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en get_status: {e}")
+            return None
+
+    async def set_status(
+        self,
+        phone: str,
+        status: ConversationStatus,
+        canal: str = "whatsapp",
+        ttl: int = None
+    ) -> bool:
+        """
+        Establece el estado de una conversación.
+
+        Args:
+            phone: Número de teléfono normalizado
+            status: Nuevo estado
+            canal: Canal de origen
+            ttl: Tiempo de vida en segundos (opcional)
+
+        Returns:
+            True si se guardó correctamente
+        """
+        state_key = f"{self.STATE_PREFIX}{phone}:{canal.lower()}"
+        try:
+            ttl = ttl or self.HANDOFF_TTL_SECONDS
+            await self.redis.set(state_key, status.value, ex=ttl)
+            logger.debug(f"[ConversationState] Estado actualizado: {phone}:{canal} -> {status.value}")
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en set_status: {e}")
+            return False
+
+    async def is_bot_active(self, phone: str, canal: str = "whatsapp") -> bool:
+        """
+        Verifica si el bot está activo para esta conversación.
+
+        Returns:
+            True si el bot está activo o no hay estado (default BOT_ACTIVE)
+        """
+        status = await self.get_status(phone, canal)
+        # Si no hay estado o es BOT_ACTIVE, el bot está activo
+        return status is None or status == ConversationStatus.BOT_ACTIVE
+
+    async def activate_bot(self, phone: str, canal: str = "whatsapp") -> bool:
+        """
+        Reactiva el bot para una conversación (cierra sesión de asesor).
+        También elimina del índice de contactos activos.
+
+        Returns:
+            True si se reactivó correctamente
+        """
+        try:
+            # Cambiar estado a BOT_ACTIVE
+            await self.set_status(phone, ConversationStatus.BOT_ACTIVE, canal)
+
+            # Remover del índice de contactos activos
+            index_member = f"{phone}:{canal.lower()}"
+            await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)
+
+            logger.info(f"[ConversationState] Bot reactivado para {phone}:{canal}")
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en activate_bot: {e}")
+            return False
+
+    async def activate_human(
+        self,
+        phone: str,
+        canal_origen: str = "whatsapp",
+        owner_id: str = None,
+        reason: str = None,
+        display_name: str = None,
+        contact_id: str = None
+    ) -> bool:
+        """
+        Activa el modo humano para una conversación.
+        El contacto aparecerá en el panel de asesores.
+
+        Args:
+            phone: Número de teléfono normalizado
+            canal_origen: Canal de origen para segregación
+            owner_id: ID del asesor asignado
+            reason: Razón del handoff
+            display_name: Nombre para mostrar
+            contact_id: ID del contacto en HubSpot
+
+        Returns:
+            True si se activó correctamente
+        """
+        canal_safe = canal_origen.lower() if canal_origen else "whatsapp"
+
+        try:
+            # 1. Guardar estado HUMAN_ACTIVE
+            state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
+            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=self.HANDOFF_TTL_SECONDS)
+
+            # 2. Guardar metadata
+            now_iso = get_bogota_now_iso()
+            meta = {
+                "phone_normalized": phone,
+                "contact_id": contact_id,
+                "status": ConversationStatus.HUMAN_ACTIVE.value,
+                "last_activity": now_iso,
+                "handoff_reason": reason,
+                "assigned_owner_id": owner_id,
+                "canal_origen": canal_origen,
+                "display_name": display_name,
+                "created_at": now_iso
+            }
+
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+
+            # 3. Agregar al índice de contactos activos
+            index_member = f"{phone}:{canal_safe}"
+            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
+
+            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone}:{canal_safe}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en activate_human: {e}")
+            return False
 
     async def close(self):
         """Cierra la conexión a Redis."""

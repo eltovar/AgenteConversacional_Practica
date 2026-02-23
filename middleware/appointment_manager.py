@@ -1,12 +1,19 @@
 # middleware/appointment_manager.py
 """
 Gestor de Citas en Redis para el sistema de recordatorios automáticos.
+
+OPTIMIZACIONES v2.0:
+- Todas las comparaciones de tiempo usan ZoneInfo("America/Bogota")
+- Timestamps se guardan siempre con offset explícito (-05:00)
+- Conversión correcta desde UTC al recuperar de Redis
+- Idempotencia con flags de notificación
 """
 
 import json
 import logging
+import os
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional, List
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -15,9 +22,78 @@ import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
-# Timezone de Colombia
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONSTANTES DE ZONA HORARIA
+# ═══════════════════════════════════════════════════════════════════════════════
+
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 
+
+def get_bogota_now() -> datetime:
+    """Retorna datetime actual en zona horaria de Bogotá."""
+    return datetime.now(TIMEZONE_BOGOTA)
+
+
+def get_bogota_now_iso() -> str:
+    """
+    Retorna datetime actual en formato ISO con offset explícito.
+    Ejemplo: 2024-02-23T10:30:00-05:00
+    """
+    return datetime.now(TIMEZONE_BOGOTA).isoformat()
+
+
+def parse_datetime_to_bogota(dt_string: str) -> datetime:
+    """
+    Parsea un string de datetime y lo convierte a zona horaria de Bogotá.
+
+    Maneja:
+    - ISO format con 'Z': 2024-01-15T10:30:00Z → convierte a Bogotá
+    - ISO format con offset: 2024-01-15T10:30:00-05:00 → mantiene
+    - ISO format naive: 2024-01-15T10:30:00 → asume Bogotá
+    """
+    if not dt_string:
+        return get_bogota_now()
+
+    # Reemplazar Z por UTC offset
+    dt_string = dt_string.replace("Z", "+00:00")
+
+    try:
+        dt = datetime.fromisoformat(dt_string)
+        if dt.tzinfo is None:
+            # Naive datetime: asumir Bogotá
+            dt = dt.replace(tzinfo=TIMEZONE_BOGOTA)
+        else:
+            # Convertir a Bogotá para comparaciones consistentes
+            dt = dt.astimezone(TIMEZONE_BOGOTA)
+        return dt
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            "[AppointmentManager] Error parseando datetime '%s': %s",
+            dt_string, e
+        )
+        return get_bogota_now()
+
+
+def timestamp_to_bogota(ts: float) -> datetime:
+    """
+    Convierte un timestamp Unix a datetime en zona horaria de Bogotá.
+
+    Args:
+        ts: Timestamp Unix (segundos desde epoch)
+
+    Returns:
+        datetime en zona horaria de Bogotá
+    """
+    # Crear datetime en UTC y convertir a Bogotá
+    from datetime import timezone as tz
+    dt_utc = datetime.fromtimestamp(ts, tz=tz.utc)
+    return dt_utc.astimezone(TIMEZONE_BOGOTA)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENUMS Y DATACLASSES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class AppointmentStatus(str, Enum):
     """Estados posibles de una cita."""
@@ -33,7 +109,7 @@ class Appointment:
     """Modelo de datos para una cita."""
     phone_normalized: str
     canal: str
-    scheduled_datetime: str       # ISO format
+    scheduled_datetime: str       # ISO format con offset (ej: 2024-02-23T10:00:00-05:00)
     status: AppointmentStatus = AppointmentStatus.PENDING
     reminder_sent: bool = False
     followup_sent: bool = False
@@ -41,6 +117,10 @@ class Appointment:
     contact_name: Optional[str] = None
     contact_id: Optional[str] = None
     notes: Optional[str] = None
+
+    # NUEVOS: Para idempotencia de notificaciones
+    reminder_sent_at: Optional[str] = None
+    followup_sent_at: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -54,22 +134,42 @@ class Appointment:
                 data["status"] = AppointmentStatus(data["status"])
             except ValueError:
                 data["status"] = AppointmentStatus.PENDING
-        return cls(**data)
+
+        # Filtrar campos desconocidos para compatibilidad
+        import dataclasses
+        valid_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+
+        return cls(**filtered_data)
 
     @property
     def scheduled_dt(self) -> datetime:
-        """Retorna el datetime de la cita."""
-        dt = datetime.fromisoformat(self.scheduled_datetime)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=TIMEZONE_BOGOTA)
-        return dt
+        """
+        Retorna el datetime de la cita en zona horaria de Bogotá.
+        CORREGIDO: Siempre retorna en TIMEZONE_BOGOTA.
+        """
+        return parse_datetime_to_bogota(self.scheduled_datetime)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APPOINTMENT MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class AppointmentManager:
-    """Gestor de citas en Redis."""
+    """
+    Gestor de citas en Redis.
+
+    OPTIMIZACIONES v2.0:
+    - Todas las operaciones de tiempo usan ZoneInfo("America/Bogota")
+    - Timestamps en Redis se guardan con offset explícito
+    - Logs detallados con diferencias de tiempo
+    """
 
     APPOINTMENT_PREFIX = "appointment:"
     APPOINTMENT_INDEX = "appointment_index"  # Sorted set para búsquedas por tiempo
+
+    # NUEVO: Prefijos para control de notificaciones
+    NOTIFICATION_SENT_PREFIX = "apt_notif_sent:"
 
     # TTL de 30 días para citas
     APPOINTMENT_TTL = 30 * 24 * 60 * 60
@@ -96,6 +196,14 @@ class AppointmentManager:
     def _build_key(self, phone: str, canal: str) -> str:
         return f"{self.APPOINTMENT_PREFIX}{phone}:{canal}"
 
+    def _build_notification_key(self, phone: str, canal: str, notif_type: str) -> str:
+        """Construye key para tracking de notificaciones."""
+        return f"{self.NOTIFICATION_SENT_PREFIX}{notif_type}:{phone}:{canal}"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CRUD DE CITAS
+    # ═══════════════════════════════════════════════════════════════════════════
+
     async def create_appointment(
         self,
         phone_normalized: str,
@@ -108,28 +216,23 @@ class AppointmentManager:
         """
         Crea una nueva cita.
 
-        Args:
-            phone_normalized: Teléfono en formato E.164
-            canal: Canal de origen
-            scheduled_datetime: Fecha y hora de la cita
-            contact_name: Nombre del cliente
-            contact_id: ID en HubSpot
-            notes: Notas adicionales
-
-        Returns:
-            Appointment creada
+        CORREGIDO: Guarda scheduled_datetime con offset explícito de Bogotá.
         """
         r = await self._get_redis()
 
-        # Asegurar timezone
+        # Asegurar timezone de Bogotá
         if scheduled_datetime.tzinfo is None:
             scheduled_datetime = scheduled_datetime.replace(tzinfo=TIMEZONE_BOGOTA)
+        else:
+            # Convertir a Bogotá si viene en otro timezone
+            scheduled_datetime = scheduled_datetime.astimezone(TIMEZONE_BOGOTA)
 
         appointment = Appointment(
             phone_normalized=phone_normalized,
             canal=canal,
+            # CRÍTICO: Guardar con offset explícito (ej: 2024-02-23T10:00:00-05:00)
             scheduled_datetime=scheduled_datetime.isoformat(),
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=get_bogota_now_iso(),
             contact_name=contact_name,
             contact_id=contact_id,
             notes=notes
@@ -141,15 +244,18 @@ class AppointmentManager:
         await r.set(key, json.dumps(appointment.to_dict()), ex=self.APPOINTMENT_TTL)
 
         # Agregar al índice ordenado por fecha
-        # Score = timestamp de la cita para búsquedas eficientes
+        # NOTA: El timestamp se guarda en UTC para que zrangebyscore funcione correctamente
+        # pero la cita tiene el offset de Bogotá para display
         await r.zadd(
             self.APPOINTMENT_INDEX,
             {key: scheduled_datetime.timestamp()}
         )
 
         logger.info(
-            f"[AppointmentManager] Cita creada: {phone_normalized}:{canal} "
-            f"para {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
+            "[AppointmentManager] Cita creada: %s:%s para %s (offset: %s)",
+            phone_normalized, canal,
+            scheduled_datetime.strftime('%Y-%m-%d %H:%M'),
+            scheduled_datetime.strftime('%z')
         )
 
         return appointment
@@ -171,7 +277,7 @@ class AppointmentManager:
             data = json.loads(data_str)
             return Appointment.from_dict(data)
         except Exception as e:
-            logger.error(f"[AppointmentManager] Error deserializando cita: {e}")
+            logger.error("[AppointmentManager] Error deserializando cita: %s", e)
             return None
 
     async def update_appointment(self, appointment: Appointment) -> bool:
@@ -180,29 +286,77 @@ class AppointmentManager:
         key = self._build_key(appointment.phone_normalized, appointment.canal)
 
         try:
-            await r.set(key, json.dumps(appointment.to_dict()), ex=self.APPOINTMENT_TTL)
+            await r.set(
+                key,
+                json.dumps(appointment.to_dict()),
+                ex=self.APPOINTMENT_TTL
+            )
             return True
         except Exception as e:
-            logger.error(f"[AppointmentManager] Error actualizando cita: {e}")
+            logger.error("[AppointmentManager] Error actualizando cita: %s", e)
             return False
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MARCADO DE NOTIFICACIONES (CON IDEMPOTENCIA)
+    # ═══════════════════════════════════════════════════════════════════════════
+
     async def mark_reminder_sent(self, phone_normalized: str, canal: str) -> bool:
-        """Marca que se envió el recordatorio (24h antes)."""
+        """
+        Marca que se envió el recordatorio (24h antes).
+        IDEMPOTENTE: Guarda timestamp de envío.
+        """
         appointment = await self.get_appointment(phone_normalized, canal)
         if not appointment:
             return False
 
+        now_iso = get_bogota_now_iso()
         appointment.reminder_sent = True
+        appointment.reminder_sent_at = now_iso
+
+        # También guardar en key separada para doble verificación
+        r = await self._get_redis()
+        notif_key = self._build_notification_key(phone_normalized, canal, "reminder")
+        await r.set(notif_key, now_iso, ex=7 * 24 * 60 * 60)  # 7 días TTL
+
         return await self.update_appointment(appointment)
 
     async def mark_followup_sent(self, phone_normalized: str, canal: str) -> bool:
-        """Marca que se envió el seguimiento post-cita (24h después)."""
+        """
+        Marca que se envió el seguimiento post-cita (24h después).
+        IDEMPOTENTE: Guarda timestamp de envío.
+        """
         appointment = await self.get_appointment(phone_normalized, canal)
         if not appointment:
             return False
 
+        now_iso = get_bogota_now_iso()
         appointment.followup_sent = True
+        appointment.followup_sent_at = now_iso
+
+        # También guardar en key separada
+        r = await self._get_redis()
+        notif_key = self._build_notification_key(phone_normalized, canal, "followup")
+        await r.set(notif_key, now_iso, ex=7 * 24 * 60 * 60)
+
         return await self.update_appointment(appointment)
+
+    async def was_notification_sent(
+        self,
+        phone_normalized: str,
+        canal: str,
+        notif_type: str
+    ) -> bool:
+        """
+        Verifica si ya se envió una notificación.
+        Útil para prevenir duplicados tras reinicio del servidor.
+        """
+        r = await self._get_redis()
+        notif_key = self._build_notification_key(phone_normalized, canal, notif_type)
+        return await r.exists(notif_key) > 0
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # OPERACIONES DE ESTADO
+    # ═══════════════════════════════════════════════════════════════════════════
 
     async def confirm_appointment(self, phone_normalized: str, canal: str) -> bool:
         """Confirma una cita (cliente confirmó asistencia)."""
@@ -223,7 +377,10 @@ class AppointmentManager:
         success = await self.update_appointment(appointment)
 
         if success:
-            logger.info(f"[AppointmentManager] Cita completada: {phone_normalized}:{canal}")
+            logger.info(
+                "[AppointmentManager] Cita completada: %s:%s",
+                phone_normalized, canal
+            )
 
         return success
 
@@ -241,28 +398,48 @@ class AppointmentManager:
             r = await self._get_redis()
             key = self._build_key(phone_normalized, canal)
             await r.zrem(self.APPOINTMENT_INDEX, key)
-            logger.info(f"[AppointmentManager] Cita cancelada: {phone_normalized}:{canal}")
+            logger.info(
+                "[AppointmentManager] Cita cancelada: %s:%s",
+                phone_normalized, canal
+            )
 
         return success
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BÚSQUEDA DE CITAS PARA NOTIFICACIONES
+    # ═══════════════════════════════════════════════════════════════════════════
 
     async def get_appointments_needing_reminder(self) -> List[Appointment]:
         """
         Obtiene citas que necesitan recordatorio (24h antes).
 
-        Busca citas programadas entre 23h y 25h desde ahora
-        (ventana de 2h para el job que corre cada hora).
+        CORREGIDO:
+        - Usa datetime.now(TIMEZONE_BOGOTA) para comparaciones
+        - El score en Redis está en UTC, pero la comparación es correcta
+          porque timestamp() siempre retorna segundos desde epoch UTC
 
         Returns:
             Lista de Appointments que necesitan recordatorio
         """
         r = await self._get_redis()
-        now = datetime.now(timezone.utc)
+
+        # CRÍTICO: Usar timezone de Bogotá para "ahora"
+        now = get_bogota_now()
 
         # Buscar citas programadas entre 23h y 25h desde ahora
+        # (ventana de 2h para el job que corre cada hora)
         min_time = now + timedelta(hours=23)
         max_time = now + timedelta(hours=25)
 
-        # Obtener keys del índice
+        logger.info(
+            "[AppointmentManager] Buscando recordatorios: ahora=%s, "
+            "ventana=[%s - %s] (Bogotá)",
+            now.strftime('%Y-%m-%d %H:%M %Z'),
+            min_time.strftime('%H:%M'),
+            max_time.strftime('%H:%M')
+        )
+
+        # Obtener keys del índice usando timestamps UTC
         keys = await r.zrangebyscore(
             self.APPOINTMENT_INDEX,
             min_time.timestamp(),
@@ -277,33 +454,72 @@ class AppointmentManager:
                     data = json.loads(data_str)
                     apt = Appointment.from_dict(data)
 
+                    # Extraer phone y canal para verificación de idempotencia
+                    parts = key.replace(self.APPOINTMENT_PREFIX, "").rsplit(":", 1)
+                    phone = parts[0] if parts else apt.phone_normalized
+                    canal = parts[1] if len(parts) > 1 else apt.canal
+
+                    # IDEMPOTENCIA: Verificar si ya se envió (doble check)
+                    if await self.was_notification_sent(phone, canal, "reminder"):
+                        logger.debug(
+                            "[AppointmentManager] Recordatorio ya enviado para %s:%s, saltando",
+                            phone, canal
+                        )
+                        continue
+
                     # Solo incluir si:
                     # - No se ha enviado recordatorio
                     # - Estado es pending o confirmed
                     if (not apt.reminder_sent and
-                        apt.status in [AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED]):
-                        appointments.append(apt)
-                except Exception as e:
-                    logger.error(f"[AppointmentManager] Error procesando cita {key}: {e}")
+                            apt.status in [AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED]):
 
-        logger.info(f"[AppointmentManager] Citas necesitando recordatorio: {len(appointments)}")
+                        # Log detallado
+                        apt_dt = apt.scheduled_dt
+                        hours_until = (apt_dt - now).total_seconds() / 3600
+
+                        logger.info(
+                            "[Scheduler] Verificando cita %s: "
+                            "Diferencia de tiempo %.1f horas, Estado %s",
+                            phone, hours_until, apt.status.value
+                        )
+
+                        appointments.append(apt)
+
+                except Exception as e:
+                    logger.error(
+                        "[AppointmentManager] Error procesando cita %s: %s",
+                        key, e
+                    )
+
+        logger.info(
+            "[AppointmentManager] Citas necesitando recordatorio: %d",
+            len(appointments)
+        )
         return appointments
 
     async def get_appointments_needing_followup(self) -> List[Appointment]:
         """
         Obtiene citas que necesitan seguimiento (24h después).
 
-        Busca citas que fueron completadas hace 23-25h.
+        CORREGIDO: Usa datetime.now(TIMEZONE_BOGOTA) para comparaciones.
 
         Returns:
             Lista de Appointments que necesitan followup
         """
         r = await self._get_redis()
-        now = datetime.now(timezone.utc)
+
+        # CRÍTICO: Usar timezone de Bogotá
+        now = get_bogota_now()
 
         # Buscar citas que fueron hace 23-25h
         min_time = now - timedelta(hours=25)
         max_time = now - timedelta(hours=23)
+
+        logger.info(
+            "[AppointmentManager] Buscando seguimientos: ahora=%s, "
+            "ventana=[-%sh a -%sh] (Bogotá)",
+            now.strftime('%Y-%m-%d %H:%M %Z'), 25, 23
+        )
 
         keys = await r.zrangebyscore(
             self.APPOINTMENT_INDEX,
@@ -319,16 +535,47 @@ class AppointmentManager:
                     data = json.loads(data_str)
                     apt = Appointment.from_dict(data)
 
+                    # Extraer phone y canal
+                    parts = key.replace(self.APPOINTMENT_PREFIX, "").rsplit(":", 1)
+                    phone = parts[0] if parts else apt.phone_normalized
+                    canal = parts[1] if len(parts) > 1 else apt.canal
+
+                    # IDEMPOTENCIA: Verificar si ya se envió
+                    if await self.was_notification_sent(phone, canal, "followup"):
+                        logger.debug(
+                            "[AppointmentManager] Seguimiento ya enviado para %s:%s, saltando",
+                            phone, canal
+                        )
+                        continue
+
                     # Solo incluir si:
                     # - No se ha enviado followup
                     # - Estado es completed (visita realizada)
                     if (not apt.followup_sent and
-                        apt.status == AppointmentStatus.COMPLETED):
-                        appointments.append(apt)
-                except Exception as e:
-                    logger.error(f"[AppointmentManager] Error procesando cita {key}: {e}")
+                            apt.status == AppointmentStatus.COMPLETED):
 
-        logger.info(f"[AppointmentManager] Citas necesitando seguimiento: {len(appointments)}")
+                        # Log detallado
+                        apt_dt = apt.scheduled_dt
+                        hours_since = (now - apt_dt).total_seconds() / 3600
+
+                        logger.info(
+                            "[Scheduler] Verificando seguimiento %s: "
+                            "Diferencia de tiempo %.1f horas, Estado %s",
+                            phone, hours_since, apt.status.value
+                        )
+
+                        appointments.append(apt)
+
+                except Exception as e:
+                    logger.error(
+                        "[AppointmentManager] Error procesando cita %s: %s",
+                        key, e
+                    )
+
+        logger.info(
+            "[AppointmentManager] Citas necesitando seguimiento: %d",
+            len(appointments)
+        )
         return appointments
 
     async def get_upcoming_appointments(
@@ -339,15 +586,10 @@ class AppointmentManager:
         """
         Obtiene las próximas citas programadas.
 
-        Args:
-            phone_normalized: Si se especifica, solo citas de este teléfono
-            limit: Número máximo de citas a retornar
-
-        Returns:
-            Lista de próximas citas ordenadas por fecha
+        CORREGIDO: Usa datetime.now(TIMEZONE_BOGOTA).
         """
         r = await self._get_redis()
-        now = datetime.now(timezone.utc)
+        now = get_bogota_now()
 
         # Obtener todas las citas futuras del índice
         keys = await r.zrangebyscore(
@@ -377,15 +619,23 @@ class AppointmentManager:
                     if len(appointments) >= limit:
                         break
                 except Exception as e:
-                    logger.error(f"[AppointmentManager] Error procesando cita {key}: {e}")
+                    logger.error(
+                        "[AppointmentManager] Error procesando cita %s: %s",
+                        key, e
+                    )
 
         return appointments
 
 
-# Función helper para obtener instancia
+# ═══════════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def get_appointment_manager(redis_url: str = None) -> AppointmentManager:
     """Obtiene una instancia del AppointmentManager."""
-    import os
     if redis_url is None:
-        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        redis_url = os.getenv(
+            "REDIS_PUBLIC_URL",
+            os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
     return AppointmentManager(redis_url)

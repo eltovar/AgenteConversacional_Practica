@@ -4,17 +4,66 @@ Gestor de Contactos para el Middleware.
 
 Este módulo maneja la identificación y creación de contactos en HubSpot,
 utilizando el número de teléfono normalizado como identificador único.
+
+OPTIMIZACIONES v2.0:
+- Lock distribuido de Redis para evitar creación de duplicados (Race Condition)
+- Manejo robusto de Rate Limits (429) sin detener el hilo principal
+- Retry con backoff exponencial para errores transitorios
 """
 
+import os
+import asyncio
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
+import redis.asyncio as redis
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer, PhoneValidationResult
 from integrations.hubspot.hubspot_client import HubSpotClient
 from integrations.hubspot.lead_assigner import lead_assigner
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONSTANTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
+
+# Prefijo para locks de creación de leads
+LEAD_CREATION_LOCK_PREFIX = "lead_creation_lock:"
+
+# TTL del lock en segundos (2 segundos como especificado)
+LEAD_CREATION_LOCK_TTL = 2
+
+# Máximo de reintentos para rate limits
+MAX_RATE_LIMIT_RETRIES = 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXCEPCIONES PERSONALIZADAS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HubSpotRateLimitError(Exception):
+    """Error específico para rate limits de HubSpot (429)."""
+
+    def __init__(self, retry_after: int = 10):
+        self.retry_after = retry_after
+        super().__init__(f"HubSpot rate limit. Retry after {retry_after}s")
+
+
+class LeadCreationLockError(Exception):
+    """Error cuando no se puede adquirir el lock para crear lead."""
+
+    def __init__(self, phone: str):
+        self.phone = phone
+        super().__init__(f"No se pudo adquirir lock para crear lead: {phone}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATACLASS PARA INFORMACIÓN DE CONTACTO
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class ContactInfo:
@@ -29,9 +78,18 @@ class ContactInfo:
     properties: Optional[Dict[str, Any]] = None
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTACT MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class ContactManager:
     """
     Gestor de contactos que unifica normalización y HubSpot.
+
+    OPTIMIZACIONES v2.0:
+    - Lock distribuido de Redis (2s) para evitar duplicados en webhooks concurrentes
+    - Manejo de 429 Rate Limit sin detener procesamiento
+    - Método seguro que nunca lanza excepciones
 
     Responsabilidades:
     - Normalizar números telefónicos
@@ -43,11 +101,11 @@ class ContactManager:
     def __init__(self, hubspot_client: Optional[HubSpotClient] = None):
         """
         Inicializa el gestor de contactos.
-
         """
         self.normalizer = PhoneNormalizer()
         self._hubspot_client = hubspot_client
         self._hubspot_initialized = False
+        self._redis: Optional[redis.Redis] = None
 
     @property
     def hubspot(self) -> HubSpotClient:
@@ -57,6 +115,30 @@ class ContactManager:
             self._hubspot_initialized = True
         return self._hubspot_client
 
+    async def _get_redis(self) -> redis.Redis:
+        """Lazy initialization de conexión Redis."""
+        if self._redis is None:
+            redis_url = os.getenv(
+                "REDIS_PUBLIC_URL",
+                os.getenv("REDIS_URL", "redis://localhost:6379")
+            )
+            self._redis = redis.from_url(
+                redis_url,
+                encoding="utf-8",
+                decode_responses=True
+            )
+        return self._redis
+
+    async def close(self):
+        """Cierra conexiones."""
+        if self._redis:
+            await self._redis.close()
+            self._redis = None
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MÉTODOS PÚBLICOS
+    # ═══════════════════════════════════════════════════════════════════════════
+
     async def identify_or_create_contact(
         self,
         phone_raw: str,
@@ -65,44 +147,122 @@ class ContactManager:
         """
         Identifica un contacto existente o crea uno nuevo.
 
-        Este es el método principal del Paso A. Garantiza que:
+        Este es el método principal. Garantiza que:
         1. El número esté normalizado correctamente
-        2. No se creen duplicados en HubSpot
+        2. No se creen duplicados en HubSpot (usa lock de Redis)
         3. Siempre se retorne un contact_id válido
+
+        Args:
+            phone_raw: Número de teléfono sin normalizar
+            source_channel: Canal de origen del contacto
+
+        Returns:
+            ContactInfo con los datos del contacto
+
+        Raises:
+            ValueError: Si el número es inválido
+            HubSpotRateLimitError: Si HubSpot devuelve 429 (después de reintentos)
         """
         # Paso 1: Normalizar el número
         validation = self.normalizer.normalize(phone_raw)
 
         if not validation.is_valid:
             logger.error(
-                f"[ContactManager] Número inválido: {phone_raw} - {validation.error_message}"
+                "[ContactManager] Número inválido: %s - %s",
+                phone_raw, validation.error_message
             )
             raise ValueError(f"Número telefónico inválido: {validation.error_message}")
 
         phone_normalized = validation.normalized
-        logger.info(f"[ContactManager] Número normalizado: {phone_raw} → {phone_normalized}")
+        logger.info(
+            "[ContactManager] Número normalizado: %s → %s",
+            phone_raw, phone_normalized
+        )
 
         # Paso 2: Buscar contacto existente en HubSpot
         contact_id = await self._search_contact(phone_normalized)
 
         if contact_id:
-            # Contacto encontrado
-            logger.info(f"[ContactManager] Contacto existente encontrado: {contact_id}")
+            logger.info(
+                "[ContactManager] Contacto existente encontrado: %s",
+                contact_id
+            )
             return ContactInfo(
                 contact_id=contact_id,
                 phone_normalized=phone_normalized,
                 is_new=False
             )
 
-        # Paso 3: Crear nuevo lead básico
-        logger.info(f"[ContactManager] Creando nuevo lead para: {phone_normalized}")
-        contact_id = await self._create_basic_lead(phone_normalized, source_channel)
+        # Paso 3: Crear nuevo lead básico (con lock distribuido)
+        logger.info(
+            "[ContactManager] Creando nuevo lead para: %s",
+            phone_normalized
+        )
+        contact_id = await self._create_basic_lead_with_lock(
+            phone_normalized, source_channel
+        )
 
         return ContactInfo(
             contact_id=contact_id,
             phone_normalized=phone_normalized,
             is_new=True
         )
+
+    async def identify_or_create_contact_safe(
+        self,
+        phone_raw: str,
+        source_channel: str = "whatsapp_directo"
+    ) -> Optional[ContactInfo]:
+        """
+        Versión segura que NUNCA detiene el procesamiento del mensaje.
+
+        Retorna None si falla en lugar de propagar excepción.
+        Útil para casos donde el mensaje debe procesarse aunque falle HubSpot.
+
+        Args:
+            phone_raw: Número de teléfono sin normalizar
+            source_channel: Canal de origen del contacto
+
+        Returns:
+            ContactInfo o None si hay error
+        """
+        try:
+            return await self.identify_or_create_contact(phone_raw, source_channel)
+
+        except HubSpotRateLimitError as e:
+            logger.warning(
+                "[ContactManager] Rate limit alcanzado para %s. "
+                "Mensaje se procesará sin CRM. Retry en %ds",
+                phone_raw, e.retry_after
+            )
+            return None
+
+        except LeadCreationLockError as e:
+            logger.warning(
+                "[ContactManager] Lock no disponible para %s. "
+                "Posible webhook duplicado, ignorando.",
+                e.phone
+            )
+            return None
+
+        except ValueError as e:
+            logger.error(
+                "[ContactManager] Número inválido %s: %s",
+                phone_raw, str(e)
+            )
+            return None
+
+        except Exception as e:
+            logger.error(
+                "[ContactManager] Error no recuperable para %s: %s. "
+                "Mensaje se procesará sin CRM.",
+                phone_raw, str(e)
+            )
+            return None
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MÉTODOS PRIVADOS - BÚSQUEDA
+    # ═══════════════════════════════════════════════════════════════════════════
 
     async def _search_contact(self, phone_normalized: str) -> Optional[str]:
         """
@@ -118,10 +278,83 @@ class ContactManager:
             contact_id = await self.hubspot.search_contact_by_phone(phone_normalized)
             return contact_id
         except Exception as e:
-            logger.error(f"[ContactManager] Error buscando contacto: {e}")
+            logger.error("[ContactManager] Error buscando contacto: %s", e)
             # En caso de error, asumimos que no existe para evitar duplicados
-            # (mejor crear uno nuevo que perder el mensaje)
             return None
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MÉTODOS PRIVADOS - CREACIÓN CON LOCK
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    async def _create_basic_lead_with_lock(
+        self,
+        phone_normalized: str,
+        source_channel: str
+    ) -> str:
+        """
+        Crea un lead básico con lock distribuido de Redis.
+
+        RACE CONDITION PREVENTION:
+        Usa un lock de 2 segundos para evitar que webhooks concurrentes
+        creen leads duplicados para el mismo teléfono.
+
+        Args:
+            phone_normalized: Teléfono en formato E.164
+            source_channel: Canal de origen
+
+        Returns:
+            contact_id del lead creado
+
+        Raises:
+            LeadCreationLockError: Si no se puede adquirir el lock
+            HubSpotRateLimitError: Si HubSpot devuelve 429
+        """
+        r = await self._get_redis()
+        lock_key = f"{LEAD_CREATION_LOCK_PREFIX}{phone_normalized}"
+
+        # Intentar adquirir lock (SET NX = solo si no existe)
+        lock_acquired = await r.set(
+            lock_key,
+            "creating",
+            nx=True,
+            ex=LEAD_CREATION_LOCK_TTL
+        )
+
+        if not lock_acquired:
+            # Otro proceso está creando este lead
+            logger.warning(
+                "[ContactManager] Lock existente para %s. "
+                "Esperando resultado del otro proceso...",
+                phone_normalized
+            )
+
+            # Esperar brevemente y buscar el contacto que el otro proceso debería crear
+            await asyncio.sleep(0.5)
+
+            # Buscar si ya se creó
+            contact_id = await self._search_contact(phone_normalized)
+            if contact_id:
+                logger.info(
+                    "[ContactManager] Contacto encontrado después de esperar lock: %s",
+                    contact_id
+                )
+                return contact_id
+
+            # Si aún no existe, esperar un poco más
+            await asyncio.sleep(1.0)
+            contact_id = await self._search_contact(phone_normalized)
+            if contact_id:
+                return contact_id
+
+            # Si después de esperar no existe, lanzar error
+            raise LeadCreationLockError(phone_normalized)
+
+        try:
+            # Lock adquirido, crear el lead
+            return await self._create_basic_lead(phone_normalized, source_channel)
+        finally:
+            # Siempre liberar el lock
+            await r.delete(lock_key)
 
     async def _create_basic_lead(
         self,
@@ -130,10 +363,24 @@ class ContactManager:
     ) -> str:
         """
         Crea un lead básico con la información mínima.
-        Incluye asignación automática de owner basada en el canal de origen.
+
+        Incluye:
+        - Asignación automática de owner basada en el canal
+        - Manejo de rate limits con retry
+        - Detección de duplicados (409 Conflict)
+
+        Args:
+            phone_normalized: Teléfono en formato E.164
+            source_channel: Canal de origen
+
+        Returns:
+            contact_id del lead creado
         """
         # Obtener owner basado en el canal de origen
         owner_id = lead_assigner.get_next_owner(source_channel)
+
+        # Timestamp con zona horaria de Bogotá
+        now = datetime.now(TIMEZONE_BOGOTA)
 
         properties = {
             # Identificador único - CRÍTICO para evitar duplicados
@@ -144,7 +391,7 @@ class ContactManager:
 
             # Metadata del chatbot
             "canal_origen": source_channel,
-            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
+            "chatbot_timestamp": str(int(now.timestamp() * 1000)),
 
             # Lifecycle stage inicial
             "lifecyclestage": "lead",
@@ -153,37 +400,95 @@ class ContactManager:
         # Asignar owner si está disponible
         if owner_id:
             properties["hubspot_owner_id"] = owner_id
-            logger.info(f"[ContactManager] Lead asignado a owner ID: {owner_id} (canal: {source_channel})")
+            logger.info(
+                "[ContactManager] Lead asignado a owner ID: %s (canal: %s)",
+                owner_id, source_channel
+            )
 
+        # Intentar crear con manejo de rate limits
+        return await self._create_contact_with_retry(
+            properties, phone_normalized
+        )
+
+    async def _create_contact_with_retry(
+        self,
+        properties: Dict[str, Any],
+        phone_normalized: str,
+        attempt: int = 1
+    ) -> str:
+        """
+        Crea contacto con retry para rate limits.
+
+        Args:
+            properties: Propiedades del contacto
+            phone_normalized: Teléfono (para logs y búsqueda de duplicados)
+            attempt: Número de intento actual
+
+        Returns:
+            contact_id del contacto creado
+        """
         try:
             contact_id = await self.hubspot.create_contact(properties)
             logger.info(
-                f"[ContactManager] Lead creado exitosamente: {contact_id} "
-                f"(whatsapp_id: {phone_normalized})"
+                "[ContactManager] Lead creado exitosamente: %s "
+                "(whatsapp_id: %s)",
+                contact_id, phone_normalized
             )
             return contact_id
 
         except Exception as e:
-            # Manejar caso de duplicado (409 Conflict)
             error_str = str(e).lower()
+
+            # Detectar Rate Limit (429)
+            if "429" in str(e) or "rate limit" in error_str:
+                if attempt >= MAX_RATE_LIMIT_RETRIES:
+                    logger.error(
+                        "[ContactManager] Rate limit: máximo de reintentos alcanzado "
+                        "para %s", phone_normalized
+                    )
+                    raise HubSpotRateLimitError(retry_after=10)
+
+                # Calcular backoff exponencial: 2^attempt segundos
+                wait_time = 2 ** attempt
+                logger.warning(
+                    "[ContactManager] Rate limit (429). Reintento %d/%d en %ds",
+                    attempt, MAX_RATE_LIMIT_RETRIES, wait_time
+                )
+
+                await asyncio.sleep(wait_time)
+
+                return await self._create_contact_with_retry(
+                    properties, phone_normalized, attempt + 1
+                )
+
+            # Detectar Duplicado (409 Conflict)
             if "conflict" in error_str or "already exists" in error_str:
                 logger.warning(
-                    f"[ContactManager] Contacto ya existe (race condition), buscando..."
+                    "[ContactManager] Contacto ya existe (race condition), buscando..."
                 )
-                # Reintentar búsqueda
                 contact_id = await self._search_contact(phone_normalized)
                 if contact_id:
                     return contact_id
 
+                # Si no lo encontramos después de 409, es un error real
+                logger.error(
+                    "[ContactManager] 409 pero contacto no encontrado: %s",
+                    phone_normalized
+                )
+
             # Error no manejable
-            logger.error(f"[ContactManager] Error creando lead: {e}")
+            logger.error("[ContactManager] Error creando lead: %s", e)
             raise
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MÉTODOS DE ACTUALIZACIÓN
+    # ═══════════════════════════════════════════════════════════════════════════
 
     async def update_contact_info(
         self,
         contact_id: str,
         properties: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """
         Actualiza información adicional de un contacto.
 
@@ -193,13 +498,36 @@ class ContactManager:
         Args:
             contact_id: ID del contacto en HubSpot
             properties: Propiedades a actualizar
+
+        Returns:
+            True si se actualizó correctamente, False si falló
         """
         try:
             await self.hubspot.update_contact(contact_id, properties)
-            logger.info(f"[ContactManager] Contacto {contact_id} actualizado")
+            logger.info("[ContactManager] Contacto %s actualizado", contact_id)
+            return True
+
         except Exception as e:
-            logger.error(f"[ContactManager] Error actualizando contacto: {e}")
-            raise
+            error_str = str(e).lower()
+
+            # Si es rate limit, loguear pero no fallar
+            if "429" in str(e) or "rate limit" in error_str:
+                logger.warning(
+                    "[ContactManager] Rate limit al actualizar %s. "
+                    "Se reintentará después.",
+                    contact_id
+                )
+                return False
+
+            logger.error(
+                "[ContactManager] Error actualizando contacto %s: %s",
+                contact_id, e
+            )
+            return False
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UTILIDADES
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def normalize_phone(self, phone_raw: str) -> PhoneValidationResult:
         """

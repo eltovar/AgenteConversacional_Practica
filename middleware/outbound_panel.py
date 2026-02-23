@@ -982,6 +982,133 @@ async def close_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/reset-bot/{phone}")
+async def reset_bot_state(
+    phone: str,
+    canal: Optional[str] = Query(None, description="Canal específico a resetear"),
+    force: bool = Query(False, description="Forzar reset incluso si ya está en BOT_ACTIVE"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    ENDPOINT DE EMERGENCIA: Fuerza el regreso del estado a BOT_ACTIVE.
+
+    Útil cuando un contacto se queda "trabado" en HUMAN_ACTIVE/IN_CONVERSATION
+    y no aparece en el panel para cerrarlo manualmente.
+
+    Este endpoint:
+    1. Busca el contacto en Redis por teléfono (todos los canales si no se especifica)
+    2. Transiciona a BOT_ACTIVE
+    3. Retorna información del estado anterior
+
+    Args:
+        phone: Número de teléfono (E.164 o sin normalizar)
+        canal: Canal específico (opcional, si no se especifica resetea todos)
+        force: Si es True, resetea incluso si ya está en BOT_ACTIVE
+
+    Returns:
+        Estado anterior y confirmación del reset
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Normalizar teléfono
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    phone_normalized = validation.normalized if validation.is_valid else phone
+
+    try:
+        redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+        state_manager = ConversationStateManager(redis_url)
+
+        results = []
+
+        if canal:
+            # Resetear solo el canal especificado
+            canales_to_reset = [canal]
+        else:
+            # Buscar todos los canales donde existe este teléfono
+            # Patrones comunes de canales
+            canales_to_check = [
+                "whatsapp_directo", "instagram", "facebook",
+                "finca_raiz", "metrocuadrado", "pagina_web", "default"
+            ]
+            canales_to_reset = []
+
+            for c in canales_to_check:
+                state = await state_manager.get_conversation_state(phone_normalized, c)
+                if state:
+                    canales_to_reset.append(c)
+
+            # También verificar con teléfono original
+            if phone != phone_normalized:
+                for c in canales_to_check:
+                    state = await state_manager.get_conversation_state(phone, c)
+                    if state and c not in canales_to_reset:
+                        canales_to_reset.append(c)
+
+        if not canales_to_reset:
+            logger.warning(f"[Panel] Reset: No se encontró estado para {phone_normalized}")
+            return {
+                "status": "warning",
+                "message": f"No se encontró conversación activa para {phone_normalized}",
+                "phone": phone_normalized,
+                "results": []
+            }
+
+        # Resetear cada canal encontrado
+        for c in canales_to_reset:
+            try:
+                # Obtener estado actual antes de resetear
+                current_state = await state_manager.get_conversation_state(phone_normalized, c)
+                previous_status = current_state.status.value if current_state else "UNKNOWN"
+
+                # Si ya está en BOT_ACTIVE y no forzamos, skip
+                if previous_status == "BOT_ACTIVE" and not force:
+                    results.append({
+                        "canal": c,
+                        "previous_status": previous_status,
+                        "new_status": "BOT_ACTIVE",
+                        "action": "skipped (already BOT_ACTIVE)"
+                    })
+                    continue
+
+                # Ejecutar reset
+                await state_manager.activate_bot(phone_normalized, canal=c)
+
+                results.append({
+                    "canal": c,
+                    "previous_status": previous_status,
+                    "new_status": "BOT_ACTIVE",
+                    "action": "reset successful"
+                })
+
+                logger.info(
+                    f"[Panel] Reset exitoso: {phone_normalized}:{c} "
+                    f"({previous_status} -> BOT_ACTIVE)"
+                )
+
+            except Exception as canal_error:
+                results.append({
+                    "canal": c,
+                    "error": str(canal_error),
+                    "action": "failed"
+                })
+                logger.error(f"[Panel] Error reseteando {phone_normalized}:{c}: {canal_error}")
+
+        success_count = len([r for r in results if r.get("action") == "reset successful"])
+
+        return {
+            "status": "success" if success_count > 0 else "warning",
+            "message": f"Sofía ha retomado el control de {phone_normalized} en {success_count} canal(es)",
+            "phone": phone_normalized,
+            "results": results
+        }
+
+    except Exception as e:
+        logger.error(f"[Panel] Error en reset-bot: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/window-status/{phone}")
 async def get_window_status(
     phone: str,
@@ -1464,37 +1591,114 @@ async def get_active_contacts(
             if contact_id:
                 seen_contact_ids.add(contact_id)
 
-        # === PASO 6: Filtrar por advisor (owner_id) si se especificó ===
+        # === PASO 6: SEGREGACIÓN ESTRICTA por equipo/portal ===
+        # REGLA DE ORO: Una asesora SOLO ve contactos cuyo canal_origen pertenece a su equipo.
+        # NO hay filtraciones de leads entre portales.
         if advisor:
-            # Importar mapeo de canales a owners
-            from integrations.hubspot.lead_assigner import LeadAssigner
+            # Modo admin: mostrar todos sin filtrar (bypass de segregación)
+            if advisor.lower() == "admin":
+                logger.info(f"[Panel] Modo ADMIN: mostrando todos los {len(active_contacts)} contactos (sin segregación)")
+            else:
+                from integrations.hubspot.lead_assigner import LeadAssigner
 
-            # Filtrar contactos que pertenezcan al advisor especificado
-            filtered_contacts = []
-            for contact in active_contacts:
-                # Verificar si el contact tiene owner_id directo
-                contact_owner = contact.get("owner_id") or contact.get("hubspot_owner_id")
+                advisor_str = str(advisor)
 
-                # Si no tiene owner_id, intentar inferir por canal_origen
-                if not contact_owner:
-                    canal = contact.get("canal_origen", "")
-                    contact_owner = LeadAssigner.CHANNEL_TO_OWNER.get(canal)
+                # ═══════════════════════════════════════════════════════════════
+                # PASO 6.1: Identificar a qué EQUIPO pertenece este advisor
+                # ═══════════════════════════════════════════════════════════════
+                advisor_team = None
+                advisor_name = "Desconocido"
 
-                # Incluir si coincide con el advisor O si no tiene owner asignado
-                # (para no perder contactos activos en espera)
-                if contact_owner == advisor:
-                    filtered_contacts.append(contact)
-                elif not contact_owner:
-                    # Sin owner asignado -> incluir para que no se pierda
-                    contact["owner_status"] = "unassigned"
-                    filtered_contacts.append(contact)
-                    logger.debug(
-                        f"[Panel] Contacto {contact.get('phone')} sin owner, "
-                        f"incluido como unassigned"
+                for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
+                    for member in team_members:
+                        if str(member.get("id")) == advisor_str:
+                            advisor_team = team_name
+                            advisor_name = member.get("name", "Desconocido")
+                            break
+                    if advisor_team:
+                        break
+
+                if not advisor_team:
+                    logger.warning(
+                        f"[Panel] Advisor ID {advisor} no encontrado en OWNERS_CONFIG. "
+                        f"Usando equipo 'default' (acceso restringido)"
                     )
+                    advisor_team = "default"
 
-            active_contacts = filtered_contacts
-            logger.info(f"[Panel] Filtrado por advisor {advisor}: {len(active_contacts)} contactos")
+                # ═══════════════════════════════════════════════════════════════
+                # PASO 6.2: Obtener los canales PERMITIDOS para este equipo
+                # ═══════════════════════════════════════════════════════════════
+                allowed_channels = set()
+
+                for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
+                    if team == advisor_team:
+                        allowed_channels.add(canal)
+
+                # Si es equipo "default", SOLO permitir canales que mapean a "default"
+                # (NO dar acceso a todos los canales)
+                if advisor_team == "default":
+                    for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
+                        if team == "default":
+                            allowed_channels.add(canal)
+
+                logger.info(
+                    f"[Panel] SEGREGACIÓN: Advisor '{advisor_name}' (ID: {advisor}) "
+                    f"pertenece a '{advisor_team}'. "
+                    f"Canales permitidos: {sorted(allowed_channels)}"
+                )
+
+                # ═══════════════════════════════════════════════════════════════
+                # PASO 6.3: Filtrar contactos ESTRICTAMENTE por canal_origen
+                # ═══════════════════════════════════════════════════════════════
+                filtered_contacts = []
+                excluded_count = 0
+
+                for contact in active_contacts:
+                    canal_origen = (contact.get("canal_origen") or "").lower().strip()
+                    phone = contact.get("phone", "N/A")
+
+                    # CASO A: Si tiene canal_origen, verificar si pertenece al equipo
+                    if canal_origen:
+                        if canal_origen in allowed_channels:
+                            filtered_contacts.append(contact)
+                            logger.debug(
+                                f"[Panel] ✓ Contacto {phone} INCLUIDO "
+                                f"(canal '{canal_origen}' pertenece a '{advisor_team}')"
+                            )
+                        else:
+                            # Canal NO pertenece al equipo -> EXCLUIR ESTRICTAMENTE
+                            excluded_count += 1
+                            logger.debug(
+                                f"[Panel] ✗ Contacto {phone} EXCLUIDO "
+                                f"(canal '{canal_origen}' NO pertenece a '{advisor_team}')"
+                            )
+                        continue
+
+                    # CASO B: Sin canal_origen -> verificar owner_id directo
+                    contact_owner = contact.get("owner_id") or contact.get("hubspot_owner_id")
+
+                    if str(contact_owner) == advisor_str:
+                        # El owner coincide directamente con el advisor
+                        filtered_contacts.append(contact)
+                        logger.debug(
+                            f"[Panel] ✓ Contacto {phone} INCLUIDO "
+                            f"(owner_id coincide directamente)"
+                        )
+                    else:
+                        # Sin canal Y owner no coincide -> EXCLUIR
+                        # (No se permiten contactos huérfanos de otros equipos)
+                        excluded_count += 1
+                        logger.debug(
+                            f"[Panel] ✗ Contacto {phone} EXCLUIDO "
+                            f"(sin canal_origen y owner_id {contact_owner} no coincide con {advisor_str})"
+                        )
+
+                active_contacts = filtered_contacts
+
+                logger.info(
+                    f"[Panel] Segregación estricta completada para '{advisor_name}' ({advisor_team}): "
+                    f"{len(active_contacts)} contactos visibles, {excluded_count} excluidos"
+                )
 
         # === PASO 7: Ordenar (activos primero) ===
         contacts_sorted = sorted(
@@ -1523,8 +1727,8 @@ async def get_active_contacts(
             logger.debug(
                 f"[Panel] -> {c.get('phone', 'N/A')} | "
                 f"active={c.get('is_active')} | "
-                f"owner={c.get('owner_id', 'N/A')} | "
-                f"status={c.get('owner_status', 'assigned')}"
+                f"canal={c.get('canal_origen', 'N/A')} | "
+                f"owner={c.get('owner_id', 'N/A')}"
             )
 
         return {

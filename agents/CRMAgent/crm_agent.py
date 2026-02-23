@@ -130,8 +130,6 @@ class CRMAgent:
         Genera una respuesta conversacional usando LLM con el system prompt del CRM.
         Inyecta el historial de conversación y la metadata recopilada hasta ahora.
         """
-        # Detectar si es primer mensaje para incluir presentación
-        # NOTA: Si llegó por link, _handle_link_arrival ya incluyó la presentación
         is_first_message = state.metadata.get("is_first_message", False)
         llegada_por_link = state.metadata.get("llegada_por_link", False)
         crm_history = state.lead_data.get('crm_history', [])
@@ -472,8 +470,6 @@ class CRMAgent:
             metadata = state.lead_data.get('metadata', {})
 
             # ASIGNACIÓN DE CANAL (mover antes de calcular score para evitar UnboundLocalError)
-            # Primero verificar si el canal viene de state.metadata (llegada por link)
-            # Si no, usar detect_channel_origin para detectarlo de lead_data.metadata
             if state.metadata.get("canal_origen"):
                 channel_origin = state.metadata["canal_origen"]
             else:
@@ -771,15 +767,6 @@ class CRMAgent:
         """
         Activa HUMAN_ACTIVE en Redis para que el contacto aparezca
         automáticamente en el panel de asesores.
-
-        Este método replica la lógica de ConversationStateManager.activate_human()
-        pero se ejecuta directamente desde CRMAgent para evitar dependencias circulares.
-
-        SEGREGACIÓN POR CANAL:
-        Las keys ahora incluyen el canal de origen para evitar colisiones
-        entre el mismo teléfono desde diferentes portales.
-
-        Formato: conv_state:{phone}:{canal}
         """
         from datetime import datetime, timedelta
         import json
@@ -826,12 +813,19 @@ class CRMAgent:
             meta_key = f"{META_PREFIX}{phone_normalized}:{canal_safe}"
             await r.set(meta_key, json.dumps(meta), ex=HANDOFF_TTL_SECONDS)
 
+            # 3. CRÍTICO: Agregar al índice de contactos activos
+            # Sin esto, get_all_human_active_contacts() NO encuentra el contacto
+            ACTIVE_CONTACTS_SET = "active_conversations_index"
+            index_member = f"{phone_normalized}:{canal_safe}"
+            await r.sadd(ACTIVE_CONTACTS_SET, index_member)
+
             await r.close()
 
             logger.info(
                 f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized}:{canal_safe} "
                 f"(owner: {owner_id or 'sin asignar'}, "
-                f"expira: {expires_at.strftime('%H:%M:%S')})"
+                f"expira: {expires_at.strftime('%H:%M:%S')}, "
+                f"agregado al índice)"
             )
 
         except Exception as e:

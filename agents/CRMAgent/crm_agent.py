@@ -2,7 +2,11 @@
 Agente de CRM conversacional con integración a HubSpot API v3.
 Conversa con el cliente para recopilar datos antes de sincronizar con HubSpot.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+# Timezone consistente con conversation_state.py y outbound_panel.py
+TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 from typing import Dict, Any
 from state_manager import ConversationState, ConversationStatus
 from integrations.hubspot.hubspot_client import HubSpotClient
@@ -768,7 +772,6 @@ class CRMAgent:
         Activa HUMAN_ACTIVE en Redis para que el contacto aparezca
         automáticamente en el panel de asesores.
         """
-        from datetime import datetime, timedelta
         import json
 
         # Configuración
@@ -797,7 +800,8 @@ class CRMAgent:
             await r.set(state_key, "HUMAN_ACTIVE", ex=HANDOFF_TTL_SECONDS)
 
             # 2. Guardar metadata para el panel
-            now = datetime.now()
+            # IMPORTANTE: Usar timezone de Bogotá para consistencia con outbound_panel.py
+            now = datetime.now(TIMEZONE_BOGOTA)
             expires_at = now + timedelta(seconds=HANDOFF_TTL_SECONDS)
 
             meta = {

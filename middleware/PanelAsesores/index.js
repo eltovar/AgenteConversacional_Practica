@@ -795,29 +795,49 @@ function renderChatBubbles(messages) {
                 : '';
 
             // Renderizar multimedia si existe
+            // Soporta tanto el nuevo formato (msg.media.permanent_url) como legacy (msg.media_url)
             let mediaHtml = '';
-            if (msg.media_url) {
-                if (msg.media_type === 'image') {
+            const mediaUrl = msg.media?.permanent_url || msg.media_url;
+            const mediaType = msg.media?.type || msg.media_type;
+            const transcription = msg.media?.transcription;
+            const analysis = msg.media?.analysis;
+
+            if (mediaUrl) {
+                if (mediaType === 'image') {
                     mediaHtml = `
                         <div class="mb-2">
-                            <img src="${msg.media_url}" alt="Imagen"
+                            <img src="${mediaUrl}" alt="Imagen"
                                  class="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
                                  style="max-height: 300px; object-fit: contain;"
-                                 onclick="window.open('${msg.media_url}', '_blank')">
+                                 onclick="window.open('${mediaUrl}', '_blank')">
                         </div>`;
-                } else if (msg.media_type === 'audio') {
+                    // Mostrar analisis de imagen si existe
+                    if (analysis) {
+                        mediaHtml += `
+                            <div class="mt-1 p-2 bg-blue-50 rounded text-xs text-blue-700 italic">
+                                <span class="font-medium">Analisis:</span> ${escapeHtml(analysis)}
+                            </div>`;
+                    }
+                } else if (mediaType === 'audio') {
                     mediaHtml = `
                         <div class="mb-2">
                             <audio controls class="w-full" style="max-width: 280px;">
-                                <source src="${msg.media_url}" type="audio/mpeg">
+                                <source src="${mediaUrl}" type="audio/mpeg">
                                 Tu navegador no soporta audio.
                             </audio>
                         </div>`;
+                    // Mostrar transcripcion de audio si existe
+                    if (transcription) {
+                        mediaHtml += `
+                            <div class="mt-1 p-2 bg-green-50 rounded text-xs text-green-700">
+                                <span class="font-medium">Transcripcion:</span> ${escapeHtml(transcription)}
+                            </div>`;
+                    }
                 } else {
                     // Archivo generico
                     mediaHtml = `
                         <div class="mb-2">
-                            <a href="${msg.media_url}" target="_blank"
+                            <a href="${mediaUrl}" target="_blank"
                                class="inline-flex items-center text-blue-600 hover:text-blue-800">
                                 <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"

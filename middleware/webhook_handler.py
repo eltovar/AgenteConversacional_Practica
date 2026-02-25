@@ -323,8 +323,7 @@ async def whatsapp_webhook(
                         Body,
                         "incoming",
                         phone_normalized,
-                        media_url_permanent,
-                        media_type
+                        media_result  # Pasar resultado completo de multimedia
                     )
             except Exception as e:
                 logger.warning(f"[Webhook] Error sincronizando mensaje a HubSpot: {e}")
@@ -391,8 +390,7 @@ async def whatsapp_webhook(
                     Body,
                     "incoming",
                     phone_normalized,
-                    media_url_permanent,
-                    media_type
+                    media_result  # Pasar resultado completo de multimedia
                 )
             else:
                 logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Mensaje NO se guardará en HubSpot")
@@ -579,8 +577,7 @@ async def whatsapp_webhook(
                     f"[BOT BLOQUEADO - {final_status.value}] {response_text}",
                     phone_normalized,
                     analysis,
-                    media_url_permanent,
-                    media_type
+                    media_result  # Pasar resultado completo de multimedia
                 )
             return Response(content="", media_type="text/xml")
 
@@ -594,8 +591,7 @@ async def whatsapp_webhook(
                 response_text,
                 phone_normalized,
                 analysis,
-                media_url_permanent,
-                media_type
+                media_result  # Pasar resultado completo de multimedia
             )
         else:
             logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Conversación NO se guardará en HubSpot")
@@ -711,8 +707,7 @@ async def _sync_message_to_hubspot(
     message: str,
     direction: str,
     phone: str,
-    media_url: Optional[str] = None,
-    media_type: Optional[str] = None
+    media_result: Optional[dict] = None
 ) -> None:
     """
     Sincroniza un mensaje individual.
@@ -720,8 +715,14 @@ async def _sync_message_to_hubspot(
     FLUJO v2.0:
     1. Guardar en MongoDB (~5ms) - Para visualización inmediata en panel
     2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
+
+    Args:
+        media_result: Diccionario con info de multimedia procesada
+                     (permanent_url, media_type, transcription, analysis)
     """
     mongo_message_id = None
+    media_url = media_result.get("permanent_url") if media_result else None
+    media_type = media_result.get("media_type") if media_result else None
 
     # =========================================================================
     # PASO 1: MongoDB - Fuente de verdad para el panel en tiempo real
@@ -730,14 +731,23 @@ async def _sync_message_to_hubspot(
         mongo_manager = get_mongo_manager()
         sender = "client" if direction == "incoming" else "bot"
 
+        # Construir subdocumento media si existe
+        media_dict = None
+        if media_result and media_url:
+            media_dict = {
+                "permanent_url": media_url,
+                "type": media_type,
+                "transcription": media_result.get("transcription"),
+                "analysis": media_result.get("analysis"),
+            }
+
         mongo_message_id = await mongo_manager.save_message(
             phone=phone,
             content=message,
             sender=sender,
             channel="whatsapp",
             hubspot_contact_id=contact_id,
-            media_url=media_url,
-            media_type=media_type
+            media=media_dict
         )
 
         if mongo_message_id:
@@ -849,8 +859,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
     bot_response: str,
     phone: str,
     analysis,
-    media_url: Optional[str] = None,
-    media_type: Optional[str] = None
+    media_result: Optional[dict] = None
 ) -> None:
     """
     Sincroniza una interacción completa con análisis.
@@ -861,15 +870,31 @@ async def _sync_conversation_with_analysis_to_hubspot(
 
     Incluye el análisis de sentimiento y actualiza propiedades adicionales
     basadas en la información extraída del análisis Single-Stream.
+
+    Args:
+        media_result: Diccionario con info de multimedia procesada
+                     (permanent_url, media_type, transcription, analysis)
     """
     mongo_client_id = None
     mongo_bot_id = None
+    media_url = media_result.get("permanent_url") if media_result else None
+    media_type = media_result.get("media_type") if media_result else None
 
     # =========================================================================
     # PASO 1: MongoDB - Fuente de verdad para el panel en tiempo real
     # =========================================================================
     try:
         mongo_manager = get_mongo_manager()
+
+        # Construir subdocumento media si existe
+        media_dict = None
+        if media_result and media_url:
+            media_dict = {
+                "permanent_url": media_url,
+                "type": media_type,
+                "transcription": media_result.get("transcription"),
+                "analysis": media_result.get("analysis"),
+            }
 
         # Guardar mensaje del cliente (con multimedia si existe)
         mongo_client_id = await mongo_manager.save_message(
@@ -879,8 +904,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
             channel="whatsapp",
             hubspot_contact_id=contact_id,
             metadata={"analysis_emocion": analysis.emocion if analysis else None},
-            media_url=media_url,
-            media_type=media_type
+            media=media_dict
         )
 
         # Guardar respuesta de Sofía

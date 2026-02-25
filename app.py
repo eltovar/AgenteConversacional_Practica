@@ -1,3 +1,32 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENDPOINT PARA SERVIR MEDIA DEL PANEL
+# ═══════════════════════════════════════════════════════════════════════════════
+from fastapi.responses import RedirectResponse
+from database.mongodb_client import get_mongo_manager
+from bson import ObjectId
+
+async def get_panel_media(message_id: str, as_json: bool = False):
+    """
+    Handler para servir media (audio, imagen) del historial del panel.
+    Se registra como ruta después de crear la instancia `app`.
+    """
+    mongo = get_mongo_manager()
+    msg = await mongo.db.messages.find_one({"_id": ObjectId(message_id)})
+    if not msg or "media" not in msg or not msg["media"].get("permanent_url"):
+        return JSONResponse({"error": "Media no encontrada"}, status_code=404)
+    media = msg["media"]
+    if as_json:
+        return JSONResponse({
+            "permanent_url": media.get("permanent_url"),
+            "type": media.get("type"),
+            "transcription": media.get("transcription"),
+            "analysis": media.get("analysis"),
+            "size_bytes": media.get("size_bytes"),
+            "format": media.get("format"),
+            "duration_seconds": media.get("duration_seconds"),
+            "processed_at": media.get("processed_at"),
+        })
+    return RedirectResponse(media["permanent_url"])
 # app.py
 """
 Servidor FastAPI asíncrono para chatbot Sofía.
@@ -94,6 +123,9 @@ if PANEL_STATIC_PATH.exists():
 app.include_router(get_whatsapp_router())
 app.include_router(get_outbound_panel_router())
 app.include_router(get_outbound_router())
+
+# Registrar la ruta de media del panel (handler definido arriba)
+app.get("/whatsapp/panel/media/{message_id}")(get_panel_media)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

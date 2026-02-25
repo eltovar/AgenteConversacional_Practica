@@ -167,8 +167,7 @@ class MongoDBManager:
         hubspot_contact_id: Optional[str] = None,
         message_sid: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        media_url: Optional[str] = None,
-        media_type: Optional[str] = None
+        media: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """
         Guarda un mensaje para visualización inmediata en el panel.
@@ -181,8 +180,7 @@ class MongoDBManager:
             hubspot_contact_id: ID del contacto en HubSpot (opcional)
             message_sid: ID del mensaje de Twilio (opcional)
             metadata: Datos adicionales (opcional)
-            media_url: URL de Cloudinary para imágenes/audios (opcional)
-            media_type: Tipo de media: 'audio', 'image', 'file' (opcional)
+            media: Diccionario con info de media (opcional)
 
         Returns:
             ID del documento insertado o None si falla
@@ -205,15 +203,15 @@ class MongoDBManager:
                 "timestamp_utc": datetime.utcnow(),
                 "metadata": metadata or {},
                 "synced_to_hubspot": False,
-                "media_url": media_url,
-                "media_type": media_type
             }
+            if media:
+                message_doc["media"] = media
 
             result = await self.db.messages.insert_one(message_doc)
 
             logger.debug(
                 f"[MongoDB] Mensaje guardado: phone={phone}, sender={sender}, "
-                f"media_type={media_type}, id={result.inserted_id}"
+                f"media={media}, id={result.inserted_id}"
             )
 
             return str(result.inserted_id)
@@ -262,6 +260,7 @@ class MongoDBManager:
             # Formatear para el frontend
             formatted_messages = []
             for msg in reversed(messages):  # Invertir para orden cronológico
+                media = msg.get("media", {})
                 formatted_messages.append({
                     "id": str(msg.get("_id")),
                     "phone": msg.get("phone"),
@@ -273,8 +272,16 @@ class MongoDBManager:
                     "align": "left" if msg.get("sender") == "client" else "right",
                     "message": msg.get("content", ""),  # Alias para compatibilidad
                     "metadata": msg.get("metadata", {}),
-                    "media_url": msg.get("media_url"),
-                    "media_type": msg.get("media_type")
+                    "media": {
+                        "permanent_url": media.get("permanent_url"),
+                        "type": media.get("type"),
+                        "transcription": media.get("transcription"),
+                        "analysis": media.get("analysis"),
+                        "size_bytes": media.get("size_bytes"),
+                        "format": media.get("format"),
+                        "duration_seconds": media.get("duration_seconds"),
+                        "processed_at": media.get("processed_at"),
+                    } if media else None
                 })
 
             logger.debug(f"[MongoDB] Historial obtenido: {len(formatted_messages)} mensajes para {phone}")

@@ -39,7 +39,10 @@ class PgVectorStore:
 
             # Validar connection string
             if not self.connection_string:
-                raise ValueError("DATABASE_URL (connection_string) no está configurada.")
+                # No fallamos el startup solo porque no hay DB configurada.
+                logger.warning("[VectorStore] DATABASE_URL no configurada. PGVector deshabilitado.")
+                self._is_initialized = False
+                return
 
             # Normalizar connection string: postgres:// → postgresql://
             # SQLAlchemy requiere 'postgresql' como dialecto, no 'postgres'

@@ -52,6 +52,17 @@ class RAGService:
             # 1. Asegurar que la DB esté conectada (inicializar PgVectorStore)
             pg_vector_store.initialize_db()
 
+            # Si PGVector no está inicializado (p.ej. DATABASE_URL ausente),
+            # saltamos la carga/indexación de la KB para no bloquear el startup.
+            if not getattr(pg_vector_store, "_is_initialized", False):
+                logger.warning("[RAG] PGVector no inicializado - se omite carga de KB.")
+                return {
+                    "status": "skipped",
+                    "chunks_indexed": 0,
+                    "duration": 0,
+                    "message": "PGVector no configurado - carga de KB omitida."
+                }
+
             # 2. Cargar y dividir documentos
             chunks = load_and_chunk_documents(
                 base_dir=self.KNOWLEDGE_BASE_DIR,

@@ -32,6 +32,10 @@ twilio>=9.0.0  # Cliente WhatsApp/SMS
 # Redis (para persistencia de estado)
 redis>=5.0.0
 
+# MongoDB (para almacenamiento en tiempo real del panel)
+motor>=3.3.0  # Driver async para MongoDB
+pymongo>=4.6.0  # Driver base de MongoDB
+
 # PostgreSQL + pgvector (para RAG vectorial)
 # Forzar instalación de dialectos SQLAlchemy para PostgreSQL
 langchain-postgres==0.0.12
@@ -54,3 +58,8 @@ pytest>=8.0.0
 # Exportación Excel profesional
 pandas>=2.0.0
 xlsxwriter>=3.1.0
+
+# Cloudinary para gestión de audios
+cloudinary>=1.36.0
+openai>=1.0.0
+httpx>=0.25.0

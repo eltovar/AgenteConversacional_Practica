@@ -113,10 +113,10 @@ async def insert_test_contacts():
         print("=" * 60)
         print()
         print("Ahora puedes abrir el panel en:")
-        print(f"   http://localhost:8000/whatsapp/panel/?key=TU_ADMIN_API_KEY")
+        print(f"   http://localhost:8001/whatsapp/panel/?key=TU_ADMIN_API_KEY")
         print()
         print("O probar el endpoint de contactos:")
-        print("   Invoke-RestMethod -Uri 'http://localhost:8000/whatsapp/panel/contacts' -Headers @{'X-API-Key'='TU_ADMIN_API_KEY'}")
+        print("   Invoke-RestMethod -Uri 'http://localhost:8001/whatsapp/panel/contacts' -Headers @{'X-API-Key'='TU_ADMIN_API_KEY'}")
         print()
 
     except Exception as e:

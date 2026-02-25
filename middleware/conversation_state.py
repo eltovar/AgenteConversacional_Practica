@@ -39,6 +39,7 @@ class ConversationStatus(str, Enum):
     BOT_ACTIVE = "BOT_ACTIVE"
     HUMAN_ACTIVE = "HUMAN_ACTIVE"
     IN_CONVERSATION = "IN_CONVERSATION"
+    PENDING_HANDOFF = "PENDING_HANDOFF"
 
 @dataclass
 class ConversationMeta:
@@ -243,19 +244,21 @@ class ConversationStateManager:
 
     async def activate_human(
         self,
-        phone: str,
+        phone_normalized: str = None,
         canal_origen: str = "whatsapp",
         owner_id: str = None,
         reason: str = None,
         display_name: str = None,
-        contact_id: str = None
+        contact_id: str = None,
+        # Alias para compatibilidad con llamadas posicionales
+        phone: str = None
     ) -> bool:
         """
         Activa el modo humano para una conversación.
         El contacto aparecerá en el panel de asesores.
 
         Args:
-            phone: Número de teléfono normalizado
+            phone_normalized: Número de teléfono normalizado (también acepta 'phone')
             canal_origen: Canal de origen para segregación
             owner_id: ID del asesor asignado
             reason: Razón del handoff
@@ -265,17 +268,23 @@ class ConversationStateManager:
         Returns:
             True si se activó correctamente
         """
+        # Compatibilidad: aceptar phone_normalized o phone
+        phone_num = phone_normalized or phone
+        if not phone_num:
+            logger.error("[ConversationState] activate_human: Se requiere phone_normalized o phone")
+            return False
+
         canal_safe = canal_origen.lower() if canal_origen else "whatsapp"
 
         try:
             # 1. Guardar estado HUMAN_ACTIVE
-            state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
+            state_key = f"{self.STATE_PREFIX}{phone_num}:{canal_safe}"
             await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=self.HANDOFF_TTL_SECONDS)
 
             # 2. Guardar metadata
             now_iso = get_bogota_now_iso()
             meta = {
-                "phone_normalized": phone,
+                "phone_normalized": phone_num,
                 "contact_id": contact_id,
                 "status": ConversationStatus.HUMAN_ACTIVE.value,
                 "last_activity": now_iso,
@@ -286,19 +295,202 @@ class ConversationStateManager:
                 "created_at": now_iso
             }
 
-            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
             await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
 
             # 3. Agregar al índice de contactos activos
-            index_member = f"{phone}:{canal_safe}"
+            index_member = f"{phone_num}:{canal_safe}"
             await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
 
-            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone}:{canal_safe}")
+            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe}")
             return True
 
         except Exception as e:
             logger.error(f"[ConversationState] Error en activate_human: {e}")
             return False
+
+    async def request_handoff(
+        self,
+        phone: str,
+        reason: str = None,
+        contact_id: str = None,
+        canal: str = "whatsapp"
+    ) -> bool:
+        """
+        Solicita handoff a un asesor humano.
+        Cambia el estado a PENDING_HANDOFF.
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
+            await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=self.HANDOFF_TTL_SECONDS)
+
+            # Guardar metadata con la razón del handoff
+            now_iso = get_bogota_now_iso()
+            meta = {
+                "phone_normalized": phone,
+                "contact_id": contact_id,
+                "status": ConversationStatus.PENDING_HANDOFF.value,
+                "last_activity": now_iso,
+                "handoff_reason": reason,
+                "canal_origen": canal,
+                "created_at": now_iso
+            }
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+
+            # Agregar al índice de contactos activos
+            index_member = f"{phone}:{canal_safe}"
+            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
+
+            logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason}")
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en request_handoff: {e}")
+            return False
+
+    async def update_activity(self, phone: str, canal: str = "whatsapp") -> bool:
+        """Actualiza el timestamp de última actividad."""
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            data = await self.redis.get(meta_key)
+            if data:
+                meta = json.loads(data)
+                meta["last_activity"] = get_bogota_now_iso()
+                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en update_activity: {e}")
+            return False
+
+    async def update_client_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
+        """Actualiza el timestamp del último mensaje del cliente."""
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            data = await self.redis.get(meta_key)
+            if data:
+                meta = json.loads(data)
+                meta["last_client_message"] = get_bogota_now_iso()
+                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en update_client_message_timestamp: {e}")
+            return False
+
+    async def update_advisor_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
+        """Actualiza el timestamp del último mensaje del asesor."""
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            data = await self.redis.get(meta_key)
+            if data:
+                meta = json.loads(data)
+                meta["last_advisor_message"] = get_bogota_now_iso()
+                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            return True
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {e}")
+            return False
+
+    async def get_conversation_state(self, phone: str, canal: str = "whatsapp") -> Optional[Dict[str, Any]]:
+        """
+        Obtiene el estado completo de una conversación (status + metadata).
+
+        Returns:
+            dict con status y metadata, o None si no existe
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            status = await self.redis.get(state_key)
+            meta_data = await self.redis.get(meta_key)
+
+            if not status and not meta_data:
+                return None
+
+            result = {
+                "status": status or "BOT_ACTIVE",
+                "phone": phone,
+                "canal": canal_safe
+            }
+
+            if meta_data:
+                meta = json.loads(meta_data)
+                result.update(meta)
+
+            return result
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en get_conversation_state: {e}")
+            return None
+
+    async def cleanup_duplicate_states(self, phone: str, keep_canal: str = None) -> int:
+        """
+        Limpia estados duplicados para un teléfono, manteniendo solo un canal.
+
+        Args:
+            phone: Número de teléfono normalizado
+            keep_canal: Canal a mantener (si es None, mantiene el más restrictivo)
+
+        Returns:
+            Número de estados eliminados
+        """
+        try:
+            deleted = 0
+            members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
+
+            # Encontrar todos los canales para este teléfono
+            phone_channels = []
+            for member in members:
+                if member.startswith(f"{phone}:"):
+                    canal = member.split(":", 1)[1] if ":" in member else "whatsapp"
+                    phone_channels.append(canal)
+
+            if len(phone_channels) <= 1:
+                return 0  # No hay duplicados
+
+            # Determinar qué canal mantener
+            if keep_canal and keep_canal in phone_channels:
+                canal_to_keep = keep_canal
+            else:
+                # Mantener el más restrictivo (HUMAN_ACTIVE > PENDING_HANDOFF > IN_CONVERSATION > BOT_ACTIVE)
+                priority = {"HUMAN_ACTIVE": 4, "PENDING_HANDOFF": 3, "IN_CONVERSATION": 2, "BOT_ACTIVE": 1}
+                best_canal = phone_channels[0]
+                best_priority = 0
+
+                for canal in phone_channels:
+                    state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
+                    status = await self.redis.get(state_key)
+                    p = priority.get(status, 0)
+                    if p > best_priority:
+                        best_priority = p
+                        best_canal = canal
+
+                canal_to_keep = best_canal
+
+            # Eliminar los demás
+            for canal in phone_channels:
+                if canal != canal_to_keep:
+                    state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
+                    meta_key = f"{self.META_PREFIX}{phone}:{canal}"
+                    index_member = f"{phone}:{canal}"
+
+                    await self.redis.delete(state_key)
+                    await self.redis.delete(meta_key)
+                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)
+                    deleted += 1
+
+            logger.info(f"[ConversationState] Limpiados {deleted} estados duplicados para {phone}, manteniendo {canal_to_keep}")
+            return deleted
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en cleanup_duplicate_states: {e}")
+            return 0
 
     async def close(self):
         """Cierra la conexión a Redis."""

@@ -9,6 +9,7 @@ En lugar de responder via TwiML, enviamos mensajes directamente via API.
 """
 
 import os
+from typing import Optional
 import httpx
 from logging_config import logger
 
@@ -46,13 +47,19 @@ class TwilioClient:
         """Indica si el cliente está disponible para enviar mensajes."""
         return self._available
 
-    async def send_whatsapp_message(self, to: str, body: str) -> dict:
+    async def send_whatsapp_message(
+        self,
+        to: str,
+        body: str,
+        media_url: Optional[str] = None
+    ) -> dict:
         """
         Envía un mensaje de WhatsApp usando la API de Twilio.
 
         Args:
             to: Número de destino (puede ser con o sin prefijo whatsapp:)
             body: Contenido del mensaje
+            media_url: URL de multimedia (imagen/audio) a enviar (opcional)
 
         Returns:
             dict con status y mensaje_sid o error
@@ -74,14 +81,21 @@ class TwilioClient:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
+                # Construir payload base
+                payload = {
+                    "From": from_number,
+                    "To": to,
+                    "Body": body
+                }
+
+                # Agregar MediaUrl si se proporciona
+                if media_url:
+                    payload["MediaUrl"] = media_url
+
                 response = await client.post(
                     url,
                     auth=(self.account_sid, self.auth_token),
-                    data={
-                        "From": from_number,
-                        "To": to,
-                        "Body": body
-                    }
+                    data=payload
                 )
 
                 if response.status_code in (200, 201):

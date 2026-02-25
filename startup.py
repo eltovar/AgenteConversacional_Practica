@@ -5,6 +5,7 @@ Espera a que Redis y PostgreSQL estén disponibles antes de iniciar la app.
 import os
 import time
 import sys
+from typing import Tuple
 import redis
 import psycopg
 from psycopg import Connection
@@ -42,9 +43,9 @@ def wait_for_postgres(max_retries=30, delay=2) -> bool:
     
     for attempt in range(max_retries):
         try:
-            with psycopg.connect(database_url) as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
+            # Verificación sincrónica de conectividad a PostgreSQL
+            conn = psycopg.connect(database_url)
+            conn.close()
             logger.info(f"✓ PostgreSQL conectado en intento {attempt + 1}")
             return True
         except Exception as e:
@@ -72,7 +73,7 @@ def main():
     
     # Importar y ejecutar la app
     import uvicorn
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8001"))
     
     logger.info(f"🚀 Iniciando servidor en puerto {port}")
     uvicorn.run(

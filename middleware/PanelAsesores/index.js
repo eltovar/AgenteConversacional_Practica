@@ -3,7 +3,20 @@
 // =========================================================================
 // Las variables API_KEY, BASE_URL y ADVISOR_NAMES son inyectadas desde index.html
 
-const POLLING_INTERVAL = 5000; // 5 segundos
+const POLLING_INTERVAL_IDLE = 10000;   // 10 segundos cuando no hay chat activo
+const POLLING_INTERVAL_ACTIVE = 3000;  // 3 segundos cuando hay chat abierto
+
+// Etapas del Pipeline de HubSpot
+const PIPELINE_STAGES = [
+    { id: "1275156339", name: "Nuevo Lead" },
+    { id: "1275156340", name: "En conversacion" },
+    { id: "1275156341", name: "Visita agendada" },
+    { id: "1279054635", name: "Visita realizada" },
+    { id: "1275312311", name: "Propuesta" },
+    { id: "1279054636", name: "En estudio" },
+    { id: "1275156342", name: "Cerrado ganado" },
+    { id: "1279054637", name: "Cerrado vendido" }
+];
 
 // Leer parametro advisor de la URL
 const urlParams = new URLSearchParams(window.location.search);
@@ -16,6 +29,74 @@ let currentPhone = null;
 let currentCanal = null;  // Canal de origen para segregacion
 let pollingInterval = null;
 let templatesData = [];  // Almacena templates cargados
+let allContacts = [];    // Cache de contactos para el buscador
+let selectedMediaFile = null;  // Archivo multimedia seleccionado
+
+// =========================================================================
+// FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
+// =========================================================================
+
+// =========================================================================
+// FUNCION DE BUSQUEDA DE CONTACTOS
+// =========================================================================
+
+function filterContacts(searchTerm) {
+    const term = searchTerm.toLowerCase().trim();
+
+    if (!term) {
+        renderContactsList(allContacts);
+        return;
+    }
+
+    const filtered = allContacts.filter(contact => {
+        const name = (contact.display_name || '').toLowerCase();
+        const phone = (contact.phone || '').toLowerCase();
+        return name.includes(term) || phone.includes(term);
+    });
+
+    renderContactsList(filtered);
+}
+
+// =========================================================================
+// FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
+// =========================================================================
+
+async function updateDealStage(contactId, dealId, stageId) {
+    try {
+        const response = await fetch(`${BASE_URL}/contacts/${contactId}/stage`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': API_KEY
+            },
+            body: JSON.stringify({ stage_id: stageId })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            // Mostrar confirmacion breve
+            const stageName = PIPELINE_STAGES.find(s => s.id === stageId)?.name || stageId;
+            console.log(`[Panel] Etapa actualizada: ${stageName}`);
+
+            // Notificacion visual temporal
+            const dropdown = document.querySelector(`select[data-contact-id="${contactId}"]`);
+            if (dropdown) {
+                dropdown.classList.add('ring-2', 'ring-green-400');
+                setTimeout(() => {
+                    dropdown.classList.remove('ring-2', 'ring-green-400');
+                }, 1500);
+            }
+        } else {
+            throw new Error(data.detail || 'Error actualizando etapa');
+        }
+    } catch (error) {
+        console.error('[Panel] Error actualizando etapa:', error);
+        alert('Error al actualizar etapa: ' + error.message);
+        // Recargar contactos para revertir el dropdown
+        loadContacts();
+    }
+}
 
 // =========================================================================
 // FUNCIONES DE TEMPLATES
@@ -400,7 +481,8 @@ async function loadContacts() {
         if (!response.ok) throw new Error('Error al cargar contactos');
 
         const data = await response.json();
-        renderContactsList(data.contacts);
+        allContacts = data.contacts || [];  // Guardar en cache para el buscador
+        renderContactsList(allContacts);
         updateLastUpdateTime();
 
         // Actualizar contador de activos
@@ -595,14 +677,41 @@ function renderContactsList(contacts) {
             ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded mr-1">${canalOrigen.replace('_', ' ')}</span>`
             : '';
 
+        // Generar dropdown de pipeline si hay deal_id
+        const dealId = contact.deal_id || '';
+        const currentStage = contact.current_stage || '';
+
+        function buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {
+            if (!dealIdForDropdown) return '';
+            const options = PIPELINE_STAGES.map(stage =>
+                `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
+            ).join('');
+            return `
+                <select class="text-xs border rounded px-1 py-0.5 bg-white cursor-pointer hover:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                        data-contact-id="${contactIdForDropdown}"
+                        onchange="updateDealStage('${contactIdForDropdown}', '${dealIdForDropdown}', this.value)"
+                        onclick="event.stopPropagation()">
+                    ${options}
+                </select>
+            `;
+        }
+
         let badge = '';
         if (isInConversation) {
             badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
                      ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
         } else if (isHumanActive || isActive) {
-            badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
-                     ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+            // Mostrar dropdown de pipeline si hay deal, sino mostrar badge "En espera"
+            const pipelineDropdown = buildPipelineDropdown(contactId, dealId, currentStage);
+            if (pipelineDropdown) {
+                badge = `${canalBadge}${pipelineDropdown}
+                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                         ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+            } else {
+                badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
+                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                         ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+            }
         } else if (status === 'BOT_ACTIVE') {
             badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Bot</span>`;
         } else {
@@ -685,11 +794,47 @@ function renderChatBubbles(messages) {
                 ? new Date(msg.timestamp).toLocaleTimeString('es-CO', {hour: '2-digit', minute: '2-digit'})
                 : '';
 
+            // Renderizar multimedia si existe
+            let mediaHtml = '';
+            if (msg.media_url) {
+                if (msg.media_type === 'image') {
+                    mediaHtml = `
+                        <div class="mb-2">
+                            <img src="${msg.media_url}" alt="Imagen"
+                                 class="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity"
+                                 style="max-height: 300px; object-fit: contain;"
+                                 onclick="window.open('${msg.media_url}', '_blank')">
+                        </div>`;
+                } else if (msg.media_type === 'audio') {
+                    mediaHtml = `
+                        <div class="mb-2">
+                            <audio controls class="w-full" style="max-width: 280px;">
+                                <source src="${msg.media_url}" type="audio/mpeg">
+                                Tu navegador no soporta audio.
+                            </audio>
+                        </div>`;
+                } else {
+                    // Archivo generico
+                    mediaHtml = `
+                        <div class="mb-2">
+                            <a href="${msg.media_url}" target="_blank"
+                               class="inline-flex items-center text-blue-600 hover:text-blue-800">
+                                <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                          d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                Ver archivo
+                            </a>
+                        </div>`;
+                }
+            }
+
             const msgHtml = `
                 <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3 animate-fadeIn" data-msg-id="${msg.id}">
                     <div class="${bubbleClass} p-3 shadow-sm">
                         <p class="text-xs font-semibold text-gray-600 mb-1">${msg.sender_name || msg.sender}</p>
-                        <p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(msg.message)}</p>
+                        ${mediaHtml}
+                        ${msg.message ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(msg.message)}</p>` : ''}
                         <p class="text-xs text-gray-500 text-right mt-1">${timestamp}</p>
                     </div>
                 </div>
@@ -724,45 +869,8 @@ function updateLastUpdateTime() {
     document.getElementById('lastUpdate').textContent = `Ultima actualizacion: ${now}`;
 }
 
-/**
- * Muestra u oculta el indicador de sincronizacion.
- * Se usa durante el delay de 2.5s despues de enviar mensajes.
- *
- * @param {boolean} show - true para mostrar, false para ocultar
- */
-function showSyncingState(show) {
-    const chatContainer = document.getElementById('chatMessages');
-    const syncIndicatorId = 'syncingIndicator';
-
-    if (show) {
-        // Verificar si ya existe
-        if (document.getElementById(syncIndicatorId)) return;
-
-        // Crear indicador de sincronizacion
-        const indicator = document.createElement('div');
-        indicator.id = syncIndicatorId;
-        indicator.className = 'flex justify-center items-center py-2 text-gray-500 text-sm animate-pulse';
-        indicator.innerHTML = `
-            <svg class="animate-spin h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            Sincronizando con HubSpot...
-        `;
-
-        // Agregar al final del chat
-        if (chatContainer) {
-            chatContainer.appendChild(indicator);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-    } else {
-        // Remover indicador
-        const indicator = document.getElementById(syncIndicatorId);
-        if (indicator) {
-            indicator.remove();
-        }
-    }
-}
+// NOTA v2.0: showSyncingState() eliminado - MongoDB proporciona datos en tiempo real
+// Ya no es necesario mostrar "Sincronizando con HubSpot..." porque MongoDB es instantaneo (~5ms)
 
 // =========================================================================
 // FUNCIONES DE EDICION DE NOMBRE
@@ -955,13 +1063,60 @@ async function saveNameChange(event) {
 }
 
 // =========================================================================
+// FUNCIONES DE MULTIMEDIA
+// =========================================================================
+
+function handleFileSelect(input) {
+    const file = input.files[0];
+    if (!file) return;
+
+    // Validar tipo de archivo
+    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm'];
+    if (!validTypes.includes(file.type)) {
+        alert('Tipo de archivo no soportado. Solo imagenes y audios.');
+        input.value = '';
+        return;
+    }
+
+    // Validar tamano (max 16MB para Cloudinary)
+    const maxSize = 16 * 1024 * 1024;
+    if (file.size > maxSize) {
+        alert('El archivo es demasiado grande. Maximo 16MB.');
+        input.value = '';
+        return;
+    }
+
+    selectedMediaFile = file;
+
+    // Mostrar preview
+    const preview = document.getElementById('mediaPreview');
+    const previewName = document.getElementById('mediaPreviewName');
+
+    const icon = file.type.startsWith('image/') ? '&#128247;' : '&#127911;';
+    previewName.innerHTML = `${icon} ${file.name}`;
+    preview.classList.remove('hidden');
+
+    console.log('[Panel] Archivo seleccionado:', file.name, file.type, file.size);
+}
+
+function clearMediaSelection() {
+    selectedMediaFile = null;
+    document.getElementById('mediaInput').value = '';
+    document.getElementById('mediaPreview').classList.add('hidden');
+    console.log('[Panel] Seleccion de archivo limpiada');
+}
+
+// =========================================================================
 // FUNCIONES DE INTERACCION
 // =========================================================================
 
-function selectContact(contactId, phone, displayName, canal = null) {
+async function selectContact(contactId, phone, displayName, canal = null) {
     currentContactId = contactId;
     currentPhone = phone;
     currentCanal = canal;  // Guardar canal para segregacion
+
+    // Reiniciar polling con intervalo mas rapido para chat activo
+    restartPollingForChat();
 
     // Resetear estado de primera carga para nuevo contacto
     isFirstChatLoad = true;
@@ -988,11 +1143,41 @@ function selectContact(contactId, phone, displayName, canal = null) {
     const closeBtn = document.getElementById('closeConversationBtn');
     if (closeBtn) closeBtn.classList.remove('hidden');
 
-    // Habilitar input
+    // Habilitar inputs
     document.getElementById('messageInput').disabled = false;
     document.getElementById('sendBtn').disabled = false;
+    document.getElementById('attachBtn').disabled = false;
     document.getElementById('selectedPhone').value = phone;
     document.getElementById('selectedContactId').value = contactId;
+
+    // Limpiar cualquier archivo multimedia previo
+    clearMediaSelection();
+
+    // =========================================================================
+    // FIX v2.1: Activar HUMAN_ACTIVE al seleccionar contacto
+    // Esto previene que Sofia responda mientras la asesora revisa el historial
+    // =========================================================================
+    try {
+        const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
+            `canal=${encodeURIComponent(canal || 'whatsapp')}` +
+            `&contact_id=${encodeURIComponent(contactId || '')}` +
+            (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
+
+        const response = await fetch(takeControlUrl, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        const data = await response.json();
+        console.log('[Panel] Take Control response:', data);
+
+        if (data.status === 'success') {
+            console.log(`[Panel] Control tomado: ${data.action} - Sofia pausada`);
+        }
+    } catch (error) {
+        console.warn('[Panel] Error en take-control (no critico):', error);
+        // Continuar aunque falle - el contacto aun puede verse
+    }
 
     // Cargar historial
     loadChatHistory(contactId);
@@ -1006,7 +1191,11 @@ function selectContact(contactId, phone, displayName, canal = null) {
     document.querySelectorAll('.contact-item').forEach(el => {
         el.classList.remove('active');
     });
-    event.currentTarget.classList.add('active');
+    // Marcar el contacto actual como activo usando el contactId
+    const selectedItem = document.querySelector(`.contact-item[onclick*="'${contactId}'"]`);
+    if (selectedItem) {
+        selectedItem.classList.add('active');
+    }
 }
 
 async function sendMessage(e) {
@@ -1018,12 +1207,13 @@ async function sendMessage(e) {
     const message = document.getElementById('messageInput').value.trim();
     const resultDiv = document.getElementById('sendResult');
 
-    console.log('[Panel] Datos de envio:', { phone, contactId, messageLength: message.length });
+    console.log('[Panel] Datos de envio:', { phone, contactId, messageLength: message.length, hasMedia: !!selectedMediaFile });
 
-    if (!phone || !message) {
-        console.warn('[Panel] Validacion fallida: phone o message vacio');
+    // Validar que haya contenido (texto o archivo)
+    if (!phone || (!message && !selectedMediaFile)) {
+        console.warn('[Panel] Validacion fallida: phone vacio o sin contenido');
         resultDiv.className = 'mt-2 text-sm text-red-600';
-        resultDiv.textContent = 'Selecciona un contacto y escribe un mensaje';
+        resultDiv.textContent = 'Selecciona un contacto y escribe un mensaje o adjunta un archivo';
         resultDiv.classList.remove('hidden');
         return;
     }
@@ -1031,12 +1221,24 @@ async function sendMessage(e) {
     // Deshabilitar mientras envia
     document.getElementById('sendBtn').disabled = true;
     document.getElementById('messageInput').disabled = true;
+    document.getElementById('attachBtn').disabled = true;
 
     try {
         const formData = new FormData();
         formData.append('to', phone);
-        formData.append('body', message);
         formData.append('contact_id', contactId);
+
+        // Agregar mensaje de texto si existe
+        if (message) {
+            formData.append('body', message);
+        }
+
+        // Agregar archivo multimedia si existe
+        if (selectedMediaFile) {
+            formData.append('media_file', selectedMediaFile);
+            console.log('[Panel] Adjuntando archivo:', selectedMediaFile.name, selectedMediaFile.type);
+        }
+
         // Incluir canal para segregacion correcta
         if (currentCanal) {
             formData.append('canal', currentCanal);
@@ -1057,17 +1259,24 @@ async function sendMessage(e) {
 
         if (data.status === 'success') {
             resultDiv.className = 'mt-2 text-sm text-green-600';
-            resultDiv.textContent = 'Mensaje enviado correctamente';
+
+            // Mensaje diferente si incluia multimedia
+            if (data.media_type) {
+                const mediaLabel = data.media_type === 'image' ? 'imagen' : (data.media_type === 'audio' ? 'audio' : 'archivo');
+                resultDiv.textContent = `Mensaje con ${mediaLabel} enviado correctamente`;
+            } else {
+                resultDiv.textContent = 'Mensaje enviado correctamente';
+            }
+
             document.getElementById('messageInput').value = '';
 
-            // Mostrar estado "Sincronizando" durante el delay
-            showSyncingState(true);
+            // Limpiar seleccion de archivo
+            clearMediaSelection();
 
-            // Recargar historial (2.5s delay para que HubSpot indexe la nota)
-            setTimeout(() => {
-                loadChatHistory(contactId);
-                showSyncingState(false);
-            }, 2500);
+            // ARQUITECTURA v2.0: MongoDB es la fuente de verdad en tiempo real
+            // El mensaje ya esta disponible en MongoDB (~5ms), no necesitamos
+            // polling incremental complejo. Un refresh inmediato es suficiente.
+            loadChatHistory(contactId);
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -1083,6 +1292,7 @@ async function sendMessage(e) {
     } finally {
         document.getElementById('sendBtn').disabled = false;
         document.getElementById('messageInput').disabled = false;
+        document.getElementById('attachBtn').disabled = false;
         resultDiv.classList.remove('hidden');
 
         // Ocultar mensaje despues de 5 segundos
@@ -1188,14 +1398,9 @@ async function sendTemplateMessage() {
             // Resetear selector
             if (selector) selector.value = '';
 
-            // Mostrar estado "Sincronizando" durante el delay
-            showSyncingState(true);
-
-            // Recargar historial (2.5s delay para que HubSpot indexe la nota)
-            setTimeout(() => {
-                loadChatHistory(contactId);
-                showSyncingState(false);
-            }, 2500);
+            // ARQUITECTURA v2.0: MongoDB es la fuente de verdad en tiempo real
+            // El mensaje ya esta disponible inmediatamente
+            loadChatHistory(contactId);
         } else {
             throw new Error(data.detail || data.message || 'Error enviando template');
         }
@@ -1225,6 +1430,9 @@ let pendingRefresh = false;  // Si hay refresh pendiente cuando la pestaña esta
 function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
 
+    // Usar intervalo mas rapido si hay chat activo
+    const interval = currentContactId ? POLLING_INTERVAL_ACTIVE : POLLING_INTERVAL_IDLE;
+
     pollingInterval = setInterval(async () => {
         // Solo hacer polling si la pestaña está visible
         if (!isTabVisible) {
@@ -1236,11 +1444,18 @@ function startPolling() {
         // Actualizar lista de contactos
         await loadContacts();
 
-        // Actualizar chat si hay contacto seleccionado
+        // Actualizar chat si hay contacto seleccionado (polling mas frecuente)
         if (currentContactId) {
             await loadChatHistory(currentContactId);
         }
-    }, POLLING_INTERVAL);
+    }, interval);
+
+    console.log(`[Panel] Polling iniciado con intervalo: ${interval}ms`);
+}
+
+// Reiniciar polling cuando cambia el estado del chat (para ajustar intervalo)
+function restartPollingForChat() {
+    startPolling();
 }
 
 function stopPolling() {

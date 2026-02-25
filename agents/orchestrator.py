@@ -6,7 +6,7 @@ Funciona tanto para CLI como para webhooks (FastAPI).
 
 Comandos:
     - Ejecutar servidor: uvicorn app:app --reload
-    - Probar con: Invoke-WebRequest -Uri "http://localhost:8000/webhook" -Method POST -ContentType "application/json" -Body '{"session_id":"test","message":"Hola"}'
+    - Probar con: Invoke-WebRequest -Uri "http://localhost:8001/webhook" -Method POST -ContentType "application/json" -Body '{"session_id":"test","message":"Hola"}'
 """
 
 import os

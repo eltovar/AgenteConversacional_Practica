@@ -10,11 +10,11 @@ import re
 import html
 import asyncio
 from io import BytesIO
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 
-from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request
+from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request, Body, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -27,6 +27,8 @@ from .contact_manager import ContactManager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from integrations.hubspot import get_timeline_logger
+from database.mongodb_client import get_mongo_manager
+from utils.media_processor import media_processor
 
 
 # Router de FastAPI para el panel de envío
@@ -44,6 +46,9 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # API Key para autenticación del panel
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+# API Key de HubSpot
+HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY", "")
+
 # Ventana de 24 horas de WhatsApp (en segundos)
 WHATSAPP_WINDOW_SECONDS = 24 * 60 * 60
 
@@ -52,6 +57,32 @@ LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
 
 # Prefijo en Redis para almacenar templates de WhatsApp
 TEMPLATE_PREFIX = "whatsapp_template:"
+
+# ============================================================================
+# Etapas del Pipeline de HubSpot
+# ============================================================================
+PIPELINE_STAGES = {
+    "1275156339": "Nuevo Lead",
+    "1275156340": "En conversación",
+    "1275156341": "Visita agendada",
+    "1279054635": "Visita realizada",
+    "1275312311": "Propuesta",
+    "1279054636": "En estudio",
+    "1275156342": "Cerrado ganado",
+    "1279054637": "Cerrado vendido"
+}
+
+# Lista ordenada de etapas para el frontend
+PIPELINE_STAGES_LIST = [
+    {"id": "1275156339", "name": "Nuevo Lead"},
+    {"id": "1275156340", "name": "En conversación"},
+    {"id": "1275156341", "name": "Visita agendada"},
+    {"id": "1279054635", "name": "Visita realizada"},
+    {"id": "1275312311", "name": "Propuesta"},
+    {"id": "1279054636", "name": "En estudio"},
+    {"id": "1275156342", "name": "Cerrado ganado"},
+    {"id": "1279054637", "name": "Cerrado vendido"}
+]
 
 @dataclass
 class WindowStatus:
@@ -73,6 +104,61 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
         logger.warning("[Panel] ADMIN_API_KEY no configurada - Panel deshabilitado")
         return False
     return api_key == ADMIN_API_KEY
+
+
+async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Busca el deal asociado a un contacto y retorna su información.
+
+    Returns:
+        dict con deal_id y current_stage, o None si no hay deal
+    """
+    if not contact_id or not HUBSPOT_API_KEY:
+        return None
+
+    try:
+        import httpx
+        base_url = "https://api.hubapi.com"
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        # Buscar deals asociados al contacto
+        associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(associations_url, headers=headers)
+
+            if response.status_code != 200:
+                logger.debug(f"[Panel] No se encontraron deals para contacto {contact_id}")
+                return None
+
+            data = response.json()
+            results = data.get("results", [])
+
+            if not results:
+                return None
+
+            # Tomar el primer deal (más reciente)
+            deal_id = results[0].get("id")
+
+            # Obtener la etapa actual del deal
+            deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}?properties=dealstage"
+            deal_response = await client.get(deal_url, headers=headers)
+
+            if deal_response.status_code == 200:
+                deal_data = deal_response.json()
+                current_stage = deal_data.get("properties", {}).get("dealstage")
+                return {
+                    "deal_id": deal_id,
+                    "current_stage": current_stage
+                }
+
+            return {"deal_id": deal_id, "current_stage": None}
+
+    except Exception as e:
+        logger.debug(f"[Panel] Error obteniendo deal info para {contact_id}: {e}")
+        return None
 
 
 async def _get_redis_client():
@@ -274,21 +360,27 @@ async def _delete_template(template_id: str) -> bool:
 async def send_message(
     background_tasks: BackgroundTasks,
     to: str = Form(..., description="Número de destino (+573001234567)"),
-    body: str = Form(..., description="Contenido del mensaje"),
+    body: Optional[str] = Form(None, description="Contenido del mensaje"),
     contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
     canal: Optional[str] = Form(None, description="Canal de origen para segregación"),
     force_send: bool = Form(False, description="Forzar envío aunque ventana esté cerrada"),
+    media_file: Optional[UploadFile] = File(None, description="Archivo multimedia (imagen/audio)"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Envía un mensaje de WhatsApp desde el panel de asesores.
+    Soporta envío de texto, multimedia (imagen/audio), o ambos.
     """
     # Validar API Key
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
 
-    # Validar campos requeridos
-    if not body.strip():
+    # Validar que haya contenido (texto o archivo)
+    if not body and not media_file:
+        raise HTTPException(status_code=400, detail="Debe enviar un mensaje de texto o un archivo multimedia")
+
+    # Si solo hay texto, validar que no esté vacío
+    if body and not body.strip() and not media_file:
         raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío")
 
     # Normalizar número
@@ -384,21 +476,97 @@ async def send_message(
     except Exception as e:
         logger.warning(f"[Panel] Error manejando estado: {e}")
 
-    # Enviar mensaje
+    # =========================================================================
+    # Procesar archivo multimedia si se envió
+    # =========================================================================
+    cloudinary_url = None
+    media_type = None
+
+    if media_file and media_file.filename:
+        try:
+            # Leer contenido del archivo
+            file_bytes = await media_file.read()
+            content_type = media_file.content_type or "application/octet-stream"
+
+            # Subir a Cloudinary
+            cloudinary_url = await media_processor.upload_outgoing_media(
+                file_bytes=file_bytes,
+                content_type=content_type,
+                phone=phone_normalized
+            )
+
+            # Determinar tipo de media
+            if content_type.startswith("image/"):
+                media_type = "image"
+            elif content_type.startswith("audio/"):
+                media_type = "audio"
+            else:
+                media_type = "file"
+
+            logger.info(f"[Panel] Multimedia subido a Cloudinary: {media_type} -> {cloudinary_url}")
+
+        except Exception as e:
+            logger.error(f"[Panel] Error procesando multimedia: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error procesando archivo multimedia: {str(e)}"
+            )
+
+    # Preparar body para envío
+    message_body = body.strip() if body else ""
+
+    # Enviar mensaje con multimedia si corresponde
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
-        body=body
+        body=message_body or "📎",  # Twilio requiere body, usar emoji si solo hay media
+        media_url=cloudinary_url
     )
 
     if result["status"] == "success":
-        # Registrar en HubSpot Timeline (background)
+        message_sid = result.get("message_sid")
+
+        # =====================================================================
+        # PASO 1: Guardar en MongoDB INMEDIATAMENTE (~5ms)
+        # MongoDB es la fuente de verdad para el panel en tiempo real
+        # =====================================================================
+        mongo_message_id = None
+        try:
+            mongo_manager = get_mongo_manager()
+            mongo_message_id = await mongo_manager.save_message(
+                phone=phone_normalized,
+                content=message_body or f"[{media_type.upper()}]" if media_type else message_body,
+                sender="advisor",
+                channel=canal or "whatsapp",
+                hubspot_contact_id=contact_id,
+                message_sid=message_sid,
+                metadata={"source": "Manual via Panel"},
+                media_url=cloudinary_url,
+                media_type=media_type
+            )
+            if mongo_message_id:
+                logger.info(f"[Panel] Mensaje guardado en MongoDB: {mongo_message_id}, media_type={media_type}")
+        except Exception as e:
+            logger.error(f"[Panel] Error guardando en MongoDB: {e}")
+            # No bloquear el flujo si MongoDB falla
+
+        # =====================================================================
+        # PASO 2: Registrar en HubSpot Timeline (BACKGROUND - no bloqueante)
+        # HubSpot es archivo histórico, no afecta la experiencia del panel
+        # =====================================================================
         if contact_id:
+            # Construir contenido para HubSpot incluyendo link multimedia si existe
+            hubspot_content = message_body
+            if cloudinary_url:
+                media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
+                hubspot_content = f"{message_body}\n\n{media_label}: {cloudinary_url}" if message_body else f"{media_label}: {cloudinary_url}"
+
             background_tasks.add_task(
                 _log_advisor_message_to_hubspot,
                 contact_id,
-                body,
+                hubspot_content,
                 phone_normalized,
-                "Manual via Panel"  # message_source
+                "Manual via Panel",
+                mongo_message_id  # Para marcar como sincronizado después
             )
 
         # Actualizar timestamp del asesor para TTL diferenciado
@@ -412,7 +580,8 @@ async def send_message(
             status_code=200,
             content={
                 "status": "success",
-                "message_sid": result.get("message_sid"),
+                "message_sid": message_sid,
+                "mongo_id": mongo_message_id,
                 "to": phone_normalized,
                 "contact_id": contact_id,
                 "canal": canal,
@@ -421,7 +590,9 @@ async def send_message(
                     "time_remaining": window_status.time_remaining_seconds
                 },
                 "sofia_paused": True,
-                "message_source": "Manual via Panel"
+                "message_source": "Manual via Panel",
+                "media_url": cloudinary_url,
+                "media_type": media_type
             }
         )
     else:
@@ -513,21 +684,48 @@ async def send_template_message(
     )
 
     if result["status"] == "success":
-        # Registrar en HubSpot Timeline (background)
+        message_sid = result.get("message_sid")
+        template_content = f"[TEMPLATE: {template.get('name', template_id)}] {template_message}"
+
+        # =====================================================================
+        # PASO 1: Guardar en MongoDB INMEDIATAMENTE
+        # =====================================================================
+        mongo_message_id = None
+        try:
+            mongo_manager = get_mongo_manager()
+            mongo_message_id = await mongo_manager.save_message(
+                phone=phone_normalized,
+                content=template_content,
+                sender="advisor",
+                channel=canal or "whatsapp",
+                hubspot_contact_id=contact_id,
+                message_sid=message_sid,
+                metadata={"source": "Template via Panel", "template_id": template_id}
+            )
+            if mongo_message_id:
+                logger.info(f"[Panel] Template guardado en MongoDB: {mongo_message_id}")
+        except Exception as e:
+            logger.error(f"[Panel] Error guardando template en MongoDB: {e}")
+
+        # =====================================================================
+        # PASO 2: Registrar en HubSpot Timeline (BACKGROUND)
+        # =====================================================================
         if contact_id:
             background_tasks.add_task(
                 _log_advisor_message_to_hubspot,
                 contact_id,
-                f"[TEMPLATE: {template.get('name', template_id)}] {template_message}",
+                template_content,
                 phone_normalized,
-                "Template via Panel"
+                "Template via Panel",
+                mongo_message_id
             )
 
         return JSONResponse(
             status_code=200,
             content={
                 "status": "success",
-                "message_sid": result.get("message_sid"),
+                "message_sid": message_sid,
+                "mongo_id": mongo_message_id,
                 "to": phone_normalized,
                 "contact_id": contact_id,
                 "canal": canal,
@@ -892,6 +1090,137 @@ async def close_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Endpoint para actualizar etapa del deal en HubSpot
+# ============================================================================
+
+@router.patch("/contacts/{contact_id}/stage")
+async def update_deal_stage(
+    contact_id: str,
+    stage_id: str = Body(..., embed=True),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Actualiza la etapa del deal en HubSpot desde el panel de asesores.
+
+    Este endpoint:
+    1. Busca el deal asociado al contacto
+    2. Actualiza la propiedad 'dealstage' del deal
+    3. Retorna confirmación del cambio
+
+    Args:
+        contact_id: ID del contacto en HubSpot
+        stage_id: ID de la nueva etapa del pipeline
+
+    Returns:
+        Confirmación del cambio con nombre de etapa
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Validar que el stage_id sea válido
+    if stage_id not in PIPELINE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stage_id inválido. Valores permitidos: {list(PIPELINE_STAGES.keys())}"
+        )
+
+    hubspot_token = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_token:
+        raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+    try:
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {hubspot_token}",
+            "Content-Type": "application/json"
+        }
+
+        base_url = "https://api.hubapi.com"
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # 1. Buscar deals asociados al contacto
+            associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
+
+            response = await client.get(associations_url, headers=headers)
+
+            if response.status_code != 200:
+                logger.error(f"[Panel] Error buscando deals: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Error buscando deals asociados: {response.text[:200]}"
+                )
+
+            associations = response.json()
+            results = associations.get("results", [])
+
+            if not results:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No se encontraron deals asociados a este contacto"
+                )
+
+            # 2. Tomar el primer deal (más reciente)
+            deal_id = results[0].get("id")
+
+            # 3. Actualizar la etapa del deal
+            update_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
+            payload = {
+                "properties": {
+                    "dealstage": stage_id
+                }
+            }
+
+            response = await client.patch(update_url, headers=headers, json=payload)
+
+            if response.status_code == 200:
+                stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
+                logger.info(
+                    f"[Panel] Deal {deal_id} actualizado a etapa '{stage_name}' "
+                    f"(contact_id: {contact_id})"
+                )
+                return {
+                    "status": "success",
+                    "message": f"Etapa actualizada a '{stage_name}'",
+                    "deal_id": deal_id,
+                    "contact_id": contact_id,
+                    "stage_id": stage_id,
+                    "stage_name": stage_name
+                }
+            else:
+                logger.error(f"[Panel] Error actualizando deal: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Error actualizando deal: {response.text[:200]}"
+                )
+
+    except httpx.TimeoutException:
+        logger.error(f"[Panel] Timeout actualizando etapa para contact_id={contact_id}")
+        raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Panel] Error inesperado actualizando etapa: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+@router.get("/stages")
+async def get_pipeline_stages(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Retorna la lista de etapas del pipeline para el dropdown del frontend.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    return {
+        "stages": PIPELINE_STAGES_LIST,
+        "count": len(PIPELINE_STAGES_LIST)
+    }
+
+
 @router.post("/reset-bot/{phone}")
 async def reset_bot_state(
     phone: str,
@@ -1056,13 +1385,15 @@ async def get_window_status(
 async def get_conversation_history(
     phone: str,
     limit: int = Query(50, ge=1, le=100),
+    canal: Optional[str] = Query(None, description="Canal para filtrar mensajes"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Obtiene el historial de conversación de un contacto por teléfono.
 
-    Este endpoint consulta las notas en HubSpot asociadas al contacto
-    para mostrar el historial de mensajes.
+    ARQUITECTURA v2.0:
+    1. Consultar MongoDB primero (fuente de verdad en tiempo real, ~5ms)
+    2. Si MongoDB vacío o no disponible → Fallback a HubSpot (migración)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1073,31 +1404,47 @@ async def get_conversation_history(
     if not validation.is_valid:
         raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
 
-    # Obtener contacto
+    phone_normalized = validation.normalized
+    messages = []
+    source = "none"
+
     try:
-        contact_manager = ContactManager()
-        contact_id = await contact_manager._search_contact(validation.normalized)
-
-        if not contact_id:
-            return {
-                "phone": validation.normalized,
-                "contact_id": None,
-                "messages": [],
-                "message": "Contacto no encontrado en HubSpot"
-            }
-
-        # Obtener historial de notas desde HubSpot
-        timeline_logger = get_timeline_logger()
-        messages = await timeline_logger.get_notes_for_contact(
-            contact_id=contact_id,
-            limit=limit
+        # =====================================================================
+        # PASO 1: MongoDB - Fuente de verdad en tiempo real
+        # =====================================================================
+        mongo_manager = get_mongo_manager()
+        messages = await mongo_manager.get_history(
+            phone=phone_normalized,
+            limit=limit,
+            channel=canal
         )
 
+        if messages:
+            source = "mongodb"
+            logger.debug(f"[Panel] Historial desde MongoDB: {len(messages)} mensajes")
+
+        # =====================================================================
+        # PASO 2: Si MongoDB vacío → Fallback a HubSpot (datos históricos)
+        # =====================================================================
+        if not messages:
+            contact_manager = ContactManager()
+            contact_id = await contact_manager._search_contact(phone_normalized)
+
+            if contact_id:
+                timeline_logger = get_timeline_logger()
+                messages = await timeline_logger.get_notes_for_contact(
+                    contact_id=contact_id,
+                    limit=limit
+                )
+                source = "hubspot"
+                logger.debug(f"[Panel] Historial desde HubSpot (fallback): {len(messages)} mensajes")
+
         return {
-            "phone": validation.normalized,
-            "contact_id": contact_id,
+            "phone": phone_normalized,
             "messages": messages,
-            "count": len(messages)
+            "count": len(messages),
+            "source": source,
+            "canal": canal
         }
 
     except Exception as e:
@@ -1110,15 +1457,16 @@ async def get_history_by_contact_id(
     contact_id: str,
     limit: int = Query(50, ge=1, le=100),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
-    phone: Optional[str] = Query(None, description="Teléfono para buscar historial de Sofía"),
+    phone: Optional[str] = Query(None, description="Teléfono para buscar historial"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Obtiene el historial de conversación por contact_id.
 
-    SEGREGACIÓN POR CANAL:
-    Si se proporciona el parámetro canal y phone, también se obtiene
-    el historial de Sofía desde Redis (segregado por canal).
+    ARQUITECTURA v2.0:
+    1. Si hay phone → Consultar MongoDB primero (fuente de verdad, ~5ms)
+    2. Si MongoDB vacío o sin phone → Consultar MongoDB por contact_id
+    3. Si aún vacío → Fallback a HubSpot (datos históricos de migración)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1137,32 +1485,68 @@ async def get_history_by_contact_id(
             }
         )
 
+    messages = []
+    source = "none"
+
     try:
-        timeline_logger = get_timeline_logger()
+        mongo_manager = get_mongo_manager()
 
-        # Obtener notas de HubSpot
-        messages = await timeline_logger.get_notes_for_contact(
-            contact_id=contact_id,
-            limit=limit
-        )
+        # =====================================================================
+        # PASO 1: MongoDB por teléfono (preferido - más eficiente)
+        # =====================================================================
+        if phone:
+            normalizer = PhoneNormalizer()
+            validation = normalizer.normalize(phone)
 
-        # Log para debug de segregación
-        if canal:
-            logger.info(f"[Panel] Historial solicitado con canal={canal}, phone={phone}")
+            if validation.is_valid:
+                messages = await mongo_manager.get_history(
+                    phone=validation.normalized,
+                    limit=limit,
+                    channel=canal
+                )
+                if messages:
+                    source = "mongodb"
+                    logger.debug(f"[Panel] Historial desde MongoDB (phone): {len(messages)} msgs")
+
+        # =====================================================================
+        # PASO 2: MongoDB por contact_id (si no hay phone o no hay resultados)
+        # =====================================================================
+        if not messages:
+            messages = await mongo_manager.get_history_by_contact_id(
+                hubspot_contact_id=contact_id,
+                limit=limit
+            )
+            if messages:
+                source = "mongodb"
+                logger.debug(f"[Panel] Historial desde MongoDB (contact_id): {len(messages)} msgs")
+
+        # =====================================================================
+        # PASO 3: Fallback a HubSpot (datos históricos de migración)
+        # =====================================================================
+        if not messages:
+            timeline_logger = get_timeline_logger()
+            messages = await timeline_logger.get_notes_for_contact(
+                contact_id=contact_id,
+                limit=limit
+            )
+            if messages:
+                source = "hubspot"
+                logger.debug(f"[Panel] Historial desde HubSpot (fallback): {len(messages)} msgs")
 
         # Asegurar que messages sea una lista válida
         if messages is None:
             messages = []
 
         canal_info = f", canal={canal}" if canal else ""
-        logger.info(f"[Panel] Historial cargado: {len(messages)} mensajes para contact_id={contact_id}{canal_info}")
+        logger.info(f"[Panel] Historial cargado: {len(messages)} msgs para contact_id={contact_id}{canal_info} (source={source})")
 
         return {
             "contact_id": contact_id,
             "messages": messages,
             "count": len(messages),
             "canal": canal,
-            "phone": phone
+            "phone": phone,
+            "source": source
         }
 
     except Exception as e:
@@ -1175,9 +1559,120 @@ async def get_history_by_contact_id(
                 "messages": [],
                 "count": 0,
                 "canal": canal,
+                "source": "error",
                 "error": f"Error interno: {str(e)}"
             }
         )
+
+
+@router.post("/contacts/{phone}/take-control")
+async def take_control_of_conversation(
+    phone: str,
+    canal: Optional[str] = Query(None, description="Canal de origen"),
+    contact_id: Optional[str] = Query(None, description="ID del contacto en HubSpot"),
+    advisor_id: Optional[str] = Query(None, description="ID de la asesora que toma control"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Activa HUMAN_ACTIVE cuando la asesora hace click en un contacto.
+
+    Este endpoint debe llamarse ANTES de cargar el historial para asegurar
+    que Sofía no responda mientras la asesora está revisando la conversación.
+
+    IMPORTANTE: Resuelve el bug donde Sofía seguía respondiendo porque
+    HUMAN_ACTIVE solo se activaba al ENVIAR un mensaje, no al seleccionar.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Normalizar teléfono
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    phone_normalized = validation.normalized if validation.is_valid else phone
+
+    try:
+        # Redis URL unificado
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        state_manager = ConversationStateManager(redis_url)
+
+        # Verificar estado actual
+        current_status = await state_manager.get_status(phone_normalized, canal or "whatsapp")
+
+        # Si ya está en HUMAN_ACTIVE o IN_CONVERSATION, solo refrescar TTL
+        if current_status in [ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION]:
+            # Refrescar TTL sin cambiar estado
+            await state_manager.set_status(
+                phone_normalized,
+                current_status,
+                canal=canal or "whatsapp",
+                ttl=state_manager.HANDOFF_TTL_SECONDS
+            )
+            logger.info(
+                f"[Panel] Take Control: TTL refrescado para {phone_normalized}:{canal} "
+                f"(estado: {current_status.value})"
+            )
+            return {
+                "status": "success",
+                "action": "ttl_refreshed",
+                "phone": phone_normalized,
+                "canal": canal,
+                "current_status": current_status.value,
+                "message": "TTL de sesión refrescado"
+            }
+
+        # Si está en PENDING_HANDOFF, cambiar a HUMAN_ACTIVE
+        if current_status == ConversationStatus.PENDING_HANDOFF:
+            await state_manager.activate_human(
+                phone_normalized=phone_normalized,
+                canal_origen=canal or "whatsapp",
+                owner_id=advisor_id,
+                contact_id=contact_id,
+                reason="Asesora tomó control desde panel"
+            )
+            logger.info(
+                f"[Panel] Take Control: PENDING_HANDOFF -> HUMAN_ACTIVE para {phone_normalized}:{canal}"
+            )
+            return {
+                "status": "success",
+                "action": "human_activated",
+                "phone": phone_normalized,
+                "canal": canal,
+                "previous_status": "PENDING_HANDOFF",
+                "new_status": "HUMAN_ACTIVE",
+                "message": "Control tomado - Sofía pausada"
+            }
+
+        # Si era BOT_ACTIVE o no existía, activar HUMAN_ACTIVE
+        await state_manager.activate_human(
+            phone_normalized=phone_normalized,
+            canal_origen=canal or "whatsapp",
+            owner_id=advisor_id,
+            contact_id=contact_id,
+            reason="Asesora seleccionó contacto en panel"
+        )
+
+        previous_status = current_status.value if current_status else "BOT_ACTIVE"
+        logger.info(
+            f"[Panel] Take Control: {previous_status} -> HUMAN_ACTIVE para {phone_normalized}:{canal}"
+        )
+
+        return {
+            "status": "success",
+            "action": "human_activated",
+            "phone": phone_normalized,
+            "canal": canal,
+            "advisor_id": advisor_id,
+            "previous_status": previous_status,
+            "new_status": "HUMAN_ACTIVE",
+            "message": "Control tomado - Sofía pausada"
+        }
+
+    except Exception as e:
+        logger.error(f"[Panel] Error en take-control: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/debug/redis")
@@ -1300,7 +1795,7 @@ async def get_active_contacts(
                 except Exception:
                     pass
 
-            # Si tenemos contact_id, obtener nombre de HubSpot
+            # Si tenemos contact_id, obtener nombre de HubSpot y deal info
             if contact.get("contact_id"):
                 try:
                     hs_info = await _get_hubspot_contact_info(contact["contact_id"])
@@ -1311,6 +1806,15 @@ async def get_active_contacts(
                         contact["email"] = hs_info.get("email")
                 except Exception as e:
                     logger.debug(f"[Panel] No se pudo enriquecer contacto: {e}")
+
+                # Buscar deal asociado para el dropdown de pipeline
+                try:
+                    deal_info = await _get_contact_deal_info(contact["contact_id"])
+                    if deal_info:
+                        contact["deal_id"] = deal_info.get("deal_id")
+                        contact["current_stage"] = deal_info.get("current_stage")
+                except Exception as e:
+                    logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
 
             # Si aún no tenemos nombre, usar teléfono
             if not contact.get("display_name"):
@@ -1355,28 +1859,28 @@ async def get_active_contacts(
             since = now - timedelta(hours=24)
             until = now
 
-        # === PASO 3.5: Filtrar contactos activos por fecha de activación ===
-        # Esto asegura que si se filtra por "48h", solo muestre contactos
-        # que fueron activados dentro de las últimas 48h
+        # === PASO 3.5: Filtrar contactos por fecha, PERO siempre incluir los activos ===
+        # REGLA IMPORTANTE: Contactos en HUMAN_ACTIVE o IN_CONVERSATION SIEMPRE se muestran
+        # porque están esperando atención. El filtro de tiempo solo aplica a históricos.
         if filter_time != "all":
             filtered_active = []
             for contact in active_contacts:
-                activated_at = contact.get("activated_at")
-                if activated_at:
-                    try:
-                        # Parsear fecha de activación
-                        if isinstance(activated_at, str):
-                            activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
-                        else:
-                            activated_dt = activated_at
+                # PRIORIDAD 1: Si está activamente esperando atención, SIEMPRE incluir
+                is_waiting = contact.get("is_active", False)
+                status = contact.get("conversation_status") or contact.get("status") or ""
+                is_human_active = status in ["HUMAN_ACTIVE", "PENDING_HANDOFF", "IN_CONVERSATION"]
 
-                        # Asegurar timezone
-                        if activated_dt.tzinfo is None:
-                            activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
-
-                        # Incluir si está dentro del rango
-                        if since <= activated_dt <= until:
-                            # Calcular tiempo desde activación para mostrar
+                if is_waiting or is_human_active:
+                    # Calcular time_ago para mostrar, pero NO filtrar
+                    activated_at = contact.get("activated_at")
+                    if activated_at:
+                        try:
+                            if isinstance(activated_at, str):
+                                activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+                            else:
+                                activated_dt = activated_at
+                            if activated_dt.tzinfo is None:
+                                activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
                             time_ago = now - activated_dt.astimezone(TIMEZONE)
                             if time_ago.total_seconds() < 3600:
                                 contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
@@ -1384,19 +1888,45 @@ async def get_active_contacts(
                                 contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
                             else:
                                 contact["time_ago"] = f"hace {int(time_ago.days)} días"
+                        except (ValueError, TypeError):
+                            contact["time_ago"] = "en espera"
+                    else:
+                        contact["time_ago"] = "en espera"
 
+                    filtered_active.append(contact)
+                    logger.debug(f"[Panel] Contacto {contact.get('phone')} incluido (activo/en espera)")
+                    continue
+
+                # PRIORIDAD 2: Para contactos no activos, aplicar filtro de tiempo
+                activated_at = contact.get("activated_at")
+                if activated_at:
+                    try:
+                        if isinstance(activated_at, str):
+                            activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+                        else:
+                            activated_dt = activated_at
+
+                        if activated_dt.tzinfo is None:
+                            activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
+
+                        if since <= activated_dt <= until:
+                            time_ago = now - activated_dt.astimezone(TIMEZONE)
+                            if time_ago.total_seconds() < 3600:
+                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
+                            elif time_ago.total_seconds() < 86400:
+                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
+                            else:
+                                contact["time_ago"] = f"hace {int(time_ago.days)} días"
                             filtered_active.append(contact)
                         else:
                             logger.debug(
-                                f"[Panel] Contacto {contact.get('phone')} excluido por filtro de tiempo "
-                                f"(activado: {activated_dt}, filtro desde: {since})"
+                                f"[Panel] Contacto histórico {contact.get('phone')} excluido por filtro de tiempo"
                             )
                     except (ValueError, TypeError) as e:
-                        # Si no podemos parsear la fecha, incluir el contacto
-                        logger.debug(f"[Panel] Error parseando fecha de activación: {e}")
+                        logger.debug(f"[Panel] Error parseando fecha: {e}")
                         filtered_active.append(contact)
                 else:
-                    # Si no tiene fecha de activación, intentar usar last_activity como fallback
+                    # Sin fecha de activación, usar last_activity o incluir como reciente
                     last_activity = contact.get("last_activity")
                     if last_activity:
                         try:
@@ -1404,11 +1934,8 @@ async def get_active_contacts(
                                 activity_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
                             else:
                                 activity_dt = last_activity
-
                             if activity_dt.tzinfo is None:
                                 activity_dt = activity_dt.replace(tzinfo=TIMEZONE)
-
-                            # Filtrar por last_activity si no hay activated_at
                             if since <= activity_dt <= until:
                                 time_ago = now - activity_dt.astimezone(TIMEZONE)
                                 if time_ago.total_seconds() < 3600:
@@ -1418,23 +1945,16 @@ async def get_active_contacts(
                                 else:
                                     contact["time_ago"] = f"hace {int(time_ago.days)} días"
                                 filtered_active.append(contact)
-                            else:
-                                logger.debug(
-                                    f"[Panel] Contacto {contact.get('phone')} excluido por filtro (usando last_activity)"
-                                )
-                        except (ValueError, TypeError) as e:
-                            # Si tampoco podemos parsear last_activity, incluir como reciente
-                            logger.debug(f"[Panel] Error parseando last_activity: {e}")
+                        except (ValueError, TypeError):
                             contact["time_ago"] = "reciente"
                             filtered_active.append(contact)
                     else:
-                        # Sin ninguna fecha disponible, incluir como reciente
                         contact["time_ago"] = "reciente"
                         filtered_active.append(contact)
 
             logger.info(
-                f"[Panel] Contactos activos después de filtro de tiempo: "
-                f"{len(filtered_active)}/{len(active_contacts)}"
+                f"[Panel] Contactos después de filtro de tiempo: "
+                f"{len(filtered_active)}/{len(active_contacts)} (activos siempre incluidos)"
             )
             active_contacts = filtered_active
 
@@ -1725,10 +2245,14 @@ async def _log_advisor_message_to_hubspot(
     contact_id: str,
     message: str,
     phone: str,
-    message_source: str
+    message_source: str,
+    mongo_message_id: Optional[str] = None
 ) -> None:
     """
     Registra un mensaje del asesor en HubSpot Timeline.
+
+    Esta función corre en background y NO bloquea la respuesta al panel.
+    El mensaje ya está disponible en MongoDB para el usuario.
     """
     try:
         timeline_logger = get_timeline_logger()
@@ -1743,6 +2267,15 @@ async def _log_advisor_message_to_hubspot(
         )
 
         logger.info(f"[Panel] Mensaje del asesor registrado en Timeline: {contact_id}")
+
+        # Marcar mensaje como sincronizado en MongoDB
+        if mongo_message_id:
+            try:
+                mongo_manager = get_mongo_manager()
+                await mongo_manager.mark_as_synced_to_hubspot(mongo_message_id)
+                logger.debug(f"[Panel] MongoDB mensaje {mongo_message_id} marcado como sincronizado")
+            except Exception as sync_error:
+                logger.warning(f"[Panel] Error marcando sincronización: {sync_error}")
 
     except Exception as e:
         logger.error(f"[Panel] Error registrando en HubSpot: {e}")

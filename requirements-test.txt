@@ -1,0 +1,57 @@
+# ============================================================================
+# DEPENDENCIAS DE TESTING - PROFESIONALES Y COMPLETAS
+# ============================================================================
+#
+# Instalación:
+#   pip install -r requirements-test.txt
+#
+# Ejecución:
+#   pytest tests/ -v --cov=middleware --cov=integrations --cov-report=html
+#
+# ============================================================================
+
+# Core Testing Framework
+pytest>=8.0.0
+pytest-asyncio>=0.23.0  # Para tests async (FastAPI)
+pytest-cov>=4.1.0       # Cobertura de código
+pytest-mock>=3.12.0     # Mocking avanzado
+
+# Testing HTTP/API
+httpx>=0.27.0           # Cliente HTTP async (para FastAPI)
+pytest-httpx>=0.30.0    # Mock de httpx
+
+# Redis Testing
+fakeredis>=2.21.0       # Redis in-memory para tests
+redis>=5.0.0
+
+# Time Mocking
+freezegun>=1.4.0        # Mock de tiempo para TTL tests
+
+# Factory & Fixtures
+pytest-factoryboy>=2.6.0  # Factories para tests
+faker>=24.0.0             # Datos falsos realistas
+
+# Concurrency Testing
+pytest-xdist>=3.5.0     # Tests paralelos
+pytest-timeout>=2.2.0   # Timeout para tests lentos
+
+# Snapshot Testing
+syrupy>=4.6.0           # Snapshot testing (para responses JSON)
+
+# Assertions Mejoradas
+pytest-clarity>=1.0.1   # Mejor output de assertions
+pytest-benchmark>=4.0.0 # Performance benchmarks
+
+# Coverage Reports
+coverage[toml]>=7.4.0
+
+# Async Utilities
+anyio>=4.2.0
+
+# Para FastAPI Testing
+starlette>=0.27.0
+
+# Linting (opcional pero recomendado)
+ruff>=0.3.0
+black>=24.0.0
+mypy>=1.8.0

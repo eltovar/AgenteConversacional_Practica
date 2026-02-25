@@ -29,6 +29,12 @@ from .sofia_brain import SofiaBrain
 # Importaciones para integración con HubSpot Timeline
 from integrations.hubspot import get_timeline_logger
 
+# MongoDB para almacenamiento en tiempo real
+from database.mongodb_client import get_mongo_manager
+
+# Procesador de multimedia (Cloudinary + Whisper)
+from utils.media_processor import media_processor
+
 # Importación para actualizar ventana de 24h
 from .outbound_panel import update_last_client_message
 
@@ -117,6 +123,13 @@ def get_sofia_brain() -> SofiaBrain:
 # LÓGICA HÍBRIDA: should_bot_respond
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Lista de canales a verificar para HUMAN_ACTIVE
+CANALES_A_VERIFICAR = [
+    "whatsapp", "instagram", "facebook", "whatsapp_directo",
+    "pagina_web", "metrocuadrado", "finca_raiz", "ciencuadras",
+    "mercado_libre", "default"
+]
+
 async def should_bot_respond(
     phone_normalized: str,
     contact_id: Optional[str] = None
@@ -128,41 +141,45 @@ async def should_bot_respond(
     colisión entre respuestas del bot y el asesor.
 
     Verificaciones:
-    1. Estado en Redis (BOT_ACTIVE / HUMAN_ACTIVE / PENDING_HANDOFF)
+    1. Estado en Redis EN CUALQUIER CANAL (BOT_ACTIVE / HUMAN_ACTIVE / PENDING_HANDOFF)
     2. Propiedad `sofia_activa` en HubSpot (si hay contact_id)
+
+    FIX: Ahora verifica HUMAN_ACTIVE en TODOS los canales posibles,
+    no solo en 'whatsapp' por defecto. Esto evita que Sofía responda
+    cuando un asesor está atendiendo desde otro canal (ej: instagram).
     """
     state_manager = get_state_manager()
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 1. Verificar estado en Redis (flag temporal de intervención humana)
+    # 1. Verificar estado en Redis EN CUALQUIER CANAL
     # ═══════════════════════════════════════════════════════════════════════
-    status = await state_manager.get_status(phone_normalized)
+    for canal in CANALES_A_VERIFICAR:
+        status = await state_manager.get_status(phone_normalized, canal)
 
-    if status == ConversationStatus.HUMAN_ACTIVE:
-        logger.info(
-            f"🤫 [should_bot_respond] Bot silenciado: HUMANO_INTERVINIENDO "
-            f"(teléfono: {phone_normalized})"
-        )
-        return False, "HUMANO_INTERVINIENDO", None
+        if status == ConversationStatus.HUMAN_ACTIVE:
+            logger.info(
+                f"🤫 [should_bot_respond] Bot silenciado: HUMANO_INTERVINIENDO "
+                f"(teléfono: {phone_normalized}, canal detectado: {canal})"
+            )
+            return False, "HUMANO_INTERVINIENDO", None
 
-    # FIX: También verificar IN_CONVERSATION (asesor chateando activamente)
-    if status == ConversationStatus.IN_CONVERSATION:
-        logger.info(
-            f"🤫 [should_bot_respond] Bot silenciado: ASESOR_EN_CONVERSACION "
-            f"(teléfono: {phone_normalized})"
-        )
-        return False, "ASESOR_EN_CONVERSACION", None
+        if status == ConversationStatus.IN_CONVERSATION:
+            logger.info(
+                f"🤫 [should_bot_respond] Bot silenciado: ASESOR_EN_CONVERSACION "
+                f"(teléfono: {phone_normalized}, canal detectado: {canal})"
+            )
+            return False, "ASESOR_EN_CONVERSACION", None
 
-    if status == ConversationStatus.PENDING_HANDOFF:
-        logger.info(
-            f"⏳ [should_bot_respond] Bot en espera: PENDIENTE_HANDOFF "
-            f"(teléfono: {phone_normalized})"
-        )
-        special_message = (
-            "En un momento uno de nuestros asesores te atenderá. "
-            "Gracias por tu paciencia. 🙏"
-        )
-        return False, "PENDIENTE_HANDOFF", special_message
+        if status == ConversationStatus.PENDING_HANDOFF:
+            logger.info(
+                f"⏳ [should_bot_respond] Bot en espera: PENDIENTE_HANDOFF "
+                f"(teléfono: {phone_normalized}, canal detectado: {canal})"
+            )
+            special_message = (
+                "En un momento uno de nuestros asesores te atenderá. "
+                "Gracias por tu paciencia. 🙏"
+            )
+            return False, "PENDIENTE_HANDOFF", special_message
 
     # ═══════════════════════════════════════════════════════════════════════
     # 2. Verificar propiedad 'sofia_activa' en HubSpot
@@ -192,16 +209,22 @@ async def whatsapp_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     From: str = Form(...),
-    Body: str = Form(...),
+    Body: str = Form(""),
     ProfileName: Optional[str] = Form(None),
     MessageSid: Optional[str] = Form(None),
+    # Parámetros de multimedia (Twilio envía NumMedia, MediaUrl0, MediaContentType0)
+    NumMedia: int = Form(0),
+    MediaUrl0: Optional[str] = Form(None),
+    MediaContentType0: Optional[str] = Form(None),
 ):
     """
     Endpoint principal del webhook de Twilio.
 
     Recibe mensajes de WhatsApp y los procesa según el estado de la conversación.
+    Soporta texto, imágenes y audios.
     """
-    logger.info(f"[Webhook] Mensaje recibido de {From}: {Body[:50]}...")
+    body_preview = Body[:50] if Body else "[Sin texto]"
+    logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")
 
     try:
         # ════════════════════════════════════════════════════════════
@@ -218,6 +241,47 @@ async def whatsapp_webhook(
 
         phone_normalized = validation.normalized
         logger.info(f"[Webhook] Número normalizado: {From} → {phone_normalized}")
+
+        # ════════════════════════════════════════════════════════════
+        # PASO 1.5: Procesamiento de Multimedia (si existe)
+        # ════════════════════════════════════════════════════════════
+        media_result = None
+        media_url_permanent = None
+        media_type = None
+
+        if NumMedia > 0 and MediaUrl0:
+            logger.info(f"[Webhook] Procesando {NumMedia} archivo(s) multimedia de {phone_normalized}")
+            logger.info(f"[Webhook] ContentType: {MediaContentType0}")
+
+            try:
+                # Procesar multimedia: descarga, sube a Cloudinary, transcribe/analiza
+                media_result = await media_processor.process_incoming_media(
+                    media_url=MediaUrl0,
+                    content_type=MediaContentType0 or "application/octet-stream",
+                    phone=phone_normalized
+                )
+
+                media_url_permanent = media_result.get("permanent_url", "")
+                media_type = media_result.get("media_type", "")
+
+                # Si es audio, el Body para Sofía será la transcripción
+                if media_result.get("transcription"):
+                    Body = media_result.get("body_for_ai", Body)
+                    logger.info(f"[Webhook] Audio transcrito: {Body[:100]}...")
+
+                # Si es imagen, añadir análisis al contexto
+                elif media_result.get("analysis"):
+                    # Combinar texto original con análisis de imagen
+                    if Body:
+                        Body = f"{Body}\n\n{media_result.get('body_for_ai', '')}"
+                    else:
+                        Body = media_result.get("body_for_ai", "[Imagen recibida]")
+                    logger.info(f"[Webhook] Imagen analizada: {Body[:100]}...")
+
+            except Exception as e:
+                logger.error(f"[Webhook] Error procesando multimedia: {e}")
+                # Continuar con el flujo normal aunque falle el procesamiento
+                Body = Body or "[El cliente envió un archivo]"
 
         # ════════════════════════════════════════════════════════════
         # Actualizar timestamp de último mensaje del cliente
@@ -258,10 +322,12 @@ async def whatsapp_webhook(
                         contact_info.contact_id,
                         Body,
                         "incoming",
-                        phone_normalized
+                        phone_normalized,
+                        media_url_permanent,
+                        media_type
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[Webhook] Error sincronizando mensaje a HubSpot: {e}")
 
             # Enviar respuesta indicando que un asesor le atenderá
             response_msg = (
@@ -274,9 +340,13 @@ async def whatsapp_webhook(
         # PASO 2: Consultar estado de la conversación
         # ════════════════════════════════════════════════════════════
         state_manager = get_state_manager()
+        # NOTA: Esta consulta es solo informativa - la verificación real
+        # se hace en should_bot_respond() que revisa TODOS los canales
         status = await state_manager.get_status(phone_normalized)
 
-        logger.info(f"[Webhook] Estado de conversación: {status.value}")
+        # Manejar caso None de forma segura
+        status_str = status.value if status else "BOT_ACTIVE (default)"
+        logger.info(f"[Webhook] Estado de conversación (canal whatsapp): {status_str}")
 
         # ════════════════════════════════════════════════════════════
         # PASO 3: Identificar/crear contacto en HubSpot
@@ -294,9 +364,12 @@ async def whatsapp_webhook(
             else:
                 logger.info(f"[Webhook] Contacto existente: {contact_info.contact_id}")
 
-        except Exception as e:
-            logger.error(f"[Webhook] Error con HubSpot: {e}")
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error("[Webhook] Error procesando contacto en HubSpot: %s", e)
             # Continuar sin HubSpot - el mensaje debe ser procesado
+            contact_info = None
+        except Exception as e:
+            logger.error("[Webhook] Error inesperado con HubSpot: %s", e)
             contact_info = None
 
         # ════════════════════════════════════════════════════════════
@@ -317,7 +390,9 @@ async def whatsapp_webhook(
                     contact_info.contact_id,
                     Body,
                     "incoming",
-                    phone_normalized
+                    phone_normalized,
+                    media_url_permanent,
+                    media_type
                 )
             else:
                 logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Mensaje NO se guardará en HubSpot")
@@ -503,7 +578,9 @@ async def whatsapp_webhook(
                     Body,
                     f"[BOT BLOQUEADO - {final_status.value}] {response_text}",
                     phone_normalized,
-                    analysis
+                    analysis,
+                    media_url_permanent,
+                    media_type
                 )
             return Response(content="", media_type="text/xml")
 
@@ -516,7 +593,9 @@ async def whatsapp_webhook(
                 Body,
                 response_text,
                 phone_normalized,
-                analysis
+                analysis,
+                media_url_permanent,
+                media_type
             )
         else:
             logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Conversación NO se guardará en HubSpot")
@@ -524,7 +603,7 @@ async def whatsapp_webhook(
         return _create_twiml_response(response_text)
 
     except Exception as e:
-        logger.error(f"[Webhook] Error procesando mensaje: {e}", exc_info=True)
+        logger.error("[Webhook] Error procesando mensaje: %s", e, exc_info=True)
         return _create_error_response(
             "Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
         )
@@ -570,7 +649,7 @@ async def _update_client_timestamp(phone_normalized: str, canal: Optional[str] =
         state_manager = get_state_manager()
         await state_manager.update_client_message_timestamp(phone_normalized, canal)
     except Exception as e:
-        logger.error(f"[Webhook] Error actualizando timestamp cliente: {e}")
+        logger.error("[Webhook] Error actualizando timestamp cliente: %s", e)
 
 
 async def _check_followup_response(phone_normalized: str) -> tuple:
@@ -607,7 +686,7 @@ async def _check_followup_response(phone_normalized: str) -> tuple:
         return found, canal
 
     except Exception as e:
-        logger.error(f"[Webhook] Error verificando followup response: {e}")
+        logger.error("[Webhook] Error verificando followup response: %s", e)
         return False, None
 
 
@@ -631,29 +710,76 @@ async def _sync_message_to_hubspot(
     contact_id: str,
     message: str,
     direction: str,
-    phone: str
+    phone: str,
+    media_url: Optional[str] = None,
+    media_type: Optional[str] = None
 ) -> None:
     """
-    Sincroniza un mensaje individual a HubSpot Timeline.
+    Sincroniza un mensaje individual.
+
+    FLUJO v2.0:
+    1. Guardar en MongoDB (~5ms) - Para visualización inmediata en panel
+    2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
     """
+    mongo_message_id = None
+
+    # =========================================================================
+    # PASO 1: MongoDB - Fuente de verdad para el panel en tiempo real
+    # =========================================================================
     try:
-        # 1. Registrar en Timeline (visual para asesores)
+        mongo_manager = get_mongo_manager()
+        sender = "client" if direction == "incoming" else "bot"
+
+        mongo_message_id = await mongo_manager.save_message(
+            phone=phone,
+            content=message,
+            sender=sender,
+            channel="whatsapp",
+            hubspot_contact_id=contact_id,
+            media_url=media_url,
+            media_type=media_type
+        )
+
+        if mongo_message_id:
+            logger.debug(f"[MongoDB] Mensaje guardado: {mongo_message_id} ({direction})")
+    except Exception as e:
+        logger.error(f"[MongoDB] Error guardando mensaje: {e}")
+        # Continuar con HubSpot aunque MongoDB falle
+
+    # =========================================================================
+    # PASO 2: HubSpot Timeline - Archivo histórico
+    # =========================================================================
+    try:
         timeline_logger = get_timeline_logger()
+
+        # Construir contenido para HubSpot incluyendo link multimedia si existe
+        hubspot_content = message
+        if media_url:
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
+            hubspot_content = f"{message}\n\n{media_label}: {media_url}" if message else f"{media_label}: {media_url}"
 
         if direction == "incoming":
             await timeline_logger.log_client_message(
                 contact_id=contact_id,
-                content=message,
+                content=hubspot_content,
                 session_id=phone
             )
         else:
             await timeline_logger.log_bot_message(
                 contact_id=contact_id,
-                content=message,
+                content=hubspot_content,
                 session_id=phone
             )
 
-        # 2. Actualizar propiedad de última conversación (backup)
+        # Marcar mensaje como sincronizado en MongoDB
+        if mongo_message_id:
+            try:
+                mongo_manager = get_mongo_manager()
+                await mongo_manager.mark_as_synced_to_hubspot(mongo_message_id)
+            except Exception:
+                pass  # No crítico
+
+        # Actualizar propiedad de última conversación (backup)
         contact_manager = get_contact_manager()
         properties = {
             "chatbot_conversation": f"[{direction.upper()}] {message[:500]}",
@@ -663,8 +789,10 @@ async def _sync_message_to_hubspot(
 
         logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {phone}")
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("[HubSpot Sync] Error sincronizando mensaje: %s", e)
     except Exception as e:
-        logger.error(f"[HubSpot Sync] Error sincronizando mensaje: {e}")
+        logger.error("[HubSpot Sync] Error inesperado sincronizando mensaje: %s", e)
 
 
 async def _sync_conversation_to_hubspot(
@@ -709,8 +837,10 @@ async def _sync_conversation_to_hubspot(
 
         logger.debug(f"[HubSpot Sync] Conversación sincronizada en Timeline para {phone}")
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("[HubSpot Sync] Error procesando conversación: %s", e)
     except Exception as e:
-        logger.error(f"[HubSpot Sync] Error sincronizando conversación: {e}")
+        logger.error("[HubSpot Sync] Error sincronizando conversación: %s", e)
 
 
 async def _sync_conversation_with_analysis_to_hubspot(
@@ -718,21 +848,77 @@ async def _sync_conversation_with_analysis_to_hubspot(
     user_message: str,
     bot_response: str,
     phone: str,
-    analysis
+    analysis,
+    media_url: Optional[str] = None,
+    media_type: Optional[str] = None
 ) -> None:
     """
-    Sincroniza una interacción completa con análisis a HubSpot Timeline.
+    Sincroniza una interacción completa con análisis.
+
+    FLUJO v2.0:
+    1. Guardar en MongoDB (~5ms) - Para visualización inmediata en panel
+    2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
 
     Incluye el análisis de sentimiento y actualiza propiedades adicionales
     basadas en la información extraída del análisis Single-Stream.
     """
+    mongo_client_id = None
+    mongo_bot_id = None
+
+    # =========================================================================
+    # PASO 1: MongoDB - Fuente de verdad para el panel en tiempo real
+    # =========================================================================
+    try:
+        mongo_manager = get_mongo_manager()
+
+        # Guardar mensaje del cliente (con multimedia si existe)
+        mongo_client_id = await mongo_manager.save_message(
+            phone=phone,
+            content=user_message,
+            sender="client",
+            channel="whatsapp",
+            hubspot_contact_id=contact_id,
+            metadata={"analysis_emocion": analysis.emocion if analysis else None},
+            media_url=media_url,
+            media_type=media_type
+        )
+
+        # Guardar respuesta de Sofía
+        mongo_bot_id = await mongo_manager.save_message(
+            phone=phone,
+            content=bot_response,
+            sender="bot",
+            channel="whatsapp",
+            hubspot_contact_id=contact_id,
+            metadata={
+                "analysis_handoff": analysis.handoff_priority if analysis else None,
+                "analysis_score": analysis.sentiment_score if analysis else None
+            }
+        )
+
+        if mongo_client_id and mongo_bot_id:
+            logger.debug(f"[MongoDB] Conversación guardada: client={mongo_client_id}, bot={mongo_bot_id}")
+
+    except Exception as e:
+        logger.error(f"[MongoDB] Error guardando conversación: {e}")
+        # Continuar con HubSpot aunque MongoDB falle
+
+    # =========================================================================
+    # PASO 2: HubSpot Timeline - Archivo histórico
+    # =========================================================================
     try:
         timeline_logger = get_timeline_logger()
 
-        # 1. Registrar mensaje del cliente en Timeline
+        # Construir contenido para HubSpot incluyendo link multimedia si existe
+        hubspot_client_content = user_message
+        if media_url:
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
+            hubspot_client_content = f"{user_message}\n\n{media_label}: {media_url}" if user_message else f"{media_label}: {media_url}"
+
+        # 1. Registrar mensaje del cliente en Timeline (con link multimedia si existe)
         await timeline_logger.log_client_message(
             contact_id=contact_id,
-            content=user_message,
+            content=hubspot_client_content,
             session_id=phone
         )
 
@@ -742,6 +928,17 @@ async def _sync_conversation_with_analysis_to_hubspot(
             content=bot_response,
             session_id=phone
         )
+
+        # Marcar mensajes como sincronizados en MongoDB
+        if mongo_client_id or mongo_bot_id:
+            try:
+                mongo_manager = get_mongo_manager()
+                if mongo_client_id:
+                    await mongo_manager.mark_as_synced_to_hubspot(mongo_client_id)
+                if mongo_bot_id:
+                    await mongo_manager.mark_as_synced_to_hubspot(mongo_bot_id)
+            except Exception:
+                pass  # No crítico
 
         # 3. Actualizar propiedades del contacto con análisis
         contact_manager = get_contact_manager()
@@ -788,8 +985,10 @@ async def _sync_conversation_with_analysis_to_hubspot(
             f"Emoción: {analysis.emocion}, Score: {analysis.sentiment_score}"
         )
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("[HubSpot Sync] Error procesando análisis: %s", e)
     except Exception as e:
-        logger.error(f"[HubSpot Sync] Error sincronizando conversación con análisis: {e}")
+        logger.error("[HubSpot Sync] Error sincronizando conversación con análisis: %s", e)
 
 
 async def _notify_high_priority_lead(
@@ -841,8 +1040,10 @@ async def _notify_high_priority_lead(
             f"Razón: {reason_str}"
         )
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("[Webhook] Error procesando lead de alta prioridad: %s", e)
     except Exception as e:
-        logger.error(f"[Webhook] Error notificando lead de alta prioridad: {e}")
+        logger.error("[Webhook] Error notificando lead: %s", e)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -875,8 +1076,11 @@ async def admin_activate_human(
             "status": ConversationStatus.HUMAN_ACTIVE.value
         }
 
+    except ValueError as e:
+        logger.error(f"[Admin] Teléfono inválido: %s", e)
+        return {"error": "Teléfono inválido"}
     except Exception as e:
-        logger.error(f"[Admin] Error activando humano: {e}")
+        logger.error("[Admin] Error al activar humano: %s", e)
         return {"error": str(e)}
 
 
@@ -903,8 +1107,11 @@ async def admin_activate_bot(phone: str = Form(...)):
             "status": ConversationStatus.BOT_ACTIVE.value
         }
 
+    except ValueError as e:
+        logger.error(f"[Admin] Teléfono inválido: %s", e)
+        return {"error": "Teléfono inválido"}
     except Exception as e:
-        logger.error(f"[Admin] Error activando bot: {e}")
+        logger.error("[Admin] Error al activar bot: %s", e)
         return {"error": str(e)}
 
 
@@ -930,8 +1137,11 @@ async def admin_get_status(phone: str):
             "meta": meta.to_dict() if meta else None
         }
 
+    except ValueError as e:
+        logger.error(f"[Admin] Teléfono inválido: %s", e)
+        return {"error": "Teléfono inválido"}
     except Exception as e:
-        logger.error(f"[Admin] Error obteniendo estado: {e}")
+        logger.error("[Admin] Error al obtener estado: %s", e)
         return {"error": str(e)}
 
 
@@ -963,8 +1173,11 @@ async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None)
             "keep_canal": keep_canal or "most_restrictive"
         }
 
+    except ValueError as e:
+        logger.error(f"[Admin] Teléfono inválido: %s", e)
+        return {"error": "Teléfono inválido"}
     except Exception as e:
-        logger.error(f"[Admin] Error limpiando duplicados: {e}")
+        logger.error("[Admin] Error al limpiar duplicados: %s", e)
         return {"error": str(e)}
 
 
@@ -1026,8 +1239,11 @@ async def hubspot_webhook(
 
         return {"status": "ok", "processed": len(events)}
 
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error(f"[HubSpot Webhook] Datos de webhook inválidos: %s", e)
+        return {"status": "error", "message": "Datos inválidos"}
     except Exception as e:
-        logger.error(f"[HubSpot Webhook] Error procesando webhook: {e}", exc_info=True)
+        logger.error(f"[HubSpot Webhook] Error procesando webhook: %s", e, exc_info=True)
         # Retornar 200 para evitar que HubSpot reintente
         return {"status": "error", "message": str(e)}
 

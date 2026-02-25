@@ -19,8 +19,6 @@ class LeadAssigner:
     # CONFIGURACIÓN DE EQUIPOS Y CANALES
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # IDs de owners de HubSpot (obtener de Settings > Users & Teams)
-    # Formato: {"name": "Nombre", "id": "hubspot_owner_id", "active": True/False}
     OWNERS_CONFIG = {
         # === ASESORA LUISA ===
         # Portales inmobiliarios: MetroCuadrado, Finca Raíz, Mercado Libre
@@ -59,6 +57,7 @@ class LeadAssigner:
         # === YUBENY: Directo + Redes Sociales + Ciencuadras ===
         "pagina_web": "equipo_yubeny",
         "whatsapp_directo": "equipo_yubeny",
+        "whatsapp": "equipo_yubeny",  # Alias para compatibilidad con webhook
         "facebook": "equipo_yubeny",
         "instagram": "equipo_yubeny",
         "ciencuadras": "equipo_yubeny",
@@ -84,6 +83,7 @@ class LeadAssigner:
         # Yubeny (88251457)
         "pagina_web": "88251457",
         "whatsapp_directo": "88251457",
+        "whatsapp": "88251457",  # Alias para compatibilidad
         "facebook": "88251457",
         "instagram": "88251457",
         "ciencuadras": "88251457",

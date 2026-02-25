@@ -2,12 +2,20 @@
 """
 Módulo para registrar conversaciones en el Timeline de HubSpot usando Notes API.
 
-Permite que los asesores vean el historial de conversaciones de Sofía directamente en la ficha del contacto en HubSpot.
+ARQUITECTURA v2.0:
+================
+MongoDB es ahora la fuente de verdad en TIEMPO REAL para el panel de asesoras.
+HubSpot funciona como ARCHIVO HISTÓRICO (se actualiza en segundo plano).
 
-Nota: Timeline Events API requiere permisos especiales (403 bloqueado).
-      Este módulo usa exclusivamente Notes API (Engagements) que funciona con los permisos estándar de crm.objects.contacts.write.
+Flujo actual:
+1. Mensaje guardado en MongoDB (~5ms) - Panel ve inmediatamente
+2. HubSpot se actualiza en BackgroundTask - No bloquea la UX
+3. Cache TTL reducido (10s) - Solo para deduplicación de notas
 
-OPTIMIZACIONES v2.0:
+Este módulo usa Notes API (Engagements) ya que Timeline Events API
+requiere permisos especiales (403 bloqueado).
+
+OPTIMIZACIONES:
 - Idempotencia con external_id basado en MessageSid de Twilio
 - Exponential backoff para errores 429 en creación de notas
 - Caché Redis para evitar notas duplicadas
@@ -37,8 +45,10 @@ from logging_config import logger
 HUBSPOT_MAX_CONCURRENT_REQUESTS = 5  # Max concurrent requests
 HUBSPOT_REQUEST_DELAY = 0.15  # Delay between requests (seconds)
 
-# Cache TTL for associations (5 minutes)
-ASSOCIATIONS_CACHE_TTL = 300  # seconds
+# Cache TTL for associations
+# IMPORTANTE: TTL reducido a 10 segundos para mejorar sincronización en panel
+# Esto permite que los mensajes nuevos aparezcan más rápido al refrescar
+ASSOCIATIONS_CACHE_TTL = 10  # seconds (reducido de 300s para mejor sincronización)
 
 # Retry configuration for 429 errors
 MAX_RETRIES_429 = 3
@@ -159,7 +169,7 @@ class TimelineLogger:
 
     async def _set_cached_associations(self, contact_id: str, note_ids: List[str]) -> None:
         """
-        Guarda asociaciones en caché Redis con TTL de 5 minutos.
+        Guarda asociaciones en caché Redis con TTL de 10 segundos.
 
         Args:
             contact_id: ID del contacto en HubSpot
@@ -173,6 +183,35 @@ class TimelineLogger:
 
         except Exception as e:
             logger.warning(f"[TimelineLogger] Error guardando caché: {e}")
+
+    async def invalidate_cache_for_contact(self, contact_id: str) -> bool:
+        """
+        Invalida el caché de asociaciones para un contacto específico.
+
+        IMPORTANTE: Llamar este método después de crear una nota nueva
+        para que el panel muestre el mensaje inmediatamente.
+
+        Args:
+            contact_id: ID del contacto en HubSpot
+
+        Returns:
+            True si se invalidó correctamente
+        """
+        try:
+            r = await self._get_redis()
+            cache_key = f"hs_assoc:contact:{contact_id}:notes"
+            deleted = await r.delete(cache_key)
+
+            if deleted:
+                logger.info(f"[TimelineLogger] Cache INVALIDADO para contact_id={contact_id}")
+            else:
+                logger.debug(f"[TimelineLogger] Cache ya no existía para contact_id={contact_id}")
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"[TimelineLogger] Error invalidando caché: {e}")
+            return False
 
     async def _rate_limited_request(
         self,
@@ -374,6 +413,10 @@ class TimelineLogger:
                 # Marcar como procesada para idempotencia futura
                 if event.external_id:
                     await self._mark_note_as_processed(event.external_id)
+
+                # IMPORTANTE: Invalidar caché para que el panel muestre el mensaje inmediatamente
+                # Esto resuelve el problema de sincronización donde los mensajes no aparecían
+                await self.invalidate_cache_for_contact(event.contact_id)
 
                 logger.info(
                     f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, "
@@ -730,9 +773,9 @@ class TimelineLogger:
                         for result in assoc_data.get("results", [])
                     ]
 
-                    # Guardar en caché para próximas consultas
-                    if note_ids:
-                        await self._set_cached_associations(contact_id, note_ids)
+                    # Guardar en caché para próximas consultas (incluso si está vacío)
+                    # Esto evita hacer queries repetidas sin resultados
+                    await self._set_cached_associations(contact_id, note_ids)
 
                 logger.info(f"[TimelineLogger] Notas asociadas encontradas: {len(note_ids)}")
 
@@ -812,6 +855,9 @@ class TimelineLogger:
     def _format_notes_as_chat(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Convierte notas de HubSpot a formato de burbujas de chat.
+
+        ROBUSTEZ v2.1: Detección mejorada que no depende solo de emojis.
+        Usa múltiples indicadores para identificar el sender correctamente.
         """
         bubbles = []
 
@@ -830,34 +876,8 @@ class TimelineLogger:
 
                 timestamp = note.get("timestamp")
 
-                # Detectar tipo por emoji O texto (buscar en los primeros 50 caracteres)
-                body_prefix = body[:50].lower() if len(body) >= 50 else body.lower()
-
-                # Detección mejorada: emojis + palabras clave
-                if "📱" in body_prefix or "cliente" in body_prefix or "whatsapp" in body_prefix:
-                    sender = "client"
-                    sender_name = "Cliente"
-                    align = "left"
-                elif "🤖" in body_prefix or "sofía" in body_prefix or "sofia" in body_prefix or "bot" in body_prefix or "[ia]" in body_prefix:
-                    sender = "bot"
-                    sender_name = "Sofía"
-                    align = "right"
-                elif "👤" in body_prefix or "asesor" in body_prefix:
-                    sender = "advisor"
-                    sender_name = "Asesor"
-                    align = "right"
-                elif "[template" in body_prefix or "[panel" in body_prefix:
-                    # Mensajes enviados desde el panel (templates)
-                    sender = "advisor"
-                    sender_name = "Asesor (Template)"
-                    align = "right"
-                else:
-                    # Notas manuales de HubSpot (sin emoji del chatbot)
-                    # Estas son notas creadas directamente en HubSpot por el equipo
-                    sender = "manual_note"
-                    sender_name = "📝 Nota HubSpot"
-                    align = "left"
-                    logger.debug(f"[TimelineLogger] Nota manual detectada: '{body[:60]}...'")
+                # Detectar sender usando múltiples indicadores (orden de prioridad)
+                sender, sender_name, align = self._detect_sender_from_body(body)
 
                 # Limpiar prefijo y metadata del cuerpo
                 clean_body = self._clean_note_body(body)
@@ -886,6 +906,83 @@ class TimelineLogger:
             logger.warning(f"[TimelineLogger] Error ordenando burbujas: {e}")
 
         return bubbles
+
+    def _detect_sender_from_body(self, body: str) -> tuple:
+        """
+        Detecta el sender de un mensaje basándose en múltiples indicadores.
+
+        ROBUSTEZ v2.1: No depende solo de emojis, usa múltiples criterios.
+
+        Returns:
+            Tupla (sender, sender_name, align)
+        """
+        if not body:
+            return ("unknown", "Desconocido", "left")
+
+        # Obtener prefijo para análisis (primeros 100 chars para mayor contexto)
+        body_lower = body[:100].lower() if len(body) >= 100 else body.lower()
+        body_prefix = body[:50] if len(body) >= 50 else body
+
+        # === CLIENTE (Mensaje entrante) ===
+        # Indicadores: emoji 📱, texto "[cliente", "whatsapp", dirección ⬅️ con contexto cliente
+        client_indicators = [
+            "📱" in body_prefix,
+            "[cliente" in body_lower,
+            "cliente - whatsapp" in body_lower,
+            "cliente]" in body_lower,
+            # Dirección inbound con indicador de cliente
+            ("⬅️" in body_prefix and "cliente" in body_lower),
+        ]
+        if any(client_indicators):
+            return ("client", "Cliente", "left")
+
+        # === SOFÍA / BOT (Respuesta automática) ===
+        # Indicadores: emoji 🤖, texto "[sofía", "sofia", "[ia]", "bot"
+        bot_indicators = [
+            "🤖" in body_prefix,
+            "[sofía" in body_lower,
+            "sofía - ia" in body_lower,
+            "[sofia" in body_lower,
+            "sofia - ia" in body_lower,
+            "[ia]" in body_lower,
+            "- ia]" in body_lower,
+            # Bot con dirección outbound
+            ("➡️" in body_prefix and ("sofia" in body_lower or "bot" in body_lower)),
+        ]
+        if any(bot_indicators):
+            return ("bot", "Sofía", "right")
+
+        # === ASESOR (Mensaje manual) ===
+        # Indicadores: emoji 👤, texto "[asesor", templates
+        advisor_indicators = [
+            "👤" in body_prefix,
+            "[asesor" in body_lower,
+            "asesor]" in body_lower,
+            "[template:" in body_lower,
+            "[template " in body_lower,
+            "[panel" in body_lower,
+            "manual via panel" in body_lower,
+            "template via panel" in body_lower,
+        ]
+        if any(advisor_indicators):
+            # Detectar si es template
+            if "[template" in body_lower:
+                return ("advisor", "Asesor (Template)", "right")
+            return ("advisor", "Asesor", "right")
+
+        # === SISTEMA (Notificaciones automáticas) ===
+        system_indicators = [
+            "[sistema" in body_lower,
+            "[system" in body_lower,
+            "handoff" in body_lower and ("activado" in body_lower or "transferido" in body_lower),
+        ]
+        if any(system_indicators):
+            return ("system", "Sistema", "left")
+
+        # === FALLBACK: Nota manual de HubSpot ===
+        # Si no coincide con ningún patrón conocido, es una nota manual
+        logger.debug(f"[TimelineLogger] Nota sin patrón reconocido: '{body[:60]}...'")
+        return ("manual_note", "📝 Nota HubSpot", "left")
 
     def _clean_note_body(self, body: str) -> str:
         """

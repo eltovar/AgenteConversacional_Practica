@@ -24,7 +24,7 @@ from typing import List, Dict, Any, Optional
 
 # URL de la API (Railway production)
 API_URL_PRODUCTION = "https://agenteconversacionalpractica-production.up.railway.app"
-API_URL_LOCAL = "http://localhost:8000"
+API_URL_LOCAL = "http://localhost:8001"
 
 # Timeout para requests
 REQUEST_TIMEOUT = 30.0
@@ -905,7 +905,7 @@ def main():
     parser.add_argument(
         "--local", "-l",
         action="store_true",
-        help="Usar servidor local (localhost:8000) en lugar de producción"
+        help="Usar servidor local (localhost:8001) en lugar de producción"
     )
     parser.add_argument(
         "--url",

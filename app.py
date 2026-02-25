@@ -1,4 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
+# CARGA DE VARIABLES DE ENTORNO (DEBE IR PRIMERO)
+# ═══════════════════════════════════════════════════════════════════════════════
+from dotenv import load_dotenv
+load_dotenv()
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT PARA SERVIR MEDIA DEL PANEL
 # ═══════════════════════════════════════════════════════════════════════════════
 from fastapi.responses import RedirectResponse
@@ -57,8 +63,6 @@ import asyncio
 import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
-
 # Scheduler para seguimiento automático
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -85,8 +89,6 @@ from integrations.hubspot import get_outbound_router, get_timeline_logger
 # Importar función para actualizar ventana de 24h
 from middleware.outbound_panel import update_last_client_message
 
-# Cargar variables de entorno
-load_dotenv()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

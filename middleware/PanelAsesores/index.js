@@ -819,10 +819,16 @@ function renderChatBubbles(messages) {
                             </div>`;
                     }
                 } else if (mediaType === 'audio') {
+                    // Detectar tipo de audio por extension para mejor compatibilidad
+                    let audioType = 'audio/mpeg';
+                    if (mediaUrl.includes('.webm')) audioType = 'audio/webm';
+                    else if (mediaUrl.includes('.ogg')) audioType = 'audio/ogg';
+                    else if (mediaUrl.includes('.mp4') || mediaUrl.includes('.m4a')) audioType = 'audio/mp4';
+
                     mediaHtml = `
                         <div class="mb-2">
                             <audio controls class="w-full" style="max-width: 280px;">
-                                <source src="${mediaUrl}" type="audio/mpeg">
+                                <source src="${mediaUrl}" type="${audioType}">
                                 Tu navegador no soporta audio.
                             </audio>
                         </div>`;
@@ -1127,6 +1133,226 @@ function clearMediaSelection() {
 }
 
 // =========================================================================
+// FUNCIONES DE GRABACION DE AUDIO
+// =========================================================================
+
+let mediaRecorder = null;
+let audioChunks = [];
+let recordingInterval = null;
+let recordingStartTime = null;
+
+/**
+ * Inicia la grabacion de audio desde el microfono del navegador.
+ * Usa MediaRecorder API nativa (Chrome/Edge/Firefox).
+ */
+async function startRecording() {
+    console.log('[Panel] Iniciando grabacion de audio...');
+
+    // Verificar soporte del navegador
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Tu navegador no soporta grabacion de audio. Usa Chrome, Edge o Firefox.');
+        return;
+    }
+
+    try {
+        // Solicitar acceso al microfono
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log('[Panel] Acceso al microfono concedido');
+
+        // Determinar el mejor formato soportado
+        let mimeType = 'audio/webm';
+        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+            mimeType = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+            mimeType = 'audio/ogg;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            mimeType = 'audio/mp4';
+        }
+        console.log('[Panel] Usando formato:', mimeType);
+
+        // Crear MediaRecorder
+        mediaRecorder = new MediaRecorder(stream, { mimeType });
+        audioChunks = [];
+
+        // Evento: datos disponibles
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                audioChunks.push(event.data);
+            }
+        };
+
+        // Evento: grabacion detenida
+        mediaRecorder.onstop = async () => {
+            console.log('[Panel] Grabacion detenida, procesando audio...');
+
+            // Crear blob con los chunks
+            const audioBlob = new Blob(audioChunks, { type: mimeType });
+            console.log('[Panel] Audio grabado:', audioBlob.size, 'bytes');
+
+            // Determinar extension
+            let extension = 'webm';
+            if (mimeType.includes('ogg')) extension = 'ogg';
+            else if (mimeType.includes('mp4')) extension = 'mp4';
+
+            // Convertir a File para enviar por FormData
+            const audioFile = new File(
+                [audioBlob],
+                `nota_voz_${Date.now()}.${extension}`,
+                { type: mimeType }
+            );
+
+            // Cerrar stream del microfono
+            stream.getTracks().forEach(track => track.stop());
+            console.log('[Panel] Stream de microfono cerrado');
+
+            // Mostrar confirmacion y enviar
+            confirmAndSendAudio(audioFile);
+        };
+
+        // Evento: error
+        mediaRecorder.onerror = (event) => {
+            console.error('[Panel] Error en MediaRecorder:', event.error);
+            alert('Error durante la grabacion: ' + event.error.message);
+            stopRecording();
+        };
+
+        // Iniciar grabacion
+        mediaRecorder.start(1000); // Chunks cada 1 segundo
+        console.log('[Panel] Grabacion iniciada');
+
+        // Actualizar UI
+        updateRecordingUI(true);
+
+    } catch (err) {
+        console.error('[Panel] Error al acceder al microfono:', err);
+
+        if (err.name === 'NotAllowedError') {
+            alert('Permiso denegado. Por favor permite el acceso al microfono en tu navegador.');
+        } else if (err.name === 'NotFoundError') {
+            alert('No se encontro ningun microfono. Conecta un microfono e intenta de nuevo.');
+        } else {
+            alert('Error al acceder al microfono: ' + err.message);
+        }
+    }
+}
+
+/**
+ * Detiene la grabacion actual.
+ */
+function stopRecording() {
+    console.log('[Panel] Deteniendo grabacion...');
+
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+    }
+
+    updateRecordingUI(false);
+}
+
+/**
+ * Muestra confirmacion y envia el audio grabado.
+ * @param {File} audioFile - Archivo de audio grabado
+ */
+function confirmAndSendAudio(audioFile) {
+    // Mostrar preview del audio antes de enviar
+    const preview = document.getElementById('mediaPreview');
+    const previewName = document.getElementById('mediaPreviewName');
+
+    previewName.innerHTML = `&#127911; ${audioFile.name} (${(audioFile.size / 1024).toFixed(1)} KB)`;
+    preview.classList.remove('hidden');
+
+    // Setear el archivo para que sendMessage lo use
+    selectedMediaFile = audioFile;
+
+    console.log('[Panel] Audio listo para enviar:', audioFile.name, audioFile.type, audioFile.size);
+
+    // Preguntar si desea enviar inmediatamente o agregar texto
+    const sendNow = confirm('Audio grabado. ¿Deseas enviarlo ahora?\n\nPresiona "Cancelar" para agregar un mensaje de texto antes de enviar.');
+
+    if (sendNow) {
+        // Enviar inmediatamente
+        sendMessage(new Event('submit'));
+    }
+    // Si cancela, el archivo queda en selectedMediaFile y puede agregar texto
+}
+
+/**
+ * Actualiza la UI segun el estado de grabacion.
+ * @param {boolean} isRecording - Si esta grabando o no
+ */
+function updateRecordingUI(isRecording) {
+    const recordBtn = document.getElementById('recordBtn');
+    const recordingStatus = document.getElementById('recordingStatus');
+    const timerDisplay = document.getElementById('recordTimer');
+    const attachBtn = document.getElementById('attachBtn');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+
+    if (isRecording) {
+        // Ocultar boton de microfono, mostrar indicador de grabacion
+        recordBtn.classList.add('hidden');
+        recordingStatus.classList.remove('hidden');
+
+        // Deshabilitar otros controles mientras graba
+        attachBtn.disabled = true;
+        messageInput.disabled = true;
+        sendBtn.disabled = true;
+
+        // Iniciar contador de tiempo
+        recordingStartTime = Date.now();
+        recordingInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+            const seconds = (elapsed % 60).toString().padStart(2, '0');
+            timerDisplay.textContent = `${minutes}:${seconds}`;
+        }, 1000);
+
+        console.log('[Panel] UI actualizada: grabando');
+
+    } else {
+        // Mostrar boton de microfono, ocultar indicador
+        recordBtn.classList.remove('hidden');
+        recordingStatus.classList.add('hidden');
+
+        // Rehabilitar controles
+        attachBtn.disabled = false;
+        messageInput.disabled = false;
+        sendBtn.disabled = false;
+
+        // Detener contador
+        if (recordingInterval) {
+            clearInterval(recordingInterval);
+            recordingInterval = null;
+        }
+
+        // Resetear timer display
+        if (timerDisplay) {
+            timerDisplay.textContent = '00:00';
+        }
+
+        console.log('[Panel] UI actualizada: no grabando');
+    }
+}
+
+/**
+ * Cancela la grabacion actual sin enviar.
+ */
+function cancelRecording() {
+    console.log('[Panel] Cancelando grabacion...');
+
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        // Remover el handler de onstop para que no intente enviar
+        mediaRecorder.onstop = () => {
+            console.log('[Panel] Grabacion cancelada');
+        };
+        mediaRecorder.stop();
+    }
+
+    audioChunks = [];
+    updateRecordingUI(false);
+}
+
+// =========================================================================
 // FUNCIONES DE INTERACCION
 // =========================================================================
 
@@ -1167,6 +1393,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     document.getElementById('messageInput').disabled = false;
     document.getElementById('sendBtn').disabled = false;
     document.getElementById('attachBtn').disabled = false;
+    document.getElementById('recordBtn').disabled = false;  // Habilitar grabacion de audio
     document.getElementById('selectedPhone').value = phone;
     document.getElementById('selectedContactId').value = contactId;
 

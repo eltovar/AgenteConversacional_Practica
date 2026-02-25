@@ -6,6 +6,30 @@
     <title>Panel de Asesores - WhatsApp</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="/whatsapp/panel/static/style.css">
+    <style>
+        /* Estilos para grabacion de audio */
+        .recording-dot {
+            height: 10px;
+            width: 10px;
+            background-color: #dc2626;
+            border-radius: 50%;
+            display: inline-block;
+            animation: blink-recording 1s infinite;
+        }
+        @keyframes blink-recording {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .btn-recording {
+            animation: pulse-recording 1.5s infinite;
+        }
+        @keyframes pulse-recording {
+            0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+        }
+    </style>
 </head>
 <body class="bg-gray-100 h-screen overflow-hidden">
     <div class="flex h-full">
@@ -181,6 +205,39 @@
                                       d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path>
                             </svg>
                         </button>
+                    </div>
+                    <!-- Boton de grabar audio -->
+                    <div class="flex flex-col justify-center" id="recordingControls">
+                        <!-- Boton de microfono (visible cuando NO esta grabando) -->
+                        <button
+                            type="button"
+                            id="recordBtn"
+                            onclick="startRecording()"
+                            class="p-3 text-gray-500 hover:text-red-600 hover:bg-gray-200 rounded-lg transition-colors disabled:opacity-50"
+                            title="Grabar nota de voz"
+                            disabled
+                        >
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                      d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                            </svg>
+                        </button>
+                        <!-- Indicador de grabacion activa (oculto por defecto) -->
+                        <div id="recordingStatus" class="hidden flex items-center gap-2 px-3 py-2 bg-red-100 rounded-lg">
+                            <span class="recording-dot"></span>
+                            <span id="recordTimer" class="text-sm text-red-700 font-mono">00:00</span>
+                            <button
+                                type="button"
+                                id="stopRecordBtn"
+                                onclick="stopRecording()"
+                                class="p-1 text-red-700 hover:text-red-900 transition-colors"
+                                title="Detener grabacion"
+                            >
+                                <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                                    <rect x="6" y="6" width="12" height="12" rx="1"></rect>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                     <div class="flex-1 flex flex-col">
                         <!-- Preview de archivo adjunto -->

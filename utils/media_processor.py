@@ -313,13 +313,15 @@ class MediaProcessor:
 
         Args:
             file_bytes: Contenido del archivo
-            content_type: Tipo MIME
+            content_type: Tipo MIME (incluye audio/webm de grabaciones del navegador)
             phone: Teléfono destino (para naming)
 
         Returns:
             URL permanente en Cloudinary
         """
-        is_audio = "audio" in content_type.lower()
+        content_lower = content_type.lower()
+        # webm es el formato nativo de MediaRecorder en navegadores Chrome/Edge
+        is_audio = "audio" in content_lower or "webm" in content_lower
         folder = "audios_asesores" if is_audio else "imagenes_asesores"
         resource_type = "video" if is_audio else "image"
 

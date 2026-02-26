@@ -379,8 +379,9 @@ class ContactManager:
         # Obtener owner basado en el canal de origen
         owner_id = lead_assigner.get_next_owner(source_channel)
 
-        # Timestamp con zona horaria de Bogotá
-        now = datetime.now(TIMEZONE_BOGOTA)
+        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
+        from datetime import timezone
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
         properties = {
             # Identificador único - CRÍTICO para evitar duplicados
@@ -391,7 +392,7 @@ class ContactManager:
 
             # Metadata del chatbot
             "canal_origen": source_channel,
-            "chatbot_timestamp": str(int(now.timestamp() * 1000)),
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
 
             # Lifecycle stage inicial
             "lifecyclestage": "lead",

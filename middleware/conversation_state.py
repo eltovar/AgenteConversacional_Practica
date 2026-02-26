@@ -30,6 +30,37 @@ def get_bogota_now_iso() -> str:
     """Retorna datetime actual en formato ISO."""
     return get_bogota_now().isoformat()
 
+
+def parse_datetime_safe(date_str: str) -> datetime:
+    """
+    Parsea un string ISO datetime de forma segura.
+
+    Maneja varios formatos:
+    - ISO con timezone: 2026-02-25T10:30:00-05:00
+    - ISO sin timezone: 2026-02-25T10:30:00
+    - Solo fecha: 2026-02-25
+
+    Siempre retorna datetime con timezone de Bogotá.
+    """
+    if not date_str:
+        return get_bogota_now()
+
+    try:
+        # Intentar parsear ISO con timezone
+        dt = datetime.fromisoformat(date_str)
+
+        # Si no tiene timezone, asumir Bogotá
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TIMEZONE_BOGOTA)
+        else:
+            # Convertir a Bogotá para comparaciones consistentes
+            dt = dt.astimezone(TIMEZONE_BOGOTA)
+
+        return dt
+    except (ValueError, TypeError):
+        # Si falla, retornar ahora (fail-safe)
+        return get_bogota_now()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODELOS
 # ═══════════════════════════════════════════════════════════════════════════════

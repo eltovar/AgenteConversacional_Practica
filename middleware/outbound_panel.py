@@ -101,10 +101,11 @@ class WindowStatus:
 def _validate_api_key(api_key: Optional[str]) -> bool:
     """Valida la API key del admin."""
     if not api_key:
+        logger.warning("[Panel] API Key no proporcionada en header")
         return False
 
-    # Normalizar entrada
-    provided = api_key.strip()
+    # Normalizar entrada (quitar espacios y comillas si existen)
+    provided = api_key.strip().strip('"').strip("'")
 
     # Soporta dos nombres de variable de entorno por compatibilidad
     expected = os.getenv("ADMIN_API_KEY") or os.getenv("PANEL_API_KEY")
@@ -113,13 +114,16 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
     if not expected:
         expected = "protect_admin_2024_xK9mP3qR"
 
-    expected = expected.strip()
+    # Normalizar valor esperado (quitar espacios y comillas si existen)
+    expected = expected.strip().strip('"').strip("'")
 
     if provided == expected:
+        logger.debug(f"[Panel] API Key validada correctamente")
         return True
 
-    # Intentar comparación sin mayúsculas (por si acaso)
-    return provided.lower() == expected.lower()
+    # Log para debugging (solo primeros 8 chars por seguridad)
+    logger.warning(f"[Panel] API Key inválida. Recibido: '{provided[:8]}...' vs Esperado: '{expected[:8]}...'")
+    return False
 
 
 async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:

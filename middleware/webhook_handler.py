@@ -843,10 +843,14 @@ async def _sync_message_to_hubspot(
                 pass  # No crítico
 
         # Actualizar propiedad de última conversación (backup)
+        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
+        from datetime import timezone
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
         contact_manager = get_contact_manager()
         properties = {
             "chatbot_conversation": f"[{direction.upper()}] {message[:500]}",
-            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
         await contact_manager.update_contact_info(contact_id, properties)
 
@@ -888,13 +892,17 @@ async def _sync_conversation_to_hubspot(
         )
 
         # 3. Actualizar propiedades del contacto (backup/resumen)
+        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
+        from datetime import timezone
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
         contact_manager = get_contact_manager()
         sofia = get_sofia_brain()
         summary = await sofia.get_conversation_summary(phone)
 
         properties = {
             "chatbot_conversation": summary[-3000:],
-            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
         await contact_manager.update_contact_info(contact_id, properties)
 
@@ -1018,13 +1026,17 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 pass  # No crítico
 
         # 3. Actualizar propiedades del contacto con análisis
+        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
+        from datetime import timezone
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
         contact_manager = get_contact_manager()
         sofia = get_sofia_brain()
         summary = await sofia.get_conversation_summary(phone)
 
         properties = {
             "chatbot_conversation": summary[-3000:],
-            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
 
         # Agregar summary_update si existe nueva información
@@ -1098,10 +1110,14 @@ async def _notify_high_priority_lead(
         reason_str = ", ".join(reasons) if reasons else f"Handoff: {analysis.handoff_priority}"
 
         # Actualizar propiedades para marcar como lead caliente
+        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
+        from datetime import timezone
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
         properties = {
             "chatbot_hot_lead": "true",
             "chatbot_hot_lead_reason": reason_str,
-            "chatbot_timestamp": str(int(datetime.now().timestamp() * 1000)),
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
 
         # Agregar URL del link si existe

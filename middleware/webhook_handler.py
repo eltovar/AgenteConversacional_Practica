@@ -32,7 +32,7 @@ from integrations.hubspot import get_timeline_logger
 # MongoDB para almacenamiento en tiempo real
 from database.mongodb_client import get_mongo_manager
 
-# Procesador de multimedia (Cloudinary + Whisper)
+# Procesador de multimedia (Bunny.net CDN + Whisper)
 from utils.media_processor import media_processor
 
 # Importación para actualizar ventana de 24h
@@ -120,20 +120,76 @@ def get_sofia_brain() -> SofiaBrain:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DETECCIÓN DINÁMICA DE CANAL (UNIFICADA CON LinkDetector)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_channel_dynamic(body: str, current_redis_channel: Optional[str]) -> str:
+    """
+    Detecta el canal basado en links usando LinkDetector (robusto).
+
+    UNIFICADO: Usa el mismo sistema de detección que el análisis de Sofía,
+    eliminando redundancias y garantizando consistencia.
+
+    Ventajas sobre detección manual:
+    - Detecta short links (instagr.am, fb.com, youtu.be, vm.tiktok.com)
+    - Detecta variantes de dominio (m.facebook.com, www.)
+    - Soporta todos los canales: Instagram, Facebook, LinkedIn, YouTube, TikTok,
+      Finca Raíz, Metrocuadrado, Mercado Libre, Ciencuadras, Página Web
+
+    Prioridad:
+    1. Links detectados en el contenido del mensaje
+    2. Canal actual en Redis (si está activo)
+    3. Default 'whatsapp'
+    """
+    if not body:
+        if current_redis_channel and current_redis_channel not in ["desconocido", "default", None]:
+            return current_redis_channel
+        return "whatsapp"
+
+    # 1. Usar LinkDetector para detección robusta
+    link_detector = get_link_detector()
+    result = link_detector.analizar_mensaje(body)
+
+    if result.tiene_link and result.portal != PortalOrigen.DESCONOCIDO:
+        # Mapear PortalOrigen a string de canal compatible con MongoDB/Redis
+        channel = result.portal.value  # "instagram", "facebook", "finca_raiz", etc.
+        logger.debug(
+            f"[Webhook] Canal detectado por LinkDetector: {channel} "
+            f"(URL: {result.url_original[:50] if result.url_original else 'N/A'}...)"
+        )
+        return channel
+
+    # 2. Si no hay link detectado, usar canal de Redis si existe
+    if current_redis_channel and current_redis_channel not in ["desconocido", "default", None]:
+        logger.debug(f"[Webhook] Canal preservado del Redis: {current_redis_channel}")
+        return current_redis_channel
+
+    # 3. Default absoluto
+    logger.debug(f"[Webhook] Canal default: whatsapp (sin links ni contexto previo)")
+    return "whatsapp"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA HÍBRIDA: should_bot_respond
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Lista de canales a verificar para HUMAN_ACTIVE
+# IMPORTANTE: Debe coincidir con PortalOrigen en link_detector.py
 CANALES_A_VERIFICAR = [
-    "whatsapp", "instagram", "facebook", "whatsapp_directo",
-    "pagina_web", "metrocuadrado", "finca_raiz", "ciencuadras",
-    "mercado_libre", "default"
+    # WhatsApp directo
+    "whatsapp", "whatsapp_directo",
+    # Redes Sociales
+    "instagram", "facebook", "linkedin", "youtube", "tiktok",
+    # Portales Inmobiliarios
+    "finca_raiz", "metrocuadrado", "mercado_libre", "ciencuadras",
+    # Otros
+    "pagina_web", "default", "desconocido"
 ]
 
 async def should_bot_respond(
     phone_normalized: str,
     contact_id: Optional[str] = None
-) -> tuple[bool, str, Optional[str]]:
+) -> tuple[bool, str, Optional[str], str]:
     """
     Determina si Sofía debe responder al mensaje.
 
@@ -144,11 +200,17 @@ async def should_bot_respond(
     1. Estado en Redis EN CUALQUIER CANAL (BOT_ACTIVE / HUMAN_ACTIVE / PENDING_HANDOFF)
     2. Propiedad `sofia_activa` en HubSpot (si hay contact_id)
 
+    Retorna:
+        (bool, str, Optional[str], str): (should_respond, reason, special_message, detected_redis_channel)
+        El 4to elemento es el canal en el que se encontró al usuario en Redis, útil para la
+        detección dinámica de canal basada en contenido.
+
     FIX: Ahora verifica HUMAN_ACTIVE en TODOS los canales posibles,
     no solo en 'whatsapp' por defecto. Esto evita que Sofía responda
     cuando un asesor está atendiendo desde otro canal (ej: instagram).
     """
     state_manager = get_state_manager()
+    detected_redis_channel = "whatsapp"  # Default
 
     # LOG DE DEBUG: Mostrar que se está verificando
     logger.info(f"🔍 [should_bot_respond] Verificando estado para: {phone_normalized}")
@@ -170,14 +232,14 @@ async def should_bot_respond(
                 f"🤫 [should_bot_respond] Bot silenciado: HUMANO_INTERVINIENDO "
                 f"(teléfono: {phone_normalized}, canal detectado: {canal})"
             )
-            return False, "HUMANO_INTERVINIENDO", None
+            return False, "HUMANO_INTERVINIENDO", None, canal
 
         if status == ConversationStatus.IN_CONVERSATION:
             logger.info(
                 f"🤫 [should_bot_respond] Bot silenciado: ASESOR_EN_CONVERSACION "
                 f"(teléfono: {phone_normalized}, canal detectado: {canal})"
             )
-            return False, "ASESOR_EN_CONVERSACION", None
+            return False, "ASESOR_EN_CONVERSACION", None, canal
 
         if status == ConversationStatus.PENDING_HANDOFF:
             logger.info(
@@ -188,7 +250,11 @@ async def should_bot_respond(
                 "En un momento uno de nuestros asesores te atenderá. "
                 "Gracias por tu paciencia. 🙏"
             )
-            return False, "PENDIENTE_HANDOFF", special_message
+            return False, "PENDIENTE_HANDOFF", special_message, canal
+        
+        # Guardar el primer canal activo (aunque no sea HUMAN_ACTIVE)
+        if status and detected_redis_channel == "whatsapp":
+            detected_redis_channel = canal
 
     # LOG DE DEBUG: Mostrar resumen de estados
     if estados_encontrados:
@@ -208,7 +274,7 @@ async def should_bot_respond(
                 f"🤫 [should_bot_respond] Bot silenciado: DESACTIVADO_EN_CRM "
                 f"(contact_id: {contact_id})"
             )
-            return False, "DESACTIVADO_EN_CRM", None
+            return False, "DESACTIVADO_EN_CRM", None, detected_redis_channel
 
     # ═══════════════════════════════════════════════════════════════════════
     # Todo OK - Sofía puede responder
@@ -216,7 +282,7 @@ async def should_bot_respond(
     logger.info(
         f"✅ [should_bot_respond] Bot ACTIVO: OK (teléfono: {phone_normalized})"
     )
-    return True, "OK", None
+    return True, "OK", None, detected_redis_channel
 
 
 @router.post("/webhook")
@@ -269,7 +335,7 @@ async def whatsapp_webhook(
             logger.info(f"[Webhook] ContentType: {MediaContentType0}")
 
             try:
-                # Procesar multimedia: descarga, sube a Cloudinary, transcribe/analiza
+                # Procesar multimedia: descarga, sube a Bunny.net, transcribe/analiza
                 media_result = await media_processor.process_incoming_media(
                     media_url=MediaUrl0,
                     content_type=MediaContentType0 or "application/octet-stream",
@@ -332,12 +398,15 @@ async def whatsapp_webhook(
                     source_channel="whatsapp_directo"
                 )
                 if contact_info:
+                    # Detectar canal dinámicamente también para followups
+                    followup_final_channel = detect_channel_dynamic(Body, followup_canal)
                     background_tasks.add_task(
                         _sync_message_to_hubspot,
                         contact_info.contact_id,
                         Body,
                         "incoming",
                         phone_normalized,
+                        followup_final_channel,
                         media_result  # Pasar resultado completo de multimedia
                     )
             except Exception as e:
@@ -390,17 +459,23 @@ async def whatsapp_webhook(
         # PASO 4: Verificar si Sofía debe responder (Lógica Híbrida)
         # ════════════════════════════════════════════════════════════
         contact_id = contact_info.contact_id if contact_info else None
-        should_respond, reason, special_message = await should_bot_respond(
+        should_respond, reason, special_message, redis_channel = await should_bot_respond(
             phone_normalized=phone_normalized,
             contact_id=contact_id
         )
+
+        # Aplicar Detección Dinámica de Canal
+        # Si el cliente envía un link de IG, el canal DEBE ser 'instagram'
+        # Si no hay link, respetar el canal del Redis
+        final_channel = detect_channel_dynamic(Body, redis_channel)
+        logger.info(f"[Webhook] Canal final detectado: {final_channel} (redis: {redis_channel})")
 
         if not should_respond:
             # ═══════════════════════════════════════════════════════════════════
             # CRÍTICO: Guardar mensaje del cliente SIEMPRE (MongoDB + HubSpot)
             # Aunque el bot esté silenciado, el mensaje debe aparecer en el panel
             # ═══════════════════════════════════════════════════════════════════
-            logger.info(f"[Webhook] 🔇 Bot silenciado ({reason}) - Guardando mensaje del cliente")
+            logger.info(f"[Webhook] 🔇 Bot silenciado ({reason}) - Guardando mensaje del cliente en canal {final_channel}")
 
             # PASO 1: Guardar en MongoDB SIEMPRE (independiente de HubSpot)
             # Esto asegura que el mensaje aparezca en el panel de asesores
@@ -421,13 +496,13 @@ async def whatsapp_webhook(
                     phone=phone_normalized,
                     content=Body,
                     sender="client",
-                    channel="whatsapp",
+                    channel=final_channel,
                     hubspot_contact_id=contact_id,  # Puede ser None
                     media=media_dict
                 )
 
                 if mongo_message_id:
-                    logger.info(f"[Webhook] ✅ Mensaje guardado en MongoDB: {mongo_message_id} (bot silenciado)")
+                    logger.info(f"[Webhook] ✅ Mensaje guardado en MongoDB: {mongo_message_id} (bot silenciado, canal={final_channel})")
                 else:
                     logger.warning(f"[Webhook] ⚠️ MongoDB retornó None al guardar mensaje")
 
@@ -436,13 +511,14 @@ async def whatsapp_webhook(
 
             # PASO 2: Registrar en HubSpot si tenemos contact_info
             if contact_info:
-                logger.info(f"[Webhook] 📱 Registrando mensaje del cliente en HubSpot (contact_id={contact_info.contact_id})")
+                logger.info(f"[Webhook] 📱 Registrando mensaje del cliente en HubSpot (contact_id={contact_info.contact_id}, canal={final_channel})")
                 background_tasks.add_task(
                     _sync_message_to_hubspot,
                     contact_info.contact_id,
                     Body,
                     "incoming",
                     phone_normalized,
+                    final_channel,
                     media_result  # Pasar resultado completo de multimedia
                 )
             else:
@@ -630,13 +706,14 @@ async def whatsapp_webhook(
                     f"[BOT BLOQUEADO - {final_status.value}] {response_text}",
                     phone_normalized,
                     analysis,
+                    final_channel,
                     media_result  # Pasar resultado completo de multimedia
                 )
             return Response(content="", media_type="text/xml")
 
         # Sincronizar con HubSpot en background (incluye análisis)
         if contact_info:
-            logger.info(f"[Webhook] 📱 Registrando conversación en HubSpot (contact_id={contact_info.contact_id})")
+            logger.info(f"[Webhook] 📱 Registrando conversación en HubSpot (contact_id={contact_info.contact_id}, canal={final_channel})")
             background_tasks.add_task(
                 _sync_conversation_with_analysis_to_hubspot,
                 contact_info.contact_id,
@@ -644,6 +721,7 @@ async def whatsapp_webhook(
                 response_text,
                 phone_normalized,
                 analysis,
+                final_channel,
                 media_result  # Pasar resultado completo de multimedia
             )
         else:
@@ -760,6 +838,7 @@ async def _sync_message_to_hubspot(
     message: str,
     direction: str,
     phone: str,
+    channel: str = "whatsapp",
     media_result: Optional[dict] = None
 ) -> None:
     """
@@ -770,6 +849,7 @@ async def _sync_message_to_hubspot(
     2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
 
     Args:
+        channel: Canal de origen del mensaje (whatsapp, instagram, facebook, etc.)
         media_result: Diccionario con info de multimedia procesada
                      (permanent_url, media_type, transcription, analysis)
     """
@@ -798,13 +878,13 @@ async def _sync_message_to_hubspot(
             phone=phone,
             content=message,
             sender=sender,
-            channel="whatsapp",
+            channel=channel,
             hubspot_contact_id=contact_id,
             media=media_dict
         )
 
         if mongo_message_id:
-            logger.debug(f"[MongoDB] Mensaje guardado: {mongo_message_id} ({direction})")
+            logger.debug(f"[MongoDB] Mensaje guardado: {mongo_message_id} ({direction}, canal={channel})")
     except Exception as e:
         logger.error(f"[MongoDB] Error guardando mensaje: {e}")
         # Continuar con HubSpot aunque MongoDB falle
@@ -854,7 +934,7 @@ async def _sync_message_to_hubspot(
         }
         await contact_manager.update_contact_info(contact_id, properties)
 
-        logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {phone}")
+        logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {phone} (canal={channel})")
 
     except (ValueError, KeyError, TypeError) as e:
         logger.error("[HubSpot Sync] Error sincronizando mensaje: %s", e)
@@ -920,6 +1000,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
     bot_response: str,
     phone: str,
     analysis,
+    channel: str = "whatsapp",
     media_result: Optional[dict] = None
 ) -> None:
     """
@@ -933,6 +1014,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
     basadas en la información extraída del análisis Single-Stream.
 
     Args:
+        channel: Canal de origen del mensaje (whatsapp, instagram, facebook, etc.)
         media_result: Diccionario con info de multimedia procesada
                      (permanent_url, media_type, transcription, analysis)
     """
@@ -962,7 +1044,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
             phone=phone,
             content=user_message,
             sender="client",
-            channel="whatsapp",
+            channel=channel,
             hubspot_contact_id=contact_id,
             metadata={"analysis_emocion": analysis.emocion if analysis else None},
             media=media_dict
@@ -973,7 +1055,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
             phone=phone,
             content=bot_response,
             sender="bot",
-            channel="whatsapp",
+            channel=channel,
             hubspot_contact_id=contact_id,
             metadata={
                 "analysis_handoff": analysis.handoff_priority if analysis else None,

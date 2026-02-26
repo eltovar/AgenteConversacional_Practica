@@ -1115,7 +1115,7 @@ function handleFileSelect(input) {
         return;
     }
 
-    // Validar tamano (max 16MB para Cloudinary)
+    // Validar tamano (max 16MB para Bunny.net CDN)
     const maxSize = 16 * 1024 * 1024;
     if (file.size > maxSize) {
         alert('El archivo es demasiado grande. Maximo 16MB.');

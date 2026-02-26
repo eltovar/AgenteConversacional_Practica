@@ -524,5 +524,10 @@ class ConversationStateManager:
             return 0
 
     async def close(self):
-        """Cierra la conexión a Redis."""
-        await self.redis.close()
+        """Cierra la conexión a Redis de forma segura."""
+        try:
+            if self.redis:
+                await self.redis.aclose()
+                logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
+        except Exception as e:
+            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")

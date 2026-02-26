@@ -420,6 +420,15 @@ async def send_message(
 
     phone_normalized = validation.normalized
 
+    # =========================================================================
+    # ASIGNACIÓN DE CANAL POR DEFECTO
+    # Si 'canal' es nulo, vacío, o literalmente "null" (que a veces manda JS)
+    # =========================================================================
+    if not canal or canal.strip() == "" or canal.lower() == "null":
+        canal_final = "whatsapp"
+    else:
+        canal_final = canal.lower().strip()
+
     # Verificar ventana de 24 horas
     window_status = await check_24h_window(phone_normalized)
 
@@ -465,10 +474,10 @@ async def send_message(
         )
         state_manager = ConversationStateManager(redis_url)
 
-        canal_info = f":{canal}" if canal else ""
+        canal_info = f":{canal_final}"
 
         # Verificar estado actual (con canal)
-        current_status = await state_manager.get_status(phone_normalized, canal)
+        current_status = await state_manager.get_status(phone_normalized, canal_final)
 
         if current_status in [ConversationStatus.HUMAN_ACTIVE, ConversationStatus.PENDING_HANDOFF]:
             # Ya está en espera, cambiar a IN_CONVERSATION (asesora está atendiendo)
@@ -476,7 +485,7 @@ async def send_message(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
                 ttl=state_manager.HANDOFF_TTL_SECONDS,
-                canal=canal
+                canal=canal_final
             )
             logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
         elif current_status == ConversationStatus.IN_CONVERSATION:
@@ -485,26 +494,26 @@ async def send_message(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
                 ttl=state_manager.HANDOFF_TTL_SECONDS,
-                canal=canal
+                canal=canal_final
             )
             logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {phone_normalized}{canal_info}")
         else:
             # Era BOT_ACTIVE o CLOSED, activar humano y cambiar a IN_CONVERSATION
-            await state_manager.activate_human(phone_normalized, canal_origen=canal)
+            await state_manager.activate_human(phone_normalized, canal_origen=canal_final)
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
                 ttl=state_manager.HANDOFF_TTL_SECONDS,
-                canal=canal
+                canal=canal_final
             )
             logger.info(f"[Panel] Sofía pausada y estado IN_CONVERSATION para {phone_normalized}{canal_info}")
     except Exception as e:
         logger.warning(f"[Panel] Error manejando estado: {e}")
 
     # =========================================================================
-    # Procesar archivo multimedia si se envió
+    # Procesar archivo multimedia si se envió (Bunny.net Storage)
     # =========================================================================
-    cloudinary_url = None
+    permanent_media_url = None
     media_type = None
 
     if media_file and media_file.filename:
@@ -515,14 +524,14 @@ async def send_message(
 
             logger.info(f"[Panel] 📁 Archivo recibido: {media_file.filename}, tipo={content_type}, tamaño={len(file_bytes)} bytes")
 
-            # Subir a Cloudinary
-            cloudinary_url = await media_processor.upload_outgoing_media(
+            # Subir a Bunny.net Storage (CDN)
+            permanent_media_url = await media_processor.upload_outgoing_media(
                 file_bytes=file_bytes,
                 content_type=content_type,
                 phone=phone_normalized
             )
 
-            logger.info(f"[Panel] 📤 Cloudinary URL obtenida: {cloudinary_url}")
+            logger.info(f"[Panel] 📤 Bunny.net URL obtenida: {permanent_media_url}")
 
             # Determinar tipo de media (incluir webm como audio)
             if content_type.startswith("image/"):
@@ -532,7 +541,7 @@ async def send_message(
             else:
                 media_type = "file"
 
-            logger.info(f"[Panel] ✅ Multimedia subido a Cloudinary: {media_type} -> {cloudinary_url}")
+            logger.info(f"[Panel] ✅ Multimedia subido a Bunny.net: {media_type} -> {permanent_media_url}")
 
         except Exception as e:
             logger.error(f"[Panel] Error procesando multimedia: {e}")
@@ -548,7 +557,7 @@ async def send_message(
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
         body=message_body or "📎",  # Twilio requiere body, usar emoji si solo hay media
-        media_url=cloudinary_url
+        media_url=permanent_media_url
     )
 
     if result["status"] == "success":
@@ -564,9 +573,9 @@ async def send_message(
 
             # Construir diccionario `media` compatible con MongoDBManager.save_message
             media_dict: Optional[Dict[str, Any]] = None
-            if cloudinary_url:
+            if permanent_media_url:
                 media_dict = {
-                    "permanent_url": cloudinary_url,
+                    "permanent_url": permanent_media_url,
                     "type": media_type,
                     "size_bytes": len(file_bytes) if 'file_bytes' in locals() and file_bytes is not None else None,
                     "format": (content_type.split('/')[-1] if content_type else None),
@@ -579,7 +588,7 @@ async def send_message(
                 phone=phone_normalized,
                 content=message_body or (f"[{media_type.upper()}]" if media_type else message_body),
                 sender="advisor",
-                channel=canal or "whatsapp",
+                channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
                 metadata={"source": "Manual via Panel"},
@@ -598,9 +607,9 @@ async def send_message(
         if contact_id:
             # Construir contenido para HubSpot incluyendo link multimedia si existe
             hubspot_content = message_body
-            if cloudinary_url:
+            if permanent_media_url:
                 media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
-                hubspot_content = f"{message_body}\n\n{media_label}: {cloudinary_url}" if message_body else f"{media_label}: {cloudinary_url}"
+                hubspot_content = f"{message_body}\n\n{media_label}: {permanent_media_url}" if message_body else f"{media_label}: {permanent_media_url}"
 
             background_tasks.add_task(
                 _log_advisor_message_to_hubspot,
@@ -615,7 +624,7 @@ async def send_message(
         background_tasks.add_task(
             _update_advisor_timestamp,
             phone_normalized,
-            canal
+            canal_final
         )
 
         return JSONResponse(
@@ -626,14 +635,14 @@ async def send_message(
                 "mongo_id": mongo_message_id,
                 "to": phone_normalized,
                 "contact_id": contact_id,
-                "canal": canal,
+                "canal": canal_final,
                 "window_status": {
                     "is_open": window_status.is_open,
                     "time_remaining": window_status.time_remaining_seconds
                 },
                 "sofia_paused": True,
                 "message_source": "Manual via Panel",
-                "media_url": cloudinary_url,
+                "media_url": permanent_media_url,
                 "media_type": media_type
             }
         )
@@ -676,6 +685,15 @@ async def send_template_message(
         )
 
     phone_normalized = validation.normalized
+
+    # =========================================================================
+    # ASIGNACIÓN DE CANAL POR DEFECTO
+    # Si 'canal' es nulo, vacío, o literalmente "null" (que a veces manda JS)
+    # =========================================================================
+    if not canal or canal.strip() == "" or canal.lower() == "null":
+        canal_final = "whatsapp"
+    else:
+        canal_final = canal.lower().strip()
 
     # Verificar disponibilidad de Twilio
     if not twilio_client.is_available:
@@ -739,7 +757,7 @@ async def send_template_message(
                 phone=phone_normalized,
                 content=template_content,
                 sender="advisor",
-                channel=canal or "whatsapp",
+                channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
                 metadata={"source": "Template via Panel", "template_id": template_id}
@@ -770,7 +788,7 @@ async def send_template_message(
                 "mongo_id": mongo_message_id,
                 "to": phone_normalized,
                 "contact_id": contact_id,
-                "canal": canal,
+                "canal": canal_final,
                 "template_id": template_id,
                 "template_name": template.get("name"),
                 "template_sent": True,

@@ -4,13 +4,15 @@ Procesador unificado de multimedia para WhatsApp.
 
 Maneja:
 - Descarga de archivos desde Twilio
-- Subida permanente a Cloudinary
+- Subida permanente a Bunny.net Storage (CDN)
 - Transcripción de audios con Whisper
 - Análisis de imágenes con GPT-4o-mini
 
 ARQUITECTURA:
-- Cliente envía audio/imagen → Twilio → Cloudinary + Transcripción/Análisis
-- Asesora envía desde panel → Cloudinary → Twilio → Cliente
+- Cliente envía audio/imagen → Twilio → Bunny.net + Transcripción/Análisis
+- Asesora envía desde panel → Bunny.net → Twilio → Cliente
+
+MIGRACIÓN: Cloudinary → Bunny.net (más económico, mismo rendimiento)
 """
 
 import os
@@ -19,8 +21,6 @@ import httpx
 from io import BytesIO
 from typing import Optional, Dict, Any
 
-import cloudinary
-import cloudinary.uploader
 from openai import AsyncOpenAI
 
 from logging_config import logger
@@ -29,20 +29,18 @@ from logging_config import logger
 # CONFIGURACIÓN
 # ============================================================================
 
-# Cloudinary
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("API_KEY_CLOUDINARY"),
-    api_secret=os.getenv("API_SECRET_CLOUDINARY"),
-    secure=True
-)
-
-# OpenAI
+# OpenAI para Whisper y GPT-4o-mini
 client_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Twilio auth para descargar media
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
+# Bunny.net Storage Configuration
+BUNNY_STORAGE_ZONE = os.getenv("BUNNY_STORAGE_ZONE_NAME")
+BUNNY_API_KEY = os.getenv("BUNNY_STORAGE_API_KEY")
+BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE_URL", "").rstrip('/')
+BUNNY_ENDPOINT = os.getenv("BUNNY_STORAGE_ENDPOINT", "ny.storage.bunnycdn.com")
 
 
 class MediaProcessor:
@@ -54,90 +52,104 @@ class MediaProcessor:
     - upload_outgoing_media(): Para archivos que envía la ASESORA
     """
 
+    def __init__(self):
+        """Inicializa el procesador con credenciales de Twilio."""
+        self.twilio_auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
     # =========================================================================
     # DESCARGA DESDE TWILIO
     # =========================================================================
 
-    @staticmethod
-    async def download_twilio_media(url: str) -> bytes:
+    async def download_twilio_media(self, url: str) -> bytes:
         """
         Descarga contenido multimedia desde Twilio.
 
-        Twilio requiere autenticación básica para acceder a los archivos.
+        Twilio requiere autenticación básica y puede usar redirecciones 302.
         """
-        auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, auth=auth)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, auth=self.twilio_auth)
 
             if response.status_code != 200:
                 logger.error(f"[MediaProcessor] Error descargando de Twilio: {response.status_code}")
                 raise Exception(f"Error descargando media de Twilio: {response.status_code}")
 
-            logger.info(f"[MediaProcessor] Media descargada: {len(response.content)} bytes")
+            logger.info(f"[MediaProcessor] Media descargada de Twilio: {len(response.content)} bytes")
             return response.content
 
     # =========================================================================
-    # SUBIDA A CLOUDINARY
+    # SUBIDA A BUNNY.NET STORAGE
     # =========================================================================
 
-    @staticmethod
-    async def upload_to_cloudinary(
+    async def upload_to_bunny(
+        self,
         file_bytes: bytes,
         folder: str,
-        resource_type: str = "auto",
-        phone: Optional[str] = None
+        filename: str
     ) -> str:
         """
-        Sube archivo a Cloudinary y devuelve URL permanente.
+        Sube archivo a Bunny.net Storage y devuelve URL pública del CDN.
 
         Args:
             file_bytes: Contenido del archivo en bytes
-            folder: Carpeta en Cloudinary (ej: "audios", "imagenes")
-            resource_type: "image", "video" (para audio), o "auto"
-            phone: Teléfono para generar public_id único
+            folder: Carpeta en Bunny Storage (ej: "audios_clientes", "imagenes_asesores")
+            filename: Nombre del archivo (ej: "+573001234567_1234567890.mp3")
 
         Returns:
-            URL segura del archivo en Cloudinary
+            URL pública del archivo en el Pull Zone (CDN)
         """
+        # Limpiar nombre de archivo para URLs seguras
+        clean_filename = filename.replace(" ", "_").replace(":", "-").replace("+", "")
+
+        # URL del Storage Zone (donde se sube)
+        storage_url = f"https://{BUNNY_ENDPOINT}/{BUNNY_STORAGE_ZONE}/{folder}/{clean_filename}"
+
+        headers = {
+            "AccessKey": BUNNY_API_KEY,
+            "Content-Type": "application/octet-stream",
+            "accept": "application/json"
+        }
+
         try:
-            # Generar public_id único
-            public_id = f"{phone}_{int(time.time())}" if phone else str(int(time.time()))
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.put(storage_url, content=file_bytes, headers=headers)
 
-            # Subir a Cloudinary
-            result = cloudinary.uploader.upload(
-                file_bytes,
-                folder=f"inmobiliaria/{folder}",
-                public_id=public_id,
-                resource_type=resource_type
-            )
+                if response.status_code in [200, 201]:
+                    # URL pública del Pull Zone (CDN - desde donde se sirve)
+                    # Twilio requiere URLs completas con https://
+                    public_url = f"https://{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
+                    logger.info(f"[BunnyStorage] Archivo subido exitosamente: {public_url}")
+                    return public_url
+                else:
+                    logger.error(
+                        f"[BunnyStorage] Error subiendo archivo: "
+                        f"status={response.status_code}, response={response.text[:200]}"
+                    )
+                    raise Exception(f"Error en Bunny Storage: {response.status_code}")
 
-            url = result.get("secure_url", "")
-            logger.info(f"[MediaProcessor] Subido a Cloudinary: {url}")
-            return url
-
+        except httpx.TimeoutException:
+            logger.error("[BunnyStorage] Timeout subiendo archivo a Bunny.net")
+            raise Exception("Timeout subiendo archivo a Bunny.net")
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error subiendo a Cloudinary: {e}")
-            return ""
+            logger.error(f"[BunnyStorage] Error inesperado: {e}")
+            raise
 
     # =========================================================================
     # TRANSCRIPCIÓN DE AUDIO (WHISPER)
     # =========================================================================
 
-    @staticmethod
-    async def transcribe_audio(audio_bytes: bytes) -> str:
+    async def transcribe_audio(self, audio_bytes: bytes) -> str:
         """
         Transcribe audio usando OpenAI Whisper.
 
         Args:
-            audio_bytes: Audio en bytes (OGG, MP3, WAV, etc.)
+            audio_bytes: Audio en bytes (OGG, MP3, WAV, WEBM, etc.)
 
         Returns:
             Texto transcrito en español
         """
         try:
             buffer = BytesIO(audio_bytes)
-            buffer.name = "audio.ogg"  # Whisper necesita extensión para detectar formato
+            buffer.name = "audio.mp3"  # Whisper necesita extensión para detectar formato
 
             transcript = await client_openai.audio.transcriptions.create(
                 model="whisper-1",
@@ -146,19 +158,36 @@ class MediaProcessor:
             )
 
             text = transcript.text
-            logger.info(f"[MediaProcessor] Transcripción Whisper: {text[:100]}...")
+
+            # --- MITIGACIÓN DE ALUCINACIONES DE WHISPER ---
+            # Whisper a veces "alucina" texto cuando el audio está vacío o tiene ruido
+            phrases_to_ignore = [
+                "Subtítulos realizados por",
+                "Amara.org",
+                "you",
+                "¡Gracias!",
+                "Watching",
+                "Gracias por ver",
+                "Suscríbete",
+                "Thanks for watching"
+            ]
+
+            if any(phrase.lower() in text.lower() for phrase in phrases_to_ignore) and len(text) < 60:
+                logger.warning(f"[Whisper] Posible alucinación detectada: '{text}'")
+                return "[Audio sin contenido verbal claro]"
+
+            logger.info(f"[Whisper] Transcripción exitosa: {text[:100]}...")
             return text
 
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error en transcripción Whisper: {e}")
+            logger.error(f"[Whisper] Error en transcripción: {e}")
             return ""
 
     # =========================================================================
     # ANÁLISIS DE IMAGEN (GPT-4o-mini)
     # =========================================================================
 
-    @staticmethod
-    async def analyze_image(image_url: str) -> str:
+    async def analyze_image(self, image_url: str) -> str:
         """
         Analiza imagen usando GPT-4o-mini para extraer información relevante.
 
@@ -168,7 +197,7 @@ class MediaProcessor:
         - Extraer características visibles
 
         Args:
-            image_url: URL de la imagen en Cloudinary
+            image_url: URL pública de la imagen en Bunny.net CDN
 
         Returns:
             Descripción/análisis de la imagen
@@ -201,11 +230,11 @@ class MediaProcessor:
             )
 
             analysis = response.choices[0].message.content
-            logger.info(f"[MediaProcessor] Análisis de imagen: {analysis[:100]}...")
+            logger.info(f"[GPT-Vision] Análisis de imagen: {analysis[:100]}...")
             return analysis
 
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error analizando imagen: {e}")
+            logger.error(f"[GPT-Vision] Error analizando imagen: {e}")
             return ""
 
     # =========================================================================
@@ -222,19 +251,19 @@ class MediaProcessor:
         Procesa multimedia enviada por el CLIENTE.
 
         Flujo:
-        1. Descargar de Twilio
-        2. Subir a Cloudinary (almacenamiento permanente)
+        1. Descargar de Twilio (siguiendo redirecciones 302)
+        2. Subir a Bunny.net Storage (CDN permanente)
         3. Si es audio: transcribir con Whisper
-        4. Si es imagen: analizar con GPT-4o-mini (opcional)
+        4. Si es imagen: analizar con GPT-4o-mini
 
         Args:
             media_url: URL temporal de Twilio
             content_type: Tipo MIME (audio/ogg, image/jpeg, etc.)
-            phone: Teléfono del cliente
+            phone: Teléfono del cliente (para naming)
 
         Returns:
             {
-                "permanent_url": str,      # URL en Cloudinary
+                "permanent_url": str,      # URL en Bunny.net CDN
                 "transcription": str,      # Solo si es audio
                 "analysis": str,           # Solo si es imagen
                 "media_type": str,         # "audio" o "image"
@@ -251,50 +280,63 @@ class MediaProcessor:
 
         try:
             # Determinar tipo de media
-            is_audio = "audio" in content_type.lower()
-            is_image = "image" in content_type.lower()
+            content_lower = content_type.lower()
+            is_audio = "audio" in content_lower or "ogg" in content_lower
+            is_image = "image" in content_lower
 
             if is_audio:
                 result["media_type"] = "audio"
-                folder = "audios"
-                resource_type = "video"  # Cloudinary trata audios como video
+                folder = "audios_clientes"
+                extension = ".ogg"
             elif is_image:
                 result["media_type"] = "image"
-                folder = "imagenes"
-                resource_type = "image"
+                folder = "imagenes_clientes"
+                extension = ".jpg"
             else:
                 result["media_type"] = "file"
-                folder = "archivos"
-                resource_type = "auto"
+                folder = "archivos_clientes"
+                extension = ".bin"
 
             # 1. Descargar de Twilio
             media_bytes = await self.download_twilio_media(media_url)
 
-            # 2. Subir a Cloudinary
-            result["permanent_url"] = await self.upload_to_cloudinary(
-                media_bytes, folder, resource_type, phone
-            )
+            # 2. Generar nombre único y subir a Bunny.net
+            clean_phone = phone.replace("+", "").replace(" ", "")
+            filename = f"{clean_phone}_{int(time.time())}{extension}"
+            result["permanent_url"] = await self.upload_to_bunny(media_bytes, folder, filename)
 
             # 3. Procesamiento específico por tipo
             if is_audio:
                 # Transcribir para que Sofía "escuche"
-                result["transcription"] = await self.transcribe_audio(media_bytes)
-                result["body_for_ai"] = f"[Audio del cliente]: {result['transcription']}"
+                transcription = await self.transcribe_audio(media_bytes)
+                result["transcription"] = transcription
+
+                if transcription and transcription != "[Audio sin contenido verbal claro]":
+                    result["body_for_ai"] = f"[Transcripción de Audio]: {transcription}"
+                else:
+                    result["body_for_ai"] = "[El cliente envió un audio sin contenido verbal claro]"
 
             elif is_image:
-                # Analizar imagen (opcional - puede ser costoso)
-                # Solo analizamos si queremos que Sofía "vea" la imagen
-                result["analysis"] = await self.analyze_image(result["permanent_url"])
-                result["body_for_ai"] = f"[Imagen del cliente]: {result['analysis']}"
+                # Analizar imagen para que Sofía "vea"
+                analysis = await self.analyze_image(result["permanent_url"])
+                result["analysis"] = analysis
+
+                if analysis:
+                    result["body_for_ai"] = f"[Imagen del cliente]: {analysis}"
+                else:
+                    result["body_for_ai"] = "[El cliente envió una imagen]"
+
+            else:
+                result["body_for_ai"] = "[El cliente envió un archivo]"
 
             logger.info(
-                f"[MediaProcessor] Media procesada: type={result['media_type']}, "
-                f"url={result['permanent_url'][:50]}..."
+                f"[MediaProcessor] Media procesada exitosamente: "
+                f"type={result['media_type']}, url={result['permanent_url'][:60]}..."
             )
 
         except Exception as e:
             logger.error(f"[MediaProcessor] Error procesando media entrante: {e}")
-            result["body_for_ai"] = "[El cliente envió un archivo que no pudo procesarse]"
+            result["body_for_ai"] = "[Error procesando archivo multimedia]"
 
         return result
 
@@ -309,7 +351,7 @@ class MediaProcessor:
         phone: str
     ) -> str:
         """
-        Sube archivo enviado por la ASESORA a Cloudinary.
+        Sube archivo enviado por la ASESORA desde el Panel a Bunny.net.
 
         Args:
             file_bytes: Contenido del archivo
@@ -317,17 +359,19 @@ class MediaProcessor:
             phone: Teléfono destino (para naming)
 
         Returns:
-            URL permanente en Cloudinary
+            URL pública en Bunny.net CDN
         """
         content_lower = content_type.lower()
-        # webm es el formato nativo de MediaRecorder en navegadores Chrome/Edge
-        is_audio = "audio" in content_lower or "webm" in content_lower
-        folder = "audios_asesores" if is_audio else "imagenes_asesores"
-        resource_type = "video" if is_audio else "image"
 
-        return await self.upload_to_cloudinary(
-            file_bytes, folder, resource_type, phone
-        )
+        # webm es el formato nativo de MediaRecorder en navegadores Chrome/Edge
+        is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower
+        folder = "audios_asesores" if is_audio else "imagenes_asesores"
+        extension = ".ogg" if is_audio else ".jpg"
+
+        clean_phone = phone.replace("+", "").replace(" ", "")
+        filename = f"{clean_phone}_{int(time.time())}{extension}"
+
+        return await self.upload_to_bunny(file_bytes, folder, filename)
 
 
 # Instancia singleton

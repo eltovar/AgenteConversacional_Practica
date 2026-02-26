@@ -59,7 +59,6 @@ pytest>=8.0.0
 pandas>=2.0.0
 xlsxwriter>=3.1.0
 
-# Cloudinary para gestión de audios
-cloudinary>=1.36.0
+# OpenAI para Whisper (transcripción) y GPT-4o-mini (análisis de imágenes)
 openai>=1.0.0
 httpx>=0.25.0

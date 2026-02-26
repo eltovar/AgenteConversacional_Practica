@@ -751,10 +751,33 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Limpieza al cerrar el servidor."""
+    """Limpieza al cerrar el servidor - Cierre Grácil de conexiones."""
+    logger.info("[SHUTDOWN] Iniciando proceso de cierre grácil...")
+
+    # 1. Detener schedulers
     if scheduler.running:
-        scheduler.shutdown()
+        scheduler.shutdown(wait=False)
         logger.info("[SHUTDOWN] Schedulers detenidos")
+
+    # 2. Cerrar conexión de Redis (State Manager)
+    try:
+        redis_url = get_redis_url()
+        state_manager = ConversationStateManager(redis_url)
+        await state_manager.close()
+        logger.info("[SHUTDOWN] Conexión a Redis cerrada")
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] Error cerrando Redis: {e}")
+
+    # 3. Cerrar conexión de MongoDB
+    try:
+        mongo_manager = get_mongo_manager()
+        if hasattr(mongo_manager, 'client') and mongo_manager.client:
+            mongo_manager.client.close()
+            logger.info("[SHUTDOWN] Conexión a MongoDB cerrada")
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] Error cerrando MongoDB: {e}")
+
+    logger.info("[SHUTDOWN] Proceso de cierre completado")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

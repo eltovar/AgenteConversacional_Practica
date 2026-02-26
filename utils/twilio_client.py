@@ -91,6 +91,9 @@ class TwilioClient:
                 # Agregar MediaUrl si se proporciona
                 if media_url:
                     payload["MediaUrl"] = media_url
+                    logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {media_url[:80]}...")
+                else:
+                    logger.debug(f"[TwilioClient] Enviando mensaje de texto (sin multimedia)")
 
                 response = await client.post(
                     url,

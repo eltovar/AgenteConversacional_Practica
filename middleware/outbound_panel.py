@@ -509,6 +509,8 @@ async def send_message(
             file_bytes = await media_file.read()
             content_type = media_file.content_type or "application/octet-stream"
 
+            logger.info(f"[Panel] 📁 Archivo recibido: {media_file.filename}, tipo={content_type}, tamaño={len(file_bytes)} bytes")
+
             # Subir a Cloudinary
             cloudinary_url = await media_processor.upload_outgoing_media(
                 file_bytes=file_bytes,
@@ -516,15 +518,17 @@ async def send_message(
                 phone=phone_normalized
             )
 
-            # Determinar tipo de media
+            logger.info(f"[Panel] 📤 Cloudinary URL obtenida: {cloudinary_url}")
+
+            # Determinar tipo de media (incluir webm como audio)
             if content_type.startswith("image/"):
                 media_type = "image"
-            elif content_type.startswith("audio/"):
+            elif content_type.startswith("audio/") or "webm" in content_type.lower():
                 media_type = "audio"
             else:
                 media_type = "file"
 
-            logger.info(f"[Panel] Multimedia subido a Cloudinary: {media_type} -> {cloudinary_url}")
+            logger.info(f"[Panel] ✅ Multimedia subido a Cloudinary: {media_type} -> {cloudinary_url}")
 
         except Exception as e:
             logger.error(f"[Panel] Error procesando multimedia: {e}")

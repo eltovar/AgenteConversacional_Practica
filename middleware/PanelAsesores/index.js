@@ -31,6 +31,7 @@ let pollingInterval = null;
 let templatesData = [];  // Almacena templates cargados
 let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
+let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 
 // =========================================================================
 // FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
@@ -678,7 +679,17 @@ function renderContactsList(contacts) {
             : '';
 
         // Generar dropdown de pipeline si hay deal_id
-        const dealId = contact.deal_id || '';
+        // FIX FLICKERING: Cachear deal_id para evitar que el UI oscile cuando
+        // HubSpot devuelve deal_id intermitentemente
+        let dealId = contact.deal_id || '';
+        const cacheKey = contactId || phone;
+        if (dealId && cacheKey) {
+            // Si tenemos deal_id, guardarlo en cache
+            contactDealCache[cacheKey] = dealId;
+        } else if (cacheKey && contactDealCache[cacheKey]) {
+            // Si no viene deal_id pero lo tenemos en cache, usarlo
+            dealId = contactDealCache[cacheKey];
+        }
         const currentStage = contact.current_stage || '';
 
         function buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {

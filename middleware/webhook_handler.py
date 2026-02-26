@@ -150,11 +150,20 @@ async def should_bot_respond(
     """
     state_manager = get_state_manager()
 
+    # LOG DE DEBUG: Mostrar que se está verificando
+    logger.info(f"🔍 [should_bot_respond] Verificando estado para: {phone_normalized}")
+
     # ═══════════════════════════════════════════════════════════════════════
     # 1. Verificar estado en Redis EN CUALQUIER CANAL
     # ═══════════════════════════════════════════════════════════════════════
+    estados_encontrados = []  # Para debug
+
     for canal in CANALES_A_VERIFICAR:
         status = await state_manager.get_status(phone_normalized, canal)
+
+        # LOG DE DEBUG: Mostrar cada estado encontrado (solo los no-None)
+        if status:
+            estados_encontrados.append(f"{canal}:{status.value}")
 
         if status == ConversationStatus.HUMAN_ACTIVE:
             logger.info(
@@ -181,6 +190,12 @@ async def should_bot_respond(
             )
             return False, "PENDIENTE_HANDOFF", special_message
 
+    # LOG DE DEBUG: Mostrar resumen de estados
+    if estados_encontrados:
+        logger.info(f"🔍 [should_bot_respond] Estados encontrados: {', '.join(estados_encontrados)}")
+    else:
+        logger.info(f"🔍 [should_bot_respond] Sin estados en Redis para {phone_normalized} (todos los canales)")
+
     # ═══════════════════════════════════════════════════════════════════════
     # 2. Verificar propiedad 'sofia_activa' en HubSpot
     # ═══════════════════════════════════════════════════════════════════════
@@ -198,8 +213,8 @@ async def should_bot_respond(
     # ═══════════════════════════════════════════════════════════════════════
     # Todo OK - Sofía puede responder
     # ═══════════════════════════════════════════════════════════════════════
-    logger.debug(
-        f"✅ [should_bot_respond] Bot activo: OK (teléfono: {phone_normalized})"
+    logger.info(
+        f"✅ [should_bot_respond] Bot ACTIVO: OK (teléfono: {phone_normalized})"
     )
     return True, "OK", None
 
@@ -381,7 +396,45 @@ async def whatsapp_webhook(
         )
 
         if not should_respond:
-            # Registrar mensaje entrante en HubSpot (siempre)
+            # ═══════════════════════════════════════════════════════════════════
+            # CRÍTICO: Guardar mensaje del cliente SIEMPRE (MongoDB + HubSpot)
+            # Aunque el bot esté silenciado, el mensaje debe aparecer en el panel
+            # ═══════════════════════════════════════════════════════════════════
+            logger.info(f"[Webhook] 🔇 Bot silenciado ({reason}) - Guardando mensaje del cliente")
+
+            # PASO 1: Guardar en MongoDB SIEMPRE (independiente de HubSpot)
+            # Esto asegura que el mensaje aparezca en el panel de asesores
+            try:
+                mongo_manager = get_mongo_manager()
+
+                # Construir subdocumento media si existe
+                media_dict = None
+                if media_result and media_result.get("permanent_url"):
+                    media_dict = {
+                        "permanent_url": media_result.get("permanent_url"),
+                        "type": media_result.get("media_type"),
+                        "transcription": media_result.get("transcription"),
+                        "analysis": media_result.get("analysis"),
+                    }
+
+                mongo_message_id = await mongo_manager.save_message(
+                    phone=phone_normalized,
+                    content=Body,
+                    sender="client",
+                    channel="whatsapp",
+                    hubspot_contact_id=contact_id,  # Puede ser None
+                    media=media_dict
+                )
+
+                if mongo_message_id:
+                    logger.info(f"[Webhook] ✅ Mensaje guardado en MongoDB: {mongo_message_id} (bot silenciado)")
+                else:
+                    logger.warning(f"[Webhook] ⚠️ MongoDB retornó None al guardar mensaje")
+
+            except Exception as e:
+                logger.error(f"[Webhook] ❌ Error guardando en MongoDB (bot silenciado): {e}")
+
+            # PASO 2: Registrar en HubSpot si tenemos contact_info
             if contact_info:
                 logger.info(f"[Webhook] 📱 Registrando mensaje del cliente en HubSpot (contact_id={contact_info.contact_id})")
                 background_tasks.add_task(
@@ -393,7 +446,7 @@ async def whatsapp_webhook(
                     media_result  # Pasar resultado completo de multimedia
                 )
             else:
-                logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Mensaje NO se guardará en HubSpot")
+                logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Solo MongoDB (sin HubSpot)")
 
             # Si hay mensaje especial (ej: PENDING_HANDOFF), enviarlo
             if special_message:

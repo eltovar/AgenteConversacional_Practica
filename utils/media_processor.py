@@ -43,6 +43,84 @@ BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE_URL", "").rstrip('/')
 BUNNY_ENDPOINT = os.getenv("BUNNY_STORAGE_ENDPOINT", "ny.storage.bunnycdn.com")
 
 
+# ============================================================================
+# DETECCIÓN DE FORMATO POR MAGIC BYTES
+# ============================================================================
+
+def detect_audio_format_by_magic_bytes(file_bytes: bytes) -> str:
+    """
+    Detecta el formato real del audio analizando su contenido (magic bytes),
+    NO confiando en el Content-Type enviado por Twilio.
+    
+    Retorna la extensión correcta para el archivo.
+    
+    Magic bytes (primeros bytes del archivo):
+    - OGG: 0x4F 0x67 0x67 0x53 ("OggS")
+    - MP3: 0xFF 0xFB/0xFA (MPEG frames) o "ID3" (ID3 tag)
+    - FLAC: 0x66 0x4C 0x61 0x43 ("fLaC")
+    - WAV: 0x52 0x49 0x46 0x46 ("RIFF") + "WAVE"
+    - WebM: 0x1A 0x45 0xDF 0xA3
+    - M4A/MP4: 0x00 0x00 0x00 [0x18-0x20] + "ftyp"
+    """
+    if not file_bytes or len(file_bytes) < 4:
+        logger.warning(f"[MediaProcessor] Archivo muy pequeño ({len(file_bytes)} bytes), asumiendo OGG")
+        return "ogg"
+    
+    # Leer magic bytes
+    magic = file_bytes[:12]
+    
+    # ⚠️ DETECTAR HTML/ERROR - Twilio a veces devuelve página de error
+    if (magic.startswith(b"<!DOCTYPE") or 
+        magic.startswith(b"<html") or 
+        magic.startswith(b"<HTML") or
+        magic.startswith(b"<?xml")):
+        logger.error(f"[MediaProcessor] ❌ Twilio devolvió HTML/XML en lugar de audio!")
+        logger.error(f"    Primeros 100 bytes: {file_bytes[:100]}")
+        raise Exception(
+            "Error descargando audio de Twilio: El servidor devolvió HTML/XML. "
+            "Probable causa: URL expirada, archivo eliminado, o error de autenticación en Twilio"
+        )
+    
+    # OGG Vorbis/Opus
+    if magic[:4] == b"OggS":
+        logger.debug("[MediaProcessor] Formato detectado: OGG (magic bytes)")
+        return "ogg"
+    
+    # FLAC
+    if magic[:4] == b"fLaC":
+        logger.debug("[MediaProcessor] Formato detectado: FLAC (magic bytes)")
+        return "flac"
+    
+    # WAV
+    if magic[:4] == b"RIFF" and magic[8:12] == b"WAVE":
+        logger.debug("[MediaProcessor] Formato detectado: WAV (magic bytes)")
+        return "wav"
+    
+    # WebM
+    if magic[:4] == b"\x1A\x45\xDF\xA3":
+        logger.debug("[MediaProcessor] Formato detectado: WebM (magic bytes)")
+        return "webm"
+    
+    # MP3 (MPEG frames)
+    if magic[0:2] == b"\xFF\xFB" or magic[0:2] == b"\xFF\xFA":
+        logger.debug("[MediaProcessor] Formato detectado: MP3 (MPEG frame sync)")
+        return "mp3"
+    
+    # ID3 tag (MP3 con metadatos)
+    if magic[:3] == b"ID3":
+        logger.debug("[MediaProcessor] Formato detectado: MP3 (ID3 tag)")
+        return "mp3"
+    
+    # M4A/MP4 (buscar "ftyp" en los primeros 12 bytes)
+    if b"ftyp" in magic:
+        logger.debug("[MediaProcessor] Formato detectado: M4A/MP4 (magic bytes)")
+        return "mp4"
+    
+    # Default: OGG (formato que Twilio usa para WhatsApp)
+    logger.warning(f"[MediaProcessor] Formato no identificado (primeros 12 bytes: {magic.hex()}), asumiendo OGG")
+    return "ogg"
+
+
 class MediaProcessor:
     """
     Procesador unificado de multimedia.
@@ -137,20 +215,36 @@ class MediaProcessor:
     # TRANSCRIPCIÓN DE AUDIO (WHISPER)
     # =========================================================================
 
-    async def transcribe_audio(self, audio_bytes: bytes) -> str:
+    async def transcribe_audio(self, audio_bytes: bytes, audio_format: str = "ogg") -> str:
         """
         Transcribe audio usando OpenAI Whisper.
 
         Args:
-            audio_bytes: Audio en bytes (OGG, MP3, WAV, WEBM, etc.)
+            audio_bytes: Audio en bytes
+            audio_format: Formato del audio detectado ("ogg", "mp3", "wav", "webm", "mp4", "flac")
+                         Ya detectado por magic bytes, NO por Content-Type
 
         Returns:
             Texto transcrito en español
         """
         try:
-            buffer = BytesIO(audio_bytes)
-            buffer.name = "audio.mp3"  # Whisper necesita extensión para detectar formato
+            # Asegurar que el formato sea válido
+            valid_formats = ["ogg", "webm", "mp4", "wav", "mpeg", "mp3", "flac", "m4a"]
+            audio_format = audio_format.lower().strip(".")
+            
+            if audio_format not in valid_formats:
+                logger.warning(f"[Whisper] Formato desconocido: {audio_format}, asumiendo ogg")
+                audio_format = "ogg"
+            
+            # Mapear mpeg a mp3 para Whisper
+            if audio_format == "mpeg":
+                audio_format = "mp3"
 
+            buffer = BytesIO(audio_bytes)
+            buffer.name = f"audio.{audio_format}"  # Whisper usa esta extensión
+
+            logger.debug(f"[Whisper] Transcribiendo con formato: {audio_format} (buffer.name={buffer.name})")
+            
             transcript = await client_openai.audio.transcriptions.create(
                 model="whisper-1",
                 file=buffer,
@@ -287,7 +381,21 @@ class MediaProcessor:
             if is_audio:
                 result["media_type"] = "audio"
                 folder = "audios_clientes"
-                extension = ".ogg"
+                # Detectar extensión correcta basándose en content_type
+                if "ogg" in content_lower or "vorbis" in content_lower:
+                    extension = ".ogg"
+                elif "webm" in content_lower:
+                    extension = ".webm"
+                elif "mp4" in content_lower or "m4a" in content_lower or "aac" in content_lower:
+                    extension = ".mp4"
+                elif "wav" in content_lower:
+                    extension = ".wav"
+                elif "mpeg" in content_lower or "mp3" in content_lower:
+                    extension = ".mp3"
+                elif "flac" in content_lower:
+                    extension = ".flac"
+                else:
+                    extension = ".ogg"  # Default a ogg (formato de Twilio)
             elif is_image:
                 result["media_type"] = "image"
                 folder = "imagenes_clientes"
@@ -300,6 +408,17 @@ class MediaProcessor:
             # 1. Descargar de Twilio
             media_bytes = await self.download_twilio_media(media_url)
 
+            # IMPORTANTE: Detectar formato REAL del archivo por magic bytes
+            # NO confiar en Content-Type de Twilio
+            if is_audio:
+                try:
+                    actual_audio_format = detect_audio_format_by_magic_bytes(media_bytes)
+                    logger.info(f"[MediaProcessor] Formato detectado por magic bytes: {actual_audio_format} (Content-Type reportaba: {content_type})")
+                    extension = f".{actual_audio_format}"
+                except Exception as e:
+                    logger.error(f"[MediaProcessor] ❌ Error detectando formato de audio: {e}")
+                    raise  # Re-lanzar la excepción para que se maneje en el bloque except general
+            
             # 2. Generar nombre único y subir a Bunny.net
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
@@ -308,7 +427,8 @@ class MediaProcessor:
             # 3. Procesamiento específico por tipo
             if is_audio:
                 # Transcribir para que Sofía "escuche"
-                transcription = await self.transcribe_audio(media_bytes)
+                # Usar el formato detectado por magic bytes, no el Content-Type
+                transcription = await self.transcribe_audio(media_bytes, actual_audio_format)
                 result["transcription"] = transcription
 
                 if transcription and transcription != "[Audio sin contenido verbal claro]":
@@ -365,8 +485,27 @@ class MediaProcessor:
 
         # webm es el formato nativo de MediaRecorder en navegadores Chrome/Edge
         is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower
-        folder = "audios_asesores" if is_audio else "imagenes_asesores"
-        extension = ".ogg" if is_audio else ".jpg"
+        
+        if is_audio:
+            folder = "audios_asesores"
+            # Detectar extensión correcta basándose en content_type
+            if "webm" in content_lower:
+                extension = ".webm"
+            elif "ogg" in content_lower or "vorbis" in content_lower:
+                extension = ".ogg"
+            elif "mp4" in content_lower or "m4a" in content_lower or "aac" in content_lower:
+                extension = ".mp4"
+            elif "wav" in content_lower:
+                extension = ".wav"
+            elif "mpeg" in content_lower or "mp3" in content_lower:
+                extension = ".mp3"
+            elif "flac" in content_lower:
+                extension = ".flac"
+            else:
+                extension = ".ogg"  # Default a ogg
+        else:
+            folder = "imagenes_asesores"
+            extension = ".jpg"
 
         clean_phone = phone.replace("+", "").replace(" ", "")
         filename = f"{clean_phone}_{int(time.time())}{extension}"

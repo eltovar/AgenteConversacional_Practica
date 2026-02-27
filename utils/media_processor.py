@@ -598,19 +598,18 @@ class MediaProcessor:
     # CONVERSIÓN DE AUDIO A OGG/OPUS (PARA WHATSAPP)
     # =========================================================================
 
-    def _convert_audio_to_ogg(self, audio_bytes: bytes, source_format: str = "auto") -> Tuple[bytes, bool]:
+    def _convert_audio_to_mp3(self, audio_bytes: bytes, source_format: str = "auto") -> Tuple[bytes, bool]:
         """
-        Convierte cualquier formato de audio a OGG (Opus) para compatibilidad con WhatsApp.
+        Convierte cualquier formato de audio a MP3 para compatibilidad UNIVERSAL con WhatsApp.
 
         WhatsApp tiene soporte limitado de formatos de audio:
-        - OGG/Opus: ✅ Nativo, funciona perfecto
-        - MP3: ✅ Funciona
-        - M4A/AAC: ⚠️ Soporte inconsistente, puede fallar
+        - MP3: ✅ MEJOR COMPATIBILIDAD - funciona siempre
+        - OGG/Opus: ⚠️ Puede fallar con Error 63021 si no está perfectamente codificado
+        - M4A/AAC: ⚠️ Soporte inconsistente
         - WebM: ❌ No soportado
-        - MP4 audio: ⚠️ Puede fallar dependiendo del codec
+        - MP4 audio: ⚠️ Puede fallar
 
-        Esta función usa ffmpeg para convertir CUALQUIER formato a OGG/Opus.
-
+        NOTA: Usamos MP3 en lugar de OGG porque tiene mejor compatibilidad universal.
         """
         try:
             # Verificar que ffmpeg esté disponible
@@ -621,7 +620,7 @@ class MediaProcessor:
                     timeout=5
                 )
             except FileNotFoundError:
-                logger.warning("[MediaProcessor] ffmpeg no encontrado - no se puede convertir audio a OGG")
+                logger.warning("[MediaProcessor] ffmpeg no encontrado - no se puede convertir audio")
                 return audio_bytes, False
             except subprocess.TimeoutExpired:
                 logger.warning("[MediaProcessor] ffmpeg timeout en verificación")
@@ -634,12 +633,12 @@ class MediaProcessor:
                 except Exception:
                     source_format = "bin"  # Genérico
 
-            # Si ya es OGG, no necesita conversión
-            if source_format == "ogg":
-                logger.info("[MediaProcessor] Audio ya es OGG - no requiere conversión")
+            # Si ya es MP3, no necesita conversión
+            if source_format == "mp3":
+                logger.info("[MediaProcessor] Audio ya es MP3 - no requiere conversión")
                 return audio_bytes, True
 
-            logger.info(f"[MediaProcessor] 🔄 Convirtiendo {source_format.upper()} → OGG/Opus para WhatsApp...")
+            logger.info(f"[MediaProcessor] 🔄 Convirtiendo {source_format.upper()} → MP3 para WhatsApp...")
 
             # Crear archivos temporales para la conversión
             input_suffix = f'.{source_format}' if source_format != "bin" else '.bin'
@@ -647,24 +646,24 @@ class MediaProcessor:
                 input_path = input_file.name
                 input_file.write(audio_bytes)
 
-            output_path = input_path.rsplit('.', 1)[0] + '.ogg'
+            output_path = input_path.rsplit('.', 1)[0] + '.mp3'
 
             try:
-                # Ejecutar ffmpeg para convertir a OGG (Opus)
-                # Parámetros críticos para WhatsApp:
-                # -c:a libopus: codec Opus (REQUERIDO por WhatsApp)
-                # -b:a 32k: bitrate bajo para notas de voz (WhatsApp las comprime mucho)
-                # -ar 16000: sample rate 16kHz (óptimo para voz/WhatsApp)
-                # -ac 1: mono (requerido para notas de voz)
+                # Ejecutar ffmpeg para convertir a MP3
+                # Parámetros optimizados para voz en WhatsApp:
+                # -c:a libmp3lame: codec MP3 (universalmente compatible)
+                # -b:a 64k: bitrate 64kbps (buena calidad para voz)
+                # -ar 44100: sample rate estándar
+                # -ac 1: mono (reduce tamaño)
                 # -vn: ignorar video
                 result = subprocess.run(
                     [
                         "ffmpeg",
                         "-y",
                         "-i", input_path,
-                        "-c:a", "libopus",
-                        "-b:a", "32k",
-                        "-ar", "16000",
+                        "-c:a", "libmp3lame",
+                        "-b:a", "64k",
+                        "-ar", "44100",
                         "-ac", "1",
                         "-vn",
                         output_path
@@ -673,31 +672,37 @@ class MediaProcessor:
                     timeout=30
                 )
 
-                # Loguear stderr siempre (contiene info útil de ffmpeg)
+                # Loguear stderr para debugging
                 stderr = result.stderr.decode('utf-8', errors='ignore')
-                if "libopus" in stderr.lower() or "opus" in stderr.lower():
-                    logger.info(f"[MediaProcessor] ffmpeg usando codec Opus ✓")
+                if "mp3" in stderr.lower() or "lame" in stderr.lower():
+                    logger.info("[MediaProcessor] ffmpeg usando codec MP3 (libmp3lame) ✓")
                 else:
-                    logger.warning(f"[MediaProcessor] ffmpeg stderr (primeros 300 chars): {stderr[:300]}")
+                    logger.warning(f"[MediaProcessor] ffmpeg stderr: {stderr[:300]}")
 
                 if result.returncode != 0:
                     logger.error(f"[MediaProcessor] ffmpeg falló (code {result.returncode}): {stderr[:500]}")
                     return audio_bytes, False
 
                 # Leer archivo convertido
-                with open(output_path, 'rb') as ogg_file:
-                    ogg_bytes = ogg_file.read()
+                with open(output_path, 'rb') as mp3_file:
+                    mp3_bytes = mp3_file.read()
 
-                # Verificar que el archivo es OGG válido (magic bytes: OggS)
-                if ogg_bytes[:4] != b'OggS':
-                    logger.error(f"[MediaProcessor] ❌ Archivo generado NO es OGG válido! Magic bytes: {ogg_bytes[:8].hex()}")
+                # Verificar que el archivo es MP3 válido
+                # MP3 puede empezar con ID3 tag (49 44 33) o frame sync (FF FB/FA/F3/F2)
+                is_valid_mp3 = (
+                    mp3_bytes[:3] == b'ID3' or  # ID3 tag
+                    (mp3_bytes[0] == 0xFF and (mp3_bytes[1] & 0xE0) == 0xE0)  # Frame sync
+                )
+                
+                if not is_valid_mp3:
+                    logger.error(f"[MediaProcessor] ❌ Archivo generado NO es MP3 válido! Bytes: {mp3_bytes[:8].hex()}")
                     return audio_bytes, False
 
                 logger.info(
-                    f"[MediaProcessor] ✅ {source_format.upper()} convertido a OGG exitosamente: "
-                    f"{len(audio_bytes)} bytes → {len(ogg_bytes)} bytes (magic: OggS ✓)"
+                    f"[MediaProcessor] ✅ {source_format.upper()} convertido a MP3 exitosamente: "
+                    f"{len(audio_bytes)} bytes → {len(mp3_bytes)} bytes"
                 )
-                return ogg_bytes, True
+                return mp3_bytes, True
 
             finally:
                 # Limpiar archivos temporales
@@ -711,16 +716,25 @@ class MediaProcessor:
                     pass
 
         except subprocess.TimeoutExpired:
-            logger.error("[MediaProcessor] Timeout en conversión de audio → OGG")
+            logger.error("[MediaProcessor] Timeout en conversión de audio → MP3")
             return audio_bytes, False
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error en conversión de audio → OGG: {e}")
+            logger.error(f"[MediaProcessor] Error en conversión de audio → MP3: {e}")
             return audio_bytes, False
 
     # Alias para compatibilidad con código existente
+    def _convert_webm_to_mp3(self, webm_bytes: bytes) -> Tuple[bytes, bool]:
+        """Alias para _convert_audio_to_mp3 con formato webm."""
+        return self._convert_audio_to_mp3(webm_bytes, "webm")
+    
+    # Mantener alias antiguo por compatibilidad
+    def _convert_audio_to_ogg(self, audio_bytes: bytes, source_format: str = "auto") -> Tuple[bytes, bool]:
+        """Alias hacia _convert_audio_to_mp3 para compatibilidad."""
+        return self._convert_audio_to_mp3(audio_bytes, source_format)
+    
     def _convert_webm_to_ogg(self, webm_bytes: bytes) -> Tuple[bytes, bool]:
-        """Alias para _convert_audio_to_ogg con formato webm."""
-        return self._convert_audio_to_ogg(webm_bytes, "webm")
+        """Alias para compatibilidad."""
+        return self._convert_audio_to_mp3(webm_bytes, "webm")
 
     # =========================================================================
     # FLUJO: ENVÍO DE MULTIMEDIA POR ASESORA
@@ -735,8 +749,8 @@ class MediaProcessor:
         """
         Sube archivo enviado por la ASESORA desde el Panel a Bunny.net.
 
-        IMPORTANTE: Convierte CUALQUIER formato de audio problemático a OGG/Opus
-        para garantizar compatibilidad con WhatsApp.
+        IMPORTANTE: Convierte CUALQUIER formato de audio problemático a MP3
+        para garantizar compatibilidad UNIVERSAL con WhatsApp.
 
         Formatos problemáticos que se convierten:
         - WebM: No soportado por WhatsApp
@@ -745,8 +759,8 @@ class MediaProcessor:
         - FLAC: No soportado por WhatsApp
 
         Formatos que NO se convierten:
-        - OGG/Opus: Nativo de WhatsApp
-        - MP3: Compatible con WhatsApp
+        - MP3: Compatible universal con WhatsApp
+        - OGG/Opus: También funciona (pero usamos MP3 por mejor compatibilidad)
         """
         content_lower = content_type.lower()
 
@@ -766,43 +780,43 @@ class MediaProcessor:
                 f"formato detectado={detected_format}"
             )
 
-            # Lista de formatos que REQUIEREN conversión a OGG
+            # Lista de formatos que REQUIEREN conversión a MP3
             # (formatos que WhatsApp no soporta bien o rechaza con Error 63021)
-            formats_requiring_conversion = ["webm", "mp4", "m4a", "wav", "flac"]
+            formats_requiring_conversion = ["webm", "mp4", "m4a", "wav", "flac", "ogg"]
 
-            # Lista de formatos que funcionan bien en WhatsApp
-            formats_whatsapp_native = ["ogg", "mp3"]
+            # Lista de formatos que funcionan bien en WhatsApp sin conversión
+            formats_whatsapp_native = ["mp3"]
 
             if detected_format in formats_requiring_conversion:
                 logger.info(
                     f"[MediaProcessor] 🔄 Formato {detected_format.upper()} detectado - "
-                    f"convirtiendo a OGG/Opus para WhatsApp..."
+                    f"convirtiendo a MP3 para WhatsApp..."
                 )
 
-                # Convertir a OGG usando ffmpeg
-                converted_bytes, was_converted = self._convert_audio_to_ogg(
+                # Convertir a MP3 usando ffmpeg (mejor compatibilidad que OGG)
+                converted_bytes, was_converted = self._convert_audio_to_mp3(
                     file_bytes,
                     detected_format
                 )
 
                 if was_converted:
                     file_bytes = converted_bytes
-                    extension = ".ogg"
+                    extension = ".mp3"
                     logger.info(
-                        f"[MediaProcessor] ✅ {detected_format.upper()} convertido a OGG - "
+                        f"[MediaProcessor] ✅ {detected_format.upper()} convertido a MP3 - "
                         f"compatible con WhatsApp"
                     )
                 else:
                     # Fallback: subir en formato original con advertencia
                     extension = f".{detected_format}"
                     logger.warning(
-                        f"[MediaProcessor] ⚠️ No se pudo convertir {detected_format.upper()} a OGG. "
+                        f"[MediaProcessor] ⚠️ No se pudo convertir {detected_format.upper()} a MP3. "
                         f"El audio puede NO reproducirse en WhatsApp (Error 63021). "
                         f"Instala ffmpeg para habilitar la conversión."
                     )
 
             elif detected_format in formats_whatsapp_native:
-                # OGG y MP3 funcionan bien en WhatsApp
+                # MP3 funciona bien en WhatsApp
                 extension = f".{detected_format}"
                 logger.info(
                     f"[MediaProcessor] ✅ Formato {detected_format.upper()} nativo de WhatsApp - "
@@ -813,15 +827,15 @@ class MediaProcessor:
                 # Formato desconocido - intentar convertir por si acaso
                 logger.warning(
                     f"[MediaProcessor] ⚠️ Formato desconocido ({detected_format}) - "
-                    f"intentando conversión a OGG..."
+                    f"intentando conversión a MP3..."
                 )
-                converted_bytes, was_converted = self._convert_audio_to_ogg(
+                converted_bytes, was_converted = self._convert_audio_to_mp3(
                     file_bytes,
                     detected_format
                 )
                 if was_converted:
                     file_bytes = converted_bytes
-                    extension = ".ogg"
+                    extension = ".mp3"
                 else:
                     extension = f".{detected_format}"
             

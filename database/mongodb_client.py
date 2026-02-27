@@ -375,6 +375,69 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error obteniendo mensajes no sincronizados: {e}")
             return []
 
+    async def update_delivery_status(
+        self,
+        message_sid: str,
+        status: str,
+        delivered_at: Optional[datetime] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None
+    ) -> bool:
+        """
+        Actualiza el estado de entrega de un mensaje basado en el callback de Twilio.
+        
+        Este método permite reconciliar lo que muestra el panel con lo que
+        realmente recibió el cliente en WhatsApp.
+        
+        Args:
+            message_sid: ID del mensaje de Twilio (SMxxxxxxx)
+            status: Estado actual ('delivered', 'read', 'failed', 'undelivered')
+            delivered_at: Timestamp de entrega (para status=delivered/read)
+            error_code: Código de error de Twilio (para status=failed/undelivered)
+            error_message: Mensaje de error de Twilio
+            
+        Returns:
+            True si se actualizó el mensaje, False si no se encontró o hubo error
+        """
+        if not await self.connect():
+            return False
+        
+        if not message_sid:
+            logger.warning("[MongoDB] update_delivery_status llamado sin message_sid")
+            return False
+        
+        try:
+            update_data = {
+                "delivery_status": status,
+                "delivery_updated_at": datetime.utcnow()
+            }
+            
+            if delivered_at:
+                update_data["delivered_at"] = delivered_at
+                
+            if error_code:
+                update_data["delivery_error_code"] = error_code
+                
+            if error_message:
+                update_data["delivery_error_message"] = error_message
+            
+            result = await self.db.messages.update_one(
+                {"message_sid": message_sid},
+                {"$set": update_data}
+            )
+            
+            if result.matched_count > 0:
+                logger.debug(f"[MongoDB] Delivery status actualizado: {message_sid} -> {status}")
+                return True
+            else:
+                # No es error crítico - el mensaje puede ser muy antiguo o de otro origen
+                logger.debug(f"[MongoDB] Mensaje no encontrado para delivery update: {message_sid}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando delivery status: {e}")
+            return False
+
     # =========================================================================
     # OPERACIONES DE CONTACTOS
     # =========================================================================

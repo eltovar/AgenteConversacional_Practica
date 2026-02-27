@@ -129,17 +129,6 @@ def detect_channel_dynamic(body: str, current_redis_channel: Optional[str]) -> s
 
     UNIFICADO: Usa el mismo sistema de detección que el análisis de Sofía,
     eliminando redundancias y garantizando consistencia.
-
-    Ventajas sobre detección manual:
-    - Detecta short links (instagr.am, fb.com, youtu.be, vm.tiktok.com)
-    - Detecta variantes de dominio (m.facebook.com, www.)
-    - Soporta todos los canales: Instagram, Facebook, LinkedIn, YouTube, TikTok,
-      Finca Raíz, Metrocuadrado, Mercado Libre, Ciencuadras, Página Web
-
-    Prioridad:
-    1. Links detectados en el contenido del mensaje
-    2. Canal actual en Redis (si está activo)
-    3. Default 'whatsapp'
     """
     if not body:
         if current_redis_channel and current_redis_channel not in ["desconocido", "default", None]:
@@ -814,22 +803,68 @@ async def whatsapp_status_callback(
     MessageStatus: str = Form(...),
     From: Optional[str] = Form(None),
     To: Optional[str] = Form(None),
+    ErrorCode: Optional[str] = Form(None),
+    ErrorMessage: Optional[str] = Form(None),
 ):
     """
     Callback de estado de mensajes de Twilio.
-
-    Twilio envía actualizaciones cuando el estado del mensaje cambia
-    (queued, sent, delivered, read, failed).
+    
+    Este endpoint actualiza el estado en MongoDB para reconciliar
+    lo que muestra el panel con lo que realmente recibió el cliente.
     """
-    logger.debug(
-        f"[StatusCallback] Message {MessageSid}: {MessageStatus} "
-        f"(From: {From}, To: {To})"
-    )
+    # Normalizar el número de destino para búsqueda
+    phone_normalized = None
+    if To:
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(To.replace("whatsapp:", ""))
+        if validation.is_valid:
+            phone_normalized = validation.normalized
 
-    # Por ahora solo logueamos, pero se podría usar para:
-    # - Detectar mensajes fallidos
-    # - Confirmar entrega
-    # - Analytics
+    # Log del estado recibido
+    if MessageStatus in ["failed", "undelivered"]:
+        logger.error(
+            f"[StatusCallback] ❌ Mensaje {MessageSid} FALLIDO: {MessageStatus} "
+            f"(Error: {ErrorCode} - {ErrorMessage}) | To: {To}"
+        )
+    elif MessageStatus in ["delivered", "read"]:
+        logger.info(
+            f"[StatusCallback] ✅ Mensaje {MessageSid}: {MessageStatus} | To: {To}"
+        )
+    else:
+        logger.debug(
+            f"[StatusCallback] Mensaje {MessageSid}: {MessageStatus} | To: {To}"
+        )
+
+    # Actualizar estado en MongoDB para reconciliación
+    try:
+        mongo_manager = get_mongo_manager()
+        
+        if MessageStatus in ["delivered", "read"]:
+            # Marcar como entregado exitosamente
+            await mongo_manager.update_delivery_status(
+                message_sid=MessageSid,
+                status="delivered",
+                delivered_at=datetime.utcnow()
+            )
+            
+        elif MessageStatus in ["failed", "undelivered"]:
+            # Marcar como fallido - CRÍTICO para detectar mensajes perdidos
+            await mongo_manager.update_delivery_status(
+                message_sid=MessageSid,
+                status="failed",
+                error_code=ErrorCode,
+                error_message=ErrorMessage
+            )
+            
+            # Log adicional para alertar sobre mensajes no entregados
+            logger.warning(
+                f"[StatusCallback] ⚠️ ALERTA: Mensaje a {phone_normalized or To} NO entregado. "
+                f"El panel puede mostrar mensaje que el cliente NO recibió."
+            )
+            
+    except Exception as e:
+        # No fallar el callback por errores de MongoDB
+        logger.error(f"[StatusCallback] Error actualizando delivery status: {e}")
 
     return Response(content="", media_type="text/xml")
 

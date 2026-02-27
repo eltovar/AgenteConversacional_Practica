@@ -1297,16 +1297,9 @@ async def close_conversation(
     2. Sofía retome la conversación automáticamente cuando el cliente escriba
     3. Se preserve el contexto de la conversación
 
-    IMPORTANTE: Ya NO elimina la conversación de Redis, sino que la transiciona
-    a BOT_ACTIVE para que Sofía pueda continuar con contexto.
-
     SEGREGACIÓN POR CANAL:
     Si se proporciona el parámetro canal, solo se cierra la conversación
     de ese canal específico.
-
-    Args:
-        phone: Número de teléfono normalizado (E.164)
-        canal: Canal de origen (instagram, finca_raiz, etc.)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")

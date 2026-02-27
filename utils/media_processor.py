@@ -39,8 +39,38 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 # Bunny.net Storage Configuration
 BUNNY_STORAGE_ZONE = os.getenv("BUNNY_STORAGE_ZONE_NAME")
 BUNNY_API_KEY = os.getenv("BUNNY_STORAGE_API_KEY")
-BUNNY_PULL_ZONE = os.getenv("BUNNY_PULL_ZONE_URL", "").rstrip('/')
 BUNNY_ENDPOINT = os.getenv("BUNNY_STORAGE_ENDPOINT", "ny.storage.bunnycdn.com")
+
+
+def _get_bunny_pull_zone() -> str:
+    """
+    Obtiene y valida la URL del Pull Zone de Bunny.net.
+    
+    IMPORTANTE: Twilio requiere URLs con protocolo https://
+    Si la variable de entorno no lo incluye, lo agregamos.
+    
+    Returns:
+        URL normalizada con https:// o cadena vacía si no está configurada.
+    """
+    url = os.getenv("BUNNY_PULL_ZONE_URL", "").strip().rstrip('/')
+    
+    if not url:
+        logger.warning("[BunnyStorage] BUNNY_PULL_ZONE_URL no configurada - multimedia puede fallar")
+        return ""
+    
+    # Asegurar que tenga protocolo https://
+    if not url.startswith("https://"):
+        if url.startswith("http://"):
+            url = url.replace("http://", "https://", 1)
+            logger.info(f"[BunnyStorage] URL normalizada de http a https: {url}")
+        else:
+            url = f"https://{url}"
+            logger.info(f"[BunnyStorage] URL normalizada con https://: {url}")
+    
+    return url
+
+
+BUNNY_PULL_ZONE = _get_bunny_pull_zone()
 
 
 # ============================================================================
@@ -51,16 +81,6 @@ def detect_audio_format_by_magic_bytes(file_bytes: bytes) -> str:
     """
     Detecta el formato real del audio analizando su contenido (magic bytes),
     NO confiando en el Content-Type enviado por Twilio.
-    
-    Retorna la extensión correcta para el archivo.
-    
-    Magic bytes (primeros bytes del archivo):
-    - OGG: 0x4F 0x67 0x67 0x53 ("OggS")
-    - MP3: 0xFF 0xFB/0xFA (MPEG frames) o "ID3" (ID3 tag)
-    - FLAC: 0x66 0x4C 0x61 0x43 ("fLaC")
-    - WAV: 0x52 0x49 0x46 0x46 ("RIFF") + "WAVE"
-    - WebM: 0x1A 0x45 0xDF 0xA3
-    - M4A/MP4: 0x00 0x00 0x00 [0x18-0x20] + "ftyp"
     """
     if not file_bytes or len(file_bytes) < 4:
         logger.warning(f"[MediaProcessor] Archivo muy pequeño ({len(file_bytes)} bytes), asumiendo OGG")
@@ -166,14 +186,6 @@ class MediaProcessor:
     ) -> str:
         """
         Sube archivo a Bunny.net Storage y devuelve URL pública del CDN.
-
-        Args:
-            file_bytes: Contenido del archivo en bytes
-            folder: Carpeta en Bunny Storage (ej: "audios_clientes", "imagenes_asesores")
-            filename: Nombre del archivo (ej: "+573001234567_1234567890.mp3")
-
-        Returns:
-            URL pública del archivo en el Pull Zone (CDN)
         """
         # Limpiar nombre de archivo para URLs seguras
         clean_filename = filename.replace(" ", "_").replace(":", "-").replace("+", "")
@@ -218,14 +230,6 @@ class MediaProcessor:
     async def transcribe_audio(self, audio_bytes: bytes, audio_format: str = "ogg") -> str:
         """
         Transcribe audio usando OpenAI Whisper.
-
-        Args:
-            audio_bytes: Audio en bytes
-            audio_format: Formato del audio detectado ("ogg", "mp3", "wav", "webm", "mp4", "flac")
-                         Ya detectado por magic bytes, NO por Content-Type
-
-        Returns:
-            Texto transcrito en español
         """
         try:
             # Asegurar que el formato sea válido
@@ -289,12 +293,6 @@ class MediaProcessor:
         - Detectar códigos de inmuebles en fotos
         - Identificar tipo de propiedad
         - Extraer características visibles
-
-        Args:
-            image_url: URL pública de la imagen en Bunny.net CDN
-
-        Returns:
-            Descripción/análisis de la imagen
         """
         try:
             response = await client_openai.chat.completions.create(
@@ -349,20 +347,6 @@ class MediaProcessor:
         2. Subir a Bunny.net Storage (CDN permanente)
         3. Si es audio: transcribir con Whisper
         4. Si es imagen: analizar con GPT-4o-mini
-
-        Args:
-            media_url: URL temporal de Twilio
-            content_type: Tipo MIME (audio/ogg, image/jpeg, etc.)
-            phone: Teléfono del cliente (para naming)
-
-        Returns:
-            {
-                "permanent_url": str,      # URL en Bunny.net CDN
-                "transcription": str,      # Solo si es audio
-                "analysis": str,           # Solo si es imagen
-                "media_type": str,         # "audio" o "image"
-                "body_for_ai": str         # Texto para que Sofía procese
-            }
         """
         result = {
             "permanent_url": "",

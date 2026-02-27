@@ -90,6 +90,18 @@ class TwilioClient:
 
                 # Agregar MediaUrl si se proporciona
                 if media_url:
+                    # VALIDACIÓN CRÍTICA: Twilio requiere URLs con https://
+                    if not media_url.startswith("https://"):
+                        logger.error(
+                            f"[TwilioClient] ❌ URL de media inválida (falta https://): "
+                            f"{media_url[:80]}... - Twilio rechazará esta URL"
+                        )
+                        return {
+                            "status": "error",
+                            "code": 400,
+                            "message": f"URL de media debe comenzar con https://. Recibido: {media_url[:50]}..."
+                        }
+                    
                     payload["MediaUrl"] = media_url
                     logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {media_url[:80]}...")
                 else:

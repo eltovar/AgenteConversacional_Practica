@@ -2,4 +2,6 @@
 # Asegura que ffmpeg esté disponible para conversión de audio WebM → OGG
 
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+aptPkgs = ["ffmpeg"]
+
+# No sobrescribir la detección automática de Python

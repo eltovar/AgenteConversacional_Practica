@@ -483,22 +483,26 @@ class MediaProcessor:
         """
         content_lower = content_type.lower()
 
-        # webm es el formato nativo de MediaRecorder en navegadores Chrome/Edge
-        is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower
+        # Formatos de audio soportados (webm, ogg, wav del panel de asesoras)
+        is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower or "wav" in content_lower
         
         if is_audio:
             folder = "audios_asesores"
             # Detectar extensión correcta basándose en content_type
-            if "webm" in content_lower:
-                extension = ".webm"
-            elif "ogg" in content_lower or "vorbis" in content_lower:
-                extension = ".ogg"
+            # PRIORIDAD: Formatos compatibles con WhatsApp primero
+            if "ogg" in content_lower or "vorbis" in content_lower:
+                extension = ".ogg"  # Ideal para WhatsApp
+            elif "wav" in content_lower:
+                extension = ".wav"  # Compatible con WhatsApp (convertido desde WebM)
             elif "mp4" in content_lower or "m4a" in content_lower or "aac" in content_lower:
                 extension = ".mp4"
-            elif "wav" in content_lower:
-                extension = ".wav"
             elif "mpeg" in content_lower or "mp3" in content_lower:
                 extension = ".mp3"
+            elif "webm" in content_lower:
+                # WebM NO es compatible con WhatsApp directamente
+                # Pero lo guardamos por si acaso (el cliente debería convertir a WAV)
+                extension = ".webm"
+                logger.warning("[MediaProcessor] Audio WebM recibido - puede no reproducirse en WhatsApp")
             elif "flac" in content_lower:
                 extension = ".flac"
             else:

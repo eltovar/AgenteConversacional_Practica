@@ -1154,7 +1154,16 @@ let recordingStartTime = null;
 
 /**
  * Inicia la grabacion de audio desde el microfono del navegador.
- * Usa MediaRecorder API nativa (Chrome/Edge/Firefox).
+ *
+ * IMPORTANTE: WhatsApp requiere formatos especificos para reproducir audio:
+ * - audio/ogg (con codec Opus) - PREFERIDO
+ * - audio/mp4, audio/aac, audio/mpeg
+ * - audio/webm NO es compatible directamente con WhatsApp
+ *
+ * Estrategia:
+ * 1. Intentar grabar en OGG/Opus (Firefox lo soporta nativamente)
+ * 2. Si no, grabar en WebM y convertir a WAV antes de enviar
+ * 3. El servidor puede procesar WAV correctamente
  */
 async function startRecording() {
     console.log('[Panel] Iniciando grabacion de audio...');
@@ -1166,24 +1175,55 @@ async function startRecording() {
     }
 
     try {
-        // Solicitar acceso al microfono
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Solicitar acceso al microfono con configuracion optima
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,        // Mono (reduce tamano)
+                sampleRate: 16000,      // 16kHz (suficiente para voz)
+                echoCancellation: true,
+                noiseSuppression: true
+            }
+        });
         console.log('[Panel] Acceso al microfono concedido');
 
-        // Determinar el mejor formato soportado
-        let mimeType = 'audio/webm';
-        if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-            mimeType = 'audio/webm;codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+        // Determinar el mejor formato soportado para WhatsApp
+        // PRIORIDAD: OGG/Opus > MP4 > WebM (convertir a WAV)
+        let mimeType = null;
+        let needsConversion = false;
+
+        // 1. Intentar OGG/Opus (compatible con WhatsApp, Firefox lo soporta)
+        if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
             mimeType = 'audio/ogg;codecs=opus';
-        } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-            mimeType = 'audio/mp4';
+            console.log('[Panel] Usando OGG/Opus (compatible con WhatsApp)');
         }
-        console.log('[Panel] Usando formato:', mimeType);
+        // 2. Intentar MP4/AAC (compatible con WhatsApp)
+        else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+            mimeType = 'audio/mp4';
+            console.log('[Panel] Usando MP4 (compatible con WhatsApp)');
+        }
+        // 3. Fallback a WebM (NO compatible con WhatsApp, necesita conversion)
+        else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+            mimeType = 'audio/webm;codecs=opus';
+            needsConversion = true;
+            console.log('[Panel] Usando WebM (se convertira a WAV para WhatsApp)');
+        }
+        else if (MediaRecorder.isTypeSupported('audio/webm')) {
+            mimeType = 'audio/webm';
+            needsConversion = true;
+            console.log('[Panel] Usando WebM basico (se convertira a WAV)');
+        }
+        else {
+            throw new Error('Tu navegador no soporta ningun formato de audio compatible');
+        }
 
         // Crear MediaRecorder
         mediaRecorder = new MediaRecorder(stream, { mimeType });
         audioChunks = [];
+
+        // Guardar referencia al stream para cerrarlo despues
+        mediaRecorder._stream = stream;
+        mediaRecorder._needsConversion = needsConversion;
+        mediaRecorder._mimeType = mimeType;
 
         // Evento: datos disponibles
         mediaRecorder.ondataavailable = (event) => {
@@ -1196,24 +1236,45 @@ async function startRecording() {
         mediaRecorder.onstop = async () => {
             console.log('[Panel] Grabacion detenida, procesando audio...');
 
-            // Crear blob con los chunks
-            const audioBlob = new Blob(audioChunks, { type: mimeType });
-            console.log('[Panel] Audio grabado:', audioBlob.size, 'bytes');
+            const originalMimeType = mediaRecorder._mimeType;
+            const needsConv = mediaRecorder._needsConversion;
 
-            // Determinar extension
-            let extension = 'webm';
-            if (mimeType.includes('ogg')) extension = 'ogg';
-            else if (mimeType.includes('mp4')) extension = 'mp4';
+            // Crear blob con los chunks originales
+            const audioBlob = new Blob(audioChunks, { type: originalMimeType });
+            console.log('[Panel] Audio grabado:', audioBlob.size, 'bytes, tipo:', originalMimeType);
+
+            let finalBlob = audioBlob;
+            let finalMimeType = originalMimeType;
+            let extension = 'ogg';
+
+            // Si es WebM, convertir a WAV para compatibilidad con WhatsApp
+            if (needsConv) {
+                console.log('[Panel] Convirtiendo WebM a WAV para compatibilidad...');
+                try {
+                    finalBlob = await convertToWav(audioBlob);
+                    finalMimeType = 'audio/wav';
+                    extension = 'wav';
+                    console.log('[Panel] Conversion exitosa:', finalBlob.size, 'bytes');
+                } catch (convErr) {
+                    console.error('[Panel] Error en conversion, enviando original:', convErr);
+                    // Si falla la conversion, enviar el original
+                    extension = 'webm';
+                }
+            } else if (originalMimeType.includes('ogg')) {
+                extension = 'ogg';
+            } else if (originalMimeType.includes('mp4')) {
+                extension = 'mp4';
+            }
 
             // Convertir a File para enviar por FormData
             const audioFile = new File(
-                [audioBlob],
+                [finalBlob],
                 `nota_voz_${Date.now()}.${extension}`,
-                { type: mimeType }
+                { type: finalMimeType }
             );
 
             // Cerrar stream del microfono
-            stream.getTracks().forEach(track => track.stop());
+            mediaRecorder._stream.getTracks().forEach(track => track.stop());
             console.log('[Panel] Stream de microfono cerrado');
 
             // Mostrar confirmacion y enviar
@@ -1229,7 +1290,7 @@ async function startRecording() {
 
         // Iniciar grabacion
         mediaRecorder.start(1000); // Chunks cada 1 segundo
-        console.log('[Panel] Grabacion iniciada');
+        console.log('[Panel] Grabacion iniciada con formato:', mimeType);
 
         // Actualizar UI
         updateRecordingUI(true);
@@ -1244,6 +1305,111 @@ async function startRecording() {
         } else {
             alert('Error al acceder al microfono: ' + err.message);
         }
+    }
+}
+
+/**
+ * Convierte un Blob de audio WebM a WAV usando AudioContext.
+ * WAV es compatible con WhatsApp y Twilio.
+ *
+ * @param {Blob} webmBlob - Audio en formato WebM
+ * @returns {Promise<Blob>} - Audio en formato WAV
+ */
+async function convertToWav(webmBlob) {
+    // Crear AudioContext
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Decodificar el audio WebM
+    const arrayBuffer = await webmBlob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    // Configuracion WAV
+    const numChannels = 1; // Mono
+    const sampleRate = 16000; // 16kHz para voz
+    const bitsPerSample = 16;
+
+    // Resamplear si es necesario
+    let samples;
+    if (audioBuffer.sampleRate !== sampleRate) {
+        // Resamplear a 16kHz
+        const offlineContext = new OfflineAudioContext(
+            numChannels,
+            audioBuffer.duration * sampleRate,
+            sampleRate
+        );
+        const source = offlineContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offlineContext.destination);
+        source.start();
+        const resampledBuffer = await offlineContext.startRendering();
+        samples = resampledBuffer.getChannelData(0);
+    } else {
+        samples = audioBuffer.getChannelData(0);
+    }
+
+    // Convertir float32 a int16
+    const int16Samples = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        int16Samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    // Crear header WAV
+    const wavBuffer = createWavBuffer(int16Samples, sampleRate, numChannels, bitsPerSample);
+
+    // Cerrar AudioContext
+    await audioContext.close();
+
+    return new Blob([wavBuffer], { type: 'audio/wav' });
+}
+
+/**
+ * Crea un buffer WAV completo con header y datos.
+ */
+function createWavBuffer(samples, sampleRate, numChannels, bitsPerSample) {
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = samples.length * bytesPerSample;
+    const bufferSize = 44 + dataSize; // 44 bytes header + data
+
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+
+    // RIFF header
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, bufferSize - 8, true);
+    writeString(view, 8, 'WAVE');
+
+    // fmt subchunk
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+    view.setUint16(20, 1, true);  // AudioFormat (1 = PCM)
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+
+    // data subchunk
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // Write samples
+    const offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+        view.setInt16(offset + i * 2, samples[i], true);
+    }
+
+    return buffer;
+}
+
+/**
+ * Escribe un string en un DataView.
+ */
+function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
     }
 }
 

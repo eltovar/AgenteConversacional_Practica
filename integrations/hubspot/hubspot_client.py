@@ -11,6 +11,94 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from logging_config import logger
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROPERTY VALIDATION - Defensa contra propiedades faltantes en HubSpot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HubSpotPropertyValidator:
+    """
+    Valida que las propiedades existan en HubSpot antes de enviarlas.
+    
+    Basado en auditoría del 2026-02-27:
+    ✅ EXISTEN: chatbot_conversation, chatbot_timestamp, chatbot_sentiment_alert, 
+                chatbot_social_media_link
+    ❌ NO EXISTEN: chatbot_summary, chatbot_suspicious_indicators, chatbot_canal_origen, 
+                  chatbot_social_media_url
+    """
+    
+    # Propiedades que están confirmadas que EXISTEN en HubSpot
+    KNOWN_EXISTING_PROPERTIES = {
+        # Propiedades estándar HubSpot
+        "firstname", "lastname", "phone", "email", "lifecyclestage", 
+        "hubspot_owner_id", "whatsapp_id",
+        
+        # Propiedades chatbot que EXISTEN
+        "chatbot_conversation",
+        "chatbot_timestamp",
+        "chatbot_sentiment_alert",
+        "chatbot_social_media_link",
+        
+        # Propiedades estándar para operaciones
+        "pipeline", "dealstage", "hs_analytics_source", "canal_origen",
+        
+        # Propiedades CRM Agent
+        "chatbot_property_type",
+        "chatbot_rooms",
+        "chatbot_location", 
+        "chatbot_budget",
+        "chatbot_urgency",
+        "chatbot_operation_type",
+        "chatbot_preference",
+        "chatbot_score",
+        "chatbot_email",
+    }
+    
+    # Propiedades que sabemos que NO existen
+    KNOWN_MISSING_PROPERTIES = {
+        "chatbot_summary",  # ← Causa del error actual
+        "chatbot_suspicious_indicators",
+        "chatbot_canal_origen_alias",  # (usa "canal_origen" en su lugar)
+        "chatbot_social_media_url",
+    }
+    
+    @classmethod
+    def validate_and_filter(
+        cls, 
+        properties: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], list[str]]:
+        """
+        Valida propiedades y filtra las que sabemos que no existen.
+        
+        Args:
+            properties: Dict de propiedades a validar
+            
+        Returns:
+            Tuple (propiedades_filtradas, propiedades_removidas)
+        """
+        if not properties:
+            return {}, []
+        
+        filtered = {}
+        removed = []
+        
+        for key, value in properties.items():
+            if key in cls.KNOWN_MISSING_PROPERTIES:
+                removed.append(key)
+                logger.debug(
+                    f"[HubSpotPropertyValidator] Filtrando propiedad conocida como inexistente: {key}"
+                )
+            else:
+                filtered[key] = value
+        
+        if removed:
+            logger.warning(
+                f"[HubSpotPropertyValidator] Se removieron {len(removed)} propiedades "
+                f"que no existen en HubSpot: {removed}"
+            )
+        
+        return filtered, removed
+
+
 class HubSpotClient:
     """
     Cliente asíncrono para interactuar con HubSpot CRM API v3.
@@ -136,9 +224,15 @@ class HubSpotClient:
     async def create_contact(self, properties: Dict[str, Any]) -> str:
         """
         Crea un nuevo contacto en HubSpot.
+        
+        Las propiedades se validan y filtran automáticamente.
         """
         endpoint = "/crm/v3/objects/contacts"
-        response = await self._request("POST", endpoint, {"properties": properties})
+        
+        # Validar y filtrar propiedades antes de enviar
+        validated_props, _ = HubSpotPropertyValidator.validate_and_filter(properties)
+        
+        response = await self._request("POST", endpoint, {"properties": validated_props})
         contact_id = response["id"]
         logger.info(f"[HubSpotClient] Contacto creado: {contact_id}")
         return contact_id
@@ -146,10 +240,26 @@ class HubSpotClient:
     async def update_contact(self, contact_id: str, properties: Dict[str, Any]) -> None:
         """
         Actualiza un contacto existente.
+        
+        Las propiedades se validan y filtran automáticamente para evitar
+        errores 400 PROPERTY_DOESNT_EXIST de propiedades no configuradas en HubSpot.
         """
         endpoint = f"/crm/v3/objects/contacts/{contact_id}"
-        await self._request("PATCH", endpoint, {"properties": properties})
+        
+        # Validar y filtrar propiedades antes de enviar
+        validated_props, filtered_out = HubSpotPropertyValidator.validate_and_filter(properties)
+        
+        # Si no hay propiedades válidas después del filtrado, no enviar nada
+        if not validated_props:
+            logger.warning(
+                f"[HubSpotClient] No hay propiedades válidas para actualizar contacto {contact_id}. "
+                f"Se filtraron: {filtered_out}. Abortando actualización."
+            )
+            return
+        
+        await self._request("PATCH", endpoint, {"properties": validated_props})
         logger.info(f"[HubSpotClient] Contacto actualizado: {contact_id}")
+
 
     async def create_deal(
         self,

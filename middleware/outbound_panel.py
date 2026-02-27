@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request, Body, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 from pathlib import Path
 import redis.asyncio as redis
 
@@ -33,6 +34,29 @@ from utils.media_processor import media_processor
 
 # Router de FastAPI para el panel de envío
 router = APIRouter(prefix="/whatsapp/panel", tags=["Panel de Envío"])
+
+
+# ============================================================================
+# Modelos Pydantic para JSON requests
+# ============================================================================
+
+class SendMessageRequest(BaseModel):
+    """Modelo para envío de mensajes via JSON (para testing E2E)."""
+    phone: str = Field(..., description="Número de destino (+573001234567)")
+    message: Optional[str] = Field(None, description="Contenido del mensaje de texto")
+    body: Optional[str] = Field(None, description="Alias: contenido del mensaje (compatibilidad)")
+    contact_id: Optional[str] = Field(None, description="ID del contacto en HubSpot")
+    canal: Optional[str] = Field("whatsapp", description="Canal de origen para segregación")
+    force_send: bool = Field(False, description="Forzar envío aunque ventana esté cerrada")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "phone": "+573001112235",
+                "message": "Hola Carlos, un gusto. Soy el asesor asignado.",
+                "canal": "whatsapp"
+            }
+        }
 
 # Configuración de Jinja2 Templates
 TEMPLATES_DIR = Path(__file__).parent / "PanelAsesores"
@@ -456,7 +480,7 @@ async def send_message(
         try:
             contact_manager = ContactManager()
             contact_info = await contact_manager.identify_or_create_contact(
-                phone_raw=to,
+                phone_raw=phone_normalized,  # Usar número normalizado, no 'to' que puede ser None
                 source_channel="panel_asesor"
             )
             contact_id = contact_info.contact_id
@@ -644,6 +668,184 @@ async def send_message(
                 "message_source": "Manual via Panel",
                 "media_url": permanent_media_url,
                 "media_type": media_type
+            }
+        )
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error enviando mensaje: {result.get('message')}"
+        )
+
+
+@router.post("/send-message-json")
+async def send_message_json(
+    background_tasks: BackgroundTasks,
+    request: SendMessageRequest,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Envía un mensaje de WhatsApp desde el panel (formato JSON).
+    
+    Endpoint alternativo para testing E2E y clientes que prefieren JSON.
+    Solo soporta texto (sin multimedia).
+    
+    Headers:
+        X-API-Key: API key de autenticación
+        Content-Type: application/json
+    
+    Body (JSON):
+        {
+            "phone": "+573001112235",
+            "message": "Hola Carlos, soy el asesor asignado.",
+            "canal": "whatsapp"
+        }
+    """
+    # Validar API Key
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    # Obtener mensaje (soportar 'message' o 'body')
+    body = request.message or request.body
+    
+    # Validar que haya contenido
+    if not body or not body.strip():
+        raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío")
+
+    # Normalizar número
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(request.phone)
+
+    if not validation.is_valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Número inválido: {validation.error_message}"
+        )
+
+    phone_normalized = validation.normalized
+
+    # Normalizar canal
+    canal_final = request.canal.lower().strip() if request.canal else "whatsapp"
+    if canal_final == "null" or not canal_final:
+        canal_final = "whatsapp"
+
+    # Verificar ventana de 24 horas
+    window_status = await check_24h_window(phone_normalized)
+
+    if not window_status.is_open and not request.force_send:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "warning",
+                "window_closed": True,
+                "message": window_status.message,
+                "requires_template": True,
+                "hint": "Use force_send=true para enviar de todas formas (requiere Template)"
+            }
+        )
+
+    # Verificar disponibilidad de Twilio
+    if not twilio_client.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail="Twilio no está configurado correctamente"
+        )
+
+    # Obtener/crear contacto si no se proporcionó
+    contact_id = request.contact_id
+    if not contact_id:
+        try:
+            contact_manager = ContactManager()
+            contact_info = await contact_manager.identify_or_create_contact(
+                phone_raw=phone_normalized,
+                source_channel="panel_asesor"
+            )
+            contact_id = contact_info.contact_id
+        except Exception as e:
+            logger.warning(f"[Panel-JSON] No se pudo obtener contacto: {e}")
+
+    # Pausar Sofía y cambiar estado
+    try:
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        state_manager = ConversationStateManager(redis_url)
+
+        current_status = await state_manager.get_status(phone_normalized, canal_final)
+
+        if current_status in [ConversationStatus.HUMAN_ACTIVE, ConversationStatus.PENDING_HANDOFF, ConversationStatus.IN_CONVERSATION]:
+            await state_manager.set_status(
+                phone_normalized,
+                ConversationStatus.IN_CONVERSATION,
+                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                canal=canal_final
+            )
+            logger.info(f"[Panel-JSON] Estado: IN_CONVERSATION para {phone_normalized}:{canal_final}")
+        else:
+            # Crear nuevo estado para la conversación
+            await state_manager.set_status(
+                phone_normalized,
+                ConversationStatus.IN_CONVERSATION,
+                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                canal=canal_final
+            )
+            logger.info(f"[Panel-JSON] Nuevo estado IN_CONVERSATION para {phone_normalized}:{canal_final}")
+
+    except Exception as e:
+        logger.error(f"[Panel-JSON] Error actualizando estado: {e}")
+
+    # Enviar mensaje vía Twilio
+    result = await twilio_client.send_whatsapp_message(
+        to=phone_normalized,
+        body=body
+    )
+
+    if result["status"] == "success":
+        message_sid = result.get("message_sid")
+        logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {message_sid} a {phone_normalized}")
+
+        # Guardar en MongoDB
+        mongo_message_id = None
+        try:
+            mongo_manager = get_mongo_manager()
+            mongo_message_id = await mongo_manager.save_message(
+                phone=phone_normalized,
+                content=body,
+                sender="advisor",
+                channel=canal_final,
+                hubspot_contact_id=contact_id,
+                message_sid=message_sid,
+                metadata={"source": "Panel JSON API"}
+            )
+        except Exception as e:
+            logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
+
+        # Registrar en HubSpot Timeline
+        if contact_id:
+            background_tasks.add_task(
+                _log_advisor_message_to_hubspot,
+                contact_id,
+                body,
+                phone_normalized,
+                "Panel JSON API",
+                mongo_message_id
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "message_sid": message_sid,
+                "mongo_id": mongo_message_id,
+                "to": phone_normalized,
+                "contact_id": contact_id,
+                "canal": canal_final,
+                "window_status": {
+                    "is_open": window_status.is_open,
+                    "time_remaining": window_status.time_remaining_seconds
+                },
+                "sofia_paused": True,
+                "message_source": "Panel JSON API"
             }
         )
     else:

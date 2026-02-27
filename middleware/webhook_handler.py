@@ -539,6 +539,44 @@ async def whatsapp_webhook(
         logger.info(f"[Webhook] Sofía ACTIVA - Procesando mensaje")
 
         # ════════════════════════════════════════════════════════════
+        # PASO 4.1.1: GUARDAR MENSAJE DEL CLIENTE EN MONGODB (SÍNCRONO)
+        # ════════════════════════════════════════════════════════════
+        # CRÍTICO: Guardar ANTES de procesar con Sofía para que el mensaje
+        # aparezca en el panel incluso si Sofía falla o tarda mucho.
+        # Esto garantiza que contactos nuevos sean visibles inmediatamente.
+        client_mongo_id = None
+        try:
+            mongo_manager = get_mongo_manager()
+
+            # Construir subdocumento media si existe
+            media_dict = None
+            if media_result and media_result.get("permanent_url"):
+                media_dict = {
+                    "permanent_url": media_result.get("permanent_url"),
+                    "type": media_result.get("media_type"),
+                    "transcription": media_result.get("transcription"),
+                    "analysis": media_result.get("analysis"),
+                }
+
+            client_mongo_id = await mongo_manager.save_message(
+                phone=phone_normalized,
+                content=Body,
+                sender="client",
+                channel=final_channel,
+                hubspot_contact_id=contact_id,
+                media=media_dict
+            )
+
+            if client_mongo_id:
+                logger.info(f"[Webhook] ✅ Mensaje del cliente guardado en MongoDB: {client_mongo_id} (pre-Sofía, canal={final_channel})")
+            else:
+                logger.warning(f"[Webhook] ⚠️ MongoDB retornó None al guardar mensaje del cliente (pre-Sofía)")
+
+        except Exception as e:
+            logger.error(f"[Webhook] ❌ Error guardando mensaje del cliente en MongoDB (pre-Sofía): {e}")
+            # Continuar con el flujo aunque falle MongoDB
+
+        # ════════════════════════════════════════════════════════════
         # PASO 4.2: Detectar código de inmueble (alta prioridad)
         # ════════════════════════════════════════════════════════════
         property_code_result = detect_property_code(Body)
@@ -643,13 +681,40 @@ async def whatsapp_webhook(
                 f"[Webhook] Handoff INMEDIATO detectado: "
                 f"emoción={analysis.emocion}, score={analysis.sentiment_score}"
             )
+            # ✅ AGREGAR AL PANEL: Cliente urgente necesita atención humana
+            await state_manager.request_handoff(
+                phone_normalized,
+                reason=f"Cliente urgente - Emoción: {analysis.emocion}, Score: {analysis.sentiment_score}",
+                contact_id=contact_info.contact_id if contact_info else None,
+                canal=final_channel
+            )
+            logger.info(f"[Webhook] ✅ Contacto {phone_normalized} agregado al panel (IMMEDIATE)")
 
-        # Handoff alto - cliente listo para avanzar
+        # Handoff alto - cliente listo para avanzar (tiene necesidades claras)
         elif analysis.handoff_priority == "high":
             logger.info(
                 f"[Webhook] Handoff HIGH detectado: intención_visita={analysis.intencion_visita}"
             )
-            # No cambiar estado, pero registrar para notificar al asesor
+            # ✅ AGREGAR AL PANEL: Cliente potencial con necesidades definidas
+            reason_parts = []
+            if analysis.intencion_visita:
+                reason_parts.append("Intención de visita")
+            if analysis.link_redes_sociales:
+                reason_parts.append("Link de red social")
+            if hasattr(analysis, 'summary_update') and analysis.summary_update:
+                reason_parts.append(analysis.summary_update)
+            
+            reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial listo para asesor"
+            
+            await state_manager.request_handoff(
+                phone_normalized,
+                reason=reason,
+                contact_id=contact_info.contact_id if contact_info else None,
+                canal=final_channel
+            )
+            logger.info(f"[Webhook] ✅ Contacto {phone_normalized} agregado al panel (HIGH)")
+            
+            # Notificar también como hot lead en HubSpot
             if contact_info:
                 background_tasks.add_task(
                     _notify_high_priority_lead,
@@ -665,6 +730,7 @@ async def whatsapp_webhook(
                 phone_normalized,
                 reason="Cliente solicitó hablar con asesor",
                 contact_id=contact_info.contact_id if contact_info else None,
+                canal=final_channel
             )
 
         # Actualizar actividad
@@ -698,6 +764,7 @@ async def whatsapp_webhook(
                 f"mientras Sofía procesaba. NO se enviará respuesta del bot."
             )
             # Guardar en HubSpot pero NO enviar respuesta
+            # NOTA: El mensaje del cliente ya fue guardado en MongoDB (client_mongo_id)
             if contact_info:
                 background_tasks.add_task(
                     _sync_conversation_with_analysis_to_hubspot,
@@ -707,11 +774,14 @@ async def whatsapp_webhook(
                     phone_normalized,
                     analysis,
                     final_channel,
-                    media_result  # Pasar resultado completo de multimedia
+                    media_result,  # Pasar resultado completo de multimedia
+                    client_mongo_id  # ID del mensaje ya guardado (evita duplicados)
                 )
             return Response(content="", media_type="text/xml")
 
         # Sincronizar con HubSpot en background (incluye análisis)
+        # NOTA: El mensaje del cliente ya fue guardado en MongoDB (client_mongo_id)
+        # Solo falta guardar la respuesta de Sofía y sincronizar con HubSpot
         if contact_info:
             logger.info(f"[Webhook] 📱 Registrando conversación en HubSpot (contact_id={contact_info.contact_id}, canal={final_channel})")
             background_tasks.add_task(
@@ -722,7 +792,8 @@ async def whatsapp_webhook(
                 phone_normalized,
                 analysis,
                 final_channel,
-                media_result  # Pasar resultado completo de multimedia
+                media_result,  # Pasar resultado completo de multimedia
+                client_mongo_id  # ID del mensaje ya guardado (evita duplicados)
             )
         else:
             logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Conversación NO se guardará en HubSpot")
@@ -932,7 +1003,16 @@ async def _sync_message_to_hubspot(
             "chatbot_conversation": f"[{direction.upper()}] {message[:500]}",
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
-        await contact_manager.update_contact_info(contact_id, properties)
+
+        try:
+            await contact_manager.update_contact_info(contact_id, properties)
+        except Exception as prop_err:
+            if "PROPERTY_DOESNT_EXIST" in str(prop_err):
+                logger.error(
+                    f"[HubSpot Sync] ❌ Propiedades no configuradas: {list(properties.keys())}"
+                )
+            else:
+                logger.error(f"[HubSpot Sync] Error actualizando propiedades: {prop_err}")
 
         logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {phone} (canal={channel})")
 
@@ -984,7 +1064,18 @@ async def _sync_conversation_to_hubspot(
             "chatbot_conversation": summary[-3000:],
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
-        await contact_manager.update_contact_info(contact_id, properties)
+
+        try:
+            await contact_manager.update_contact_info(contact_id, properties)
+        except Exception as prop_err:
+            # Loguear pero NO fallar
+            if "PROPERTY_DOESNT_EXIST" in str(prop_err):
+                logger.error(
+                    f"[HubSpot Sync] ❌ Propiedades no configuradas en HubSpot: "
+                    f"{list(properties.keys())}"
+                )
+            else:
+                logger.error(f"[HubSpot Sync] Error actualizando propiedades: {prop_err}")
 
         logger.debug(f"[HubSpot Sync] Conversación sincronizada en Timeline para {phone}")
 
@@ -1001,24 +1092,13 @@ async def _sync_conversation_with_analysis_to_hubspot(
     phone: str,
     analysis,
     channel: str = "whatsapp",
-    media_result: Optional[dict] = None
+    media_result: Optional[dict] = None,
+    existing_client_mongo_id: Optional[str] = None
 ) -> None:
     """
     Sincroniza una interacción completa con análisis.
-
-    FLUJO v2.0:
-    1. Guardar en MongoDB (~5ms) - Para visualización inmediata en panel
-    2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
-
-    Incluye el análisis de sentimiento y actualiza propiedades adicionales
-    basadas en la información extraída del análisis Single-Stream.
-
-    Args:
-        channel: Canal de origen del mensaje (whatsapp, instagram, facebook, etc.)
-        media_result: Diccionario con info de multimedia procesada
-                     (permanent_url, media_type, transcription, analysis)
     """
-    mongo_client_id = None
+    mongo_client_id = existing_client_mongo_id  # Usar ID existente si fue guardado antes
     mongo_bot_id = None
     media_url = media_result.get("permanent_url") if media_result else None
     media_type = media_result.get("media_type") if media_result else None
@@ -1039,16 +1119,20 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 "analysis": media_result.get("analysis"),
             }
 
-        # Guardar mensaje del cliente (con multimedia si existe)
-        mongo_client_id = await mongo_manager.save_message(
-            phone=phone,
-            content=user_message,
-            sender="client",
-            channel=channel,
-            hubspot_contact_id=contact_id,
-            metadata={"analysis_emocion": analysis.emocion if analysis else None},
-            media=media_dict
-        )
+        # Guardar mensaje del cliente SOLO si no fue guardado previamente
+        if not existing_client_mongo_id:
+            mongo_client_id = await mongo_manager.save_message(
+                phone=phone,
+                content=user_message,
+                sender="client",
+                channel=channel,
+                hubspot_contact_id=contact_id,
+                metadata={"analysis_emocion": analysis.emocion if analysis else None},
+                media=media_dict
+            )
+            logger.debug(f"[MongoDB] Mensaje del cliente guardado (background): {mongo_client_id}")
+        else:
+            logger.debug(f"[MongoDB] Mensaje del cliente ya existente (pre-Sofía): {existing_client_mongo_id}")
 
         # Guardar respuesta de Sofía
         mongo_bot_id = await mongo_manager.save_message(
@@ -1116,22 +1200,37 @@ async def _sync_conversation_with_analysis_to_hubspot(
         sofia = get_sofia_brain()
         summary = await sofia.get_conversation_summary(phone)
 
-        # Propiedades base (siempre existen en HubSpot)
-        properties = {
+        # ═══════════════════════════════════════════════════════════════════
+        # PROPIEDADES BASE - Intentamos actualizar pero NO bloqueamos si fallan
+        # ═══════════════════════════════════════════════════════════════════
+        # NOTA: Aunque estas "deberían" existir, las protegemos para evitar
+        # que un error de configuración en HubSpot bloquee todo el flujo.
+        base_properties = {
             "chatbot_conversation": summary[-3000:],
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
 
-        # Agregar summary_update si existe nueva información
-        if analysis.summary_update:
-            properties["chatbot_summary"] = analysis.summary_update
+        try:
+            await contact_manager.update_contact_info(contact_id, base_properties)
+        except Exception as base_err:
+            # Loguear pero NO fallar - el mensaje ya fue guardado en MongoDB
+            if "PROPERTY_DOESNT_EXIST" in str(base_err):
+                logger.error(
+                    f"[HubSpot Sync] ❌ PROPIEDADES BASE NO CONFIGURADAS en HubSpot: "
+                    f"{list(base_properties.keys())}. Contacte al administrador de HubSpot."
+                )
+            else:
+                logger.error(f"[HubSpot Sync] Error actualizando propiedades base: {base_err}")
 
-        # Actualizar propiedades base (estas siempre deberían existir)
-        await contact_manager.update_contact_info(contact_id, properties)
-
-        # Propiedades opcionales (pueden no existir en HubSpot)
-        # Las intentamos actualizar por separado para no bloquear las base
+        # ═══════════════════════════════════════════════════════════════════
+        # PROPIEDADES OPCIONALES - Pueden no existir en HubSpot
+        # ═══════════════════════════════════════════════════════════════════
         optional_properties = {}
+
+        # Agregar summary_update si existe nueva información
+        # NOTA: chatbot_summary es OPCIONAL - puede no existir en HubSpot
+        if analysis.summary_update:
+            optional_properties["chatbot_summary"] = analysis.summary_update
 
         # Registrar score de sentimiento si es bajo (para alertas)
         if analysis.sentiment_score <= 4:
@@ -1213,19 +1312,40 @@ async def _notify_high_priority_lead(
         from datetime import timezone
         midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-        properties = {
+        # Propiedades base (deberían existir en HubSpot)
+        base_properties = {
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
+        }
+
+        # Propiedades opcionales (pueden no existir en HubSpot)
+        optional_properties = {
             "chatbot_hot_lead": "true",
             "chatbot_hot_lead_reason": reason_str,
-            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         }
 
         # Agregar URL del link si existe
         if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
             url = analysis.social_media_info.get("url")
             if url:
-                properties["chatbot_social_media_url"] = url[:500]  # Truncar si es muy largo
+                optional_properties["chatbot_social_media_url"] = url[:500]
 
-        await contact_manager.update_contact_info(contact_id, properties)
+        # Actualizar propiedades base primero
+        try:
+            await contact_manager.update_contact_info(contact_id, base_properties)
+        except Exception as base_err:
+            logger.warning(f"[Webhook] Error actualizando propiedades base: {base_err}")
+
+        # Intentar actualizar propiedades opcionales (ignorar si no existen)
+        try:
+            await contact_manager.update_contact_info(contact_id, optional_properties)
+        except Exception as opt_err:
+            if "PROPERTY_DOESNT_EXIST" in str(opt_err):
+                logger.warning(
+                    f"[Webhook] Propiedades de hot lead no configuradas en HubSpot: "
+                    f"{list(optional_properties.keys())} - Ignorando"
+                )
+            else:
+                logger.warning(f"[Webhook] Error actualizando propiedades de hot lead: {opt_err}")
 
         logger.info(
             f"[Webhook] Lead de alta prioridad marcado: {phone} | "

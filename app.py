@@ -46,23 +46,19 @@ OPTIMIZACIONES v2.0:
 - Compatibilidad completa con managers de Sesión 1
 """
 
-from fastapi import FastAPI, HTTPException, Response, Form, Request, Header, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 from agents.orchestrator import process_message
-from agents.InfoAgent.info_agent import agent
-from utils.message_aggregator import message_aggregator, AGGREGATION_TIMEOUT
 from utils.twilio_client import twilio_client
 from logging_config import logger
 import uvicorn
 import os
-import json
 import asyncio
 import random
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 # Scheduler para seguimiento automático
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -77,11 +73,7 @@ from middleware.conversation_state import (
     get_bogota_now_iso
 )
 
-from middleware.appointment_manager import (
-    get_appointment_manager,
-    AppointmentManager,
-    AppointmentStatus
-)
+from middleware.appointment_manager import AppointmentManager
 
 # Importar el router de webhooks de salida HubSpot -> WhatsApp
 from integrations.hubspot import get_outbound_router, get_timeline_logger
@@ -292,95 +284,10 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ENDPOINT WEBHOOK PRINCIPAL
+# NOTA: El endpoint /webhook fue ELIMINADO para evitar duplicidad.
+# Twilio debe configurarse para usar ÚNICAMENTE: /whatsapp/webhook
+# (definido en middleware/webhook_handler.py)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-@app.post("/webhook")
-async def webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    From: str = Form(None),
-    Body: str = Form(None)
-):
-    """
-    Maneja mensajes de Twilio (Form Data) y JSON estándar.
-    Incluye sistema de AGREGACIÓN para manejar múltiples mensajes seguidos.
-    """
-    try:
-        content_type = request.headers.get("content-type", "")
-        is_twilio = "application/x-www-form-urlencoded" in content_type and From
-
-        if is_twilio:
-            # Validar que From no sea None ni vacío
-            if not From or not From.strip():
-                logger.error("[WEBHOOK] From está vacío o es None en petición Twilio")
-                return Response(
-                    content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                    media_type="application/xml"
-                )
-            session_id = From.replace("whatsapp:", "")
-            to_number = From
-            message = Body or ""
-            logger.info("[WEBHOOK] Twilio msg recibido de: %s", session_id)
-        else:
-            try:
-                data = await request.json()
-            except UnicodeDecodeError:
-                body_bytes = await request.body()
-                body_text = body_bytes.decode('latin-1')
-                data = json.loads(body_text)
-                logger.warning("[WEBHOOK] JSON decodificado con latin-1 fallback")
-            except Exception as json_err:
-                logger.error("[WEBHOOK] Error parseando JSON: %s", json_err)
-                raise HTTPException(status_code=400, detail=f"JSON inválido: {str(json_err)}")
-
-            session_id = data.get("session_id")
-            message = data.get("message")
-            to_number = session_id
-            if not session_id or not message:
-                raise HTTPException(status_code=400, detail="Faltan campos: session_id y message")
-            logger.info("[WEBHOOK] JSON msg recibido de: %s", session_id)
-
-        # Sistema de agregación
-        agg_result = await message_aggregator.add_message_to_buffer(session_id, message)
-
-        if not agg_result["should_process"]:
-            logger.info("[WEBHOOK] Mensaje agregado a buffer. Total: %s", agg_result['buffer_count'])
-            if is_twilio:
-                return Response(
-                    content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                    media_type="application/xml"
-                )
-            return MessageResponse(response="", status="aggregating")
-
-        if agg_result["is_aggregating"] and is_twilio:
-            logger.info("[WEBHOOK] Iniciando procesamiento en background para %s", session_id)
-            background_tasks.add_task(process_aggregated_messages, session_id, to_number)
-            return Response(
-                content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                media_type="application/xml"
-            )
-
-        if agg_result.get("combined_message"):
-            message = agg_result["combined_message"]
-
-        result = await process_message(session_id, message)
-
-        if is_twilio:
-            xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response><Message>{result['response']}</Message></Response>"""
-            return Response(content=xml_response, media_type="application/xml")
-
-        return MessageResponse(response=result["response"], status=str(result["status"]))
-
-    except Exception as e:
-        logger.error("[WEBHOOK] Error procesando mensaje: %s", e, exc_info=True)
-        if From:
-            return Response(
-                content='<?xml version="1.0"?><Response><Message>Lo siento, ocurrió un error.</Message></Response>',
-                media_type="application/xml"
-            )
-        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -680,7 +587,7 @@ def root():
         "status": "operational",
         "timezone": str(TIMEZONE_BOGOTA),
         "endpoints": {
-            "webhook": "POST /webhook",
+            "webhook": "POST /whatsapp/webhook",
             "health": "GET /health",
             "docs": "GET /docs"
         }

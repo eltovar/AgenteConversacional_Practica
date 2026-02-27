@@ -502,6 +502,10 @@ class ContactManager:
 
         Returns:
             True si se actualizó correctamente, False si falló
+        
+        Raises:
+            Exception: Re-lanza excepciones de propiedades no existentes
+                      para que el caller pueda manejarlas como opcionales
         """
         try:
             await self.hubspot.update_contact(contact_id, properties)
@@ -510,6 +514,15 @@ class ContactManager:
 
         except Exception as e:
             error_str = str(e).lower()
+
+            # Re-lanzar si es propiedad faltante (para manejo en webhook_handler)
+            if "PROPERTY_DOESNT_EXIST" in str(e):
+                logger.debug(
+                    "[ContactManager] Propiedad faltante al actualizar %s. "
+                    "Re-lanzando para manejo de opcional.",
+                    contact_id
+                )
+                raise
 
             # Si es rate limit, loguear pero no fallar
             if "429" in str(e) or "rate limit" in error_str:

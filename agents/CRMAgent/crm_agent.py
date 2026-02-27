@@ -565,12 +565,23 @@ class CRMAgent:
 
             if contact_id:
                 logger.info(f"[CRMAgent] Contacto existente encontrado: {contact_id}")
-                await self.hubspot.update_contact(contact_id, contact_properties)
-                action_type = "actualizado"
+                try:
+                    await self.hubspot.update_contact(contact_id, contact_properties)
+                    action_type = "actualizado"
+                except Exception as update_err:
+                    # La validación en HubSpotClient filtra propiedades inválidas
+                    # Este try/except es defensa en profundidad
+                    logger.error(f"[CRMAgent] Error actualizando contacto {contact_id}: {update_err}")
+                    # No fallar - el contacto existe, solo se perdió la actualización
+                    action_type = "actualizado (con errores)"
             else:
                 logger.info("[CRMAgent] Creando nuevo contacto en HubSpot...")
-                contact_id = await self.hubspot.create_contact(contact_properties)
-                action_type = "registrado"
+                try:
+                    contact_id = await self.hubspot.create_contact(contact_properties)
+                    action_type = "registrado"
+                except Exception as create_err:
+                    logger.error(f"[CRMAgent] Error creando contacto: {create_err}")
+                    raise  # Fallar aquí porque no podemos continuar sin contacto
 
             logger.info(f"[CRMAgent] Contacto {action_type} exitosamente: {contact_id}")
 

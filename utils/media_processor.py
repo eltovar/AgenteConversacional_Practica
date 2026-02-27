@@ -193,8 +193,8 @@ class MediaProcessor:
 
                 if response.status_code in [200, 201]:
                     # URL pública del Pull Zone (CDN - desde donde se sirve)
-                    # Twilio requiere URLs completas con https://
-                    public_url = f"https://{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
+                    # BUNNY_PULL_ZONE ya incluye https:// (del .env)
+                    public_url = f"{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
                     logger.info(f"[BunnyStorage] Archivo subido exitosamente: {public_url}")
                     return public_url
                 else:

@@ -1116,6 +1116,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
         sofia = get_sofia_brain()
         summary = await sofia.get_conversation_summary(phone)
 
+        # Propiedades base (siempre existen en HubSpot)
         properties = {
             "chatbot_conversation": summary[-3000:],
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
@@ -1123,33 +1124,49 @@ async def _sync_conversation_with_analysis_to_hubspot(
 
         # Agregar summary_update si existe nueva información
         if analysis.summary_update:
-            # Acumular resúmenes en una propiedad (si existe)
             properties["chatbot_summary"] = analysis.summary_update
+
+        # Actualizar propiedades base (estas siempre deberían existir)
+        await contact_manager.update_contact_info(contact_id, properties)
+
+        # Propiedades opcionales (pueden no existir en HubSpot)
+        # Las intentamos actualizar por separado para no bloquear las base
+        optional_properties = {}
 
         # Registrar score de sentimiento si es bajo (para alertas)
         if analysis.sentiment_score <= 4:
-            properties["chatbot_sentiment_alert"] = (
+            optional_properties["chatbot_sentiment_alert"] = (
                 f"Score: {analysis.sentiment_score}/10 - {analysis.emocion}"
             )
 
         # Registrar si el cliente envió link de red social
         if analysis.link_redes_sociales:
-            properties["chatbot_social_media_link"] = "true"
-            # Si tiene info adicional del link
+            optional_properties["chatbot_social_media_link"] = "true"
             if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
                 portal = analysis.social_media_info.get("portal", "desconocido")
-                properties["chatbot_canal_origen"] = portal
+                optional_properties["chatbot_canal_origen"] = portal
 
         # Registrar indicadores sospechosos si existen
         if analysis.suspicious_indicators and len(analysis.suspicious_indicators) > 0:
-            # Almacenar los indicadores separados por coma
-            properties["chatbot_suspicious_indicators"] = ", ".join(analysis.suspicious_indicators)
+            optional_properties["chatbot_suspicious_indicators"] = ", ".join(analysis.suspicious_indicators)
             logger.info(
                 f"[HubSpot Sync] Indicadores sospechosos detectados para {phone}: "
                 f"{analysis.suspicious_indicators}"
             )
 
-        await contact_manager.update_contact_info(contact_id, properties)
+        # Intentar actualizar propiedades opcionales (ignorar si no existen en HubSpot)
+        if optional_properties:
+            try:
+                await contact_manager.update_contact_info(contact_id, optional_properties)
+            except Exception as opt_err:
+                # Ignorar errores de propiedades que no existen en HubSpot
+                if "PROPERTY_DOESNT_EXIST" in str(opt_err):
+                    logger.warning(
+                        f"[HubSpot Sync] Propiedades opcionales no configuradas en HubSpot: "
+                        f"{list(optional_properties.keys())} - Ignorando"
+                    )
+                else:
+                    logger.warning(f"[HubSpot Sync] Error actualizando propiedades opcionales: {opt_err}")
 
         logger.debug(
             f"[HubSpot Sync] Conversación+Análisis sincronizado para {phone} | "

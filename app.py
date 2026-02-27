@@ -308,9 +308,16 @@ async def webhook(
     """
     try:
         content_type = request.headers.get("content-type", "")
-        is_twilio = "application/x-www-form-urlencoded" in content_type or From is not None
+        is_twilio = "application/x-www-form-urlencoded" in content_type and From
 
         if is_twilio:
+            # Validar que From no sea None ni vacío
+            if not From or not From.strip():
+                logger.error("[WEBHOOK] From está vacío o es None en petición Twilio")
+                return Response(
+                    content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    media_type="application/xml"
+                )
             session_id = From.replace("whatsapp:", "")
             to_number = From
             message = Body or ""

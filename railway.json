@@ -5,7 +5,10 @@
     "nixpacksPlan": {
       "phases": {
         "setup": {
-          "nixPkgs": ["ffmpeg"]
+          "nixPkgs": ["python312", "ffmpeg"]
+        },
+        "install": {
+          "cmds": ["pip install -r requirements.txt"]
         }
       }
     }

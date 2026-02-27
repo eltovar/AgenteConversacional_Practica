@@ -229,6 +229,9 @@ class MediaProcessor:
         
         IMPORTANTE: Twilio/WhatsApp REQUIEREN Content-Types específicos.
         application/octet-stream causa Error 63019 y 63021.
+        
+        NOTA: Para OGG, usamos "audio/ogg" sin parámetros de codec.
+        El codec (Opus) es detectado del contenido del archivo.
         """
         extension_map = {
             # Audio
@@ -648,21 +651,20 @@ class MediaProcessor:
 
             try:
                 # Ejecutar ffmpeg para convertir a OGG (Opus)
-                # -y: sobrescribir sin preguntar
-                # -i: input file
-                # -c:a libopus: codec Opus (nativo de WhatsApp)
-                # -b:a 64k: bitrate 64kbps (suficiente para voz)
-                # -ar 48000: sample rate 48kHz (estándar para Opus)
-                # -ac 1: mono (reduce tamaño)
-                # -vn: ignorar video si existe
+                # Parámetros críticos para WhatsApp:
+                # -c:a libopus: codec Opus (REQUERIDO por WhatsApp)
+                # -b:a 32k: bitrate bajo para notas de voz (WhatsApp las comprime mucho)
+                # -ar 16000: sample rate 16kHz (óptimo para voz/WhatsApp)
+                # -ac 1: mono (requerido para notas de voz)
+                # -vn: ignorar video
                 result = subprocess.run(
                     [
                         "ffmpeg",
                         "-y",
                         "-i", input_path,
                         "-c:a", "libopus",
-                        "-b:a", "64k",
-                        "-ar", "48000",
+                        "-b:a", "32k",
+                        "-ar", "16000",
                         "-ac", "1",
                         "-vn",
                         output_path
@@ -671,18 +673,29 @@ class MediaProcessor:
                     timeout=30
                 )
 
+                # Loguear stderr siempre (contiene info útil de ffmpeg)
+                stderr = result.stderr.decode('utf-8', errors='ignore')
+                if "libopus" in stderr.lower() or "opus" in stderr.lower():
+                    logger.info(f"[MediaProcessor] ffmpeg usando codec Opus ✓")
+                else:
+                    logger.warning(f"[MediaProcessor] ffmpeg stderr (primeros 300 chars): {stderr[:300]}")
+
                 if result.returncode != 0:
-                    stderr = result.stderr.decode('utf-8', errors='ignore')
-                    logger.error(f"[MediaProcessor] ffmpeg error: {stderr[:500]}")
+                    logger.error(f"[MediaProcessor] ffmpeg falló (code {result.returncode}): {stderr[:500]}")
                     return audio_bytes, False
 
                 # Leer archivo convertido
                 with open(output_path, 'rb') as ogg_file:
                     ogg_bytes = ogg_file.read()
 
+                # Verificar que el archivo es OGG válido (magic bytes: OggS)
+                if ogg_bytes[:4] != b'OggS':
+                    logger.error(f"[MediaProcessor] ❌ Archivo generado NO es OGG válido! Magic bytes: {ogg_bytes[:8].hex()}")
+                    return audio_bytes, False
+
                 logger.info(
                     f"[MediaProcessor] ✅ {source_format.upper()} convertido a OGG exitosamente: "
-                    f"{len(audio_bytes)} bytes → {len(ogg_bytes)} bytes"
+                    f"{len(audio_bytes)} bytes → {len(ogg_bytes)} bytes (magic: OggS ✓)"
                 )
                 return ogg_bytes, True
 

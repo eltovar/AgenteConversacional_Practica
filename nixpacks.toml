@@ -1,7 +1,7 @@
 # Nixpacks configuration for Railway
-# Asegura que ffmpeg esté disponible para conversión de audio WebM → OGG
+# Asegura que ffmpeg con libopus esté disponible para conversión de audio → OGG/Opus
 
 [phases.setup]
-aptPkgs = ["ffmpeg"]
+aptPkgs = ["ffmpeg", "libopus0", "libopus-dev"]
 
 # No sobrescribir la detección automática de Python

@@ -79,6 +79,49 @@ BUNNY_PULL_ZONE = _get_bunny_pull_zone()
 # DETECCIÓN DE FORMATO POR MAGIC BYTES
 # ============================================================================
 
+def detect_image_format_by_magic_bytes(file_bytes: bytes) -> tuple[str, str]:
+    """
+    Detecta el formato real de una imagen analizando sus magic bytes.
+    
+    Returns:
+        Tuple de (formato, content_type). Ej: ("jpg", "image/jpeg")
+    """
+    if not file_bytes or len(file_bytes) < 8:
+        logger.warning(f"[MediaProcessor] Imagen muy pequeña ({len(file_bytes)} bytes), asumiendo JPEG")
+        return ("jpg", "image/jpeg")
+    
+    magic = file_bytes[:12]
+    
+    # JPEG: empieza con FF D8 FF
+    if magic[:3] == b"\xFF\xD8\xFF":
+        logger.debug("[MediaProcessor] Imagen detectada: JPEG")
+        return ("jpg", "image/jpeg")
+    
+    # PNG: empieza con 89 50 4E 47 0D 0A 1A 0A
+    if magic[:8] == b"\x89PNG\r\n\x1a\n":
+        logger.debug("[MediaProcessor] Imagen detectada: PNG")
+        return ("png", "image/png")
+    
+    # GIF: empieza con GIF87a o GIF89a
+    if magic[:6] in (b"GIF87a", b"GIF89a"):
+        logger.debug("[MediaProcessor] Imagen detectada: GIF")
+        return ("gif", "image/gif")
+    
+    # WebP: empieza con RIFF...WEBP
+    if magic[:4] == b"RIFF" and magic[8:12] == b"WEBP":
+        logger.debug("[MediaProcessor] Imagen detectada: WebP")
+        return ("webp", "image/webp")
+    
+    # BMP: empieza con BM
+    if magic[:2] == b"BM":
+        logger.debug("[MediaProcessor] Imagen detectada: BMP")
+        return ("bmp", "image/bmp")
+    
+    # Por defecto asumir JPEG (formato más común en WhatsApp)
+    logger.warning(f"[MediaProcessor] Formato imagen no identificado (bytes: {magic[:8].hex()}), asumiendo JPEG")
+    return ("jpg", "image/jpeg")
+
+
 def detect_audio_format_by_magic_bytes(file_bytes: bytes) -> str:
     """
     Detecta el formato real del audio analizando su contenido (magic bytes),
@@ -177,6 +220,55 @@ class MediaProcessor:
             return response.content
 
     # =========================================================================
+    # UTILIDADES PARA CONTENT-TYPE Y DETECCIÓN DE FORMATO
+    # =========================================================================
+
+    def _get_content_type_from_filename(self, filename: str) -> str:
+        """
+        Infiere el Content-Type MIME correcto basándose en la extensión del archivo.
+        
+        IMPORTANTE: Twilio/WhatsApp REQUIEREN Content-Types específicos.
+        application/octet-stream causa Error 63019 y 63021.
+        """
+        extension_map = {
+            # Audio
+            ".ogg": "audio/ogg",
+            ".opus": "audio/ogg",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+            ".aac": "audio/aac",
+            ".webm": "audio/webm",
+            ".flac": "audio/flac",
+            # Imágenes
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            # Video
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            # Documentos  
+            ".pdf": "application/pdf",
+        }
+        
+        # Obtener extensión en minúsculas
+        ext = ""
+        if "." in filename:
+            ext = "." + filename.rsplit(".", 1)[1].lower()
+        
+        content_type = extension_map.get(ext, "application/octet-stream")
+        
+        if content_type == "application/octet-stream":
+            logger.warning(
+                f"[BunnyStorage] ⚠️ Extensión desconocida '{ext}' - "
+                f"usando application/octet-stream (puede causar errores en Twilio)"
+            )
+        
+        return content_type
+
+    # =========================================================================
     # SUBIDA A BUNNY.NET STORAGE
     # =========================================================================
 
@@ -184,14 +276,23 @@ class MediaProcessor:
         self,
         file_bytes: bytes,
         folder: str,
-        filename: str
+        filename: str,
+        content_type: str = None
     ) -> str:
         """
         Sube archivo a Bunny.net Storage y devuelve URL pública del CDN.
 
-        IMPORTANTE: Después de subir, verifica que el archivo esté disponible
-        en el Pull Zone (CDN) antes de retornar. Esto evita el error 63019 de
-        Twilio donde intenta descargar antes de que el CDN haya propagado.
+        IMPORTANTE: 
+        - Usa el Content-Type correcto para que Twilio/WhatsApp puedan identificar el archivo
+        - Después de subir, verifica que el archivo esté disponible en el Pull Zone (CDN)
+          antes de retornar. Esto evita el error 63019 de Twilio donde intenta descargar 
+          antes de que el CDN haya propagado.
+        
+        Args:
+            file_bytes: Contenido del archivo
+            folder: Carpeta en el Storage Zone
+            filename: Nombre del archivo (incluye extensión)
+            content_type: MIME type del archivo. Si no se especifica, se infiere de la extensión.
         """
         import asyncio
 
@@ -201,9 +302,15 @@ class MediaProcessor:
         # URL del Storage Zone (donde se sube)
         storage_url = f"https://{BUNNY_ENDPOINT}/{BUNNY_STORAGE_ZONE}/{folder}/{clean_filename}"
 
+        # Inferir Content-Type si no se especifica
+        if not content_type:
+            content_type = self._get_content_type_from_filename(clean_filename)
+        
+        logger.info(f"[BunnyStorage] Subiendo con Content-Type: {content_type}")
+
         headers = {
             "AccessKey": BUNNY_API_KEY,
-            "Content-Type": "application/octet-stream",
+            "Content-Type": content_type,
             "accept": "application/json"
         }
 
@@ -420,46 +527,29 @@ class MediaProcessor:
             is_audio = "audio" in content_lower or "ogg" in content_lower
             is_image = "image" in content_lower
 
+            # 1. Descargar de Twilio primero (para todos los tipos)
+            media_bytes = await self.download_twilio_media(media_url)
+
             if is_audio:
                 result["media_type"] = "audio"
                 folder = "audios_clientes"
-                # Detectar extensión correcta basándose en content_type
-                if "ogg" in content_lower or "vorbis" in content_lower:
-                    extension = ".ogg"
-                elif "webm" in content_lower:
-                    extension = ".webm"
-                elif "mp4" in content_lower or "m4a" in content_lower or "aac" in content_lower:
-                    extension = ".mp4"
-                elif "wav" in content_lower:
-                    extension = ".wav"
-                elif "mpeg" in content_lower or "mp3" in content_lower:
-                    extension = ".mp3"
-                elif "flac" in content_lower:
-                    extension = ".flac"
-                else:
-                    extension = ".ogg"  # Default a ogg (formato de Twilio)
+                
+                # IMPORTANTE: Detectar formato REAL por magic bytes
+                actual_audio_format = detect_audio_format_by_magic_bytes(media_bytes)
+                logger.info(f"[MediaProcessor] Formato audio detectado por magic bytes: {actual_audio_format} (Content-Type reportaba: {content_type})")
+                extension = f".{actual_audio_format}"
+                
             elif is_image:
                 result["media_type"] = "image"
                 folder = "imagenes_clientes"
-                extension = ".jpg"
+                # Detectar formato real de imagen por magic bytes
+                img_format, _ = detect_image_format_by_magic_bytes(media_bytes)
+                extension = f".{img_format}"
+                logger.info(f"[MediaProcessor] Imagen cliente detectada: formato={img_format}")
             else:
                 result["media_type"] = "file"
                 folder = "archivos_clientes"
                 extension = ".bin"
-
-            # 1. Descargar de Twilio
-            media_bytes = await self.download_twilio_media(media_url)
-
-            # IMPORTANTE: Detectar formato REAL del archivo por magic bytes
-            # NO confiar en Content-Type de Twilio
-            if is_audio:
-                try:
-                    actual_audio_format = detect_audio_format_by_magic_bytes(media_bytes)
-                    logger.info(f"[MediaProcessor] Formato detectado por magic bytes: {actual_audio_format} (Content-Type reportaba: {content_type})")
-                    extension = f".{actual_audio_format}"
-                except Exception as e:
-                    logger.error(f"[MediaProcessor] ❌ Error detectando formato de audio: {e}")
-                    raise  # Re-lanzar la excepción para que se maneje en el bloque except general
             
             # 2. Generar nombre único y subir a Bunny.net
             clean_phone = phone.replace("+", "").replace(" ", "")
@@ -469,7 +559,6 @@ class MediaProcessor:
             # 3. Procesamiento específico por tipo
             if is_audio:
                 # Transcribir para que Sofía "escuche"
-                # Usar el formato detectado por magic bytes, no el Content-Type
                 transcription = await self.transcribe_audio(media_bytes, actual_audio_format)
                 result["transcription"] = transcription
 
@@ -722,14 +811,29 @@ class MediaProcessor:
                     extension = ".ogg"
                 else:
                     extension = f".{detected_format}"
+            
+            # Content-Type final para audio
+            final_content_type = self._get_content_type_from_filename(f"audio{extension}")
         else:
+            # =========================================================================
+            # DETECCIÓN DE FORMATO DE IMAGEN
+            # =========================================================================
             folder = "imagenes_asesores"
-            extension = ".jpg"
+            
+            # Detectar formato real de la imagen (no asumir siempre JPEG)
+            img_format, final_content_type = detect_image_format_by_magic_bytes(file_bytes)
+            extension = f".{img_format}"
+            
+            logger.info(
+                f"[MediaProcessor] Imagen detectada: formato={img_format}, "
+                f"content-type={final_content_type}"
+            )
 
         clean_phone = phone.replace("+", "").replace(" ", "")
         filename = f"{clean_phone}_{int(time.time())}{extension}"
 
-        return await self.upload_to_bunny(file_bytes, folder, filename)
+        # Pasar el Content-Type correcto a Bunny.net
+        return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
 
 # Instancia singleton

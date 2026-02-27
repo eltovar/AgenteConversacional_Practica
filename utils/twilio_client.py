@@ -115,11 +115,30 @@ class TwilioClient:
 
                 if response.status_code in (200, 201):
                     data = response.json()
-                    logger.info(f"[TwilioClient] Mensaje enviado exitosamente. SID: {data.get('sid')}")
+                    msg_status = data.get('status', 'unknown')
+                    error_code = data.get('error_code')
+                    error_message = data.get('error_message')
+
+                    # Log detallado del estado
+                    if error_code:
+                        logger.warning(
+                            f"[TwilioClient] ⚠️ Mensaje aceptado pero con error: "
+                            f"SID={data.get('sid')}, status={msg_status}, "
+                            f"error_code={error_code}, error_message={error_message}"
+                        )
+                    else:
+                        logger.info(
+                            f"[TwilioClient] Mensaje enviado exitosamente. "
+                            f"SID: {data.get('sid')}, status: {msg_status}"
+                        )
+
                     return {
                         "status": "success",
                         "message_sid": data.get("sid"),
-                        "to": to
+                        "message_status": msg_status,
+                        "to": to,
+                        "error_code": error_code,
+                        "error_message": error_message
                     }
                 else:
                     error_msg = response.text

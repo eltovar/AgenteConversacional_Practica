@@ -18,8 +18,10 @@ MIGRACIÓN: Cloudinary → Bunny.net (más económico, mismo rendimiento)
 import os
 import time
 import httpx
+import subprocess
+import tempfile
 from io import BytesIO
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from openai import AsyncOpenAI
 
@@ -445,6 +447,96 @@ class MediaProcessor:
         return result
 
     # =========================================================================
+    # CONVERSIÓN DE AUDIO WEBM → OGG (PARA WHATSAPP)
+    # =========================================================================
+
+    def _convert_webm_to_ogg(self, webm_bytes: bytes) -> Tuple[bytes, bool]:
+        """
+        Convierte audio WebM a OGG (Opus) para compatibilidad con WhatsApp.
+
+        WhatsApp NO soporta WebM directamente. Esta función usa ffmpeg para
+        convertir a OGG/Opus que es el formato nativo de WhatsApp.
+        """
+        try:
+            # Verificar que ffmpeg esté disponible
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-version"],
+                    capture_output=True,
+                    timeout=5
+                )
+            except FileNotFoundError:
+                logger.warning("[MediaProcessor] ffmpeg no encontrado - no se puede convertir WebM a OGG")
+                return webm_bytes, False
+            except subprocess.TimeoutExpired:
+                logger.warning("[MediaProcessor] ffmpeg timeout en verificación")
+                return webm_bytes, False
+
+            # Crear archivos temporales para la conversión
+            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as input_file:
+                input_path = input_file.name
+                input_file.write(webm_bytes)
+
+            output_path = input_path.replace('.webm', '.ogg')
+
+            try:
+                # Ejecutar ffmpeg para convertir WebM → OGG (Opus)
+                # -y: sobrescribir sin preguntar
+                # -i: input file
+                # -c:a libopus: codec Opus (nativo de WhatsApp)
+                # -b:a 64k: bitrate 64kbps (suficiente para voz)
+                # -ar 48000: sample rate 48kHz (estándar para Opus)
+                # -ac 1: mono (reduce tamaño)
+                result = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i", input_path,
+                        "-c:a", "libopus",
+                        "-b:a", "64k",
+                        "-ar", "48000",
+                        "-ac", "1",
+                        "-vn",  # No video
+                        output_path
+                    ],
+                    capture_output=True,
+                    timeout=30
+                )
+
+                if result.returncode != 0:
+                    stderr = result.stderr.decode('utf-8', errors='ignore')
+                    logger.error(f"[MediaProcessor] ffmpeg error: {stderr[:500]}")
+                    return webm_bytes, False
+
+                # Leer archivo convertido
+                with open(output_path, 'rb') as ogg_file:
+                    ogg_bytes = ogg_file.read()
+
+                logger.info(
+                    f"[MediaProcessor] ✅ WebM convertido a OGG exitosamente: "
+                    f"{len(webm_bytes)} bytes → {len(ogg_bytes)} bytes"
+                )
+                return ogg_bytes, True
+
+            finally:
+                # Limpiar archivos temporales
+                try:
+                    os.unlink(input_path)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(output_path)
+                except OSError:
+                    pass
+
+        except subprocess.TimeoutExpired:
+            logger.error("[MediaProcessor] Timeout en conversión WebM → OGG")
+            return webm_bytes, False
+        except Exception as e:
+            logger.error(f"[MediaProcessor] Error en conversión WebM → OGG: {e}")
+            return webm_bytes, False
+
+    # =========================================================================
     # FLUJO: ENVÍO DE MULTIMEDIA POR ASESORA
     # =========================================================================
 
@@ -456,6 +548,9 @@ class MediaProcessor:
     ) -> str:
         """
         Sube archivo enviado por la ASESORA desde el Panel a Bunny.net.
+
+        IMPORTANTE: Si el audio es WebM (Chrome/Edge), lo convertimos a OGG
+        automáticamente para compatibilidad con WhatsApp.
 
         Args:
             file_bytes: Contenido del archivo
@@ -469,24 +564,41 @@ class MediaProcessor:
 
         # Formatos de audio soportados (webm, ogg, wav del panel de asesoras)
         is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower or "wav" in content_lower
-        
+
         if is_audio:
             folder = "audios_asesores"
+
+            # =========================================================================
+            # CONVERSIÓN WEBM → OGG (CRÍTICO PARA WHATSAPP)
+            # =========================================================================
+            if "webm" in content_lower:
+                logger.info("[MediaProcessor] Audio WebM detectado - iniciando conversión a OGG para WhatsApp...")
+
+                # Convertir WebM → OGG usando ffmpeg
+                converted_bytes, was_converted = self._convert_webm_to_ogg(file_bytes)
+
+                if was_converted:
+                    file_bytes = converted_bytes
+                    extension = ".ogg"
+                    logger.info("[MediaProcessor] ✅ Audio convertido a OGG - compatible con WhatsApp")
+                else:
+                    # Fallback: intentar enviar como MP3 si tenemos ffmpeg pero falló OGG
+                    extension = ".webm"
+                    logger.warning(
+                        "[MediaProcessor] ⚠️ No se pudo convertir WebM a OGG. "
+                        "El audio puede NO reproducirse en WhatsApp. "
+                        "Instala ffmpeg para habilitar la conversión."
+                    )
             # Detectar extensión correcta basándose en content_type
             # PRIORIDAD: Formatos compatibles con WhatsApp primero
-            if "ogg" in content_lower or "vorbis" in content_lower:
+            elif "ogg" in content_lower or "vorbis" in content_lower:
                 extension = ".ogg"  # Ideal para WhatsApp
             elif "wav" in content_lower:
-                extension = ".wav"  # Compatible con WhatsApp (convertido desde WebM)
+                extension = ".wav"  # Compatible con WhatsApp
             elif "mp4" in content_lower or "m4a" in content_lower or "aac" in content_lower:
                 extension = ".mp4"
             elif "mpeg" in content_lower or "mp3" in content_lower:
                 extension = ".mp3"
-            elif "webm" in content_lower:
-                # WebM NO es compatible con WhatsApp directamente
-                # Pero lo guardamos por si acaso (el cliente debería convertir a WAV)
-                extension = ".webm"
-                logger.warning("[MediaProcessor] Audio WebM recibido - puede no reproducirse en WhatsApp")
             elif "flac" in content_lower:
                 extension = ".flac"
             else:

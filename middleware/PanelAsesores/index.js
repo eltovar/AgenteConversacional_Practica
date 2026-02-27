@@ -1256,9 +1256,12 @@ async function startRecording() {
                     extension = 'wav';
                     console.log('[Panel] Conversion exitosa:', finalBlob.size, 'bytes');
                 } catch (convErr) {
-                    console.error('[Panel] Error en conversion, enviando original:', convErr);
-                    // Si falla la conversion, enviar el original
+                    console.error('[Panel] Error en conversion:', convErr);
+                    // IMPORTANTE: Actualizar mimeType al original para que el servidor
+                    // sepa que es WebM y pueda convertirlo server-side
+                    finalMimeType = originalMimeType;
                     extension = 'webm';
+                    console.warn('[Panel] Enviando WebM original - servidor debe convertir a OGG');
                 }
             } else if (originalMimeType.includes('ogg')) {
                 extension = 'ogg';

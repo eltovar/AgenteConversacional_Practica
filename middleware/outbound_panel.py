@@ -1294,6 +1294,7 @@ async def create_manual_contact(
     budget: Optional[str] = Form(None, description="Presupuesto"),
     characteristics: Optional[str] = Form(None, description="Características adicionales"),
     canal: str = Form("whatsapp_directo", description="Canal de origen para asignación"),
+    advisor_id: Optional[str] = Form(None, description="ID del asesor que crea el contacto (tiene prioridad sobre round-robin)"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -1306,7 +1307,7 @@ async def create_manual_contact(
     4. Si no existe → Crear contacto + deal en HubSpot
     5. Activar HUMAN_ACTIVE para que aparezca en el panel
     """
-    logger.info(f"[Panel] POST /contacts/create - phone={phone}, firstname={firstname}, canal={canal}")
+    logger.info(f"[Panel] POST /contacts/create - phone={phone}, firstname={firstname}, canal={canal}, advisor_id={advisor_id}")
 
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -1373,12 +1374,19 @@ async def create_manual_contact(
         logger.error(f"[Panel] Error buscando contacto existente: {e}")
         # Continuar con la creación si falla la búsqueda
 
-    # === 3. Obtener owner_id usando LeadAssigner (round-robin) ===
-    from integrations.hubspot.lead_assigner import lead_assigner
-    owner_id = lead_assigner.get_next_owner(canal)
-
-    if not owner_id:
-        logger.warning(f"[Panel] No se pudo asignar owner para canal: {canal}")
+    # === 3. Determinar owner_id ===
+    # Si el asesor crea el contacto manualmente desde SU panel, usarlo directamente.
+    # Solo se usa round-robin (LeadAssigner) cuando la creación es automática/API.
+    if advisor_id:
+        owner_id = advisor_id
+        logger.info(f"[Panel] Contacto asignado directamente al asesor creador: {advisor_id}")
+    else:
+        from integrations.hubspot.lead_assigner import lead_assigner
+        owner_id = lead_assigner.get_next_owner(canal)
+        if not owner_id:
+            logger.warning(f"[Panel] No se pudo asignar owner para canal: {canal}")
+        else:
+            logger.info(f"[Panel] Contacto asignado por round-robin (canal={canal}): {owner_id}")
 
     # === 4. Crear contacto en HubSpot ===
     from datetime import timezone as tz

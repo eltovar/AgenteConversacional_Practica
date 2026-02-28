@@ -2289,6 +2289,11 @@ async function createManualContact(event) {
     }
 
     try {
+        // Enviar advisor_id del asesor que crea el contacto (para asignación directa)
+        if (ADVISOR_ID) {
+            formData.append('advisor_id', ADVISOR_ID);
+        }
+
         const response = await fetch(`${BASE_URL}/contacts/create`, {
             method: 'POST',
             headers: { 'X-API-Key': API_KEY },

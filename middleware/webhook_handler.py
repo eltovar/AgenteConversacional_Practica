@@ -729,44 +729,65 @@ async def whatsapp_webhook(
         # PASO 4.5: Verificar horario laboral para handoff
         # ════════════════════════════════════════════════════════════
         # Si el cliente quiere asesor y estamos fuera de horario,
-        # agregar mensaje tranquilizador (no cerramos la puerta)
+        # preparar mensaje tranquilizador. NO se agrega a response_text
+        # todavía — se enviará directamente en PASO 4.6 para garantizar
+        # que llegue incluso cuando la race condition bloquea a Sofía.
+        out_of_hours_msg: Optional[str] = None
         if should_add_out_of_hours_message(analysis.handoff_priority):
             out_of_hours_msg = get_out_of_hours_message()
-            response_text = f"{response_text}\n\n{out_of_hours_msg}"
             logger.info(
-                f"[Webhook] Mensaje de fuera de horario agregado para "
-                f"handoff {analysis.handoff_priority}"
+                f"[Webhook] Fuera de horario con handoff {analysis.handoff_priority} "
+                f"— mensaje informativo preparado (se enviará antes del race condition check)"
             )
 
         # ════════════════════════════════════════════════════════════
         # PASO 4.6: RE-CHECK estado ANTES de enviar (anti race-condition)
         # ════════════════════════════════════════════════════════════
-        # Verificar si un asesor intervino mientras Sofía procesaba
+        # Verificar si un asesor intervino mientras Sofía procesaba.
+        # Si hay mensaje de fuera de horario, enviarlo vía TwiML aunque
+        # Sofía esté bloqueada — el cliente SIEMPRE debe recibir este aviso.
         final_status = await state_manager.get_status(phone_normalized)
         if final_status in [
             ConversationStatus.HUMAN_ACTIVE,
             ConversationStatus.IN_CONVERSATION,
             ConversationStatus.PENDING_HANDOFF
         ]:
-            logger.warning(
-                f"[Webhook] ⚠️ RACE CONDITION EVITADA: Estado cambió a {final_status.value} "
-                f"mientras Sofía procesaba. NO se enviará respuesta del bot."
-            )
-            # Guardar en HubSpot pero NO enviar respuesta
+            # Guardar en HubSpot pero NO enviar respuesta de Sofía
             # NOTA: El mensaje del cliente ya fue guardado en MongoDB (client_mongo_id)
+            hubspot_content = f"[BOT BLOQUEADO - {final_status.value}] {response_text}"
+            if out_of_hours_msg:
+                hubspot_content += f"\n\n[FUERA DE HORARIO ENVIADO] {out_of_hours_msg}"
+
             if contact_info:
                 background_tasks.add_task(
                     _sync_conversation_with_analysis_to_hubspot,
                     contact_info.contact_id,
                     Body,
-                    f"[BOT BLOQUEADO - {final_status.value}] {response_text}",
+                    hubspot_content,
                     phone_normalized,
                     analysis,
                     final_channel,
                     media_result,  # Pasar resultado completo de multimedia
                     client_mongo_id  # ID del mensaje ya guardado (evita duplicados)
                 )
+
+            if out_of_hours_msg:
+                # Enviar solo el aviso de fuera de horario — Sofía bloqueada
+                logger.info(
+                    f"[Webhook] Estado {final_status.value} — Sofía bloqueada. "
+                    f"Enviando mensaje de fuera de horario al cliente."
+                )
+                return _create_twiml_response(out_of_hours_msg)
+
+            logger.warning(
+                f"[Webhook] ⚠️ RACE CONDITION EVITADA: Estado cambió a {final_status.value} "
+                f"mientras Sofía procesaba. NO se enviará respuesta del bot."
+            )
             return Response(content="", media_type="text/xml")
+
+        # Sin race condition: si hay mensaje de fuera de horario, concatenarlo a la respuesta
+        if out_of_hours_msg:
+            response_text = f"{response_text}\n\n{out_of_hours_msg}"
 
         # Sincronizar con HubSpot en background (incluye análisis)
         # NOTA: El mensaje del cliente ya fue guardado en MongoDB (client_mongo_id)

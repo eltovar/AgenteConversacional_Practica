@@ -1492,6 +1492,98 @@ async def admin_get_status(phone: str):
         return {"error": str(e)}
 
 
+@router.post("/admin/reset-contact/{phone}")
+async def admin_reset_contact(
+    phone: str,
+    delete_mongodb: bool = True,
+    delete_redis: bool = True
+):
+    """
+    🧹 Limpia COMPLETAMENTE un número para tests E2E.
+    
+    Elimina de:
+    - Redis: Estados de conversación, metadata, ZSET
+    - MongoDB: Historial de mensajes
+    
+    NO elimina de HubSpot (el contacto permanece).
+    
+    Uso: POST /whatsapp/admin/reset-contact/+573042652384
+    """
+    try:
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(phone)
+
+        if not validation.is_valid:
+            return {"error": "Número inválido", "details": validation.error_message}
+
+        phone_norm = validation.normalized
+        deleted_items = {"redis": [], "mongodb": 0}
+
+        # === Limpiar Redis ===
+        if delete_redis:
+            state_manager = get_state_manager()
+            redis = state_manager.redis
+            
+            # Buscar todas las claves relacionadas con este número
+            canales = ["whatsapp", "whatsapp_directo", "instagram", "facebook", "default"]
+            
+            for canal in canales:
+                # Estado de conversación
+                state_key = f"conv_state:{phone_norm}:{canal}"
+                if await redis.exists(state_key):
+                    await redis.delete(state_key)
+                    deleted_items["redis"].append(state_key)
+                
+                # Metadata
+                meta_key = f"conv_meta:{phone_norm}:{canal}"
+                if await redis.exists(meta_key):
+                    await redis.delete(meta_key)
+                    deleted_items["redis"].append(meta_key)
+                
+                # ZSET de contactos activos
+                zset_member = f"{phone_norm}:{canal}"
+                removed = await redis.zrem("active_conversations_sorted", zset_member)
+                if removed:
+                    deleted_items["redis"].append(f"ZSET:{zset_member}")
+            
+            # Buscar patrones adicionales con SCAN
+            cursor = 0
+            pattern = f"*{phone_norm}*"
+            while True:
+                cursor, keys = await redis.scan(cursor, match=pattern, count=100)
+                for key in keys:
+                    if key not in deleted_items["redis"]:
+                        await redis.delete(key)
+                        deleted_items["redis"].append(key)
+                if cursor == 0:
+                    break
+
+        # === Limpiar MongoDB ===
+        if delete_mongodb:
+            try:
+                mongo_manager = await get_mongo_manager()
+                if mongo_manager and mongo_manager.messages_collection:
+                    result = await mongo_manager.messages_collection.delete_many({
+                        "phone": phone_norm
+                    })
+                    deleted_items["mongodb"] = result.deleted_count
+            except Exception as e:
+                logger.warning(f"[Admin] Error limpiando MongoDB: {e}")
+
+        logger.info(f"[Admin] Contacto {phone_norm} reseteado: {len(deleted_items['redis'])} claves Redis, {deleted_items['mongodb']} mensajes MongoDB")
+
+        return {
+            "status": "success",
+            "phone": phone_norm,
+            "deleted": deleted_items,
+            "message": f"Contacto listo para test E2E (Redis: {len(deleted_items['redis'])} claves, MongoDB: {deleted_items['mongodb']} mensajes)"
+        }
+
+    except Exception as e:
+        logger.error(f"[Admin] Error reseteando contacto: {e}")
+        return {"error": str(e)}
+
+
 @router.post("/admin/cleanup-duplicates/{phone}")
 async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None):
     """

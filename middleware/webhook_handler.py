@@ -1582,7 +1582,7 @@ async def admin_reset_contact(
         # === Limpiar MongoDB ===
         if delete_mongodb:
             try:
-                mongo_manager = await get_mongo_manager()
+                mongo_manager = get_mongo_manager()  # Síncrono
                 if mongo_manager and mongo_manager.messages_collection:
                     result = await mongo_manager.messages_collection.delete_many({
                         "phone": phone_norm

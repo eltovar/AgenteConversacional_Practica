@@ -85,6 +85,10 @@ class ConversationMeta:
     display_name: Optional[str] = None
     version_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=get_bogota_now_iso)
+    # === CAMPOS PARA TRANSFERENCIA DE CONTACTOS ===
+    assigned_owner_ids: Optional[List[str]] = None  # Colaboradores (modo collaborative)
+    primary_owner_id: Optional[str] = None  # Owner principal en HubSpot
+    transfer_history: Optional[List[dict]] = None  # Historial de transferencias
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -94,7 +98,8 @@ class ConversationStateManager:
     """Maneja la persistencia de estados y metadatos en Redis."""
     STATE_PREFIX = "conv_state:"
     META_PREFIX = "conv_meta:"
-    ACTIVE_CONTACTS_SET = "active_conversations_index"
+    ACTIVE_CONTACTS_SET = "active_conversations_index"  # Legacy SET (compatibilidad)
+    ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # Nuevo ZSET ordenado por timestamp
     HANDOFF_TTL_SECONDS = 86400
 
     def __init__(self, redis_url: str = None):
@@ -140,10 +145,30 @@ class ConversationStateManager:
             return None
 
     async def get_active_contacts(self) -> List[Dict[str, Any]]:
-        """Retorna la lista de contactos activos procesando el índice de Redis."""
+        """
+        Retorna la lista de contactos activos ordenados por última actividad.
+
+        Usa ZSET (sorted set) con score = timestamp Unix para ordenamiento.
+        Los contactos con mensajes más recientes aparecen primero.
+        """
         contacts = []
         try:
-            members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
+            # Usar ZSET para obtener contactos ordenados (más reciente primero)
+            # zrevrange retorna en orden descendente por score
+            members = await self.redis.zrevrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
+
+            # Fallback: Si ZSET está vacío, intentar migrar desde SET legacy
+            if not members:
+                legacy_members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
+                if legacy_members:
+                    logger.info(f"[ConversationState] Migrando {len(legacy_members)} contactos de SET a ZSET")
+                    for legacy_member in legacy_members:
+                        # Migrar con timestamp actual (no tenemos el original)
+                        score = get_bogota_now().timestamp()
+                        await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {legacy_member: score})
+                    # Ahora sí obtener del ZSET
+                    members = await self.redis.zrevrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
+
             for member in members:
                 if ":" not in member: continue
                 phone, canal = member.split(":", 1)
@@ -152,7 +177,8 @@ class ConversationStateManager:
                 
                 if not status:
                     # Limpieza automática si la llave de estado expiró
-                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
+                    await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)  # Legacy cleanup
                     continue
 
                 meta = await self.get_meta(phone, canal)
@@ -165,6 +191,7 @@ class ConversationStateManager:
                     "display_name": (meta.display_name if meta else None) or "Cliente Nuevo",
                     "last_activity": meta.last_activity if meta else get_bogota_now_iso(),
                     "owner_id": meta.assigned_owner_id if meta else None,
+                    "assigned_owner_ids": meta.assigned_owner_ids if meta else [],  # Colaboradores (modo collaborative)
                     "handoff_reason": meta.handoff_reason if meta else "Transferencia manual",
                     "ttl_remaining": ttl,
                     "contact_id": meta.contact_id if meta else None,
@@ -172,7 +199,7 @@ class ConversationStateManager:
                     "is_active": True,  # Marcar como activo para el panel
                     "canal_origen": (meta.canal_origen if meta else canal) or canal,  # Segregación por equipo
                     "activated_at": meta.created_at if meta else get_bogota_now_iso(),  # Filtro de tiempo
-                    "conversation_status": "active"  # Badge "En espera" del panel
+                    "conversation_status": status  # Estado real de Redis (HUMAN_ACTIVE/IN_CONVERSATION)
                 })
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
@@ -263,9 +290,10 @@ class ConversationStateManager:
             # Cambiar estado a BOT_ACTIVE
             await self.set_status(phone, ConversationStatus.BOT_ACTIVE, canal)
 
-            # Remover del índice de contactos activos
+            # Remover del índice de contactos activos (ZSET + SET legacy)
             index_member = f"{phone}:{canal.lower()}"
-            await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)
+            await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
+            await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy cleanup
 
             logger.info(f"[ConversationState] Bot reactivado para {phone}:{canal}")
             return True
@@ -329,9 +357,11 @@ class ConversationStateManager:
             meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
             await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
 
-            # 3. Agregar al índice de contactos activos
+            # 3. Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             index_member = f"{phone_num}:{canal_safe}"
-            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
+            score = get_bogota_now().timestamp()  # Unix timestamp como score
+            await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
 
             logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe}")
             return True
@@ -370,9 +400,11 @@ class ConversationStateManager:
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
             await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
 
-            # Agregar al índice de contactos activos
+            # Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             index_member = f"{phone}:{canal_safe}"
-            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
+            score = get_bogota_now().timestamp()  # Unix timestamp como score
+            await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
 
             logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason}")
             return True
@@ -381,7 +413,12 @@ class ConversationStateManager:
             return False
 
     async def update_activity(self, phone: str, canal: str = "whatsapp") -> bool:
-        """Actualiza el timestamp de última actividad."""
+        """
+        Actualiza el timestamp de última actividad.
+
+        También actualiza el score en el ZSET para reordenamiento automático.
+        Contactos con actividad reciente suben al inicio de la lista.
+        """
         try:
             canal_safe = canal.lower() if canal else "whatsapp"
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
@@ -391,10 +428,100 @@ class ConversationStateManager:
                 meta = json.loads(data)
                 meta["last_activity"] = get_bogota_now_iso()
                 await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+
+                # Actualizar score en ZSET para reordenamiento
+                index_member = f"{phone}:{canal_safe}"
+                score = get_bogota_now().timestamp()
+                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_activity: {e}")
             return False
+
+    async def transfer_contact(
+        self,
+        phone: str,
+        to_owner_id: str,
+        from_owner_id: str = None,
+        canal: str = "whatsapp",
+        mode: str = "exclusive",
+        reason: str = None
+    ) -> dict:
+        """
+        Transfiere un contacto a otro asesor.
+
+        Args:
+            phone: Teléfono del contacto
+            to_owner_id: ID del asesor destino
+            from_owner_id: ID del asesor origen (opcional, se obtiene de metadata)
+            canal: Canal de la conversación
+            mode: "exclusive" (cambio total) o "collaborative" (ambos ven)
+            reason: Motivo de la transferencia
+
+        Returns:
+            dict con status, from_owner, to_owner, mode
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            data = await self.redis.get(meta_key)
+            if not data:
+                logger.warning(f"[ConversationState] No hay metadata para transferir: {phone}")
+                return {"status": "error", "message": "Contacto no encontrado en sesión activa"}
+
+            meta = json.loads(data)
+            original_owner = from_owner_id or meta.get("assigned_owner_id")
+
+            # Registrar en historial de transferencias
+            transfer_record = {
+                "from": original_owner,
+                "to": to_owner_id,
+                "mode": mode,
+                "reason": reason,
+                "timestamp": get_bogota_now_iso()
+            }
+
+            history = meta.get("transfer_history") or []
+            history.append(transfer_record)
+            meta["transfer_history"] = history
+
+            if mode == "exclusive":
+                # Transferencia exclusiva: cambiar owner completamente
+                meta["assigned_owner_id"] = to_owner_id
+                meta["primary_owner_id"] = to_owner_id
+                meta["assigned_owner_ids"] = [to_owner_id]
+            else:
+                # Modo colaborativo: agregar al equipo
+                owners = meta.get("assigned_owner_ids") or []
+                if original_owner and original_owner not in owners:
+                    owners.append(original_owner)
+                if to_owner_id not in owners:
+                    owners.append(to_owner_id)
+                meta["assigned_owner_ids"] = owners
+                meta["primary_owner_id"] = to_owner_id  # El nuevo es el principal
+
+            # Guardar metadata actualizada
+            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+
+            logger.info(
+                f"[ConversationState] Contacto {phone} transferido: "
+                f"{original_owner} -> {to_owner_id} (modo: {mode})"
+            )
+
+            return {
+                "status": "success",
+                "from_owner": original_owner,
+                "to_owner": to_owner_id,
+                "mode": mode,
+                "phone": phone,
+                "transfer_history": history
+            }
+
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en transfer_contact: {e}")
+            return {"status": "error", "message": str(e)}
 
     async def update_client_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
         """Actualiza el timestamp del último mensaje del cliente."""
@@ -474,7 +601,10 @@ class ConversationStateManager:
         """
         try:
             deleted = 0
-            members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
+            # Usar ZSET como fuente principal, fallback a SET legacy
+            members = await self.redis.zrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
+            if not members:
+                members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
 
             # Encontrar todos los canales para este teléfono
             phone_channels = []
@@ -514,7 +644,8 @@ class ConversationStateManager:
 
                     await self.redis.delete(state_key)
                     await self.redis.delete(meta_key)
-                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)
+                    await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
+                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy
                     deleted += 1
 
             logger.info(f"[ConversationState] Limpiados {deleted} estados duplicados para {phone}, manteniendo {canal_to_keep}")

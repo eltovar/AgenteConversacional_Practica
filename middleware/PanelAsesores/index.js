@@ -27,6 +27,7 @@ const ADVISOR_NAME = ADVISOR_ID ? (ADVISOR_NAMES[ADVISOR_ID] || `Asesor ${ADVISO
 let currentContactId = null;
 let currentPhone = null;
 let currentCanal = null;  // Canal de origen para segregacion
+let currentName = null;   // Nombre del contacto activo para modales
 let pollingInterval = null;
 let templatesData = [];  // Almacena templates cargados
 let allContacts = [];    // Cache de contactos para el buscador
@@ -50,9 +51,13 @@ function filterContacts(searchTerm) {
     }
 
     const filtered = allContacts.filter(contact => {
-        const name = (contact.display_name || '').toLowerCase();
-        const phone = (contact.phone || '').toLowerCase();
-        return name.includes(term) || phone.includes(term);
+        const haystack = [
+            contact.display_name || '',
+            contact.phone || '',
+            contact.canal_origen || '',
+            contact.handoff_reason || '',
+        ].join(' ').toLowerCase();
+        return haystack.includes(term);
     });
 
     renderContactsList(filtered);
@@ -484,15 +489,20 @@ async function loadContacts() {
         const data = await response.json();
         allContacts = data.contacts || [];  // Guardar en cache para el buscador
         renderContactsList(allContacts);
-        updateLastUpdateTime();
 
-        // Actualizar contador de activos
+        // Actualizar contador: distingue "en espera" (sin responder) de "en conversacion"
         const activeCounter = document.getElementById('activeCounter');
+        const inConversationCount = allContacts.filter(
+            c => c.conversation_status === 'IN_CONVERSATION'
+        ).length;
+        const parts = [];
         if (data.active_count > 0) {
-            activeCounter.innerHTML = `<span class="inline-block w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>${data.active_count} en espera`;
-        } else {
-            activeCounter.textContent = '';
+            parts.push(`<span class="inline-block w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>${data.active_count} en espera`);
         }
+        if (inConversationCount > 0) {
+            parts.push(`<span class="inline-block w-2 h-2 bg-blue-500 rounded-full mr-1"></span>${inConversationCount} en conversacion`);
+        }
+        activeCounter.innerHTML = parts.length ? parts.join(' &nbsp;·&nbsp; ') : '';
 
     } catch (error) {
         console.error('Error cargando contactos:', error);
@@ -901,11 +911,6 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function updateLastUpdateTime() {
-    const now = new Date().toLocaleTimeString('es-CO');
-    document.getElementById('lastUpdate').textContent = `Ultima actualizacion: ${now}`;
-}
-
 // NOTA v2.0: showSyncingState() eliminado - MongoDB proporciona datos en tiempo real
 // Ya no es necesario mostrar "Sincronizando con HubSpot..." porque MongoDB es instantaneo (~5ms)
 
@@ -1020,6 +1025,7 @@ async function closeConversation() {
             currentContactId = null;
             currentPhone = null;
             currentCanal = null;
+            currentName = null;
 
             // Resetear UI
             document.getElementById('contactName').textContent = 'Selecciona un contacto';
@@ -1033,6 +1039,7 @@ async function closeConversation() {
             document.getElementById('sendBtn').disabled = true;
             document.getElementById('editNameBtn').classList.add('hidden');
             document.getElementById('closeConversationBtn').classList.add('hidden');
+            document.getElementById('transferContactBtn').classList.add('hidden');
 
             // Recargar lista de contactos
             await loadContacts();
@@ -1540,6 +1547,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     currentContactId = contactId;
     currentPhone = phone;
     currentCanal = canal;  // Guardar canal para segregacion
+    currentName = displayName || null;
 
     // Reiniciar polling con intervalo mas rapido para chat activo
     restartPollingForChat();
@@ -1568,6 +1576,10 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     // Mostrar boton de cerrar conversacion
     const closeBtn = document.getElementById('closeConversationBtn');
     if (closeBtn) closeBtn.classList.remove('hidden');
+
+    // Mostrar boton de transferir contacto
+    const transferBtn = document.getElementById('transferContactBtn');
+    if (transferBtn) transferBtn.classList.remove('hidden');
 
     // Habilitar inputs
     document.getElementById('messageInput').disabled = false;
@@ -1986,3 +1998,560 @@ window.addEventListener('beforeunload', stopPolling);
 
 // Page Visibility API: Pausar/reanudar polling segun visibilidad
 document.addEventListener('visibilitychange', handleVisibilityChange);
+
+// =========================================================================
+// WEBSOCKET PARA NOTIFICACIONES EN TIEMPO REAL
+// =========================================================================
+
+let ws = null;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_RECONNECT_DELAY = 3000;  // 3 segundos
+
+/**
+ * Conecta al WebSocket para recibir notificaciones en tiempo real.
+ * Usa el ADVISOR_ID de la URL si esta disponible.
+ */
+function connectWebSocket() {
+    // Si no hay ADVISOR_ID, conectar con "all" para recibir broadcasts
+    const advisorId = ADVISOR_ID || 'all';
+
+    // Determinar protocolo (ws o wss segun http/https)
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/whatsapp/panel/ws/${advisorId}`;
+
+    console.log('[Panel] Conectando WebSocket:', wsUrl);
+
+    try {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log('[Panel] WebSocket conectado');
+            wsReconnectAttempts = 0;
+
+            // Notificar que contacto actual esta siendo observado
+            if (currentPhone) {
+                ws.send(JSON.stringify({
+                    type: 'watching',
+                    phone: currentPhone
+                }));
+            }
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            } catch (e) {
+                console.warn('[Panel] Error parseando mensaje WS:', e);
+            }
+        };
+
+        ws.onclose = (event) => {
+            console.log('[Panel] WebSocket desconectado:', event.code, event.reason);
+            ws = null;
+
+            // Reconectar si no fue cierre intencional
+            if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+                wsReconnectAttempts++;
+                console.log(`[Panel] Reintentando conexion WS (${wsReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS})...`);
+                setTimeout(connectWebSocket, WS_RECONNECT_DELAY);
+            } else {
+                console.warn('[Panel] Max reintentos WS alcanzado. Usando solo polling.');
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error('[Panel] Error WebSocket:', error);
+        };
+
+    } catch (e) {
+        console.error('[Panel] Error creando WebSocket:', e);
+    }
+}
+
+/**
+ * Maneja mensajes recibidos del WebSocket.
+ * @param {Object} data - Mensaje parseado
+ */
+function handleWebSocketMessage(data) {
+    console.log('[Panel] Mensaje WS recibido:', data.type);
+
+    switch (data.type) {
+        case 'new_message':
+            handleNewMessageNotification(data);
+            break;
+
+        case 'contact_transferred':
+            handleContactTransferred(data);
+            break;
+
+        case 'status_change':
+            handleStatusChange(data);
+            break;
+
+        case 'pong':
+            // Respuesta a ping, ignorar
+            break;
+
+        case 'ping':
+            // Responder con pong
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'pong' }));
+            }
+            break;
+
+        default:
+            console.log('[Panel] Mensaje WS desconocido:', data);
+    }
+}
+
+/**
+ * Maneja notificacion de nuevo mensaje.
+ */
+function handleNewMessageNotification(data) {
+    console.log('[Panel] Nuevo mensaje de', data.phone, ':', data.preview);
+
+    // Reproducir sonido de notificacion
+    playNotificationSound();
+
+    // Mostrar notificacion del navegador si la pestana esta oculta
+    if (document.hidden) {
+        showBrowserNotification(
+            data.contact_name || data.phone,
+            data.preview || 'Nuevo mensaje'
+        );
+    }
+
+    // Refrescar lista de contactos para actualizar orden
+    loadContacts();
+
+    // Si el contacto actual es el que envio mensaje, refrescar chat
+    if (currentPhone === data.phone) {
+        loadChatHistory(currentContactId);
+    }
+}
+
+/**
+ * Maneja notificacion de transferencia de contacto.
+ */
+function handleContactTransferred(data) {
+    console.log('[Panel] Contacto transferido:', data);
+
+    // Notificacion visual
+    if (data.direction === 'incoming') {
+        playNotificationSound();
+        showBrowserNotification(
+            'Nuevo contacto',
+            `${data.contact_name || data.phone} ha sido transferido a tu panel`
+        );
+    }
+
+    // Refrescar lista
+    loadContacts();
+}
+
+/**
+ * Maneja cambio de estado de conversacion.
+ */
+function handleStatusChange(data) {
+    console.log('[Panel] Cambio de estado:', data.phone, data.old_status, '->', data.new_status);
+
+    // Refrescar lista para actualizar badges
+    loadContacts();
+}
+
+/**
+ * Reproduce sonido de notificacion.
+ */
+function playNotificationSound() {
+    try {
+        const audio = document.getElementById('notificationSound');
+        if (audio) {
+            audio.currentTime = 0;
+            audio.volume = 0.5;
+            audio.play().catch(e => {
+                // El navegador puede bloquear autoplay hasta interaccion del usuario
+                console.log('[Panel] Audio bloqueado por navegador');
+            });
+        }
+    } catch (e) {
+        console.warn('[Panel] Error reproduciendo audio:', e);
+    }
+}
+
+/**
+ * Muestra notificacion del navegador.
+ */
+function showBrowserNotification(title, body) {
+    // Verificar si las notificaciones estan soportadas y permitidas
+    if (!('Notification' in window)) {
+        return;
+    }
+
+    if (Notification.permission === 'granted') {
+        new Notification(title, {
+            body: body,
+            icon: 'https://ui-avatars.com/api/?name=P&background=10B981&color=fff&size=64',
+            tag: 'panel-notification'  // Evita multiples notificaciones
+        });
+    } else if (Notification.permission !== 'denied') {
+        // Pedir permiso
+        Notification.requestPermission().then(permission => {
+            if (permission === 'granted') {
+                showBrowserNotification(title, body);
+            }
+        });
+    }
+}
+
+/**
+ * Envia ping al WebSocket para mantener la conexion viva.
+ */
+function sendWebSocketPing() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+    }
+}
+
+// Iniciar WebSocket cuando el DOM este listo
+document.addEventListener('DOMContentLoaded', () => {
+    // Conectar WebSocket (con delay para dar tiempo a que el servidor este listo)
+    setTimeout(connectWebSocket, 1000);
+
+    // Ping cada 30 segundos para mantener conexion viva
+    setInterval(sendWebSocketPing, 30000);
+
+    // Pedir permiso para notificaciones
+    if ('Notification' in window && Notification.permission === 'default') {
+        // Pedir permiso despues de interaccion del usuario
+        document.body.addEventListener('click', () => {
+            Notification.requestPermission();
+        }, { once: true });
+    }
+});
+
+// =========================================================================
+// FUNCIONES DE CREACION MANUAL DE CONTACTOS
+// =========================================================================
+
+/**
+ * Abre el modal de creacion de contacto.
+ */
+function openCreateContactModal() {
+    const modal = document.getElementById('createContactModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        // Limpiar formulario
+        const form = document.getElementById('createContactForm');
+        if (form) form.reset();
+        // Ocultar mensajes previos
+        const resultDiv = document.getElementById('createContactResult');
+        if (resultDiv) resultDiv.classList.add('hidden');
+    }
+}
+
+/**
+ * Cierra el modal de creacion de contacto.
+ */
+function closeCreateContactModal() {
+    const modal = document.getElementById('createContactModal');
+    if (modal) modal.classList.add('hidden');
+}
+
+/**
+ * Crea un contacto manualmente desde el formulario del modal.
+ * @param {Event} event - Evento submit del formulario
+ */
+async function createManualContact(event) {
+    event.preventDefault();
+    console.log('[Panel] createManualContact() iniciado');
+
+    const form = event.target;
+    const formData = new FormData(form);
+    const submitBtn = document.getElementById('createContactBtn');
+    const resultDiv = document.getElementById('createContactResult');
+    const resultContent = resultDiv.querySelector('div');
+
+    // Validar campos obligatorios
+    const firstname = formData.get('firstname')?.trim();
+    const phone = formData.get('phone')?.trim();
+
+    if (!firstname || !phone) {
+        showCreateResult('error', 'Nombre y telefono son obligatorios');
+        return;
+    }
+
+    // Deshabilitar boton mientras procesa
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creando...';
+    }
+
+    try {
+        const response = await fetch(`${BASE_URL}/contacts/create`, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY },
+            body: formData
+        });
+
+        const data = await response.json();
+        console.log('[Panel] Respuesta creacion:', data);
+
+        if (response.status === 409) {
+            // Contacto ya existe
+            showCreateResult('warning',
+                `${data.message}. <button onclick="takeControlOfExisting('${data.contact_id}', '${data.phone}')" class="underline font-medium">Tomar control</button>`
+            );
+        } else if (response.ok && data.status === 'success') {
+            // Exito
+            showCreateResult('success', `Contacto "${data.display_name}" creado exitosamente`);
+
+            // Cerrar modal despues de 2 segundos y refrescar lista
+            setTimeout(() => {
+                closeCreateContactModal();
+                loadContacts();
+
+                // Seleccionar el nuevo contacto automaticamente
+                if (data.contact_id && data.phone) {
+                    selectContact(data.contact_id, data.phone, data.display_name, 'whatsapp_directo');
+                }
+            }, 1500);
+        } else {
+            throw new Error(data.detail || data.message || 'Error desconocido');
+        }
+
+    } catch (error) {
+        console.error('[Panel] Error creando contacto:', error);
+        showCreateResult('error', `Error: ${error.message}`);
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Crear Contacto';
+        }
+    }
+}
+
+/**
+ * Muestra resultado de la creacion en el modal.
+ * @param {string} type - Tipo: 'success', 'error', 'warning'
+ * @param {string} message - Mensaje a mostrar
+ */
+function showCreateResult(type, message) {
+    const resultDiv = document.getElementById('createContactResult');
+    const resultContent = resultDiv.querySelector('div');
+
+    const colors = {
+        success: 'bg-green-100 text-green-800 border border-green-200',
+        error: 'bg-red-100 text-red-800 border border-red-200',
+        warning: 'bg-yellow-100 text-yellow-800 border border-yellow-200'
+    };
+
+    resultContent.className = `p-3 rounded text-sm ${colors[type] || colors.error}`;
+    resultContent.innerHTML = message;
+    resultDiv.classList.remove('hidden');
+}
+
+/**
+ * Toma control de un contacto existente (cuando se detecta duplicado).
+ * @param {string} contactId - ID del contacto en HubSpot
+ * @param {string} phone - Telefono normalizado
+ */
+async function takeControlOfExisting(contactId, phone) {
+    console.log('[Panel] Tomando control de contacto existente:', contactId, phone);
+
+    try {
+        // Usar el endpoint de take-control existente
+        const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
+            `canal=whatsapp_directo&contact_id=${encodeURIComponent(contactId)}`;
+
+        const response = await fetch(takeControlUrl, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        const data = await response.json();
+        console.log('[Panel] Take control response:', data);
+
+        if (data.status === 'success') {
+            showCreateResult('success', 'Control tomado exitosamente');
+
+            // Cerrar modal y refrescar
+            setTimeout(() => {
+                closeCreateContactModal();
+                loadContacts();
+            }, 1000);
+        } else {
+            throw new Error(data.detail || 'Error tomando control');
+        }
+
+    } catch (error) {
+        console.error('[Panel] Error tomando control:', error);
+        showCreateResult('error', `Error: ${error.message}`);
+    }
+}
+
+// =========================================================================
+// FUNCIONES DE TRANSFERENCIA DE CONTACTOS
+// =========================================================================
+
+let advisorsList = [];  // Cache de asesores
+
+/**
+ * Abre el modal de transferencia de contacto.
+ */
+async function openTransferModal() {
+    if (!currentPhone || !currentContactId) {
+        alert('Selecciona un contacto primero');
+        return;
+    }
+
+    const modal = document.getElementById('transferContactModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+
+        // Rellenar info del contacto
+        document.getElementById('transferContactName').textContent = currentName || 'Sin nombre';
+        document.getElementById('transferContactPhone').textContent = currentPhone;
+        document.getElementById('transferPhone').value = currentPhone;
+        document.getElementById('transferContactId').value = currentContactId;
+        document.getElementById('transferCanal').value = currentCanal || 'whatsapp';
+
+        // Ocultar mensajes previos
+        const resultDiv = document.getElementById('transferResult');
+        if (resultDiv) resultDiv.classList.add('hidden');
+
+        // Cargar lista de asesores
+        await loadAdvisorsList();
+    }
+}
+
+/**
+ * Cierra el modal de transferencia.
+ */
+function closeTransferModal() {
+    const modal = document.getElementById('transferContactModal');
+    if (modal) modal.classList.add('hidden');
+}
+
+/**
+ * Carga la lista de asesores disponibles para transferencia.
+ */
+async function loadAdvisorsList() {
+    const select = document.getElementById('transferToOwner');
+    if (!select) return;
+
+    // Mostrar cargando
+    select.innerHTML = '<option value="">Cargando asesores...</option>';
+
+    try {
+        const response = await fetch(`${BASE_URL}/advisors`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        if (!response.ok) {
+            throw new Error('Error cargando asesores');
+        }
+
+        const data = await response.json();
+        advisorsList = data.advisors || [];
+
+        // Limpiar y rellenar select
+        select.innerHTML = '<option value="">-- Seleccionar asesora --</option>';
+
+        for (const advisor of advisorsList) {
+            const option = document.createElement('option');
+            option.value = advisor.id;
+            option.textContent = `${advisor.name} (${advisor.team})`;
+            select.appendChild(option);
+        }
+
+        console.log('[Panel] Asesores cargados:', advisorsList.length);
+
+    } catch (error) {
+        console.error('[Panel] Error cargando asesores:', error);
+        select.innerHTML = '<option value="">Error cargando asesores</option>';
+    }
+}
+
+/**
+ * Ejecuta la transferencia del contacto.
+ * @param {Event} event - Evento submit del formulario
+ */
+async function transferContact(event) {
+    event.preventDefault();
+    console.log('[Panel] transferContact() iniciado');
+
+    const form = event.target;
+    const formData = new FormData(form);
+    const submitBtn = document.getElementById('transferBtn');
+
+    const toOwnerId = formData.get('to_owner_id');
+    if (!toOwnerId) {
+        showTransferResult('error', 'Selecciona una asesora destino');
+        return;
+    }
+
+    // Deshabilitar boton mientras procesa
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Transfiriendo...';
+    }
+
+    try {
+        const phone = formData.get('phone');
+        const response = await fetch(`${BASE_URL}/contacts/${encodeURIComponent(phone)}/transfer`, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY },
+            body: formData
+        });
+
+        const data = await response.json();
+        console.log('[Panel] Respuesta transferencia:', data);
+
+        if (response.ok && data.status === 'success') {
+            // Obtener nombre del asesor destino
+            const toAdvisor = advisorsList.find(a => a.id === toOwnerId);
+            const toName = toAdvisor ? toAdvisor.name : toOwnerId;
+
+            showTransferResult('success', `Contacto transferido a ${toName}`);
+
+            // Cerrar modal y refrescar
+            setTimeout(() => {
+                closeTransferModal();
+                loadContacts();
+            }, 1500);
+        } else {
+            throw new Error(data.detail || data.message || 'Error en transferencia');
+        }
+
+    } catch (error) {
+        console.error('[Panel] Error en transferencia:', error);
+        showTransferResult('error', `Error: ${error.message}`);
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Transferir';
+        }
+    }
+}
+
+/**
+ * Muestra resultado de la transferencia en el modal.
+ * @param {string} type - Tipo: 'success', 'error', 'warning'
+ * @param {string} message - Mensaje a mostrar
+ */
+function showTransferResult(type, message) {
+    const resultDiv = document.getElementById('transferResult');
+    const resultContent = resultDiv.querySelector('div');
+
+    const colors = {
+        success: 'bg-green-100 text-green-800 border border-green-200',
+        error: 'bg-red-100 text-red-800 border border-red-200',
+        warning: 'bg-yellow-100 text-yellow-800 border border-yellow-200'
+    };
+
+    resultContent.className = `p-3 rounded text-sm ${colors[type] || colors.error}`;
+    resultContent.textContent = message;
+    resultDiv.classList.remove('hidden');
+}

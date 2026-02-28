@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 
-from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request, Body, UploadFile, File
+from fastapi import APIRouter, Form, Header, HTTPException, BackgroundTasks, Query, Request, Body, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -25,6 +25,7 @@ from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
+from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from integrations.hubspot import get_timeline_logger
@@ -81,6 +82,12 @@ LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
 
 # Prefijo en Redis para almacenar templates de WhatsApp
 TEMPLATE_PREFIX = "whatsapp_template:"
+
+# Singleton de connection pool Redis (evita crear nueva conexión por request)
+_redis_pool: Optional[redis.Redis] = None
+
+# Flag para inicializar templates predefinidos solo una vez por proceso
+_TEMPLATES_INITIALIZED: bool = False
 
 # ============================================================================
 # Etapas del Pipeline de HubSpot
@@ -205,14 +212,26 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def _get_redis_client():
-    """Obtiene cliente Redis (UNIFICADO con ConversationStateManager)."""
-    # En Railway usar REDIS_URL (conexión interna), fuera usar REDIS_PUBLIC_URL
-    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    redis_url = os.getenv("REDIS_URL") if is_railway else (
-        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-    )
-    return redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+async def _get_redis_client() -> redis.Redis:
+    """
+    Obtiene cliente Redis con connection pool reutilizable.
+    El pool se crea una sola vez por proceso — elimina el overhead de TCP
+    handshake en cada llamada.
+    """
+    global _redis_pool
+    if _redis_pool is None:
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        _redis_pool = redis.from_url(
+            redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+            max_connections=10,
+        )
+        logger.info("[Panel] Redis connection pool inicializado")
+    return _redis_pool
 
 
 async def check_24h_window(phone_normalized: str) -> WindowStatus:
@@ -228,7 +247,6 @@ async def check_24h_window(phone_normalized: str) -> WindowStatus:
         key = f"{LAST_CLIENT_MESSAGE_PREFIX}{phone_normalized}"
 
         last_msg_str = await r.get(key)
-        await r.close()
 
         if not last_msg_str:
             # No hay registro - asumir ventana cerrada por seguridad
@@ -298,7 +316,6 @@ async def update_last_client_message(phone_normalized: str) -> None:
             datetime.now(timezone.utc).isoformat(),
             ex=25 * 60 * 60
         )
-        await r.close()
 
         logger.debug(f"[Panel] Actualizado último mensaje del cliente: {phone_normalized}")
 
@@ -311,7 +328,14 @@ async def update_last_client_message(phone_normalized: str) -> None:
 # ============================================================================
 
 async def _init_default_templates():
-    """Inicializa templates predefinidos en Redis si no existen."""
+    """
+    Inicializa templates predefinidos en Redis si no existen.
+    Usa un flag de proceso para ejecutarse una sola vez — evita N×EXISTS
+    Redis calls en cada request de envío de template.
+    """
+    global _TEMPLATES_INITIALIZED
+    if _TEMPLATES_INITIALIZED:
+        return
     try:
         r = await _get_redis_client()
         for template_id, template_data in DEFAULT_TEMPLATES.items():
@@ -319,27 +343,80 @@ async def _init_default_templates():
             if not await r.exists(key):
                 await r.set(key, json.dumps(template_data))
                 logger.debug(f"[Templates] Template predefinido creado: {template_id}")
+        _TEMPLATES_INITIALIZED = True
+        logger.info("[Templates] Templates predefinidos inicializados")
     except Exception as e:
         logger.error(f"[Templates] Error inicializando templates: {e}")
 
 
+# ============================================================================
+# Caché de templates en memoria (evita SCAN costoso en cada request)
+# ============================================================================
+_TEMPLATES_CACHE: list = []
+_TEMPLATES_CACHE_TS: float = 0
+_TEMPLATES_CACHE_TTL: float = 60.0  # 60 segundos de caché
+
+
 async def _get_all_templates() -> list:
-    """Obtiene todos los templates de Redis."""
+    """
+    Obtiene todos los templates de Redis con caché en memoria.
+    
+    Optimización: KEYS es más rápido que SCAN para <100 keys porque
+    es un solo roundtrip vs múltiples iteraciones de SCAN.
+    
+    Caché: Los templates raramente cambian, así que cacheamos 60s.
+    """
+    import time
+    global _TEMPLATES_CACHE, _TEMPLATES_CACHE_TS
+    
+    _t0 = time.monotonic()
+    
+    # Verificar caché primero
+    if _TEMPLATES_CACHE and (time.monotonic() - _TEMPLATES_CACHE_TS) < _TEMPLATES_CACHE_TTL:
+        logger.debug(f"[Templates][TIMING] Cache HIT: {len(_TEMPLATES_CACHE)} templates")
+        return _TEMPLATES_CACHE
+    
     try:
         r = await _get_redis_client()
+
+        # KEYS es 1 roundtrip vs SCAN que hace múltiples
+        # Seguro para <100 keys (tenemos ~10 templates)
+        _t1 = time.monotonic()
+        keys = await r.keys(f"{TEMPLATE_PREFIX}*")
+        _t2 = time.monotonic()
+        
+        if not keys:
+            logger.info(f"[Templates][TIMING] KEYS: {(_t2-_t1)*1000:.1f}ms | 0 templates")
+            return []
+
+        # Un pipeline → todos los GETs en un solo roundtrip
+        pipe = r.pipeline()
+        for key in keys:
+            pipe.get(key)
+        values = await pipe.execute()
+        _t3 = time.monotonic()
+        
+        logger.info(
+            f"[Templates][TIMING] KEYS({len(keys)}): {(_t2-_t1)*1000:.1f}ms | "
+            f"pipeline GET: {(_t3-_t2)*1000:.1f}ms | total: {(_t3-_t0)*1000:.1f}ms"
+        )
+
         templates = []
-        async for key in r.scan_iter(match=f"{TEMPLATE_PREFIX}*"):
-            data = await r.get(key)
+        for data in values:
             if data:
-                template = json.loads(data)
-                templates.append(template)
+                templates.append(json.loads(data))
 
         # Ordenar por categoría y nombre
         templates.sort(key=lambda x: (x.get("category", ""), x.get("name", "")))
+        
+        # Actualizar caché
+        _TEMPLATES_CACHE = templates
+        _TEMPLATES_CACHE_TS = time.monotonic()
+        
         return templates
     except Exception as e:
         logger.error(f"[Templates] Error obteniendo templates: {e}")
-        return []
+        return _TEMPLATES_CACHE if _TEMPLATES_CACHE else []  # Fallback a caché
 
 
 async def _get_template(template_id: str) -> Optional[dict]:
@@ -356,6 +433,13 @@ async def _get_template(template_id: str) -> Optional[dict]:
         return None
 
 
+def _invalidate_templates_cache():
+    """Invalida el caché de templates forzando recarga en próximo request."""
+    global _TEMPLATES_CACHE_TS
+    _TEMPLATES_CACHE_TS = 0
+    logger.debug("[Templates] Caché invalidado")
+
+
 async def _save_template(template_data: dict) -> bool:
     """Guarda o actualiza un template en Redis."""
     try:
@@ -366,6 +450,7 @@ async def _save_template(template_data: dict) -> bool:
 
         key = f"{TEMPLATE_PREFIX}{template_id}"
         await r.set(key, json.dumps(template_data))
+        _invalidate_templates_cache()  # Forzar recarga
         logger.info(f"[Templates] Template guardado: {template_id}")
         return True
     except Exception as e:
@@ -389,6 +474,7 @@ async def _delete_template(template_id: str) -> bool:
 
         result = await r.delete(key)
         if result > 0:
+            _invalidate_templates_cache()  # Forzar recarga
             logger.info(f"[Templates] Template eliminado: {template_id}")
             return True
         return False
@@ -904,11 +990,17 @@ async def send_template_message(
             detail="Twilio no está configurado correctamente"
         )
 
+    import time
+    _t0 = time.monotonic()
+
     # Inicializar templates predefinidos si es necesario
     await _init_default_templates()
+    logger.info(f"[Panel][TIMING] _init_default_templates: {(time.monotonic()-_t0)*1000:.1f}ms")
 
     # Obtener template de Redis
+    _t1 = time.monotonic()
     template = await _get_template(template_id)
+    logger.info(f"[Panel][TIMING] _get_template: {(time.monotonic()-_t1)*1000:.1f}ms")
     if not template:
         raise HTTPException(
             status_code=404,
@@ -940,9 +1032,15 @@ async def send_template_message(
     logger.info(f"[Panel] Enviando template '{template_id}' a {phone_normalized}")
 
     # Enviar mensaje (usando force porque es template)
+    _t2 = time.monotonic()
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
         body=template_message
+    )
+    logger.info(
+        f"[Panel][TIMING] twilio.send_whatsapp_message: {(time.monotonic()-_t2)*1000:.1f}ms | "
+        f"total_hasta_aqui: {(time.monotonic()-_t0)*1000:.1f}ms | "
+        f"status: {result.get('status')}"
     )
 
     if result["status"] == "success":
@@ -1180,6 +1278,416 @@ async def delete_template(
         "status": "success",
         "message": f"Template '{template_id}' eliminado"
     }
+
+
+# ============================================================================
+# Endpoint para CREAR contacto manualmente
+# ============================================================================
+
+@router.post("/contacts/create")
+async def create_manual_contact(
+    firstname: str = Form(..., description="Nombre del contacto"),
+    phone: str = Form(..., description="Teléfono del contacto"),
+    lastname: str = Form("", description="Apellido (opcional)"),
+    property_type: Optional[str] = Form(None, description="Tipo de inmueble"),
+    operation_type: Optional[str] = Form(None, description="Tipo de operación (compra/arriendo)"),
+    budget: Optional[str] = Form(None, description="Presupuesto"),
+    characteristics: Optional[str] = Form(None, description="Características adicionales"),
+    canal: str = Form("whatsapp_directo", description="Canal de origen para asignación"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Crea un contacto manualmente desde el panel de asesores.
+
+    Flujo:
+    1. Normalizar teléfono
+    2. Verificar si existe (deduplicación por whatsapp_id)
+    3. Si existe → Retornar error con opción de tomar control
+    4. Si no existe → Crear contacto + deal en HubSpot
+    5. Activar HUMAN_ACTIVE para que aparezca en el panel
+    """
+    logger.info(f"[Panel] POST /contacts/create - phone={phone}, firstname={firstname}, canal={canal}")
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # === 1. Normalizar teléfono ===
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    if not validation.is_valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Número de teléfono inválido: {phone}"
+        )
+    phone_normalized = validation.normalized
+
+    logger.info(f"[Panel] Teléfono normalizado: {phone_normalized}")
+
+    # === 2. Verificar si el contacto ya existe (deduplicación) ===
+    import httpx
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key:
+        raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+    # Buscar por whatsapp_id (identificador único)
+    search_url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
+    search_payload = {
+        "properties": ["id", "firstname", "lastname", "phone", "hubspot_owner_id"],
+        "idProperty": "whatsapp_id",
+        "inputs": [{"id": phone_normalized}]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                search_url,
+                json=search_payload,
+                headers={
+                    "Authorization": f"Bearer {hubspot_api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                if results:
+                    # Contacto ya existe
+                    existing = results[0]
+                    existing_id = existing.get("id")
+                    existing_name = f"{existing.get('properties', {}).get('firstname', '')} {existing.get('properties', {}).get('lastname', '')}".strip()
+
+                    logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
+
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "exists",
+                            "message": f"El contacto ya existe: {existing_name or phone_normalized}",
+                            "contact_id": existing_id,
+                            "phone": phone_normalized,
+                            "display_name": existing_name or "Sin nombre",
+                            "suggestion": "¿Deseas tomar control de este contacto?"
+                        }
+                    )
+    except Exception as e:
+        logger.error(f"[Panel] Error buscando contacto existente: {e}")
+        # Continuar con la creación si falla la búsqueda
+
+    # === 3. Obtener owner_id usando LeadAssigner (round-robin) ===
+    from integrations.hubspot.lead_assigner import lead_assigner
+    owner_id = lead_assigner.get_next_owner(canal)
+
+    if not owner_id:
+        logger.warning(f"[Panel] No se pudo asignar owner para canal: {canal}")
+
+    # === 4. Crear contacto en HubSpot ===
+    from datetime import timezone as tz
+    midnight_utc = datetime.now(tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Solo propiedades estándar de HubSpot (siempre existen)
+    contact_properties = {
+        "whatsapp_id": phone_normalized,
+        "phone": phone_normalized,
+        "firstname": firstname.strip(),
+        "lastname": lastname.strip() if lastname else "",
+        "canal_origen": canal,
+        "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
+        "lifecyclestage": "lead",
+    }
+
+    # Agregar owner si está disponible
+    if owner_id:
+        contact_properties["hubspot_owner_id"] = owner_id
+
+    # NOTA: tipo_inmueble, tipo_operacion, presupuesto, caracteristicas
+    # se guardan en el Deal (description) en lugar del contacto
+    # porque son propiedades custom que pueden no existir en HubSpot
+
+    create_url = "https://api.hubapi.com/crm/v3/objects/contacts"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                create_url,
+                json={"properties": contact_properties},
+                headers={
+                    "Authorization": f"Bearer {hubspot_api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if response.status_code in [200, 201]:
+                contact_data = response.json()
+                contact_id = contact_data.get("id")
+                logger.info(f"[Panel] Contacto creado exitosamente: {contact_id}")
+            elif response.status_code == 409:
+                # Conflicto - contacto ya existe (race condition)
+                logger.warning(f"[Panel] Conflicto 409 al crear contacto: {response.text}")
+                raise HTTPException(
+                    status_code=409,
+                    detail="El contacto ya existe. Por favor busca en el panel."
+                )
+            else:
+                logger.error(f"[Panel] Error creando contacto: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Error de HubSpot: {response.text}"
+                )
+
+    except httpx.HTTPError as e:
+        logger.error(f"[Panel] Error HTTP creando contacto: {e}")
+        raise HTTPException(status_code=500, detail=f"Error de conexión: {str(e)}")
+
+    # === 5. Crear Deal asociado ===
+    deal_id = None
+    try:
+        # Construir descripción con las características del inmueble
+        description_parts = []
+        if property_type:
+            description_parts.append(f"Tipo inmueble: {property_type}")
+        if operation_type:
+            description_parts.append(f"Operación: {operation_type}")
+        if budget:
+            description_parts.append(f"Presupuesto: {budget}")
+        if characteristics:
+            description_parts.append(f"Características: {characteristics}")
+
+        deal_properties = {
+            "dealname": f"Lead: {firstname} {lastname}".strip(),
+            "pipeline": "1275156338",  # Pipeline Comercial
+            "dealstage": "1275156339",  # Nuevo Lead
+        }
+
+        # Agregar descripción si hay características
+        if description_parts:
+            deal_properties["description"] = "\n".join(description_parts)
+
+        if owner_id:
+            deal_properties["hubspot_owner_id"] = owner_id
+
+        deal_url = "https://api.hubapi.com/crm/v3/objects/deals"
+        deal_payload = {
+            "properties": deal_properties,
+            "associations": [
+                {
+                    "to": {"id": contact_id},
+                    "types": [
+                        {
+                            "associationCategory": "HUBSPOT_DEFINED",
+                            "associationTypeId": 3  # Deal to Contact
+                        }
+                    ]
+                }
+            ]
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                deal_url,
+                json=deal_payload,
+                headers={
+                    "Authorization": f"Bearer {hubspot_api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if response.status_code in [200, 201]:
+                deal_data = response.json()
+                deal_id = deal_data.get("id")
+                logger.info(f"[Panel] Deal creado: {deal_id} para contacto {contact_id}")
+            else:
+                logger.warning(f"[Panel] No se pudo crear deal: {response.status_code}")
+
+    except Exception as e:
+        logger.warning(f"[Panel] Error creando deal (no crítico): {e}")
+
+    # === 6. Activar HUMAN_ACTIVE en Redis ===
+    try:
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        state_manager = ConversationStateManager(redis_url)
+
+        display_name = f"{firstname} {lastname}".strip()
+
+        await state_manager.activate_human(
+            phone_normalized=phone_normalized,
+            canal_origen=canal,
+            owner_id=owner_id,
+            reason="Creado manualmente desde panel",
+            display_name=display_name,
+            contact_id=contact_id
+        )
+
+        logger.info(f"[Panel] HUMAN_ACTIVE activado para {phone_normalized}")
+
+    except Exception as e:
+        logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {e}")
+        # No falla la operación, el contacto ya está en HubSpot
+
+    return {
+        "status": "success",
+        "message": f"Contacto '{firstname}' creado exitosamente",
+        "contact_id": contact_id,
+        "deal_id": deal_id,
+        "phone": phone_normalized,
+        "display_name": f"{firstname} {lastname}".strip(),
+        "owner_id": owner_id
+    }
+
+
+# ============================================================================
+# Endpoint para TRANSFERIR contacto a otra asesora
+# ============================================================================
+
+@router.post("/contacts/{phone}/transfer")
+async def transfer_contact(
+    phone: str,
+    to_owner_id: str = Form(..., description="ID del asesor destino"),
+    mode: str = Form("exclusive", description="Modo: exclusive o collaborative"),
+    reason: str = Form("", description="Motivo de la transferencia"),
+    contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
+    canal: str = Form("whatsapp", description="Canal de la conversación"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Transfiere un contacto a otro asesor.
+
+    Modos:
+    - exclusive: El contacto pasa completamente al nuevo asesor
+    - collaborative: Ambos asesores pueden ver y atender el contacto
+
+    Actualiza:
+    - Redis: Metadata de la conversación (assigned_owner_id)
+    - HubSpot: hubspot_owner_id del contacto (solo en modo exclusive)
+    """
+    logger.info(f"[Panel] POST /contacts/{phone}/transfer -> {to_owner_id} (modo: {mode})")
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # Normalizar teléfono
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    if not validation.is_valid:
+        raise HTTPException(status_code=400, detail=f"Teléfono inválido: {phone}")
+    phone_normalized = validation.normalized
+
+    # Validar modo
+    if mode not in ["exclusive", "collaborative"]:
+        raise HTTPException(status_code=400, detail="Modo debe ser 'exclusive' o 'collaborative'")
+
+    # === 1. Transferir en Redis ===
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    redis_url = os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+    state_manager = ConversationStateManager(redis_url)
+
+    result = await state_manager.transfer_contact(
+        phone=phone_normalized,
+        to_owner_id=to_owner_id,
+        canal=canal,
+        mode=mode,
+        reason=reason
+    )
+
+    if result.get("status") != "success":
+        raise HTTPException(status_code=400, detail=result.get("message", "Error en transferencia"))
+
+    from_owner = result.get("from_owner")
+
+    # === 2. Actualizar HubSpot (solo en modo exclusive) ===
+    hubspot_updated = False
+    if mode == "exclusive" and contact_id:
+        import httpx
+        hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+
+        if hubspot_api_key:
+            try:
+                url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.patch(
+                        url,
+                        json={"properties": {"hubspot_owner_id": to_owner_id}},
+                        headers={
+                            "Authorization": f"Bearer {hubspot_api_key}",
+                            "Content-Type": "application/json"
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        hubspot_updated = True
+                        logger.info(f"[Panel] HubSpot owner actualizado: {contact_id} -> {to_owner_id}")
+                    else:
+                        logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
+
+            except Exception as e:
+                logger.warning(f"[Panel] Error actualizando HubSpot (no crítico): {e}")
+
+    # === 3. Notificar vía WebSocket ===
+    try:
+        # Obtener nombre del contacto
+        meta = await state_manager.get_meta(phone_normalized, canal)
+        contact_name = meta.display_name if meta else phone_normalized
+
+        await ws_manager.notify_contact_transferred(
+            phone=phone_normalized,
+            from_advisor=from_owner or "unknown",
+            to_advisor=to_owner_id,
+            contact_name=contact_name,
+            mode=mode
+        )
+    except Exception as e:
+        logger.warning(f"[Panel] Error notificando WebSocket: {e}")
+
+    return {
+        "status": "success",
+        "message": f"Contacto transferido a {to_owner_id}",
+        "phone": phone_normalized,
+        "from_owner": from_owner,
+        "to_owner": to_owner_id,
+        "mode": mode,
+        "hubspot_updated": hubspot_updated,
+        "transfer_history": result.get("transfer_history", [])
+    }
+
+
+@router.get("/advisors")
+async def get_advisors_list(x_api_key: str = Header(None, alias="X-API-Key")):
+    """
+    Retorna la lista de asesores disponibles para transferencias.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        from integrations.hubspot.lead_assigner import LeadAssigner
+
+        advisors = []
+        for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
+            for member in team_members:
+                if member.get("active", True):
+                    advisors.append({
+                        "id": member["id"],
+                        "name": member["name"],
+                        "team": team_name
+                    })
+
+        # Eliminar duplicados por ID
+        seen_ids = set()
+        unique_advisors = []
+        for advisor in advisors:
+            if advisor["id"] not in seen_ids:
+                seen_ids.add(advisor["id"])
+                unique_advisors.append(advisor)
+
+        return {"advisors": unique_advisors}
+
+    except Exception as e:
+        logger.error(f"[Panel] Error obteniendo lista de asesores: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -1974,8 +2482,6 @@ async def debug_redis(
                 "ttl": ttl
             })
 
-        await r.close()
-
         return {
             "redis_url": redis_url,
             "connection_ok": pong,
@@ -2319,7 +2825,21 @@ async def get_active_contacts(
                 )
 
                 # ═══════════════════════════════════════════════════════════════
-                # PASO 6.3: Filtrar contactos ESTRICTAMENTE por canal_origen
+                # PASO 6.3: Obtener lista de TODOS los advisors conocidos
+                # (para detectar transferencias a otros advisors)
+                # ═══════════════════════════════════════════════════════════════
+                all_advisor_ids = set()
+                for team_members in LeadAssigner.OWNERS_CONFIG.values():
+                    for member in team_members:
+                        member_id = member.get("id")
+                        if member_id:
+                            all_advisor_ids.add(str(member_id))
+                
+                other_advisor_ids = all_advisor_ids - {advisor_str}
+
+                # ═══════════════════════════════════════════════════════════════
+                # PASO 6.4: Filtrar contactos ESTRICTAMENTE
+                # PRIORIDAD: owner_id > canal_origen
                 # ═══════════════════════════════════════════════════════════════
                 filtered_contacts = []
                 excluded_count = 0
@@ -2327,9 +2847,55 @@ async def get_active_contacts(
                 for contact in active_contacts:
                     canal_origen = (contact.get("canal_origen") or "").lower().strip()
                     phone = contact.get("phone", "N/A")
+                    
+                    # Obtener owner_id del contacto (puede venir de transferencia)
+                    contact_owner = contact.get("owner_id") or contact.get("assigned_owner_id") or contact.get("hubspot_owner_id")
+                    contact_owner_str = str(contact_owner) if contact_owner else ""
+                    
+                    # Obtener lista de colaboradores (modo collaborative)
+                    assigned_owner_ids = contact.get("assigned_owner_ids") or []
+                    assigned_owner_ids_str = [str(x) for x in assigned_owner_ids if x]
+                    
+                    # REGLA 1: TRANSFERENCIA tiene PRIORIDAD sobre segregación por canal
+                    # Incluir si:
+                    #   a) owner_id coincide con el advisor (transferencia exclusiva), O
+                    #   b) advisor está en assigned_owner_ids (modo colaborativo)
+                    is_owner = contact_owner_str == advisor_str
+                    is_collaborator = advisor_str in assigned_owner_ids_str
+                    
+                    if is_owner or is_collaborator:
+                        filtered_contacts.append(contact)
+                        if is_collaborator and not is_owner:
+                            logger.info(
+                                f"[Panel] ✓ Contacto {phone} INCLUIDO por COLABORACIÓN "
+                                f"(advisor {advisor_str} está en assigned_owner_ids={assigned_owner_ids_str})"
+                            )
+                        elif canal_origen and canal_origen not in allowed_channels:
+                            logger.info(
+                                f"[Panel] ✓ Contacto {phone} INCLUIDO por TRANSFERENCIA "
+                                f"(owner_id={contact_owner_str} coincide, canal '{canal_origen}' es de otro equipo)"
+                            )
+                        else:
+                            logger.debug(
+                                f"[Panel] ✓ Contacto {phone} INCLUIDO "
+                                f"(owner_id coincide directamente)"
+                            )
+                        continue
 
-                    # CASO A: Si tiene canal_origen, verificar si pertenece al equipo
+                    # REGLA 2: Si tiene canal_origen, verificar si pertenece al equipo
+                    # PERO primero verificar si fue TRANSFERIDO a otro advisor
                     if canal_origen:
+                        # REGLA 2a: Si fue transferido a OTRO advisor conocido, EXCLUIR
+                        if contact_owner_str and contact_owner_str in other_advisor_ids:
+                            excluded_count += 1
+                            logger.info(
+                                f"[Panel] ✗ Contacto {phone} EXCLUIDO por TRANSFERENCIA "
+                                f"(owner_id={contact_owner_str} es otro advisor, "
+                                f"aunque canal '{canal_origen}' pertenece a '{advisor_team}')"
+                            )
+                            continue
+                        
+                        # REGLA 2b: Canal pertenece al equipo y no fue transferido a otro
                         if canal_origen in allowed_channels:
                             filtered_contacts.append(contact)
                             logger.debug(
@@ -2337,32 +2903,21 @@ async def get_active_contacts(
                                 f"(canal '{canal_origen}' pertenece a '{advisor_team}')"
                             )
                         else:
-                            # Canal NO pertenece al equipo -> EXCLUIR ESTRICTAMENTE
+                            # Canal NO pertenece al equipo Y no fue transferido a este advisor
                             excluded_count += 1
                             logger.debug(
                                 f"[Panel] ✗ Contacto {phone} EXCLUIDO "
-                                f"(canal '{canal_origen}' NO pertenece a '{advisor_team}')"
+                                f"(canal '{canal_origen}' NO pertenece a '{advisor_team}', "
+                                f"owner={contact_owner_str} != {advisor_str})"
                             )
                         continue
 
-                    # CASO B: Sin canal_origen -> verificar owner_id directo
-                    contact_owner = contact.get("owner_id") or contact.get("hubspot_owner_id")
-
-                    if str(contact_owner) == advisor_str:
-                        # El owner coincide directamente con el advisor
-                        filtered_contacts.append(contact)
-                        logger.debug(
-                            f"[Panel] ✓ Contacto {phone} INCLUIDO "
-                            f"(owner_id coincide directamente)"
-                        )
-                    else:
-                        # Sin canal Y owner no coincide -> EXCLUIR
-                        # (No se permiten contactos huérfanos de otros equipos)
-                        excluded_count += 1
-                        logger.debug(
-                            f"[Panel] ✗ Contacto {phone} EXCLUIDO "
-                            f"(sin canal_origen y owner_id {contact_owner} no coincide con {advisor_str})"
-                        )
+                    # REGLA 3: Sin canal_origen y owner no coincide -> EXCLUIR
+                    excluded_count += 1
+                    logger.debug(
+                        f"[Panel] ✗ Contacto {phone} EXCLUIDO "
+                        f"(sin canal_origen y owner_id {contact_owner_str} no coincide con {advisor_str})"
+                    )
 
                 active_contacts = filtered_contacts
 
@@ -2387,7 +2942,13 @@ async def get_active_contacts(
             key=lambda x: (0 if x.get("is_active", False) else 1, x.get("activated_at", "") or ""),
         )
 
-        active_count = len([c for c in contacts_sorted if c.get("is_active")])
+        # active_count = solo contactos ESPERANDO respuesta (HUMAN_ACTIVE / PENDING_HANDOFF)
+        # IN_CONVERSATION no cuenta: ya están siendo atendidos
+        waiting_statuses = {"HUMAN_ACTIVE", "PENDING_HANDOFF"}
+        active_count = len([
+            c for c in contacts_sorted
+            if c.get("conversation_status") in waiting_statuses
+        ])
 
         # Log para diagnóstico
         logger.info(
@@ -3206,3 +3767,62 @@ async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, al
         "api_key": x_api_key,
         "base_url": "/whatsapp/panel"
     })
+
+
+# ============================================================================
+# WebSocket para notificaciones en tiempo real
+# ============================================================================
+
+@router.websocket("/ws/{advisor_id}")
+async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
+    """
+    Endpoint WebSocket para notificaciones en tiempo real.
+
+    Conexión:
+        ws://host/whatsapp/panel/ws/{advisor_id}
+    """
+    await ws_manager.connect(websocket, advisor_id)
+
+    try:
+        while True:
+            # Recibir mensajes del cliente (para ping/pong o comandos)
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data) if data else {}
+
+                # Responder a pings
+                if message.get("type") == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                # Comando para registrar teléfono activo
+                elif message.get("type") == "watching":
+                    phone = message.get("phone")
+                    if phone:
+                        ws_manager.register_phone_owner(phone, advisor_id)
+                        logger.debug(f"[WebSocket] Asesor {advisor_id} observando {phone}")
+
+            except json.JSONDecodeError:
+                # Ignorar mensajes mal formados
+                pass
+
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket, advisor_id)
+        logger.info(f"[WebSocket] Asesor {advisor_id} desconectado")
+
+    except Exception as e:
+        logger.error(f"[WebSocket] Error en conexión de {advisor_id}: {e}")
+        ws_manager.disconnect(websocket, advisor_id)
+
+
+@router.get("/ws/stats")
+async def websocket_stats(x_api_key: str = Header(None, alias="X-API-Key")):
+    """
+    Retorna estadísticas de conexiones WebSocket activas.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    return ws_manager.get_stats()

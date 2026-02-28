@@ -7,6 +7,7 @@ Delega toda la lógica de negocio a orchestrator.py.
 from agents.orchestrator import process_message
 from agents.InfoAgent.info_agent import agent  # Para comando /reload
 from logging_config import logger
+import asyncio
 import signal
 import sys
 
@@ -22,7 +23,7 @@ def signal_handler(sig, frame):
 
 # ===== BUCLE CLI =====
 
-def main_loop(session_id: str = "default"):
+async def main_loop(session_id: str = "default"):
     """
     Bucle CLI para interacción local.
     Toda la lógica de negocio está en orchestrator.py.
@@ -59,7 +60,7 @@ def main_loop(session_id: str = "default"):
                 continue
 
             # DELEGAR A ORCHESTRATOR
-            result = process_message(session_id, user_input)
+            result = await process_message(session_id, user_input)
 
             # Mostrar respuesta
             print(f"\n🤖 Sofía: {result['response']}")
@@ -85,4 +86,4 @@ if __name__ == "__main__":
     session_id = "default"
 
     # Iniciar bucle principal
-    main_loop(session_id)
+    asyncio.run(main_loop(session_id))

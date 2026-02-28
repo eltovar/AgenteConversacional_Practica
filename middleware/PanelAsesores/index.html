@@ -42,6 +42,13 @@
                 <div class="flex items-center justify-between">
                     <h1 id="panelTitle" class="text-lg font-semibold">Asesores Comerciales</h1>
                     <div class="flex items-center gap-2">
+                        <button
+                            onclick="openCreateContactModal()"
+                            class="bg-white text-green-700 text-xs px-2 py-1 rounded-full hover:bg-green-100 transition-colors font-medium"
+                            title="Crear nuevo contacto"
+                        >
+                            + Nuevo
+                        </button>
                         <span class="pulse text-xs bg-green-500 px-2 py-1 rounded-full">En vivo</span>
                     </div>
                 </div>
@@ -85,12 +92,9 @@
                 </div>
             </div>
 
-            <!-- Info de actualizacion y contadores -->
+            <!-- Contador de activos -->
             <div class="p-2 bg-gray-50 border-t text-xs text-gray-500">
-                <div class="flex justify-between items-center">
-                    <span id="activeCounter" class="text-green-600 font-medium"></span>
-                    <span id="lastUpdate">Actualizacion: --</span>
-                </div>
+                <span id="activeCounter" class="text-green-600 font-medium"></span>
             </div>
         </div>
 
@@ -113,6 +117,15 @@
                 </div>
                 <div class="flex items-center gap-2">
                     <div id="windowStatus" class="hidden text-sm"></div>
+                    <!-- Boton transferir contacto -->
+                    <button
+                        id="transferContactBtn"
+                        onclick="openTransferModal()"
+                        class="hidden bg-blue-100 hover:bg-blue-200 text-blue-700 text-xs px-3 py-1 rounded-full transition-colors"
+                        title="Transferir a otra asesora"
+                    >
+                        &#8644; Transferir
+                    </button>
                     <!-- Boton cerrar conversacion -->
                     <button
                         id="closeConversationBtn"
@@ -267,6 +280,169 @@
                     </button>
                 </form>
                 <div id="sendResult" class="mt-2 text-sm hidden"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio de notificacion (silencioso hasta que el usuario interactue) -->
+    <audio id="notificationSound" preload="auto">
+        <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" type="audio/mpeg">
+    </audio>
+
+    <!-- Modal: Crear Contacto Manualmente -->
+    <div id="createContactModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+            <div class="p-4 border-b flex justify-between items-center bg-green-50">
+                <h2 class="text-lg font-semibold text-green-800">Crear Nuevo Contacto</h2>
+                <button onclick="closeCreateContactModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+            </div>
+            <form id="createContactForm" onsubmit="createManualContact(event)" class="p-4">
+                <!-- Nombre (obligatorio) -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Nombre <span class="text-red-500">*</span></label>
+                    <input type="text" name="firstname" required
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Ej: Carlos">
+                </div>
+                <!-- Apellido (opcional) -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Apellido</label>
+                    <input type="text" name="lastname"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Ej: Rodriguez">
+                </div>
+                <!-- Telefono (obligatorio) -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Telefono <span class="text-red-500">*</span></label>
+                    <input type="tel" name="phone" required
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Ej: 3001234567">
+                    <p class="text-xs text-gray-500 mt-1">Sin codigo de pais, se agrega automaticamente</p>
+                </div>
+                <!-- Tipo de inmueble -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Tipo de inmueble</label>
+                    <select name="property_type" class="w-full border rounded px-3 py-2">
+                        <option value="">-- Seleccionar --</option>
+                        <option value="apartamento">Apartamento</option>
+                        <option value="casa">Casa</option>
+                        <option value="local">Local comercial</option>
+                        <option value="oficina">Oficina</option>
+                        <option value="bodega">Bodega</option>
+                        <option value="lote">Lote</option>
+                        <option value="finca">Finca</option>
+                        <option value="otro">Otro</option>
+                    </select>
+                </div>
+                <!-- Tipo de operacion -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Tipo de operacion</label>
+                    <select name="operation_type" class="w-full border rounded px-3 py-2">
+                        <option value="">-- Seleccionar --</option>
+                        <option value="compra">Compra</option>
+                        <option value="arriendo">Arriendo</option>
+                        <option value="venta">Venta</option>
+                        <option value="otro">Otro</option>
+                    </select>
+                </div>
+                <!-- Presupuesto -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Presupuesto</label>
+                    <input type="text" name="budget"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Ej: 200-300 millones">
+                </div>
+                <!-- Caracteristicas -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-1">Notas adicionales</label>
+                    <textarea name="characteristics" rows="2"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Ej: Busca 3 habitaciones, zona norte..."></textarea>
+                </div>
+                <!-- Botones -->
+                <div class="flex gap-2 justify-end">
+                    <button type="button" onclick="closeCreateContactModal()"
+                        class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 transition-colors">
+                        Cancelar
+                    </button>
+                    <button type="submit" id="createContactBtn"
+                        class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition-colors">
+                        Crear Contacto
+                    </button>
+                </div>
+            </form>
+            <!-- Mensaje de resultado -->
+            <div id="createContactResult" class="hidden px-4 pb-4">
+                <div class="p-3 rounded text-sm"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Transferir Contacto -->
+    <div id="transferContactModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+            <div class="p-4 border-b flex justify-between items-center bg-blue-50">
+                <h2 class="text-lg font-semibold text-blue-800">Transferir Contacto</h2>
+                <button onclick="closeTransferModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+            </div>
+            <form id="transferContactForm" onsubmit="transferContact(event)" class="p-4">
+                <!-- Info del contacto actual -->
+                <div class="mb-4 p-3 bg-gray-50 rounded">
+                    <p class="text-sm text-gray-600">Contacto:</p>
+                    <p id="transferContactName" class="font-medium">-</p>
+                    <p id="transferContactPhone" class="text-sm text-gray-500">-</p>
+                </div>
+                <!-- Campos ocultos -->
+                <input type="hidden" name="phone" id="transferPhone">
+                <input type="hidden" name="contact_id" id="transferContactId">
+                <input type="hidden" name="canal" id="transferCanal" value="whatsapp">
+                <!-- Seleccionar asesora destino -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Transferir a <span class="text-red-500">*</span></label>
+                    <select name="to_owner_id" id="transferToOwner" required
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Cargando asesores...</option>
+                    </select>
+                </div>
+                <!-- Modo de transferencia -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Modo</label>
+                    <div class="flex gap-4">
+                        <label class="flex items-center">
+                            <input type="radio" name="mode" value="exclusive" checked class="mr-2">
+                            <span class="text-sm">Exclusivo</span>
+                        </label>
+                        <label class="flex items-center">
+                            <input type="radio" name="mode" value="collaborative" class="mr-2">
+                            <span class="text-sm">Colaborativo</span>
+                        </label>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">
+                        Exclusivo: Solo el nuevo asesor ve el contacto. Colaborativo: Ambos pueden atenderlo.
+                    </p>
+                </div>
+                <!-- Motivo -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-1">Motivo (opcional)</label>
+                    <input type="text" name="reason"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="Ej: Cliente prefiere atencion en ingles">
+                </div>
+                <!-- Botones -->
+                <div class="flex gap-2 justify-end">
+                    <button type="button" onclick="closeTransferModal()"
+                        class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 transition-colors">
+                        Cancelar
+                    </button>
+                    <button type="submit" id="transferBtn"
+                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors">
+                        Transferir
+                    </button>
+                </div>
+            </form>
+            <!-- Mensaje de resultado -->
+            <div id="transferResult" class="hidden px-4 pb-4">
+                <div class="p-3 rounded text-sm"></div>
             </div>
         </div>
     </div>

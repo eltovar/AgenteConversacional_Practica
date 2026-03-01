@@ -2941,21 +2941,9 @@ async def get_active_contacts(
                     f"{len(active_contacts)} contactos visibles, {excluded_count} excluidos"
                 )
 
-        # === PASO 7: Ordenar (activos primero) ===
-        contacts_sorted = sorted(
-            active_contacts,
-            key=lambda x: (
-                not x.get("is_active", False),  # Activos primero
-                x.get("activated_at", "") or ""  # Luego por fecha
-            ),
-            reverse=False
-        )
-
-        # Invertir para que activos estén al inicio
-        contacts_sorted = sorted(
-            contacts_sorted,
-            key=lambda x: (0 if x.get("is_active", False) else 1, x.get("activated_at", "") or ""),
-        )
+        # === PASO 7: El orden ya viene correcto del ZSET (por last_activity descendente) ===
+        # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"
+        contacts_sorted = active_contacts  # Mantener orden del backend
 
         # active_count = solo contactos ESPERANDO respuesta (HUMAN_ACTIVE / PENDING_HANDOFF)
         # IN_CONVERSATION no cuenta: ya están siendo atendidos

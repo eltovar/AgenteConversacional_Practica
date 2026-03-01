@@ -1504,7 +1504,7 @@ async def create_manual_contact(
                 deal_id = deal_data.get("id")
                 logger.info(f"[Panel] Deal creado: {deal_id} para contacto {contact_id}")
             else:
-                logger.warning(f"[Panel] No se pudo crear deal: {response.status_code}")
+                logger.warning(f"[Panel] No se pudo crear deal: {response.status_code} - {response.text}")
 
     except Exception as e:
         logger.warning(f"[Panel] Error creando deal (no crítico): {e}")
@@ -2598,10 +2598,17 @@ async def get_active_contacts(
 
             return contact
 
-        # Ejecutar enriquecimiento en paralelo para todos los contactos
+        # ✅ FIX: Semáforo para limitar llamadas concurrentes a HubSpot (evitar 429)
+        hubspot_semaphore = asyncio.Semaphore(3)  # Máximo 3 llamadas simultáneas
+        
+        async def _enrich_with_rate_limit(contact: dict) -> dict:
+            async with hubspot_semaphore:
+                return await _enrich_single_contact(contact)
+
+        # Ejecutar enriquecimiento en paralelo (limitado por semáforo)
         if active_contacts:
             enriched_contacts = await asyncio.gather(
-                *[_enrich_single_contact(contact) for contact in active_contacts],
+                *[_enrich_with_rate_limit(contact) for contact in active_contacts],
                 return_exceptions=True
             )
             # Filtrar excepciones y mantener contactos válidos

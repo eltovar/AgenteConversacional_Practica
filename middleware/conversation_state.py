@@ -586,7 +586,10 @@ class ConversationStateManager:
             return {"status": "error", "message": str(e)}
 
     async def update_client_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
-        """Actualiza el timestamp del último mensaje del cliente."""
+        """
+        Actualiza el timestamp del último mensaje del cliente.
+        También actualiza el score en ZSET para que el contacto suba al principio de la lista.
+        """
         try:
             canal_safe = canal.lower() if canal else "whatsapp"
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
@@ -597,13 +600,23 @@ class ConversationStateManager:
                 meta["last_client_message"] = get_bogota_now_iso()
                 ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                
+                # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
+                index_member = f"{phone}:{canal_safe}"
+                score = get_bogota_now().timestamp()
+                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                logger.debug(f"[ConversationState] Contacto {phone} reordenado al principio (mensaje cliente)")
+                
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_client_message_timestamp: {e}")
             return False
 
     async def update_advisor_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
-        """Actualiza el timestamp del último mensaje del asesor."""
+        """
+        Actualiza el timestamp del último mensaje del asesor.
+        También actualiza el score en ZSET para que el contacto suba al principio de la lista.
+        """
         try:
             canal_safe = canal.lower() if canal else "whatsapp"
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
@@ -614,6 +627,13 @@ class ConversationStateManager:
                 meta["last_advisor_message"] = get_bogota_now_iso()
                 ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                
+                # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
+                index_member = f"{phone}:{canal_safe}"
+                score = get_bogota_now().timestamp()
+                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                logger.debug(f"[ConversationState] Contacto {phone} reordenado al principio (mensaje asesor)")
+                
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {e}")

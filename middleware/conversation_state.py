@@ -100,7 +100,64 @@ class ConversationStateManager:
     META_PREFIX = "conv_meta:"
     ACTIVE_CONTACTS_SET = "active_conversations_index"  # Legacy SET (compatibilidad)
     ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # Nuevo ZSET ordenado por timestamp
-    HANDOFF_TTL_SECONDS = 86400
+    
+    # TTL dinámico: 24h días laborales, 72h fines de semana (para que duren hasta el lunes)
+    HANDOFF_TTL_SECONDS = 86400  # Default 24h (días laborales)
+    HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
+    
+    # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
+    WORK_HOURS_START = 8
+    WORK_HOURS_END = 18
+    
+    def _calculate_dynamic_ttl(self) -> int:
+        """
+        Calcula TTL dinámico basado en día y hora actual.
+        
+        - Viernes después de las 18h → TTL hasta lunes 9AM
+        - Sábado/Domingo → TTL hasta lunes 9AM
+        - Días laborales → 24h estándar
+        
+        Esto garantiza que los contactos del fin de semana persistan
+        hasta que las asesoras puedan atenderlos el lunes.
+        """
+        now = get_bogota_now()
+        weekday = now.weekday()  # 0=Lunes, 4=Viernes, 5=Sábado, 6=Domingo
+        hour = now.hour
+        
+        # Calcular si estamos en periodo de fin de semana extendido
+        is_friday_evening = (weekday == 4 and hour >= self.WORK_HOURS_END)
+        is_weekend = (weekday in [5, 6])
+        
+        if is_friday_evening or is_weekend:
+            # Calcular segundos hasta el próximo lunes 9AM
+            days_until_monday = (7 - weekday) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7  # Si es lunes, esperar al siguiente
+            
+            # Para viernes/sábado ajustar días
+            if weekday == 4:  # Viernes
+                days_until_monday = 3
+            elif weekday == 5:  # Sábado
+                days_until_monday = 2
+            elif weekday == 6:  # Domingo
+                days_until_monday = 1
+            
+            # Calcular TTL hasta lunes 9AM
+            from datetime import timedelta
+            monday_9am = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=days_until_monday)
+            ttl_seconds = int((monday_9am - now).total_seconds())
+            
+            # Mínimo 24 horas, máximo 72 horas
+            ttl_seconds = max(self.HANDOFF_TTL_SECONDS, min(ttl_seconds, self.HANDOFF_TTL_WEEKEND))
+            
+            logger.info(
+                f"[ConversationState] TTL FIN DE SEMANA: {ttl_seconds}s "
+                f"({ttl_seconds // 3600}h) - weekday={weekday}, hour={hour}"
+            )
+            return ttl_seconds
+        
+        # Días laborales: TTL estándar de 24h
+        return self.HANDOFF_TTL_SECONDS
 
     def __init__(self, redis_url: str = None):
         if not redis_url:
@@ -259,7 +316,7 @@ class ConversationStateManager:
         """
         state_key = f"{self.STATE_PREFIX}{phone}:{canal.lower()}"
         try:
-            ttl = ttl or self.HANDOFF_TTL_SECONDS
+            ttl = ttl or self._calculate_dynamic_ttl()
             await self.redis.set(state_key, status.value, ex=ttl)
             logger.debug(f"[ConversationState] Estado actualizado: {phone}:{canal} -> {status.value}")
             return True
@@ -336,9 +393,10 @@ class ConversationStateManager:
         canal_safe = canal_origen.lower() if canal_origen else "whatsapp"
 
         try:
-            # 1. Guardar estado HUMAN_ACTIVE
+            # 1. Guardar estado HUMAN_ACTIVE con TTL dinámico (fin de semana = 72h)
+            ttl = self._calculate_dynamic_ttl()
             state_key = f"{self.STATE_PREFIX}{phone_num}:{canal_safe}"
-            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=self.HANDOFF_TTL_SECONDS)
+            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=ttl)
 
             # 2. Guardar metadata
             now_iso = get_bogota_now_iso()
@@ -355,7 +413,7 @@ class ConversationStateManager:
             }
 
             meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
-            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             # 3. Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             index_member = f"{phone_num}:{canal_safe}"
@@ -382,9 +440,11 @@ class ConversationStateManager:
         Cambia el estado a PENDING_HANDOFF.
         """
         try:
+            # TTL dinámico: 24h días laborales, 72h fines de semana
+            ttl = self._calculate_dynamic_ttl()
             canal_safe = canal.lower() if canal else "whatsapp"
             state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
-            await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=self.HANDOFF_TTL_SECONDS)
+            await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=ttl)
 
             # Guardar metadata con la razón del handoff
             now_iso = get_bogota_now_iso()
@@ -398,7 +458,7 @@ class ConversationStateManager:
                 "created_at": now_iso
             }
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
-            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             # Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             index_member = f"{phone}:{canal_safe}"
@@ -427,7 +487,8 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_activity"] = get_bogota_now_iso()
-                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+                ttl = self._calculate_dynamic_ttl()
+                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Actualizar score en ZSET para reordenamiento
                 index_member = f"{phone}:{canal_safe}"
@@ -503,7 +564,8 @@ class ConversationStateManager:
                 meta["primary_owner_id"] = to_owner_id  # El nuevo es el principal
 
             # Guardar metadata actualizada
-            await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+            ttl = self._calculate_dynamic_ttl()
+            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             logger.info(
                 f"[ConversationState] Contacto {phone} transferido: "
@@ -533,7 +595,8 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_client_message"] = get_bogota_now_iso()
-                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+                ttl = self._calculate_dynamic_ttl()
+                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_client_message_timestamp: {e}")
@@ -549,7 +612,8 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_advisor_message"] = get_bogota_now_iso()
-                await self.redis.set(meta_key, json.dumps(meta), ex=self.HANDOFF_TTL_SECONDS)
+                ttl = self._calculate_dynamic_ttl()
+                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {e}")

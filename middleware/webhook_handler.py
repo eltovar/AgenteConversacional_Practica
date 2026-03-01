@@ -1582,12 +1582,14 @@ async def admin_reset_contact(
         # === Limpiar MongoDB ===
         if delete_mongodb:
             try:
-                mongo_manager = get_mongo_manager()  # Síncrono
-                if mongo_manager and mongo_manager.messages_collection:
-                    result = await mongo_manager.messages_collection.delete_many({
-                        "phone": phone_norm
-                    })
-                    deleted_items["mongodb"] = result.deleted_count
+                mongo_manager = get_mongo_manager()
+                if mongo_manager:
+                    await mongo_manager.connect()
+                    if mongo_manager.db:
+                        result = await mongo_manager.db.messages.delete_many({
+                            "phone": phone_norm
+                        })
+                        deleted_items["mongodb"] = result.deleted_count
             except Exception as e:
                 logger.warning(f"[Admin] Error limpiando MongoDB: {e}")
 

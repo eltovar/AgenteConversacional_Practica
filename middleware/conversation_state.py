@@ -605,7 +605,7 @@ class ConversationStateManager:
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                logger.debug(f"[ConversationState] Contacto {phone} reordenado al principio (mensaje cliente)")
+                logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje cliente)")
                 
             return True
         except Exception as e:
@@ -632,7 +632,7 @@ class ConversationStateManager:
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                logger.debug(f"[ConversationState] Contacto {phone} reordenado al principio (mensaje asesor)")
+                logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje asesor)")
                 
             return True
         except Exception as e:

@@ -3125,7 +3125,7 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
         )
         state_manager = ConversationStateManager(redis_url)
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
-        logger.debug(f"[Panel] Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
+        logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
     except Exception as e:
         logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
 

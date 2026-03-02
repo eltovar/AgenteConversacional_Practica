@@ -753,6 +753,7 @@ async def whatsapp_webhook(
         try:
             # Obtener estado actual para decidir tipo de notificación
             current_status = await state_manager.get_status(phone_normalized)
+            logger.info(f"[Webhook] Notificando panel - phone={phone_normalized}, status={current_status}")
             
             # Si el contacto está siendo atendido por un asesor, enviar notificación
             # de nuevo mensaje con preview para que el asesor lo vea inmediatamente
@@ -761,23 +762,25 @@ async def whatsapp_webhook(
                 ConversationStatus.IN_CONVERSATION
             ]:
                 # Notificación rica con preview del mensaje
-                await ws_manager.notify_new_message(
+                sent = await ws_manager.notify_new_message(
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                     message_preview=Body[:100] if Body else "",
                     sender="client",
                     contact_name=""  # El frontend usa el teléfono si no hay nombre
                 )
+                logger.info(f"[Webhook] notify_new_message enviado a {sent} conexiones")
             else:
                 # Notificación simple para refrescar la lista
-                await ws_manager.broadcast({
+                sent = await ws_manager.broadcast({
                     "type": "contact_updated",
                     "phone": phone_normalized,
                     "action": "new_message",
                     "canal": final_channel
                 })
-        except Exception:
-            pass  # No bloquear el flujo principal si WebSocket falla
+                logger.info(f"[Webhook] contact_updated broadcast enviado a {sent} conexiones")
+        except Exception as ws_err:
+            logger.error(f"[Webhook] Error notificando WebSocket: {ws_err}")
 
         # ════════════════════════════════════════════════════════════
         # PASO 4.5: Verificar horario laboral para handoff

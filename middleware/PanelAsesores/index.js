@@ -34,6 +34,11 @@ let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 
+// Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
+let unreadCounts = {};
+// Flag para saber si ya se ejecutó el auto-select de deep link
+let deepLinkHandled = false;
+
 // =========================================================================
 // FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
 // =========================================================================
@@ -125,6 +130,13 @@ async function updateDealStage(contactId, dealId, stageId) {
             // Mostrar confirmacion breve
             const stageName = PIPELINE_STAGES.find(s => s.id === stageId)?.name || stageId;
             console.log(`[Panel] Etapa actualizada: ${stageName}`);
+
+            // ACTUALIZAR CACHÉ LOCAL para evitar flickering en próximo polling
+            if (contactId && contactDealCache[contactId]) {
+                contactDealCache[contactId].current_stage = stageId;
+            } else if (contactId) {
+                contactDealCache[contactId] = { deal_id: dealId, current_stage: stageId };
+            }
 
             // Notificacion visual temporal
             const dropdown = document.querySelector(`select[data-contact-id="${contactId}"]`);
@@ -531,6 +543,21 @@ async function loadContacts() {
         allContacts = data.contacts || [];  // Guardar en cache para el buscador
         renderContactsList(allContacts);
 
+        // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
+        if (!deepLinkHandled) {
+            const deepLinkPhone = urlParams.get('phone');
+            if (deepLinkPhone) {
+                deepLinkHandled = true;
+                const target = allContacts.find(c => c.phone === deepLinkPhone);
+                if (target) {
+                    console.log('[Panel] Deep link: auto-seleccionando', deepLinkPhone);
+                    selectContact(target.contact_id || '', target.phone, target.display_name || target.phone, target.canal_origen || 'whatsapp');
+                } else {
+                    console.warn('[Panel] Deep link: contacto no encontrado en lista activa:', deepLinkPhone);
+                }
+            }
+        }
+
         // Actualizar contador: distingue "en espera" (sin responder) de "en conversacion"
         const activeCounter = document.getElementById('activeCounter');
         const inConversationCount = allContacts.filter(
@@ -557,25 +584,46 @@ async function loadContacts() {
 }
 
 async function loadChatHistory(contactId) {
-    console.log('[Panel] Cargando historial para contact_id:', contactId, 'canal:', currentCanal, 'phone:', currentPhone);
+    // Capturar el contactId y phone al momento de iniciar la petición
+    // para verificar que no cambió durante el fetch (race condition fix)
+    const requestedContactId = contactId;
+    const requestedPhone = currentPhone;
+    const requestedCanal = currentCanal;
+
+    console.log('[Panel] Cargando historial para contact_id:', requestedContactId, 'canal:', requestedCanal, 'phone:', requestedPhone);
     try {
         // Construir URL con parametros de segregacion por canal
-        let historyUrl = `${BASE_URL}/history/${contactId}?limit=50`;
-        if (currentCanal) {
-            historyUrl += `&canal=${encodeURIComponent(currentCanal)}`;
+        let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=50`;
+        if (requestedCanal) {
+            historyUrl += `&canal=${encodeURIComponent(requestedCanal)}`;
         }
-        if (currentPhone) {
-            historyUrl += `&phone=${encodeURIComponent(currentPhone)}`;
+        if (requestedPhone) {
+            historyUrl += `&phone=${encodeURIComponent(requestedPhone)}`;
         }
 
         const response = await fetch(historyUrl, {
             headers: { 'X-API-Key': API_KEY }
         });
 
+        // ═══════════════════════════════════════════════════════════════
+        // FIX RACE CONDITION: Verificar que el contacto no cambió
+        // mientras la petición estaba en vuelo. Si cambió, descartar.
+        // ═══════════════════════════════════════════════════════════════
+        if (currentContactId !== requestedContactId) {
+            console.warn(`[Panel] Race condition detectada: petición para ${requestedContactId} descartada (ahora es ${currentContactId})`);
+            return; // Descartar respuesta obsoleta
+        }
+
         console.log('[Panel] Respuesta de historial:', response.status);
 
         const data = await response.json();
-        console.log('[Panel] Datos recibidos:', data, 'canal:', data.canal);
+        console.log('[Panel] Datos recibidos para', requestedContactId, '- mensajes:', data.messages?.length || 0);
+
+        // Doble verificación después del JSON parse
+        if (currentContactId !== requestedContactId) {
+            console.warn(`[Panel] Race condition (post-parse): petición para ${requestedContactId} descartada`);
+            return;
+        }
 
         // Verificar si hay error en la respuesta (aunque sea 200)
         if (data.error) {
@@ -587,16 +635,19 @@ async function loadChatHistory(contactId) {
 
         // Mostrar mensaje si no hay historial
         if (!data.messages || data.messages.length === 0) {
-            console.log('[Panel] Sin mensajes en historial para canal:', currentCanal);
+            console.log('[Panel] Sin mensajes en historial para canal:', requestedCanal);
         }
 
     } catch (error) {
-        console.error('[Panel] Error cargando historial:', error);
-        document.getElementById('chatMessages').innerHTML = `
-            <div class="flex items-center justify-center h-full text-red-500">
-                <p>Error al cargar historial: ${error.message}</p>
-            </div>
-        `;
+        // Solo mostrar error si el contacto sigue siendo el mismo
+        if (currentContactId === requestedContactId) {
+            console.error('[Panel] Error cargando historial:', error);
+            document.getElementById('chatMessages').innerHTML = `
+                <div class="flex items-center justify-center h-full text-red-500">
+                    <p>Error al cargar historial: ${error.message}</p>
+                </div>
+            `;
+        }
     }
 }
 
@@ -730,18 +781,26 @@ function renderContactsList(contacts) {
             : '';
 
         // Generar dropdown de pipeline si hay deal_id
-        // FIX FLICKERING: Cachear deal_id para evitar que el UI oscile cuando
-        // HubSpot devuelve deal_id intermitentemente
+        // FIX FLICKERING: Cachear deal_id Y current_stage para evitar que el UI oscile
+        // cuando HubSpot devuelve datos intermitentemente por rate limiting
         let dealId = contact.deal_id || '';
+        let currentStage = contact.current_stage || '';
         const cacheKey = contactId || phone;
+
         if (dealId && cacheKey) {
-            // Si tenemos deal_id, guardarlo en cache
-            contactDealCache[cacheKey] = dealId;
+            // Si tenemos deal_id, guardarlo en cache junto con current_stage
+            contactDealCache[cacheKey] = {
+                deal_id: dealId,
+                current_stage: currentStage || contactDealCache[cacheKey]?.current_stage || ''
+            };
         } else if (cacheKey && contactDealCache[cacheKey]) {
             // Si no viene deal_id pero lo tenemos en cache, usarlo
-            dealId = contactDealCache[cacheKey];
+            dealId = contactDealCache[cacheKey].deal_id || contactDealCache[cacheKey];
+            // También recuperar current_stage del caché si no viene
+            if (!currentStage && contactDealCache[cacheKey].current_stage) {
+                currentStage = contactDealCache[cacheKey].current_stage;
+            }
         }
-        const currentStage = contact.current_stage || '';
 
         function buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {
             if (!dealIdForDropdown) return '';
@@ -788,14 +847,30 @@ function renderContactsList(contacts) {
         // URL de UI Avatars (servicio gratuito de avatares)
         const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || '?')}&background=${bgColor}&color=fff&size=40&rounded=true&bold=true`;
 
+        // Badge de mensajes no leídos (solo si no es el contacto activo)
+        const unread = unreadCounts[phone] || 0;
+        const unreadBadge = (unread > 0 && phone !== currentPhone)
+            ? `<span class="unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none">${unread > 9 ? '9+' : unread}</span>`
+            : '';
+
+        // Badge de cita programada (📅)
+        const apptBadge = contact.has_appointment
+            ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
+            : '';
+
         return `
             <div class="contact-item p-3 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
+                 data-phone="${phone}"
                  onclick="selectContact('${contactId}', '${phone}', '${displayName.replace(/'/g, "\\'")}', '${canalOrigen}')">
                 <div class="flex items-center gap-3">
-                    <img src="${avatarUrl}"
-                         class="w-10 h-10 rounded-full"
-                         alt="${displayName}"
-                         onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
+                    <div class="relative flex-shrink-0">
+                        <img src="${avatarUrl}"
+                             class="w-10 h-10 rounded-full"
+                             alt="${displayName}"
+                             onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
+                        ${unreadBadge}
+                        ${apptBadge}
+                    </div>
                     <div class="flex-1 min-w-0">
                         <p class="font-medium text-gray-800 truncate">${displayName}</p>
                         <p class="text-sm text-gray-500 truncate">${phone || contact.email || 'Sin contacto'}</p>
@@ -812,23 +887,34 @@ function renderContactsList(contacts) {
 
 // Variable para tracking de primera carga
 let isFirstChatLoad = true;
+// Variable para tracking del contacto actual en el chat (para detectar cambio de contacto)
+let renderedContactId = null;
 
 function renderChatBubbles(messages) {
     const container = document.getElementById('chatMessages');
 
+    // =========================================================================
+    // FIX CRUCE DE CONVERSACIONES: Detectar cambio de contacto
+    // Si el contacto cambió, LIMPIAR completamente el contenedor antes de renderizar
+    // =========================================================================
+    const contactChanged = renderedContactId !== currentContactId;
+    if (contactChanged) {
+        console.log(`[Panel] Contacto cambió: ${renderedContactId} → ${currentContactId}, limpiando chat`);
+        container.innerHTML = '';  // Limpiar mensajes del contacto anterior
+        renderedContactId = currentContactId;
+    }
+
     if (!messages || messages.length === 0) {
-        // Solo mostrar mensaje vacio si no hay contenido previo
-        if (container.children.length === 0 || container.querySelector('[data-empty-msg]')) {
-            container.innerHTML = `
-                <div class="flex items-center justify-center h-full text-gray-500" data-empty-msg="true">
-                    <p>No hay mensajes en el historial</p>
-                </div>
-            `;
-        }
+        // Mostrar mensaje de sin historial (siempre al limpiar o si está vacío)
+        container.innerHTML = `
+            <div class="flex items-center justify-center h-full text-gray-500" data-empty-msg="true">
+                <p>No hay mensajes en el historial</p>
+            </div>
+        `;
         return;
     }
 
-    // SINCRONIZACION INCREMENTAL: Solo agregar mensajes nuevos
+    // SINCRONIZACION INCREMENTAL: Solo agregar mensajes nuevos (para el mismo contacto)
     // Esto evita el parpadeo causado por innerHTML = ''
     let hasNewContent = false;
 
@@ -1585,6 +1671,30 @@ function cancelRecording() {
 // =========================================================================
 
 async function selectContact(contactId, phone, displayName, canal = null) {
+    // Si es el mismo contacto, no hacer nada (evita recargas innecesarias)
+    if (currentContactId === contactId && currentPhone === phone) {
+        console.log('[Panel] Mismo contacto seleccionado, ignorando');
+        return;
+    }
+
+    // Al abrir el chat de un contacto, marcar sus mensajes como leídos
+    if (phone && unreadCounts[phone]) {
+        delete unreadCounts[phone];
+        // Re-renderizar solo el ítem de la lista para quitar el badge
+        const phoneToReset = phone;
+        const contactItem = document.querySelector(`.contact-item[data-phone="${phoneToReset}"]`);
+        if (contactItem) {
+            const badge = contactItem.querySelector('.unread-badge');
+            if (badge) badge.remove();
+        }
+    }
+
+    // Mostrar botón de agendar cita solo cuando hay un contacto activo
+    const apptBtn = document.getElementById('scheduleAppointmentBtn');
+    if (apptBtn) {
+        apptBtn.classList.toggle('hidden', !contactId);
+    }
+
     currentContactId = contactId;
     currentPhone = phone;
     currentCanal = canal;  // Guardar canal para segregacion
@@ -1596,14 +1706,18 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     // Resetear estado de primera carga para nuevo contacto
     isFirstChatLoad = true;
 
-    // Limpiar chat anterior al cambiar de contacto
+    // Mostrar indicador de carga sobre el chat existente (no limpiar por completo)
     const chatContainer = document.getElementById('chatMessages');
     if (chatContainer) {
-        chatContainer.innerHTML = `
-            <div class="flex items-center justify-center h-full text-gray-400">
-                <p>Cargando historial...</p>
-            </div>
-        `;
+        // Añadir overlay de carga sin destruir el contenido
+        const existingOverlay = chatContainer.querySelector('.loading-overlay');
+        if (!existingOverlay) {
+            const overlay = document.createElement('div');
+            overlay.className = 'loading-overlay absolute inset-0 bg-white bg-opacity-80 flex items-center justify-center z-10';
+            overlay.innerHTML = '<p class="text-gray-500">Cargando historial...</p>';
+            chatContainer.style.position = 'relative';
+            chatContainer.appendChild(overlay);
+        }
     }
 
     // Actualizar header
@@ -1633,48 +1747,52 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     // Limpiar cualquier archivo multimedia previo
     clearMediaSelection();
 
-    // =========================================================================
-    // FIX v2.1: Activar HUMAN_ACTIVE al seleccionar contacto
-    // Esto previene que Sofia responda mientras la asesora revisa el historial
-    // =========================================================================
-    try {
-        const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
-            `canal=${encodeURIComponent(canal || 'whatsapp')}` +
-            `&contact_id=${encodeURIComponent(contactId || '')}` +
-            (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
-
-        const response = await fetch(takeControlUrl, {
-            method: 'POST',
-            headers: { 'X-API-Key': API_KEY }
-        });
-
-        const data = await response.json();
-        console.log('[Panel] Take Control response:', data);
-
-        if (data.status === 'success') {
-            console.log(`[Panel] Control tomado: ${data.action} - Sofia pausada`);
-        }
-    } catch (error) {
-        console.warn('[Panel] Error en take-control (no critico):', error);
-        // Continuar aunque falle - el contacto aun puede verse
-    }
-
-    // Cargar historial
-    loadChatHistory(contactId);
-
-    // Verificar ventana de 24h
-    if (phone) {
-        checkWindowStatus(phone);
-    }
-
-    // Actualizar lista (marcar activo)
+    // Actualizar visualmente la seleccion en la lista (inmediatamente)
     document.querySelectorAll('.contact-item').forEach(el => {
         el.classList.remove('active');
     });
-    // Marcar el contacto actual como activo usando el contactId
     const selectedItem = document.querySelector(`.contact-item[onclick*="'${contactId}'"]`);
     if (selectedItem) {
         selectedItem.classList.add('active');
+    }
+
+    // =========================================================================
+    // OPTIMIZACION: Ejecutar take-control y loadChatHistory en paralelo
+    // Esto reduce el tiempo total de carga al seleccionar un contacto
+    // =========================================================================
+    const takeControlPromise = (async () => {
+        try {
+            const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
+                `canal=${encodeURIComponent(canal || 'whatsapp')}` +
+                `&contact_id=${encodeURIComponent(contactId || '')}` +
+                (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
+
+            const response = await fetch(takeControlUrl, {
+                method: 'POST',
+                headers: { 'X-API-Key': API_KEY }
+            });
+
+            const data = await response.json();
+            console.log('[Panel] Take Control response:', data);
+
+            if (data.status === 'success') {
+                console.log(`[Panel] Control tomado: ${data.action} - Sofia pausada`);
+            }
+        } catch (error) {
+            console.warn('[Panel] Error en take-control (no critico):', error);
+        }
+    })();
+
+    const loadHistoryPromise = loadChatHistory(contactId);
+    const checkWindowPromise = phone ? checkWindowStatus(phone) : Promise.resolve();
+
+    // Esperar a que todas las operaciones completen
+    await Promise.all([takeControlPromise, loadHistoryPromise, checkWindowPromise]);
+
+    // Remover overlay de carga
+    if (chatContainer) {
+        const overlay = chatContainer.querySelector('.loading-overlay');
+        if (overlay) overlay.remove();
     }
 }
 
@@ -2116,12 +2234,24 @@ function connectWebSocket() {
  * @param {Object} data - Mensaje parseado
  */
 function handleWebSocketMessage(data) {
-    console.log('[Panel] Mensaje WS recibido:', data.type);
+    console.log('[Panel] Mensaje WS recibido:', data.type, data);
 
     switch (data.type) {
         case 'contact_updated':
             // Nuevo mensaje o actividad → reordenar lista INMEDIATAMENTE
-            console.log('[Panel] contact_updated recibido, recargando lista...');
+            console.log('[Panel] contact_updated recibido, action:', data.action, 'phone:', data.phone);
+
+            // Si action es 'new_message', también incrementar contador de no leídos y notificar
+            // (El backend envía contact_updated con action='new_message' cuando el estado no es HUMAN_ACTIVE)
+            if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
+                console.log('[Panel] Incrementando unreadCounts para', data.phone);
+                unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+                playNotificationSound();
+                if (document.hidden) {
+                    showBrowserNotification(data.phone, 'Nuevo mensaje');
+                }
+            }
+
             loadContacts();
             // Si el chat activo es el que recibió el mensaje, refrescar historial
             if (currentPhone && data.phone && data.phone === currentPhone) {
@@ -2174,7 +2304,12 @@ function handleNewMessageNotification(data) {
         );
     }
 
-    // Refrescar lista de contactos para actualizar orden
+    // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
+    if (data.phone && data.phone !== currentPhone) {
+        unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+    }
+
+    // Refrescar lista de contactos para actualizar orden (y badge de no leídos)
     loadContacts();
 
     // Si el contacto actual es el que envio mensaje, refrescar chat
@@ -2633,4 +2768,273 @@ function showTransferResult(type, message) {
     resultContent.className = `p-3 rounded text-sm ${colors[type] || colors.error}`;
     resultContent.textContent = message;
     resultDiv.classList.remove('hidden');
+}
+
+// =========================================================================
+// WORKERS — Gestión del equipo de campo
+// =========================================================================
+
+let workersCache = [];  // Cache local de workers para el selector del modal de citas
+
+async function openWorkersModal() {
+    document.getElementById('workersModal').classList.remove('hidden');
+    await loadWorkers();
+}
+
+function closeWorkersModal() {
+    document.getElementById('workersModal').classList.add('hidden');
+    document.getElementById('newWorkerName').value = '';
+}
+
+async function loadWorkers() {
+    try {
+        const response = await fetch(`${BASE_URL}/workers`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+        const data = await response.json();
+        workersCache = data.workers || [];
+        renderWorkersList(workersCache);
+    } catch (err) {
+        console.error('[Panel] Error cargando workers:', err);
+        document.getElementById('workersList').innerHTML =
+            '<p class="text-sm text-red-500 text-center py-2">Error cargando encargados</p>';
+    }
+}
+
+function renderWorkersList(workers) {
+    const container = document.getElementById('workersList');
+    if (!workers || workers.length === 0) {
+        container.innerHTML = '<p class="text-sm text-gray-400 text-center py-4">Sin encargados aún. Agrega el primero.</p>';
+        return;
+    }
+    container.innerHTML = workers.map(w => `
+        <div class="flex items-center gap-2 p-2 bg-gray-50 rounded border" data-worker-id="${w.id}">
+            <span class="flex-1 text-sm font-medium text-gray-700 worker-name-display">${w.name}</span>
+            <input type="text" value="${w.name}"
+                class="hidden flex-1 text-sm border rounded px-2 py-1 focus:ring-1 focus:ring-green-400 worker-name-input">
+            <button onclick="startEditWorker('${w.id}')"
+                class="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 worker-edit-btn"
+                title="Editar nombre">&#9998;</button>
+            <button onclick="saveEditWorker('${w.id}')"
+                class="hidden text-green-600 hover:text-green-800 text-xs px-2 py-1 worker-save-btn"
+                title="Guardar">&#10003;</button>
+            <button onclick="deleteWorker('${w.id}', '${w.name}')"
+                class="text-red-400 hover:text-red-600 text-xs px-2 py-1"
+                title="Eliminar encargado">&#10005;</button>
+        </div>
+    `).join('');
+}
+
+function startEditWorker(workerId) {
+    const row = document.querySelector(`[data-worker-id="${workerId}"]`);
+    if (!row) return;
+    row.querySelector('.worker-name-display').classList.add('hidden');
+    row.querySelector('.worker-name-input').classList.remove('hidden');
+    row.querySelector('.worker-edit-btn').classList.add('hidden');
+    row.querySelector('.worker-save-btn').classList.remove('hidden');
+    row.querySelector('.worker-name-input').focus();
+}
+
+async function saveEditWorker(workerId) {
+    const row = document.querySelector(`[data-worker-id="${workerId}"]`);
+    if (!row) return;
+    const newName = row.querySelector('.worker-name-input').value.trim();
+    if (!newName) return;
+
+    try {
+        const response = await fetch(`${BASE_URL}/workers/${workerId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ name: newName })
+        });
+        if (response.ok) {
+            await loadWorkers();
+        } else {
+            const err = await response.json();
+            alert('Error: ' + (err.detail || 'No se pudo actualizar'));
+        }
+    } catch (e) {
+        alert('Error de conexión al actualizar encargado');
+    }
+}
+
+async function createWorker() {
+    const input = document.getElementById('newWorkerName');
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+
+    try {
+        const response = await fetch(`${BASE_URL}/workers`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ name })
+        });
+        if (response.ok) {
+            input.value = '';
+            await loadWorkers();
+        } else {
+            const err = await response.json();
+            alert('Error: ' + (err.detail || 'No se pudo crear el encargado'));
+        }
+    } catch (e) {
+        alert('Error de conexión al crear encargado');
+    }
+}
+
+async function deleteWorker(workerId, workerName) {
+    if (!confirm(`¿Eliminar a "${workerName}"? Sus citas históricas se conservan.`)) return;
+    try {
+        const response = await fetch(`${BASE_URL}/workers/${workerId}`, {
+            method: 'DELETE',
+            headers: { 'X-API-Key': API_KEY }
+        });
+        if (response.ok) {
+            await loadWorkers();
+        } else {
+            const err = await response.json();
+            alert('Error: ' + (err.detail || 'No se pudo eliminar'));
+        }
+    } catch (e) {
+        alert('Error de conexión al eliminar encargado');
+    }
+}
+
+// =========================================================================
+// APPOINTMENTS — Agendar citas
+// =========================================================================
+
+async function openAppointmentModal() {
+    if (!currentContactId) return;
+
+    // Resetear formulario
+    document.getElementById('appointmentForm').reset();
+    document.getElementById('appointmentResult').classList.add('hidden');
+    document.getElementById('apptSubmitBtn').disabled = false;
+
+    // Precargar fecha/hora: mañana a las 10:00 AM por defecto
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(10, 0, 0, 0);
+    const isoLocal = tomorrow.toISOString().slice(0, 16);
+    document.getElementById('apptDatetime').value = isoLocal;
+
+    document.getElementById('appointmentModal').classList.remove('hidden');
+
+    // Cargar workers en el select
+    await _loadWorkersIntoSelect();
+
+    // Cargar citas anteriores de este contacto
+    await _loadPreviousAppointments();
+}
+
+function closeAppointmentModal() {
+    document.getElementById('appointmentModal').classList.add('hidden');
+}
+
+async function _loadWorkersIntoSelect() {
+    const select = document.getElementById('apptWorkerSelect');
+    select.innerHTML = '<option value="">Cargando...</option>';
+    try {
+        if (workersCache.length === 0) {
+            const response = await fetch(`${BASE_URL}/workers`, {
+                headers: { 'X-API-Key': API_KEY }
+            });
+            const data = await response.json();
+            workersCache = data.workers || [];
+        }
+        if (workersCache.length === 0) {
+            select.innerHTML = '<option value="">Sin encargados — agrega uno en ⚙️</option>';
+            return;
+        }
+        select.innerHTML = '<option value="">-- Seleccionar encargado --</option>' +
+            workersCache.map(w => `<option value="${w.id}" data-name="${w.name}">${w.name}</option>`).join('');
+    } catch (e) {
+        select.innerHTML = '<option value="">Error cargando encargados</option>';
+    }
+}
+
+async function _loadPreviousAppointments() {
+    const section = document.getElementById('previousApptsSection');
+    const list = document.getElementById('previousApptsList');
+    try {
+        const response = await fetch(`${BASE_URL}/contacts/${currentContactId}/appointments`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+        const data = await response.json();
+        const appts = data.appointments || [];
+        if (appts.length === 0) {
+            section.classList.add('hidden');
+            return;
+        }
+        section.classList.remove('hidden');
+        list.innerHTML = appts.map(a => {
+            const dt = a.appointment_dt ? new Date(a.appointment_dt).toLocaleString('es-CO', {
+                dateStyle: 'short', timeStyle: 'short'
+            }) : '—';
+            const statusColor = a.status === 'cancelled' ? 'text-red-400 line-through' : 'text-gray-700';
+            return `<div class="${statusColor}">📅 ${dt} — ${a.worker_name}${a.notes ? ` | ${a.notes}` : ''}</div>`;
+        }).join('');
+    } catch (e) {
+        section.classList.add('hidden');
+    }
+}
+
+async function submitAppointment(event) {
+    event.preventDefault();
+    if (!currentContactId) return;
+
+    const select = document.getElementById('apptWorkerSelect');
+    const workerId = select.value;
+    const workerName = select.options[select.selectedIndex]?.dataset?.name || '';
+    const datetimeVal = document.getElementById('apptDatetime').value;
+    const notes = document.getElementById('apptNotes').value.trim();
+
+    if (!workerId || !datetimeVal) return;
+
+    const submitBtn = document.getElementById('apptSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Agendando...';
+
+    try {
+        const response = await fetch(`${BASE_URL}/contacts/${currentContactId}/appointments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({
+                worker_id: workerId,
+                worker_name: workerName,
+                appointment_dt: datetimeVal,
+                notes: notes,
+                advisor_id: ADVISOR_ID || null
+            })
+        });
+
+        const data = await response.json();
+        const resultDiv = document.getElementById('appointmentResult');
+        const content = resultDiv.querySelector('div');
+
+        if (response.ok) {
+            content.className = 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
+            content.innerHTML = `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display}</span><br><span class="text-xs text-gray-500">Nota creada en HubSpot ✓</span>`;
+            resultDiv.classList.remove('hidden');
+            // Recargar lista para mostrar badge de cita en el contacto
+            setTimeout(() => {
+                loadContacts();
+                closeAppointmentModal();
+            }, 2000);
+        } else {
+            content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
+            content.textContent = 'Error: ' + (data.detail || 'No se pudo agendar la cita');
+            resultDiv.classList.remove('hidden');
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Agendar Cita';
+        }
+    } catch (err) {
+        const resultDiv = document.getElementById('appointmentResult');
+        const content = resultDiv.querySelector('div');
+        content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
+        content.textContent = 'Error de conexión. Intenta de nuevo.';
+        resultDiv.classList.remove('hidden');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Agendar Cita';
+    }
 }

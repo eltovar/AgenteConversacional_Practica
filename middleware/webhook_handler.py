@@ -751,12 +751,31 @@ async def whatsapp_webhook(
         # Notificar al panel vía WebSocket para reordenamiento instantáneo
         # (sin esto, el panel solo se actualiza en el próximo ciclo de polling)
         try:
-            await ws_manager.broadcast({
-                "type": "contact_updated",
-                "phone": phone_normalized,
-                "action": "new_message",
-                "canal": final_channel
-            })
+            # Obtener estado actual para decidir tipo de notificación
+            current_status = await state_manager.get_status(phone_normalized)
+            
+            # Si el contacto está siendo atendido por un asesor, enviar notificación
+            # de nuevo mensaje con preview para que el asesor lo vea inmediatamente
+            if current_status in [
+                ConversationStatus.HUMAN_ACTIVE,
+                ConversationStatus.IN_CONVERSATION
+            ]:
+                # Notificación rica con preview del mensaje
+                await ws_manager.notify_new_message(
+                    phone=phone_normalized,
+                    canal=final_channel or "whatsapp",
+                    message_preview=Body[:100] if Body else "",
+                    sender="client",
+                    contact_name=""  # El frontend usa el teléfono si no hay nombre
+                )
+            else:
+                # Notificación simple para refrescar la lista
+                await ws_manager.broadcast({
+                    "type": "contact_updated",
+                    "phone": phone_normalized,
+                    "action": "new_message",
+                    "canal": final_channel
+                })
         except Exception:
             pass  # No bloquear el flujo principal si WebSocket falla
 

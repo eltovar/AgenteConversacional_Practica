@@ -124,12 +124,14 @@ class MongoDBManager:
                 expireAfterSeconds=90 * 24 * 60 * 60  # 90 días
             )
 
-            # Índice único sparse para deduplicación por MessageSid de Twilio
+            # Índice único para deduplicación por MessageSid de Twilio
+            # Usa partialFilterExpression en lugar de sparse para ignorar
+            # documentos donde message_sid es null o no existe
             await self.db.messages.create_index(
                 "message_sid",
                 name="message_sid_unique_idx",
                 unique=True,
-                sparse=True  # No aplica a mensajes sin message_sid (advisor, bot)
+                partialFilterExpression={"message_sid": {"$type": "string"}}
             )
 
             # Índice de texto para búsqueda fulltext en contenido de mensajes
@@ -150,6 +152,23 @@ class MongoDBManager:
                 "hubspot_id",
                 name="contact_hubspot_idx",
                 sparse=True
+            )
+
+            # Índices para appointment_workers (equipo de campo)
+            await self.db.appointment_workers.create_index(
+                "name",
+                name="worker_name_idx",
+                unique=True
+            )
+
+            # Índices para appointments (citas agendadas)
+            await self.db.appointments.create_index(
+                [("contact_id", ASCENDING), ("status", ASCENDING)],
+                name="appointment_contact_status_idx"
+            )
+            await self.db.appointments.create_index(
+                "appointment_dt",
+                name="appointment_dt_idx"
             )
 
             self._indexes_created = True
@@ -648,6 +667,168 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo conversaciones recientes: {e}")
             return []
+
+    # =========================================================================
+    # OPERACIONES DE WORKERS (EQUIPO DE CAMPO)
+    # =========================================================================
+
+    async def get_workers(self) -> List[Dict[str, Any]]:
+        """Lista todos los workers activos."""
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.appointment_workers.find(
+                {"active": True}
+            ).sort("name", ASCENDING)
+            workers = await cursor.to_list(length=200)
+            return [
+                {"id": str(w["_id"]), "name": w["name"]}
+                for w in workers
+            ]
+        except Exception as e:
+            logger.error(f"[MongoDB] Error listando workers: {e}")
+            return []
+
+    async def create_worker(self, name: str) -> Optional[str]:
+        """Crea un nuevo worker. Retorna el ID o None si ya existe."""
+        if not await self.connect():
+            return None
+        try:
+            result = await self.db.appointment_workers.insert_one({
+                "name": name.strip(),
+                "active": True,
+                "created_at": datetime.now(TIMEZONE)
+            })
+            return str(result.inserted_id)
+        except Exception as e:
+            # Duplicate key → ya existe
+            logger.warning(f"[MongoDB] Worker duplicado o error: {e}")
+            return None
+
+    async def update_worker(self, worker_id: str, name: str) -> bool:
+        """Actualiza el nombre de un worker."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.appointment_workers.update_one(
+                {"_id": ObjectId(worker_id)},
+                {"$set": {"name": name.strip(), "updated_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando worker {worker_id}: {e}")
+            return False
+
+    async def delete_worker(self, worker_id: str) -> bool:
+        """Soft-delete de un worker (active=False). Preserva historial de citas."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.appointment_workers.update_one(
+                {"_id": ObjectId(worker_id)},
+                {"$set": {"active": False, "deleted_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error eliminando worker {worker_id}: {e}")
+            return False
+
+    # =========================================================================
+    # OPERACIONES DE CITAS (APPOINTMENTS)
+    # =========================================================================
+
+    async def create_appointment(
+        self,
+        contact_id: str,
+        phone: str,
+        advisor_id: str,
+        worker_id: str,
+        worker_name: str,
+        appointment_dt: datetime,
+        notes: str,
+        hubspot_note_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Crea una cita y la persiste en MongoDB."""
+        if not await self.connect():
+            return None
+        try:
+            result = await self.db.appointments.insert_one({
+                "contact_id": contact_id,
+                "phone": phone,
+                "advisor_id": advisor_id,
+                "worker_id": worker_id,
+                "worker_name": worker_name,
+                "appointment_dt": appointment_dt,
+                "notes": notes,
+                "hubspot_note_id": hubspot_note_id,
+                "status": "scheduled",
+                "created_at": datetime.now(TIMEZONE)
+            })
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"[MongoDB] Error creando cita: {e}")
+            return None
+
+    async def get_appointments(self, contact_id: str) -> List[Dict[str, Any]]:
+        """Obtiene todas las citas de un contacto, ordenadas por fecha."""
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.appointments.find(
+                {"contact_id": contact_id}
+            ).sort("appointment_dt", ASCENDING)
+            appts = await cursor.to_list(length=50)
+            return [
+                {
+                    "id": str(a["_id"]),
+                    "worker_name": a.get("worker_name", ""),
+                    "appointment_dt": a["appointment_dt"].isoformat() if a.get("appointment_dt") else None,
+                    "notes": a.get("notes", ""),
+                    "status": a.get("status", "scheduled"),
+                    "created_at": a["created_at"].isoformat() if a.get("created_at") else None,
+                }
+                for a in appts
+            ]
+        except Exception as e:
+            logger.error(f"[MongoDB] Error obteniendo citas de {contact_id}: {e}")
+            return []
+
+    async def get_contacts_with_appointments(self, contact_ids: List[str]) -> set:
+        """
+        Retorna el set de contact_ids que tienen al menos una cita futura activa.
+        Usa UNA sola query para todos los contactos (eficiencia O(1) por contacto).
+        """
+        if not await self.connect() or not contact_ids:
+            return set()
+        try:
+            now = datetime.now(TIMEZONE)
+            cursor = self.db.appointments.find(
+                {
+                    "contact_id": {"$in": contact_ids},
+                    "status": "scheduled",
+                    "appointment_dt": {"$gte": now}
+                },
+                {"contact_id": 1}
+            )
+            docs = await cursor.to_list(length=len(contact_ids) * 10)
+            return {d["contact_id"] for d in docs}
+        except Exception as e:
+            logger.error(f"[MongoDB] Error buscando citas activas: {e}")
+            return set()
+
+    async def cancel_appointment(self, appointment_id: str) -> bool:
+        """Cancela una cita (status → cancelled)."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.appointments.update_one(
+                {"_id": ObjectId(appointment_id)},
+                {"$set": {"status": "cancelled", "cancelled_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error cancelando cita {appointment_id}: {e}")
+            return False
 
     async def close(self):
         """Cierra la conexión."""

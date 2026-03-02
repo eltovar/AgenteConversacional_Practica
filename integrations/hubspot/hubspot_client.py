@@ -44,13 +44,16 @@ class HubSpotPropertyValidator:
         # Propiedades CRM Agent
         "chatbot_property_type",
         "chatbot_rooms",
-        "chatbot_location", 
+        "chatbot_location",
         "chatbot_budget",
         "chatbot_urgency",
         "chatbot_operation_type",
         "chatbot_preference",
         "chatbot_score",
         "chatbot_email",
+
+        # Propiedad de deep link al panel de Sofía
+        "url_chat",
     }
     
     # Propiedades que sabemos que NO existen
@@ -296,6 +299,17 @@ class HubSpotClient:
         deal_id = response["id"]
         logger.info(f"[HubSpotClient] Deal creado: {deal_id} (asociado a contacto {contact_id})")
         return deal_id
+
+    async def update_deal(self, deal_id: str, properties: Dict[str, Any]) -> None:
+        """
+        Actualiza propiedades de un deal (negocio) existente.
+
+        A diferencia de update_contact, no pasa por el validador de propiedades
+        ya que los deals tienen su propio esquema de propiedades personalizadas.
+        """
+        endpoint = f"/crm/v3/objects/deals/{deal_id}"
+        await self._request("PATCH", endpoint, {"properties": properties})
+        logger.info(f"[HubSpotClient] Deal actualizado: {deal_id}")
 
     async def create_note(
         self,

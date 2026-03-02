@@ -164,12 +164,8 @@ class ConnectionManager:
             "timestamp": datetime.now(TIMEZONE_BOGOTA).isoformat()
         }
 
-        # Si conocemos el asesor asignado, notificar solo a él
-        advisor_id = self.phone_to_advisor.get(phone)
-        if advisor_id:
-            return await self.send_to_advisor(advisor_id, notification)
-
-        # Si no, broadcast a todos
+        # Siempre broadcast a todos los asesores conectados
+        # El frontend filtra según reglas de segregación
         return await self.broadcast(notification)
 
     async def notify_contact_transferred(

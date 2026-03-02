@@ -13,6 +13,7 @@ OPTIMIZACIONES v2.0:
 
 import os
 import asyncio
+
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -411,10 +412,21 @@ class ContactManager:
             properties, phone_normalized
         )
 
-        # Crear deal asociado en background (no bloquea la respuesta al cliente)
-        asyncio.create_task(
-            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel)
+        # Construir url_chat para deep link CRM → Panel (requiere PANEL_BASE_URL en env)
+        panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+        url_chat = (
+            f"{panel_base_url}/whatsapp/panel/?advisor={owner_id}&phone={phone_normalized}"
+            if panel_base_url and owner_id else ""
         )
+
+        # Crear deal asociado en background (le pasamos url_chat para que lo escriba en el negocio)
+        asyncio.create_task(
+            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat)
+        )
+
+        # Escribir url_chat en el contacto (en background, independiente del deal)
+        if url_chat:
+            asyncio.create_task(self._write_panel_url(contact_id, url_chat))
 
         return contact_id
 
@@ -422,8 +434,9 @@ class ContactManager:
         self,
         contact_id: str,
         phone_normalized: str,
-        source_channel: str
-    ) -> None:
+        source_channel: str,
+        url_chat: str = ""
+    ) -> dict | None:
         """
         Crea un Deal en HubSpot y lo asocia al contacto recién creado.
 
@@ -432,6 +445,12 @@ class ContactManager:
 
         Pipeline: 854756009
         Etapa inicial: 1275156339 (Nuevo Lead)
+
+        Si se provee url_chat, también actualiza la propiedad url_chat del negocio
+        para que el deep link esté disponible tanto en el Contacto como en el Negocio.
+
+        Returns:
+            dict con deal_id y current_stage si se creó exitosamente, None si falló
         """
         # IDs del pipeline definidos como constantes
         PIPELINE_ID = "854756009"
@@ -449,12 +468,37 @@ class ContactManager:
                 "[ContactManager] Deal creado: %s para contacto %s (canal=%s)",
                 deal_id, contact_id, source_channel
             )
+
+            # Escribir url_chat en el negocio si está disponible
+            if url_chat and deal_id:
+                try:
+                    await self.hubspot.update_deal(deal_id, {"url_chat": url_chat})
+                    logger.info("[ContactManager] url_chat escrito en negocio %s", deal_id)
+                except Exception as deal_url_err:
+                    logger.warning(
+                        "[ContactManager] No se pudo escribir url_chat en negocio %s: %s",
+                        deal_id, deal_url_err
+                    )
+
+            return {"deal_id": deal_id, "current_stage": STAGE_NUEVO_LEAD}
         except Exception as e:
             # El fallo de creación de deal NO debe afectar la conversación
             logger.warning(
                 "[ContactManager] No se pudo crear deal para contacto %s: %s",
                 contact_id, e
             )
+            return None
+
+    async def _write_panel_url(self, contact_id: str, url_chat: str) -> None:
+        """
+        Escribe la URL de deep link al panel en la propiedad url_chat de HubSpot.
+        Se ejecuta en background — un fallo no afecta el flujo principal.
+        """
+        try:
+            await self.hubspot.update_contact(contact_id, {"url_chat": url_chat})
+            logger.info("[ContactManager] url_chat registrado para contacto %s", contact_id)
+        except Exception as e:
+            logger.warning("[ContactManager] No se pudo escribir url_chat para %s: %s", contact_id, e)
 
     async def _create_contact_with_retry(
         self,

@@ -49,6 +49,13 @@
                         >
                             + Nuevo
                         </button>
+                        <button
+                            onclick="openWorkersModal()"
+                            class="bg-white text-green-700 text-xs px-2 py-1 rounded-full hover:bg-green-100 transition-colors"
+                            title="Gestionar equipo de campo (encargados de citas)"
+                        >
+                            &#9881;&#65039;
+                        </button>
                         <span class="pulse text-xs bg-green-500 px-2 py-1 rounded-full">En vivo</span>
                     </div>
                 </div>
@@ -117,6 +124,15 @@
                 </div>
                 <div class="flex items-center gap-2">
                     <div id="windowStatus" class="hidden text-sm"></div>
+                    <!-- Boton agendar cita -->
+                    <button
+                        id="scheduleAppointmentBtn"
+                        onclick="openAppointmentModal()"
+                        class="hidden bg-amber-100 hover:bg-amber-200 text-amber-700 text-xs px-3 py-1 rounded-full transition-colors"
+                        title="Agendar cita con encargado de inmueble"
+                    >
+                        &#128197; Cita
+                    </button>
                     <!-- Boton transferir contacto -->
                     <button
                         id="transferContactBtn"
@@ -443,6 +459,94 @@
             <!-- Mensaje de resultado -->
             <div id="transferResult" class="hidden px-4 pb-4">
                 <div class="p-3 rounded text-sm"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================================= -->
+    <!-- Modal: Agendar Cita                                                    -->
+    <!-- ======================================================================= -->
+    <div id="appointmentModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+            <div class="p-4 border-b flex justify-between items-center bg-amber-50">
+                <h2 class="text-lg font-semibold text-amber-800">&#128197; Agendar Cita</h2>
+                <button onclick="closeAppointmentModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+            </div>
+            <form id="appointmentForm" onsubmit="submitAppointment(event)" class="p-4">
+                <!-- Encargado -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Encargado <span class="text-red-500">*</span></label>
+                    <select id="apptWorkerSelect" required
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                        <option value="">Cargando encargados...</option>
+                    </select>
+                </div>
+                <!-- Fecha y hora -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Fecha y hora <span class="text-red-500">*</span></label>
+                    <input type="datetime-local" id="apptDatetime" required
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400">
+                </div>
+                <!-- Observaciones -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-1">Observaciones</label>
+                    <textarea id="apptNotes" rows="3"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        placeholder="Ej: Ver apartamento en Chapinero, zona norte..."></textarea>
+                </div>
+                <!-- Citas anteriores de este contacto -->
+                <div id="previousApptsSection" class="mb-4 hidden">
+                    <p class="text-xs font-medium text-gray-500 mb-1">Citas anteriores:</p>
+                    <div id="previousApptsList" class="text-xs text-gray-600 space-y-1 max-h-28 overflow-y-auto bg-gray-50 rounded p-2"></div>
+                </div>
+                <!-- Botones -->
+                <div class="flex gap-2 justify-end">
+                    <button type="button" onclick="closeAppointmentModal()"
+                        class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 transition-colors">
+                        Cancelar
+                    </button>
+                    <button type="submit" id="apptSubmitBtn"
+                        class="px-4 py-2 bg-amber-500 text-white rounded hover:bg-amber-600 transition-colors">
+                        Agendar Cita
+                    </button>
+                </div>
+            </form>
+            <div id="appointmentResult" class="hidden px-4 pb-4">
+                <div class="p-3 rounded text-sm"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ======================================================================= -->
+    <!-- Modal: Gestión de Workers (Equipo de campo)                             -->
+    <!-- ======================================================================= -->
+    <div id="workersModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+            <div class="p-4 border-b flex justify-between items-center bg-gray-50">
+                <h2 class="text-lg font-semibold text-gray-800">&#9881;&#65039; Equipo de Campo</h2>
+                <button onclick="closeWorkersModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+            </div>
+            <div class="p-4">
+                <p class="text-sm text-gray-500 mb-3">Agrega, edita o elimina los encargados de mostrar los inmuebles.</p>
+                <!-- Agregar nuevo worker -->
+                <div class="flex gap-2 mb-4">
+                    <input type="text" id="newWorkerName" placeholder="Nombre del encargado (ej. Mauricio)"
+                        class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400">
+                    <button onclick="createWorker()"
+                        class="bg-green-600 text-white px-3 py-2 rounded text-sm hover:bg-green-700 transition-colors">
+                        + Agregar
+                    </button>
+                </div>
+                <!-- Lista de workers -->
+                <div id="workersList" class="space-y-2 max-h-64 overflow-y-auto">
+                    <p class="text-sm text-gray-400 text-center py-4">Cargando...</p>
+                </div>
+            </div>
+            <div class="p-4 border-t flex justify-end">
+                <button onclick="closeWorkersModal()"
+                    class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 transition-colors text-sm">
+                    Cerrar
+                </button>
             </div>
         </div>
     </div>

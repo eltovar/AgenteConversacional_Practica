@@ -95,6 +95,13 @@ _redis_pool: Optional[redis.Redis] = None
 # Singleton de cliente HTTP con connection pooling (evita crear conexión por request)
 _httpx_client: Optional[httpx.AsyncClient] = None
 
+# ============================================================================
+# Caché en memoria para deal info (reduce llamadas a HubSpot)
+# ============================================================================
+# Estructura: { contact_id: {"deal_id": str, "current_stage": str, "cached_at": float} }
+_deal_info_cache: Dict[str, Dict[str, Any]] = {}
+DEAL_CACHE_TTL_SECONDS = 3600  # TTL de 1 hora — deals no cambian frecuentemente; cubre propagación de HubSpot
+
 def get_httpx_client() -> httpx.AsyncClient:
     """
     Retorna cliente HTTP global con connection pooling.
@@ -189,15 +196,34 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
     return False
 
 
-async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
+async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> Optional[Dict[str, Any]]:
     """
     Busca el deal asociado a un contacto y retorna su información.
+    Usa caché en memoria para reducir llamadas a HubSpot.
+
+    Args:
+        contact_id: ID del contacto en HubSpot
+        skip_cache: Si True, ignora el caché y consulta HubSpot directamente
 
     Returns:
         dict con deal_id y current_stage, o None si no hay deal
     """
+    import time
+    global _deal_info_cache
+
     if not contact_id or not HUBSPOT_API_KEY:
         return None
+
+    # Verificar caché (si no se pide skip_cache)
+    if not skip_cache and contact_id in _deal_info_cache:
+        cached = _deal_info_cache[contact_id]
+        age = time.time() - cached.get("cached_at", 0)
+        if age < DEAL_CACHE_TTL_SECONDS:
+            logger.debug(f"[Panel] Deal info de caché para {contact_id} (age={age:.1f}s)")
+            return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
+        else:
+            # Caché expirado, limpiar
+            del _deal_info_cache[contact_id]
 
     try:
         base_url = "https://api.hubapi.com"
@@ -208,6 +234,12 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
 
         if response.status_code == 429:
             logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
+            # Si hay rate limiting, intentar devolver del caché aunque esté expirado
+            if contact_id in _deal_info_cache:
+                return {
+                    "deal_id": _deal_info_cache[contact_id].get("deal_id"),
+                    "current_stage": _deal_info_cache[contact_id].get("current_stage")
+                }
             return None
         if response.status_code != 200:
             logger.debug(
@@ -231,19 +263,31 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
             None, deal_url, HUBSPOT_API_KEY, params={"properties": "dealstage"}
         )
 
+        result = {"deal_id": deal_id, "current_stage": None}
         if deal_response.status_code == 200:
             deal_data = deal_response.json()
-            current_stage = deal_data.get("properties", {}).get("dealstage")
-            return {
-                "deal_id": deal_id,
-                "current_stage": current_stage
-            }
+            result["current_stage"] = deal_data.get("properties", {}).get("dealstage")
 
-        return {"deal_id": deal_id, "current_stage": None}
+        # Guardar en caché
+        _deal_info_cache[contact_id] = {
+            "deal_id": result["deal_id"],
+            "current_stage": result["current_stage"],
+            "cached_at": time.time()
+        }
+
+        return result
 
     except Exception as e:
         logger.debug(f"[Panel] Error obteniendo deal info para {contact_id}: {e}")
         return None
+
+
+def _invalidate_deal_cache(contact_id: str) -> None:
+    """Invalida el caché de deal info para un contacto específico."""
+    global _deal_info_cache
+    if contact_id in _deal_info_cache:
+        del _deal_info_cache[contact_id]
+        logger.debug(f"[Panel] Caché de deal invalidado para {contact_id}")
 
 
 async def _get_redis_client() -> redis.Redis:
@@ -361,6 +405,8 @@ async def _update_deal_to_en_conversacion(contact_id: str) -> None:
             )
             if pr.status_code in [200, 201]:
                 logger.info(f"[Panel] Deal {deal_id} actualizado a 'En conversación' (contact={contact_id})")
+                # Invalidar caché de deal info para este contacto
+                _invalidate_deal_cache(contact_id)
             else:
                 logger.warning(f"[Panel] Error actualizando deal stage: {pr.status_code} - {pr.text}")
 
@@ -2072,6 +2118,10 @@ async def update_deal_stage(
                     f"[Panel] Deal {deal_id} actualizado a etapa '{stage_name}' "
                     f"(contact_id: {contact_id})"
                 )
+                
+                # Invalidar caché de deal info para este contacto
+                _invalidate_deal_cache(contact_id)
+                
                 return {
                     "status": "success",
                     "message": f"Etapa actualizada a '{stage_name}'",
@@ -2746,6 +2796,28 @@ async def get_active_contacts(
                     if deal_info:
                         contact["deal_id"] = deal_info.get("deal_id")
                         contact["current_stage"] = deal_info.get("current_stage")
+                    else:
+                        # ✅ AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
+                        try:
+                            created_deal = await contact_manager._create_deal_for_new_lead(
+                                contact_id=contact["contact_id"],
+                                phone_normalized=phone,
+                                source_channel="panel_auto"
+                            )
+                            if created_deal:
+                                # Usar directamente el deal creado sin consultar HubSpot de nuevo
+                                contact["deal_id"] = created_deal.get("deal_id")
+                                contact["current_stage"] = created_deal.get("current_stage")
+                                # Guardar en cache para evitar que desaparezca en próximos polls
+                                import time
+                                _deal_info_cache[contact["contact_id"]] = {
+                                    "deal_id": created_deal.get("deal_id"),
+                                    "current_stage": created_deal.get("current_stage"),
+                                    "cached_at": time.time()
+                                }
+                                logger.info(f"[Panel] Deal auto-creado para contacto {contact['contact_id']}: {created_deal.get('deal_id')}")
+                        except Exception as create_err:
+                            logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
                 except Exception as e:
                     logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
 
@@ -3088,6 +3160,21 @@ async def get_active_contacts(
         # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"
         contacts_sorted = active_contacts  # Mantener orden del backend
 
+        # === PASO 7.5: Marcar contactos con citas activas (una sola query MongoDB) ===
+        try:
+            mongo_mgr = get_mongo_manager()
+            page_contact_ids = [
+                c.get("contact_id", "") for c in contacts_sorted[:limit]
+                if c.get("contact_id")
+            ]
+            contacts_with_appts = await mongo_mgr.get_contacts_with_appointments(page_contact_ids)
+            for c in contacts_sorted:
+                c["has_appointment"] = c.get("contact_id", "") in contacts_with_appts
+        except Exception as appt_err:
+            logger.warning(f"[Panel] Error verificando citas activas: {appt_err}")
+            for c in contacts_sorted:
+                c["has_appointment"] = False
+
         # active_count = solo contactos ESPERANDO respuesta (HUMAN_ACTIVE / PENDING_HANDOFF)
         # IN_CONVERSATION no cuenta: ya están siendo atendidos
         waiting_statuses = {"HUMAN_ACTIVE", "PENDING_HANDOFF"}
@@ -3156,6 +3243,215 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
         logger.debug(f"[Panel] Error obteniendo info de HubSpot: {e}")
 
     return None
+
+
+# ============================================================================
+# WORKERS (Equipo de campo para citas)
+# ============================================================================
+
+@router.get("/workers")
+async def list_workers(x_api_key: str = Header(None, alias="X-API-Key")):
+    """Lista todos los workers activos del equipo de campo."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    workers = await mongo_mgr.get_workers()
+    return {"workers": workers}
+
+
+class WorkerCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class WorkerUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+@router.post("/workers", status_code=201)
+async def create_worker(
+    body: WorkerCreateRequest,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Crea un nuevo worker (encargado de mostrar inmuebles)."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    worker_id = await mongo_mgr.create_worker(body.name)
+    if not worker_id:
+        raise HTTPException(status_code=409, detail="Ya existe un worker con ese nombre")
+    logger.info(f"[Panel] Worker creado: {body.name} ({worker_id})")
+    return {"worker_id": worker_id, "name": body.name}
+
+
+@router.patch("/workers/{worker_id}")
+async def update_worker(
+    worker_id: str,
+    body: WorkerUpdateRequest,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Actualiza el nombre de un worker."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.update_worker(worker_id, body.name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Worker no encontrado")
+    return {"ok": True, "name": body.name}
+
+
+@router.delete("/workers/{worker_id}")
+async def delete_worker(
+    worker_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Elimina (soft-delete) un worker. Sus citas históricas se preservan."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.delete_worker(worker_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Worker no encontrado")
+    return {"ok": True}
+
+
+# ============================================================================
+# APPOINTMENTS (Citas agendadas)
+# ============================================================================
+
+class AppointmentCreateRequest(BaseModel):
+    worker_id: str = Field(..., description="ID del worker en MongoDB")
+    worker_name: str = Field(..., description="Nombre del worker (desnormalizado para rapidez)")
+    appointment_dt: str = Field(..., description="Fecha y hora en ISO 8601 (ej. 2026-03-10T10:00:00)")
+    notes: str = Field("", description="Observaciones de la cita")
+    advisor_id: Optional[str] = Field(None, description="HubSpot owner ID de la asesora")
+
+
+@router.post("/contacts/{contact_id}/appointments", status_code=201)
+async def create_appointment(
+    contact_id: str,
+    body: AppointmentCreateRequest,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """
+    Agenda una cita para un contacto:
+    1. Crea nota en HubSpot con formato estructurado
+    2. Persiste la cita en MongoDB
+    3. Retorna el appointment_id
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    BOGOTA_TZ = ZoneInfo("America/Bogota")
+
+    # Parsear fecha y convertir a timezone Colombia
+    try:
+        appt_dt_utc = dt.fromisoformat(body.appointment_dt)
+        if appt_dt_utc.tzinfo is None:
+            appt_dt_utc = appt_dt_utc.replace(tzinfo=BOGOTA_TZ)
+        appt_dt_bogota = appt_dt_utc.astimezone(BOGOTA_TZ)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Formato de fecha inválido. Use ISO 8601.")
+
+    # Formatear fecha legible para la nota
+    DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    fecha_str = (
+        f"{DIAS[appt_dt_bogota.weekday()]}, "
+        f"{appt_dt_bogota.day} {MESES[appt_dt_bogota.month - 1]} {appt_dt_bogota.year} | "
+        f"{appt_dt_bogota.strftime('%I:%M %p')} (Hora Colombia)"
+    )
+
+    # Construir nota HubSpot
+    notas_extra = f"\nNotas: {body.notes}" if body.notes.strip() else ""
+    note_body = (
+        f"📅 CITA PROGRAMADA\n"
+        f"Encargado: {body.worker_name}\n"
+        f"Fecha: {fecha_str}"
+        f"{notas_extra}"
+    )
+
+    # Crear nota en HubSpot (en background para no bloquear)
+    hubspot_note_id = None
+    try:
+        from integrations.hubspot.hubspot_client import HubSpotClient
+        hs_client = HubSpotClient()
+        hubspot_note_id = await hs_client.create_note(
+            contact_id=contact_id,
+            body=note_body,
+            owner_id=body.advisor_id
+        )
+        logger.info(f"[Panel] Nota de cita creada en HubSpot: {hubspot_note_id}")
+    except Exception as hs_err:
+        logger.warning(f"[Panel] No se pudo crear nota en HubSpot para cita: {hs_err}")
+        # No falla el endpoint — la cita se guarda en MongoDB de todas formas
+
+    # Obtener phone del contacto para guardar en MongoDB
+    phone = ""
+    try:
+        hs_info = await _get_hubspot_contact_info(contact_id)
+        if hs_info:
+            phone = hs_info.get("phone", "")
+    except Exception:
+        pass
+
+    # Persistir en MongoDB
+    mongo_mgr = get_mongo_manager()
+    appointment_id = await mongo_mgr.create_appointment(
+        contact_id=contact_id,
+        phone=phone,
+        advisor_id=body.advisor_id or "",
+        worker_id=body.worker_id,
+        worker_name=body.worker_name,
+        appointment_dt=appt_dt_utc,
+        notes=body.notes,
+        hubspot_note_id=hubspot_note_id
+    )
+
+    if not appointment_id:
+        raise HTTPException(status_code=500, detail="Error guardando la cita en base de datos")
+
+    logger.info(
+        f"[Panel] Cita agendada: contact={contact_id}, worker={body.worker_name}, "
+        f"fecha={fecha_str}, appt_id={appointment_id}"
+    )
+    return {
+        "appointment_id": appointment_id,
+        "hubspot_note_id": hubspot_note_id,
+        "worker_name": body.worker_name,
+        "appointment_dt": appt_dt_bogota.isoformat(),
+        "fecha_display": fecha_str,
+        "note_body": note_body
+    }
+
+
+@router.get("/contacts/{contact_id}/appointments")
+async def get_appointments(
+    contact_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Lista las citas de un contacto."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    appts = await mongo_mgr.get_appointments(contact_id)
+    return {"appointments": appts, "total": len(appts)}
+
+
+@router.patch("/appointments/{appointment_id}/cancel")
+async def cancel_appointment(
+    appointment_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Cancela una cita existente."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.cancel_appointment(appointment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    return {"ok": True}
 
 
 # ============================================================================

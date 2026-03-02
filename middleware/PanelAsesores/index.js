@@ -2405,8 +2405,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Conectar WebSocket (con delay para dar tiempo a que el servidor este listo)
     setTimeout(connectWebSocket, 1000);
 
-    // Ping cada 30 segundos para mantener conexion viva
-    setInterval(sendWebSocketPing, 30000);
+    // Ping cada 15 segundos para mantener conexion viva (Railway cierra conexiones idle)
+    setInterval(sendWebSocketPing, 15000);
 
     // Pedir permiso para notificaciones
     if ('Notification' in window && Notification.permission === 'default') {

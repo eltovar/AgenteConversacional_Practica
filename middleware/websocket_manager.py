@@ -166,6 +166,7 @@ class ConnectionManager:
 
         # Siempre broadcast a todos los asesores conectados
         # El frontend filtra según reglas de segregación
+        logger.info(f"[WebSocket] notify_new_message broadcasting to all: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
         return await self.broadcast(notification)
 
     async def notify_contact_transferred(
@@ -270,7 +271,7 @@ class ConnectionManager:
                         del self.active_connections[advisor_id]
                     break
 
-        logger.debug(f"[WebSocket] Broadcast enviado a {sent_count} conexiones")
+        logger.info(f"[WebSocket] Broadcast enviado a {sent_count} conexiones activas")
         return sent_count
 
     async def send_ping(self) -> int:

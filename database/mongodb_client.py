@@ -124,6 +124,14 @@ class MongoDBManager:
                 expireAfterSeconds=90 * 24 * 60 * 60  # 90 días
             )
 
+            # Índice único sparse para deduplicación por MessageSid de Twilio
+            await self.db.messages.create_index(
+                "message_sid",
+                name="message_sid_unique_idx",
+                unique=True,
+                sparse=True  # No aplica a mensajes sin message_sid (advisor, bot)
+            )
+
             # Índices para colección contacts
             await self.db.contacts.create_index(
                 "phone",
@@ -190,6 +198,18 @@ class MongoDBManager:
             return None
 
         try:
+            # Deduplicación: si ya existe un mensaje con este MessageSid, no duplicar
+            if message_sid:
+                existing = await self.db.messages.find_one(
+                    {"message_sid": message_sid},
+                    {"_id": 1}
+                )
+                if existing:
+                    logger.debug(
+                        f"[MongoDB] Mensaje duplicado ignorado: message_sid={message_sid}"
+                    )
+                    return str(existing["_id"])
+
             now = datetime.now(TIMEZONE)
 
             message_doc = {

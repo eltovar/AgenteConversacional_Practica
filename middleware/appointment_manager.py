@@ -499,9 +499,11 @@ class AppointmentManager:
 
     async def get_appointments_needing_followup(self) -> List[Appointment]:
         """
-        Obtiene citas que necesitan seguimiento (24h después).
+        Obtiene citas que necesitan seguimiento post-visita.
 
-        CORREGIDO: Usa datetime.now(TIMEZONE_BOGOTA) para comparaciones.
+        Ventana: citas que ocurrieron hace entre 1h15min y 1h45min
+        (punto medio = 1h30min después de la cita).
+        Ej: cita a las 3pm → mensaje se envía entre 4:15pm y 4:45pm.
 
         Returns:
             Lista de Appointments que necesitan followup
@@ -511,14 +513,14 @@ class AppointmentManager:
         # CRÍTICO: Usar timezone de Bogotá
         now = get_bogota_now()
 
-        # Buscar citas que fueron hace 23-25h
-        min_time = now - timedelta(hours=25)
-        max_time = now - timedelta(hours=23)
+        # Ventana: 1h15min – 1h45min después de la cita
+        min_time = now - timedelta(minutes=105)  # hace 1h45min
+        max_time = now - timedelta(minutes=75)   # hace 1h15min
 
         logger.info(
-            "[AppointmentManager] Buscando seguimientos: ahora=%s, "
-            "ventana=[-%sh a -%sh] (Bogotá)",
-            now.strftime('%Y-%m-%d %H:%M %Z'), 25, 23
+            "[AppointmentManager] Buscando seguimientos post-visita: ahora=%s, "
+            "ventana=[-1h45min a -1h15min] (Bogotá)",
+            now.strftime('%Y-%m-%d %H:%M %Z')
         )
 
         keys = await r.zrangebyscore(

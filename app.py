@@ -2,6 +2,8 @@
 # CARGA DE VARIABLES DE ENTORNO (DEBE IR PRIMERO)
 # ═══════════════════════════════════════════════════════════════════════════════
 from dotenv import load_dotenv
+
+from utils.message_aggregator import message_aggregator
 load_dotenv()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -281,19 +283,10 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 
     except Exception as e:
         logger.error("[BACKGROUND] Error en procesamiento: %s", e, exc_info=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# NOTA: El endpoint /webhook fue ELIMINADO para evitar duplicidad.
-# Twilio debe configurarse para usar ÚNICAMENTE: /whatsapp/webhook
-# (definido en middleware/webhook_handler.py)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
+        
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE RECORDATORIOS DE CITAS
 # ═══════════════════════════════════════════════════════════════════════════════
-
 async def check_appointment_reminders():
     """
     Verifica citas próximas y envía recordatorios 1 hora antes.
@@ -575,6 +568,79 @@ async def check_and_send_followups():
         logger.error("[FOLLOWUP] Error general: %s", e, exc_info=True)
 
 
+async def check_appointment_followups():
+    """
+    Verifica citas que ocurrieron hace ~1h30min y envía mensaje de experiencia.
+    Se ejecuta cada 15 minutos para capturar la ventana 1h15-1h45 post-cita.
+    """
+    if not APPOINTMENT_REMINDERS_ENABLED:
+        return
+
+    await apply_jitter()
+
+    redis_url = get_redis_url()
+    apt_manager = AppointmentManager(redis_url)
+    state_manager = ConversationStateManager(redis_url)
+    now = get_bogota_now()
+
+    logger.info("[Scheduler] Ejecutando verificación de seguimientos post-cita (ventana 1h30min)...")
+
+    try:
+        appointments = await apt_manager.get_appointments_needing_followup()
+        logger.info("[Scheduler] Citas para seguimiento post-cita: %d", len(appointments))
+
+        for apt in appointments:
+            try:
+                contact_name = apt.contact_name or "cliente"
+                apt_dt = apt.scheduled_dt
+                minutes_since = (now - apt_dt).total_seconds() / 60
+
+                logger.info(
+                    "[Scheduler] Seguimiento post-cita %s: %.0f min después de la cita",
+                    apt.phone_normalized, minutes_since
+                )
+
+                message = (
+                    f"¡Hola {contact_name}! 😊 Esperamos que tu visita haya sido de tu agrado. "
+                    f"¿Tienes alguna pregunta sobre el inmueble que visitaste? "
+                    f"Estamos aquí para ayudarte."
+                )
+
+                if twilio_client.is_available:
+                    result = await twilio_client.send_whatsapp_message(
+                        to=apt.phone_normalized,
+                        body=message
+                    )
+
+                    if result.get("status") == "success":
+                        await apt_manager.mark_followup_sent(apt.phone_normalized, apt.canal)
+
+                        if apt.contact_id:
+                            try:
+                                timeline = get_timeline_logger()
+                                await timeline.log_bot_message(
+                                    contact_id=apt.contact_id,
+                                    content="Mensaje de experiencia post-visita enviado automáticamente.",
+                                    session_id=apt.phone_normalized
+                                )
+                            except Exception as hs_err:
+                                logger.error("[Scheduler] Error HubSpot followup: %s", hs_err)
+
+                        logger.info("[Scheduler] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
+                    else:
+                        logger.warning("[Scheduler] ❌ Error enviando followup a %s", apt.phone_normalized)
+                else:
+                    logger.warning("[Scheduler] Twilio no disponible para followup post-cita")
+
+            except Exception as apt_err:
+                logger.error("[Scheduler] Error en followup post-cita %s: %s", apt.phone_normalized, apt_err)
+
+        await apt_manager.close()
+
+    except Exception as e:
+        logger.error("[Scheduler] Error en check_appointment_followups: %s", e, exc_info=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS BÁSICOS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -649,6 +715,15 @@ async def startup_event():
             replace_existing=True
         )
         logger.info("[STARTUP] ✅ Scheduler de seguimiento 24h HABILITADO")
+
+    if APPOINTMENT_REMINDERS_ENABLED:
+        scheduler.add_job(
+            check_appointment_followups,
+            trigger=IntervalTrigger(minutes=15),
+            id="apt_followups",
+            replace_existing=True
+        )
+        logger.info("[STARTUP] ✅ Scheduler de seguimiento post-cita HABILITADO (cada 15 min, ventana 1h30min)")
 
     scheduler.add_job(
         check_conversation_timeouts,

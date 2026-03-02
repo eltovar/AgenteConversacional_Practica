@@ -232,15 +232,26 @@ class ConversationStateManager:
                 state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
                 status = await self.redis.get(state_key)
                 
-                if not status:
-                    # Limpieza automática si la llave de estado expiró
-                    await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
-                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)  # Legacy cleanup
-                    continue
-
                 meta = await self.get_meta(phone, canal)
+
+                if not status:
+                    # TTL expiró: Sofía retomará la conversación.
+                    # NO eliminar del panel — las asesoras deben seguir
+                    # viendo el contacto y su historial. Se muestra con
+                    # estado BOT_ACTIVE para indicar que está en modo bot.
+                    if not meta:
+                        # Sin meta tampoco: contacto fantasma, limpiar silenciosamente
+                        await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                        await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
+                        continue
+                    status = ConversationStatus.BOT_ACTIVE.value
+                    logger.debug(
+                        f"[ConversationState] TTL expirado para {phone}:{canal} — "
+                        f"mostrando como BOT_ACTIVE en el panel"
+                    )
+
                 ttl = await self.redis.ttl(state_key)
-                
+
                 contacts.append({
                     "phone": phone,
                     "canal": canal,

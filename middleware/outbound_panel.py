@@ -83,6 +83,11 @@ LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
 # Prefijo en Redis para almacenar templates de WhatsApp
 TEMPLATE_PREFIX = "whatsapp_template:"
 
+# IDs del Pipeline Comercial de HubSpot (actualizado)
+HUBSPOT_PIPELINE_ID = "854756009"
+HUBSPOT_STAGE_NUEVO_LEAD = "1275156339"
+HUBSPOT_STAGE_EN_CONVERSACION = "1275156340"
+
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
 
@@ -170,18 +175,20 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
     try:
         import httpx
         base_url = "https://api.hubapi.com"
-        headers = {
-            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
-            "Content-Type": "application/json"
-        }
 
         # Buscar deals asociados al contacto
         associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(associations_url, headers=headers)
+            response = await _hubspot_get(client, associations_url, HUBSPOT_API_KEY)
 
+            if response.status_code == 429:
+                logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
+                return None
             if response.status_code != 200:
-                logger.debug(f"[Panel] No se encontraron deals para contacto {contact_id}")
+                logger.debug(
+                    f"[Panel] No se encontraron deals para contacto {contact_id} "
+                    f"(status={response.status_code})"
+                )
                 return None
 
             data = response.json()
@@ -194,8 +201,10 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
             deal_id = results[0].get("id")
 
             # Obtener la etapa actual del deal
-            deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}?properties=dealstage"
-            deal_response = await client.get(deal_url, headers=headers)
+            deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
+            deal_response = await _hubspot_get(
+                client, deal_url, HUBSPOT_API_KEY, params={"properties": "dealstage"}
+            )
 
             if deal_response.status_code == 200:
                 deal_data = deal_response.json()
@@ -232,6 +241,99 @@ async def _get_redis_client() -> redis.Redis:
         )
         logger.info("[Panel] Redis connection pool inicializado")
     return _redis_pool
+
+
+async def _hubspot_post(client, url: str, payload: dict, api_key: str, max_retries: int = 3):
+    """
+    POST a HubSpot con retry automático en 429 (rate limit).
+    Espera 12 segundos entre intentos — cubre la ventana de 10s de HubSpot.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    for attempt in range(1, max_retries + 1):
+        response = await client.post(url, json=payload, headers=headers)
+        if response.status_code == 429:
+            wait = 12 * attempt
+            logger.warning(
+                f"[Panel] HubSpot 429 rate limit (intento {attempt}/{max_retries}), "
+                f"esperando {wait}s..."
+            )
+            await asyncio.sleep(wait)
+            continue
+        return response
+    # Último intento sin catch (dejará propagar el error)
+    return await client.post(url, json=payload, headers=headers)
+
+
+async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_retries: int = 2):
+    """
+    GET a HubSpot con retry automático en 429 (rate limit).
+    Usa max_retries=2 para GET (vs 3 en POST) para no bloquear el panel demasiado tiempo.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    for attempt in range(1, max_retries + 1):
+        response = await client.get(url, headers=headers, params=params)
+        if response.status_code == 429:
+            wait = 12 * attempt
+            logger.warning(
+                f"[Panel] HubSpot 429 rate limit GET (intento {attempt}/{max_retries}), "
+                f"esperando {wait}s..."
+            )
+            await asyncio.sleep(wait)
+            continue
+        return response
+    return await client.get(url, headers=headers, params=params)
+
+
+async def _update_deal_to_en_conversacion(contact_id: str) -> None:
+    """
+    Busca el deal activo del contacto y actualiza su stage a 'En conversación'
+    (1275156340) cuando la asesora inicia una conversación activa.
+    Se ejecuta en background — no bloquea el envío del mensaje.
+    """
+    import httpx
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key or not contact_id:
+        return
+    try:
+        # Buscar deals asociados al contacto
+        search_url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}/associations/deals"
+        headers = {"Authorization": f"Bearer {hubspot_api_key}"}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(search_url, headers=headers)
+            if r.status_code != 200:
+                logger.warning(f"[Panel] No se pudo obtener deals para contact {contact_id}: {r.status_code}")
+                return
+
+            results = r.json().get("results", [])
+            if not results:
+                logger.debug(f"[Panel] Sin deals asociados a contacto {contact_id}")
+                return
+
+            # Actualizar el primer deal encontrado
+            deal_id = results[0].get("id")
+            patch_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
+            patch_payload = {
+                "properties": {
+                    "dealstage": HUBSPOT_STAGE_EN_CONVERSACION,  # 1275156340
+                    "pipeline": HUBSPOT_PIPELINE_ID              # 854756009
+                }
+            }
+            pr = await client.patch(
+                patch_url,
+                json=patch_payload,
+                headers={**headers, "Content-Type": "application/json"}
+            )
+            if pr.status_code in [200, 201]:
+                logger.info(f"[Panel] Deal {deal_id} actualizado a 'En conversación' (contact={contact_id})")
+            else:
+                logger.warning(f"[Panel] Error actualizando deal stage: {pr.status_code} - {pr.text}")
+
+    except Exception as e:
+        logger.error(f"[Panel] Error en _update_deal_to_en_conversacion: {e}")
 
 
 async def check_24h_window(phone_normalized: str) -> WindowStatus:
@@ -598,6 +700,9 @@ async def send_message(
                 canal=canal_final
             )
             logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
+            # Sincronizar deal a "En conversación" en HubSpot (background)
+            if contact_id:
+                background_tasks.add_task(_update_deal_to_en_conversacion, contact_id)
         elif current_status == ConversationStatus.IN_CONVERSATION:
             # Ya está en conversación, solo refrescar TTL
             await state_manager.set_status(
@@ -1339,15 +1444,8 @@ async def create_manual_contact(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                search_url,
-                json=search_payload,
-                headers={
-                    "Authorization": f"Bearer {hubspot_api_key}",
-                    "Content-Type": "application/json"
-                }
-            )
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await _hubspot_post(client, search_url, search_payload, hubspot_api_key)
 
             if response.status_code == 200:
                 results = response.json().get("results", [])
@@ -1414,14 +1512,9 @@ async def create_manual_contact(
     create_url = "https://api.hubapi.com/crm/v3/objects/contacts"
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                create_url,
-                json={"properties": contact_properties},
-                headers={
-                    "Authorization": f"Bearer {hubspot_api_key}",
-                    "Content-Type": "application/json"
-                }
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            response = await _hubspot_post(
+                client, create_url, {"properties": contact_properties}, hubspot_api_key
             )
 
             if response.status_code in [200, 201]:
@@ -1462,8 +1555,8 @@ async def create_manual_contact(
 
         deal_properties = {
             "dealname": f"Lead: {firstname} {lastname}".strip(),
-            "pipeline": "1275156338",  # Pipeline Comercial
-            "dealstage": "1275156339",  # Nuevo Lead
+            "pipeline": HUBSPOT_PIPELINE_ID,          # 854756009
+            "dealstage": HUBSPOT_STAGE_NUEVO_LEAD,    # 1275156339
         }
 
         # Agregar descripción si hay características
@@ -1489,15 +1582,8 @@ async def create_manual_contact(
             ]
         }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                deal_url,
-                json=deal_payload,
-                headers={
-                    "Authorization": f"Bearer {hubspot_api_key}",
-                    "Content-Type": "application/json"
-                }
-            )
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            response = await _hubspot_post(client, deal_url, deal_payload, hubspot_api_key)
 
             if response.status_code in [200, 201]:
                 deal_data = response.json()
@@ -2648,16 +2734,17 @@ async def get_active_contacts(
 
                 if is_waiting or is_human_active:
                     # Calcular time_ago para mostrar, pero NO filtrar
-                    activated_at = contact.get("activated_at")
-                    if activated_at:
+                    # Usar last_activity (último mensaje) como referencia de tiempo
+                    ref_time = contact.get("last_activity") or contact.get("activated_at")
+                    if ref_time:
                         try:
-                            if isinstance(activated_at, str):
-                                activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+                            if isinstance(ref_time, str):
+                                ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
                             else:
-                                activated_dt = activated_at
-                            if activated_dt.tzinfo is None:
-                                activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
-                            time_ago = now - activated_dt.astimezone(TIMEZONE)
+                                ref_dt = ref_time
+                            if ref_dt.tzinfo is None:
+                                ref_dt = ref_dt.replace(tzinfo=TIMEZONE)
+                            time_ago = now - ref_dt.astimezone(TIMEZONE)
                             if time_ago.total_seconds() < 3600:
                                 contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
                             elif time_ago.total_seconds() < 86400:
@@ -2673,20 +2760,21 @@ async def get_active_contacts(
                     logger.debug(f"[Panel] Contacto {contact.get('phone')} incluido (activo/en espera)")
                     continue
 
-                # PRIORIDAD 2: Para contactos no activos, aplicar filtro de tiempo
-                activated_at = contact.get("activated_at")
-                if activated_at:
+                # PRIORIDAD 2: Para contactos no activos, filtrar por last_activity
+                # Usar last_activity como referencia principal; fallback a activated_at
+                ref_time = contact.get("last_activity") or contact.get("activated_at")
+                if ref_time:
                     try:
-                        if isinstance(activated_at, str):
-                            activated_dt = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
+                        if isinstance(ref_time, str):
+                            ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
                         else:
-                            activated_dt = activated_at
+                            ref_dt = ref_time
 
-                        if activated_dt.tzinfo is None:
-                            activated_dt = activated_dt.replace(tzinfo=TIMEZONE)
+                        if ref_dt.tzinfo is None:
+                            ref_dt = ref_dt.replace(tzinfo=TIMEZONE)
 
-                        if since <= activated_dt <= until:
-                            time_ago = now - activated_dt.astimezone(TIMEZONE)
+                        if since <= ref_dt <= until:
+                            time_ago = now - ref_dt.astimezone(TIMEZONE)
                             if time_ago.total_seconds() < 3600:
                                 contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
                             elif time_ago.total_seconds() < 86400:
@@ -2702,31 +2790,8 @@ async def get_active_contacts(
                         logger.debug(f"[Panel] Error parseando fecha: {e}")
                         filtered_active.append(contact)
                 else:
-                    # Sin fecha de activación, usar last_activity o incluir como reciente
-                    last_activity = contact.get("last_activity")
-                    if last_activity:
-                        try:
-                            if isinstance(last_activity, str):
-                                activity_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
-                            else:
-                                activity_dt = last_activity
-                            if activity_dt.tzinfo is None:
-                                activity_dt = activity_dt.replace(tzinfo=TIMEZONE)
-                            if since <= activity_dt <= until:
-                                time_ago = now - activity_dt.astimezone(TIMEZONE)
-                                if time_ago.total_seconds() < 3600:
-                                    contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
-                                elif time_ago.total_seconds() < 86400:
-                                    contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
-                                else:
-                                    contact["time_ago"] = f"hace {int(time_ago.days)} días"
-                                filtered_active.append(contact)
-                        except (ValueError, TypeError):
-                            contact["time_ago"] = "reciente"
-                            filtered_active.append(contact)
-                    else:
-                        contact["time_ago"] = "reciente"
-                        filtered_active.append(contact)
+                    contact["time_ago"] = "reciente"
+                    filtered_active.append(contact)
 
             logger.info(
                 f"[Panel] Contactos después de filtro de tiempo: "
@@ -2963,7 +3028,9 @@ async def get_active_contacts(
                 f"[Panel] -> {c.get('phone', 'N/A')} | "
                 f"active={c.get('is_active')} | "
                 f"canal={c.get('canal_origen', 'N/A')} | "
-                f"owner={c.get('owner_id', 'N/A')}"
+                f"owner={c.get('owner_id', 'N/A')} | "
+                f"deal_id={c.get('deal_id', 'NONE')} | "
+                f"stage={c.get('current_stage', 'N/A')}"
             )
 
         return {
@@ -2994,19 +3061,18 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
 
     try:
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        params = {"properties": "firstname,lastname,email,phone"}
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {hubspot_api_key}"},
-                params=params,
-                timeout=10.0
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await _hubspot_get(
+                client, url, hubspot_api_key,
+                params={"properties": "firstname,lastname,email,phone"}
             )
 
             if response.status_code == 200:
                 data = response.json()
                 return data.get("properties", {})
+            elif response.status_code == 429:
+                logger.warning(f"[Panel] HubSpot 429 persistente al obtener contacto {contact_id}")
 
     except Exception as e:
         logger.debug(f"[Panel] Error obteniendo info de HubSpot: {e}")

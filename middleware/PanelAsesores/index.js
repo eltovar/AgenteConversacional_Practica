@@ -2078,6 +2078,16 @@ function handleWebSocketMessage(data) {
     console.log('[Panel] Mensaje WS recibido:', data.type);
 
     switch (data.type) {
+        case 'contact_updated':
+            // Nuevo mensaje o actividad → reordenar lista INMEDIATAMENTE
+            console.log('[Panel] contact_updated recibido, recargando lista...');
+            loadContacts();
+            // Si el chat activo es el que recibió el mensaje, refrescar historial
+            if (currentPhone && data.phone && data.phone === currentPhone) {
+                loadChatHistory(currentContactId);
+            }
+            break;
+
         case 'new_message':
             handleNewMessageNotification(data);
             break;

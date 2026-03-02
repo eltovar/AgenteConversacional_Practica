@@ -407,9 +407,54 @@ class ContactManager:
             )
 
         # Intentar crear con manejo de rate limits
-        return await self._create_contact_with_retry(
+        contact_id = await self._create_contact_with_retry(
             properties, phone_normalized
         )
+
+        # Crear deal asociado en background (no bloquea la respuesta al cliente)
+        asyncio.create_task(
+            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel)
+        )
+
+        return contact_id
+
+    async def _create_deal_for_new_lead(
+        self,
+        contact_id: str,
+        phone_normalized: str,
+        source_channel: str
+    ) -> None:
+        """
+        Crea un Deal en HubSpot y lo asocia al contacto recién creado.
+
+        Se ejecuta en background (asyncio.create_task) para no bloquear
+        el procesamiento del webhook. Usa el pipeline y etapa correctos.
+
+        Pipeline: 854756009
+        Etapa inicial: 1275156339 (Nuevo Lead)
+        """
+        # IDs del pipeline definidos como constantes
+        PIPELINE_ID = "854756009"
+        STAGE_NUEVO_LEAD = "1275156339"
+
+        try:
+            deal_name = f"Lead WA {phone_normalized}"
+            deal_id = await self.hubspot.create_deal(
+                contact_id=contact_id,
+                properties={"dealname": deal_name},
+                pipeline_id=PIPELINE_ID,
+                dealstage=STAGE_NUEVO_LEAD
+            )
+            logger.info(
+                "[ContactManager] Deal creado: %s para contacto %s (canal=%s)",
+                deal_id, contact_id, source_channel
+            )
+        except Exception as e:
+            # El fallo de creación de deal NO debe afectar la conversación
+            logger.warning(
+                "[ContactManager] No se pudo crear deal para contacto %s: %s",
+                contact_id, e
+            )
 
     async def _create_contact_with_retry(
         self,

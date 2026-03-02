@@ -25,6 +25,7 @@ from .phone_normalizer import PhoneNormalizer, normalize_colombian_phone
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
 from .sofia_brain import SofiaBrain
+from .websocket_manager import ws_manager
 
 # Importaciones para integración con HubSpot Timeline
 from integrations.hubspot import get_timeline_logger
@@ -487,6 +488,7 @@ async def whatsapp_webhook(
                     sender="client",
                     channel=final_channel,
                     hubspot_contact_id=contact_id,  # Puede ser None
+                    message_sid=MessageSid,
                     media=media_dict
                 )
 
@@ -553,6 +555,7 @@ async def whatsapp_webhook(
                 sender="client",
                 channel=final_channel,
                 hubspot_contact_id=contact_id,
+                message_sid=MessageSid,
                 media=media_dict
             )
 
@@ -724,6 +727,18 @@ async def whatsapp_webhook(
 
         # Actualizar actividad
         await state_manager.update_activity(phone_normalized)
+
+        # Notificar al panel vía WebSocket para reordenamiento instantáneo
+        # (sin esto, el panel solo se actualiza en el próximo ciclo de polling)
+        try:
+            await ws_manager.broadcast({
+                "type": "contact_updated",
+                "phone": phone_normalized,
+                "action": "new_message",
+                "canal": final_channel
+            })
+        except Exception:
+            pass  # No bloquear el flujo principal si WebSocket falla
 
         # ════════════════════════════════════════════════════════════
         # PASO 4.5: Verificar horario laboral para handoff

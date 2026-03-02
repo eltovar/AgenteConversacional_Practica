@@ -120,7 +120,13 @@ class LeadAssigner:
             )
 
             if redis_url:
-                self.redis = redis.from_url(redis_url, decode_responses=True)
+                self.redis = redis.from_url(
+                    redis_url, 
+                    decode_responses=True,
+                    socket_timeout=3.0,
+                    socket_connect_timeout=3.0,
+                    retry_on_timeout=True
+                )
                 self.redis.ping()
                 self._redis_available = True
                 logger.info("[LeadAssigner] Conexión a Redis establecida")

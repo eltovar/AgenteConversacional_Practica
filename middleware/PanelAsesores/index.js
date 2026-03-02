@@ -42,7 +42,10 @@ let contactDealCache = {};  // Cache de deal_id por contacto para evitar flicker
 // FUNCION DE BUSQUEDA DE CONTACTOS
 // =========================================================================
 
-function filterContacts(searchTerm) {
+// Debounce para búsqueda en servidor (evitar spam de requests)
+let searchDebounceTimeout = null;
+
+async function filterContacts(searchTerm) {
     const term = searchTerm.toLowerCase().trim();
 
     if (!term) {
@@ -50,7 +53,8 @@ function filterContacts(searchTerm) {
         return;
     }
 
-    const filtered = allContacts.filter(contact => {
+    // Búsqueda local inmediata (nombre, teléfono, canal, razón)
+    const localFiltered = allContacts.filter(contact => {
         const haystack = [
             contact.display_name || '',
             contact.phone || '',
@@ -60,7 +64,44 @@ function filterContacts(searchTerm) {
         return haystack.includes(term);
     });
 
-    renderContactsList(filtered);
+    // Mostrar resultados locales inmediatamente
+    renderContactsList(localFiltered);
+
+    // Si el término es corto (< 3 caracteres), solo hacer búsqueda local
+    if (term.length < 3) {
+        return;
+    }
+
+    // Búsqueda en servidor (historial de mensajes) con debounce de 500ms
+    clearTimeout(searchDebounceTimeout);
+    searchDebounceTimeout = setTimeout(async () => {
+        try {
+            const response = await fetch(`${BASE_URL}/contacts/search?q=${encodeURIComponent(term)}&limit=20`, {
+                headers: { 'X-API-Key': API_KEY }
+            });
+
+            if (!response.ok) return;
+
+            const data = await response.json();
+            const serverPhones = data.phones || [];
+
+            if (serverPhones.length === 0) return;
+
+            // Combinar resultados: agregar contactos del servidor que no estén en local
+            const localPhones = new Set(localFiltered.map(c => c.phone));
+            const additionalContacts = allContacts.filter(contact =>
+                serverPhones.includes(contact.phone) && !localPhones.has(contact.phone)
+            );
+
+            if (additionalContacts.length > 0) {
+                console.log(`[Panel] Búsqueda en historial: +${additionalContacts.length} contactos`);
+                renderContactsList([...localFiltered, ...additionalContacts]);
+            }
+        } catch (error) {
+            console.warn('[Panel] Error en búsqueda de historial:', error);
+            // La búsqueda local ya se mostró, no hacer nada
+        }
+    }, 500);
 }
 
 // =========================================================================
@@ -269,12 +310,12 @@ function renderTemplateList() {
                     </div>
                     <p class="text-sm text-gray-600 mt-1">${t.body.substring(0, 100)}${t.body.length > 100 ? '...' : ''}</p>
                     ${t.variables && t.variables.length > 0 ?
-                        `<p class="text-xs text-gray-400 mt-1">Variables: ${t.variables.join(', ')}</p>` : ''}
+            `<p class="text-xs text-gray-400 mt-1">Variables: ${t.variables.join(', ')}</p>` : ''}
                 </div>
                 <div class="flex gap-1">
                     <button onclick="editTemplate('${t.id}')" class="text-blue-500 hover:text-blue-700 p-1" title="Editar">&#9999;&#65039;</button>
                     ${!t.is_default ?
-                        `<button onclick="deleteTemplate('${t.id}')" class="text-red-500 hover:text-red-700 p-1" title="Eliminar">&#128465;&#65039;</button>` : ''}
+            `<button onclick="deleteTemplate('${t.id}')" class="text-red-500 hover:text-red-700 p-1" title="Eliminar">&#128465;&#65039;</button>` : ''}
                 </div>
             </div>
         </div>
@@ -812,7 +853,7 @@ function renderChatBubbles(messages) {
             else if (msg.sender === 'advisor') bubbleClass = 'bubble-advisor';
 
             const timestamp = msg.timestamp
-                ? new Date(msg.timestamp).toLocaleTimeString('es-CO', {hour: '2-digit', minute: '2-digit'})
+                ? new Date(msg.timestamp).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
                 : '';
 
             // Renderizar multimedia si existe
@@ -1953,7 +1994,7 @@ document.addEventListener('DOMContentLoaded', () => {
     startPolling();
 
     // Filtro de tiempo
-    document.getElementById('timeFilter').addEventListener('change', function() {
+    document.getElementById('timeFilter').addEventListener('change', function () {
         const customDates = document.getElementById('customDates');
         if (this.value === 'custom') {
             customDates.classList.remove('hidden');
@@ -1981,7 +2022,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Enviar con Ctrl+Enter
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
-        messageInput.addEventListener('keydown', function(e) {
+        messageInput.addEventListener('keydown', function (e) {
             if (e.ctrlKey && e.key === 'Enter') {
                 console.log('[Panel] Ctrl+Enter presionado');
                 sendMessage(e);
@@ -2451,6 +2492,7 @@ function closeTransferModal() {
 
 /**
  * Carga la lista de asesores disponibles para transferencia.
+ * Incluye timeout de 5s y retry automático.
  */
 async function loadAdvisorsList() {
     const select = document.getElementById('transferToOwner');
@@ -2459,34 +2501,56 @@ async function loadAdvisorsList() {
     // Mostrar cargando
     select.innerHTML = '<option value="">Cargando asesores...</option>';
 
-    try {
-        const response = await fetch(`${BASE_URL}/advisors`, {
-            headers: { 'X-API-Key': API_KEY }
-        });
+    const maxRetries = 2;
+    let lastError = null;
 
-        if (!response.ok) {
-            throw new Error('Error cargando asesores');
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            // Timeout de 5 segundos
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+            const response = await fetch(`${BASE_URL}/advisors`, {
+                headers: { 'X-API-Key': API_KEY },
+                signal: controller.signal
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            advisorsList = data.advisors || [];
+
+            // Limpiar y rellenar select
+            select.innerHTML = '<option value="">-- Seleccionar asesora --</option>';
+
+            for (const advisor of advisorsList) {
+                const option = document.createElement('option');
+                option.value = advisor.id;
+                option.textContent = `${advisor.name} (${advisor.team})`;
+                select.appendChild(option);
+            }
+
+            console.log('[Panel] Asesores cargados:', advisorsList.length);
+            return; // Éxito, salir
+
+        } catch (error) {
+            lastError = error;
+            console.warn(`[Panel] Intento ${attempt}/${maxRetries} fallido:`, error.message);
+
+            if (attempt < maxRetries) {
+                // Esperar 1 segundo antes de reintentar
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
         }
-
-        const data = await response.json();
-        advisorsList = data.advisors || [];
-
-        // Limpiar y rellenar select
-        select.innerHTML = '<option value="">-- Seleccionar asesora --</option>';
-
-        for (const advisor of advisorsList) {
-            const option = document.createElement('option');
-            option.value = advisor.id;
-            option.textContent = `${advisor.name} (${advisor.team})`;
-            select.appendChild(option);
-        }
-
-        console.log('[Panel] Asesores cargados:', advisorsList.length);
-
-    } catch (error) {
-        console.error('[Panel] Error cargando asesores:', error);
-        select.innerHTML = '<option value="">Error cargando asesores</option>';
     }
+
+    // Todos los intentos fallaron
+    console.error('[Panel] Error cargando asesores después de', maxRetries, 'intentos:', lastError);
+    select.innerHTML = '<option value="">Error - Reintentar más tarde</option>';
 }
 
 /**

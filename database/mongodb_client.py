@@ -132,6 +132,13 @@ class MongoDBManager:
                 sparse=True  # No aplica a mensajes sin message_sid (advisor, bot)
             )
 
+            # Índice de texto para búsqueda fulltext en contenido de mensajes
+            await self.db.messages.create_index(
+                [("content", "text")],
+                name="content_text_idx",
+                default_language="spanish"
+            )
+
             # Índices para colección contacts
             await self.db.contacts.create_index(
                 "phone",
@@ -352,6 +359,55 @@ class MongoDBManager:
 
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo historial por contact_id: {e}")
+            return []
+
+    async def search_messages_fulltext(
+        self,
+        query_text: str,
+        limit: int = 100
+    ) -> List[str]:
+        """
+        Busca mensajes por texto y retorna los teléfonos únicos que coinciden.
+
+        Usa índice de texto de MongoDB para búsqueda eficiente.
+
+        Args:
+            query_text: Texto a buscar en los mensajes
+            limit: Máximo de resultados
+
+        Returns:
+            Lista de números de teléfono únicos con mensajes que coinciden
+        """
+        if not await self.connect():
+            logger.warning("[MongoDB] No conectado - búsqueda vacía")
+            return []
+
+        if not query_text or len(query_text) < 2:
+            return []
+
+        try:
+            # Búsqueda fulltext con índice de texto
+            cursor = self.db.messages.find(
+                {"$text": {"$search": query_text}},
+                {"phone": 1, "score": {"$meta": "textScore"}}
+            ).sort([("score", {"$meta": "textScore"})]).limit(limit)
+
+            messages = await cursor.to_list(length=limit)
+
+            # Extraer teléfonos únicos preservando orden de relevancia
+            seen = set()
+            unique_phones = []
+            for msg in messages:
+                phone = msg.get("phone")
+                if phone and phone not in seen:
+                    seen.add(phone)
+                    unique_phones.append(phone)
+
+            logger.info(f"[MongoDB] Búsqueda fulltext '{query_text}': {len(unique_phones)} contactos encontrados")
+            return unique_phones
+
+        except Exception as e:
+            logger.error(f"[MongoDB] Error en búsqueda fulltext: {e}")
             return []
 
     async def mark_as_synced_to_hubspot(self, message_id: str) -> bool:

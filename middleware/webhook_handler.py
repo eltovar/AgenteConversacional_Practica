@@ -364,6 +364,14 @@ async def whatsapp_webhook(
         background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
 
         # ════════════════════════════════════════════════════════════
+        # DETECCIÓN TEMPRANA DEL CANAL DE ORIGEN (para métricas correctas)
+        # ════════════════════════════════════════════════════════════
+        # Detectar canal ANTES de crear el contacto para que las métricas
+        # de redes sociales reflejen correctamente la fuente del lead
+        early_channel = detect_channel_dynamic(Body, None)
+        logger.info(f"[Webhook] Canal detectado tempranamente: {early_channel}")
+
+        # ════════════════════════════════════════════════════════════
         # DETECCIÓN DE RESPUESTA A TEMPLATE DE SEGUIMIENTO
         # ════════════════════════════════════════════════════════════
         # Si el cliente responde a un template de seguimiento post-cita,
@@ -383,9 +391,11 @@ async def whatsapp_webhook(
             # Registrar mensaje en HubSpot si tenemos contacto
             contact_manager = get_contact_manager()
             try:
+                # Usar canal detectado tempranamente o fallback a followup_canal
+                followup_source_channel = early_channel if early_channel not in ["whatsapp", "whatsapp_directo"] else followup_canal or "whatsapp_directo"
                 contact_info = await contact_manager.identify_or_create_contact(
                     phone_raw=From,
-                    source_channel="whatsapp_directo"
+                    source_channel=followup_source_channel
                 )
                 if contact_info:
                     # Detectar canal dinámicamente también para followups
@@ -397,7 +407,8 @@ async def whatsapp_webhook(
                         "incoming",
                         phone_normalized,
                         followup_final_channel,
-                        media_result  # Pasar resultado completo de multimedia
+                        media_result,  # Pasar resultado completo de multimedia
+                        MessageSid  # Para deduplicación
                     )
             except Exception as e:
                 logger.warning(f"[Webhook] Error sincronizando mensaje a HubSpot: {e}")
@@ -427,15 +438,23 @@ async def whatsapp_webhook(
         contact_manager = get_contact_manager()
 
         try:
+            # Usar canal detectado tempranamente para métricas correctas
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=From,
-                source_channel="whatsapp_directo"
+                source_channel=early_channel
             )
 
             if contact_info.is_new:
-                logger.info(f"[Webhook] Nuevo lead creado: {contact_info.contact_id}")
+                logger.info(f"[Webhook] Nuevo lead creado: {contact_info.contact_id} (canal: {early_channel})")
             else:
                 logger.info(f"[Webhook] Contacto existente: {contact_info.contact_id}")
+                # Para contactos existentes, actualizar canal_origen si es más específico
+                if early_channel not in ["whatsapp", "whatsapp_directo"]:
+                    background_tasks.add_task(
+                        _update_contact_channel,
+                        contact_info.contact_id,
+                        early_channel
+                    )
 
         except (ValueError, KeyError, TypeError) as e:
             logger.error("[Webhook] Error procesando contacto en HubSpot: %s", e)
@@ -510,7 +529,8 @@ async def whatsapp_webhook(
                     "incoming",
                     phone_normalized,
                     final_channel,
-                    media_result  # Pasar resultado completo de multimedia
+                    media_result,  # Pasar resultado completo de multimedia
+                    MessageSid  # Para deduplicación
                 )
             else:
                 logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Solo MongoDB (sin HubSpot)")
@@ -921,6 +941,34 @@ async def _update_client_timestamp(phone_normalized: str, canal: Optional[str] =
         logger.error("[Webhook] Error actualizando timestamp cliente: %s", e)
 
 
+async def _update_contact_channel(contact_id: str, canal_origen: str):
+    """
+    Actualiza el canal_origen de un contacto existente en HubSpot.
+    
+    Se usa cuando detectamos un canal más específico (ej: Instagram, Facebook)
+    para un contacto que ya existía con canal genérico (whatsapp_directo).
+    
+    Esto es CRÍTICO para que las métricas de redes sociales sean correctas.
+    
+    Args:
+        contact_id: ID del contacto en HubSpot
+        canal_origen: Nuevo canal detectado (instagram, facebook, etc.)
+    """
+    try:
+        contact_manager = get_contact_manager()
+        await contact_manager.update_contact_info(
+            contact_id=contact_id,
+            properties={"canal_origen": canal_origen}
+        )
+        logger.info(
+            f"[Webhook] Canal actualizado en HubSpot: contact_id={contact_id}, "
+            f"canal_origen={canal_origen}"
+        )
+    except Exception as e:
+        # No fallar si HubSpot no acepta la actualización
+        logger.warning(f"[Webhook] No se pudo actualizar canal_origen en HubSpot: {e}")
+
+
 async def _check_followup_response(phone_normalized: str) -> tuple:
     """
     Verifica si el mensaje es respuesta a un template de seguimiento de cita.
@@ -981,19 +1029,22 @@ async def _sync_message_to_hubspot(
     direction: str,
     phone: str,
     channel: str = "whatsapp",
-    media_result: Optional[dict] = None
+    media_result: Optional[dict] = None,
+    message_sid: Optional[str] = None
 ) -> None:
     """
     Sincroniza un mensaje individual.
 
     FLUJO v2.0:
     1. Guardar en MongoDB (~5ms) - Para visualización inmediata en panel
+       (con deduplicación por message_sid si se proporciona)
     2. Registrar en HubSpot Timeline - Archivo histórico (puede demorar)
 
     Args:
         channel: Canal de origen del mensaje (whatsapp, instagram, facebook, etc.)
         media_result: Diccionario con info de multimedia procesada
                      (permanent_url, media_type, transcription, analysis)
+        message_sid: ID del mensaje de Twilio para deduplicación (opcional)
     """
     mongo_message_id = None
     media_url = media_result.get("permanent_url") if media_result else None
@@ -1022,6 +1073,7 @@ async def _sync_message_to_hubspot(
             sender=sender,
             channel=channel,
             hubspot_contact_id=contact_id,
+            message_sid=message_sid,  # Deduplicación por MessageSid
             media=media_dict
         )
 

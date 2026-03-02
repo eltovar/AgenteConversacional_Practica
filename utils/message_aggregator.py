@@ -30,7 +30,13 @@ class MessageAggregator:
             import redis
             redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PUBLIC_URL")
             if redis_url:
-                self.redis = redis.from_url(redis_url, decode_responses=True)
+                self.redis = redis.from_url(
+                    redis_url, 
+                    decode_responses=True,
+                    socket_timeout=3.0,
+                    socket_connect_timeout=3.0,
+                    retry_on_timeout=True
+                )
                 self.redis.ping()
                 self._redis_available = True
                 logger.info("[MessageAggregator] Redis conectado para agregación de mensajes")

@@ -168,11 +168,15 @@ class ConversationStateManager:
         else:
             self.redis_url = redis_url
             
+        # Configuración optimizada de Redis con timeouts
         self.redis = redis.from_url(
             self.redis_url, 
             encoding="utf-8", 
             decode_responses=True,
-            socket_timeout=5.0
+            socket_timeout=3.0,          # Timeout para operaciones (antes 5.0)
+            socket_connect_timeout=3.0,  # Timeout para conexión
+            retry_on_timeout=True,       # Reintentar en timeout
+            health_check_interval=30     # Health check cada 30s
         )
 
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:

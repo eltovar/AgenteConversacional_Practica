@@ -9,6 +9,7 @@ import json
 import re
 import html
 import asyncio
+import httpx
 from io import BytesIO
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
@@ -90,6 +91,32 @@ HUBSPOT_STAGE_EN_CONVERSACION = "1275156340"
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
+
+# Singleton de cliente HTTP con connection pooling (evita crear conexión por request)
+_httpx_client: Optional[httpx.AsyncClient] = None
+
+def get_httpx_client() -> httpx.AsyncClient:
+    """
+    Retorna cliente HTTP global con connection pooling.
+    
+    Reutilizar conexiones TCP reduce latencia y overhead.
+    El cliente se cierra automáticamente al terminar el proceso.
+    """
+    global _httpx_client
+    if _httpx_client is None:
+        # Límites de conexiones para HubSpot API
+        limits = httpx.Limits(
+            max_keepalive_connections=10,
+            max_connections=20,
+            keepalive_expiry=30.0
+        )
+        _httpx_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=limits,
+            http2=False  # HTTP/2 puede causar problemas con algunos CDNs
+        )
+        logger.info("[Panel] Cliente HTTP global inicializado con connection pooling")
+    return _httpx_client
 
 # Flag para inicializar templates predefinidos solo una vez por proceso
 _TEMPLATES_INITIALIZED: bool = False
@@ -173,48 +200,46 @@ async def _get_contact_deal_info(contact_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        import httpx
         base_url = "https://api.hubapi.com"
 
-        # Buscar deals asociados al contacto
+        # Buscar deals asociados al contacto (usa cliente global)
         associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await _hubspot_get(client, associations_url, HUBSPOT_API_KEY)
+        response = await _hubspot_get(None, associations_url, HUBSPOT_API_KEY)
 
-            if response.status_code == 429:
-                logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
-                return None
-            if response.status_code != 200:
-                logger.debug(
-                    f"[Panel] No se encontraron deals para contacto {contact_id} "
-                    f"(status={response.status_code})"
-                )
-                return None
-
-            data = response.json()
-            results = data.get("results", [])
-
-            if not results:
-                return None
-
-            # Tomar el primer deal (más reciente)
-            deal_id = results[0].get("id")
-
-            # Obtener la etapa actual del deal
-            deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
-            deal_response = await _hubspot_get(
-                client, deal_url, HUBSPOT_API_KEY, params={"properties": "dealstage"}
+        if response.status_code == 429:
+            logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
+            return None
+        if response.status_code != 200:
+            logger.debug(
+                f"[Panel] No se encontraron deals para contacto {contact_id} "
+                f"(status={response.status_code})"
             )
+            return None
 
-            if deal_response.status_code == 200:
-                deal_data = deal_response.json()
-                current_stage = deal_data.get("properties", {}).get("dealstage")
-                return {
-                    "deal_id": deal_id,
-                    "current_stage": current_stage
-                }
+        data = response.json()
+        results = data.get("results", [])
 
-            return {"deal_id": deal_id, "current_stage": None}
+        if not results:
+            return None
+
+        # Tomar el primer deal (más reciente)
+        deal_id = results[0].get("id")
+
+        # Obtener la etapa actual del deal (usa cliente global)
+        deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
+        deal_response = await _hubspot_get(
+            None, deal_url, HUBSPOT_API_KEY, params={"properties": "dealstage"}
+        )
+
+        if deal_response.status_code == 200:
+            deal_data = deal_response.json()
+            current_stage = deal_data.get("properties", {}).get("dealstage")
+            return {
+                "deal_id": deal_id,
+                "current_stage": current_stage
+            }
+
+        return {"deal_id": deal_id, "current_stage": None}
 
     except Exception as e:
         logger.debug(f"[Panel] Error obteniendo deal info para {contact_id}: {e}")
@@ -271,7 +296,14 @@ async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_
     """
     GET a HubSpot con retry automático en 429 (rate limit).
     Usa max_retries=2 para GET (vs 3 en POST) para no bloquear el panel demasiado tiempo.
+    
+    Args:
+        client: Cliente httpx (si es None, usa el cliente global con pooling)
     """
+    # Usar cliente global si no se provee uno
+    if client is None:
+        client = get_httpx_client()
+    
     headers = {"Authorization": f"Bearer {api_key}"}
     for attempt in range(1, max_retries + 1):
         response = await client.get(url, headers=headers, params=params)
@@ -1759,6 +1791,8 @@ async def get_advisors_list(x_api_key: str = Header(None, alias="X-API-Key")):
     try:
         from integrations.hubspot.lead_assigner import LeadAssigner
 
+        logger.info("[Panel] GET /advisors - Obteniendo lista de asesores")
+
         advisors = []
         for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
             for member in team_members:
@@ -1777,10 +1811,11 @@ async def get_advisors_list(x_api_key: str = Header(None, alias="X-API-Key")):
                 seen_ids.add(advisor["id"])
                 unique_advisors.append(advisor)
 
+        logger.info(f"[Panel] GET /advisors - Retornando {len(unique_advisors)} asesores: {[a['name'] for a in unique_advisors]}")
         return {"advisors": unique_advisors}
 
     except Exception as e:
-        logger.error(f"[Panel] Error obteniendo lista de asesores: {e}")
+        logger.error(f"[Panel] Error obteniendo lista de asesores: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2595,6 +2630,49 @@ async def debug_redis(
             "error": str(e),
             "redis_url": os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
         }
+
+
+@router.get("/contacts/search")
+async def search_contacts_by_keyword(
+    q: str = Query(..., min_length=2, max_length=100, description="Palabra clave a buscar"),
+    limit: int = Query(20, ge=1, le=50),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Busca contactos por palabra clave en el historial de mensajes.
+    
+    Usa búsqueda fulltext de MongoDB para encontrar mensajes que contengan
+    la palabra buscada y retorna los contactos asociados.
+    
+    Args:
+        q: Palabra clave a buscar (mínimo 2 caracteres)
+        limit: Máximo de contactos a retornar
+    
+    Returns:
+        Lista de teléfonos que tienen mensajes con la palabra buscada
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        from database.mongodb_client import MongoDBManager
+        
+        logger.info(f"[Panel] Búsqueda por palabra clave: '{q}'")
+        
+        mongo_manager = MongoDBManager()
+        matching_phones = await mongo_manager.search_messages_fulltext(q, limit=limit)
+        
+        logger.info(f"[Panel] Búsqueda '{q}': {len(matching_phones)} contactos encontrados")
+        
+        return {
+            "query": q,
+            "count": len(matching_phones),
+            "phones": matching_phones
+        }
+        
+    except Exception as e:
+        logger.error(f"[Panel] Error en búsqueda por palabra clave: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/contacts")

@@ -2974,31 +2974,26 @@ async function deleteWorker(workerId, workerName) {
 }
 
 // =========================================================================
-// APPOINTMENTS — Agendar citas
+// APPOINTMENTS — Gestión de citas
 // =========================================================================
+
+let currentAppointments = []; // Cache de citas del contacto actual
 
 async function openAppointmentModal() {
     if (!currentContactId) return;
 
-    // Resetear formulario
-    document.getElementById('appointmentForm').reset();
+    // Resetear estado
     document.getElementById('appointmentResult').classList.add('hidden');
-    document.getElementById('apptSubmitBtn').disabled = false;
-
-    // Precargar fecha/hora: mañana a las 10:00 AM por defecto
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    tomorrow.setHours(10, 0, 0, 0);
-    const isoLocal = tomorrow.toISOString().slice(0, 16);
-    document.getElementById('apptDatetime').value = isoLocal;
+    document.getElementById('editingApptId').value = '';
+    currentAppointments = [];
 
     document.getElementById('appointmentModal').classList.remove('hidden');
 
-    // Cargar workers en el select
+    // Cargar workers
     await _loadWorkersIntoSelect();
 
-    // Cargar citas anteriores de este contacto
-    await _loadPreviousAppointments();
+    // Cargar citas y decidir vista
+    await _loadAppointmentsAndRender();
 }
 
 function closeAppointmentModal() {
@@ -3027,29 +3022,202 @@ async function _loadWorkersIntoSelect() {
     }
 }
 
-async function _loadPreviousAppointments() {
-    const section = document.getElementById('previousApptsSection');
-    const list = document.getElementById('previousApptsList');
+async function _loadAppointmentsAndRender() {
+    const listView = document.getElementById('appointmentListView');
+    const formView = document.getElementById('appointmentForm');
+    const scheduledSection = document.getElementById('scheduledApptsSection');
+    const scheduledList = document.getElementById('scheduledApptsList');
+    const pastSection = document.getElementById('pastApptsSection');
+    const pastList = document.getElementById('pastApptsList');
+    const modalTitle = document.getElementById('apptModalTitle');
+
     try {
         const response = await fetch(`${BASE_URL}/contacts/${currentContactId}/appointments`, {
             headers: { 'X-API-Key': API_KEY }
         });
         const data = await response.json();
-        const appts = data.appointments || [];
-        if (appts.length === 0) {
-            section.classList.add('hidden');
-            return;
+        currentAppointments = data.appointments || [];
+
+        const now = new Date();
+
+        // Separar citas programadas (futuras y activas) de pasadas/canceladas
+        const scheduled = currentAppointments.filter(a => {
+            if (a.status === 'cancelled') return false;
+            const dt = a.appointment_dt ? new Date(a.appointment_dt) : null;
+            return dt && dt > now;
+        }).sort((a, b) => new Date(a.appointment_dt) - new Date(b.appointment_dt));
+
+        const past = currentAppointments.filter(a => {
+            if (a.status === 'cancelled') return true;
+            const dt = a.appointment_dt ? new Date(a.appointment_dt) : null;
+            return !dt || dt <= now;
+        }).sort((a, b) => new Date(b.appointment_dt) - new Date(a.appointment_dt));
+
+        // Renderizar citas programadas
+        if (scheduled.length > 0) {
+            scheduledSection.classList.remove('hidden');
+            scheduledList.innerHTML = scheduled.map(a => _renderScheduledAppointment(a)).join('');
+            modalTitle.textContent = '📅 Citas';
+        } else {
+            scheduledSection.classList.add('hidden');
         }
-        section.classList.remove('hidden');
-        list.innerHTML = appts.map(a => {
-            const dt = a.appointment_dt ? new Date(a.appointment_dt).toLocaleString('es-CO', {
-                dateStyle: 'short', timeStyle: 'short'
-            }) : '—';
-            const statusColor = a.status === 'cancelled' ? 'text-red-400 line-through' : 'text-gray-700';
-            return `<div class="${statusColor}">📅 ${dt} — ${a.worker_name}${a.notes ? ` | ${a.notes}` : ''}</div>`;
-        }).join('');
+
+        // Renderizar citas pasadas
+        if (past.length > 0) {
+            pastSection.classList.remove('hidden');
+            pastList.innerHTML = past.map(a => _renderPastAppointment(a)).join('');
+        } else {
+            pastSection.classList.add('hidden');
+        }
+
+        // Mostrar vista de lista, ocultar form
+        listView.classList.remove('hidden');
+        formView.classList.add('hidden');
+
+        // Si no hay ninguna cita, mostrar form directamente
+        if (currentAppointments.length === 0) {
+            showAppointmentForm();
+        }
+
     } catch (e) {
-        section.classList.add('hidden');
+        console.error('Error cargando citas:', e);
+        // En caso de error, mostrar el formulario
+        showAppointmentForm();
+    }
+}
+
+function _renderScheduledAppointment(appt) {
+    const dt = appt.appointment_dt ? new Date(appt.appointment_dt) : null;
+    const dateStr = dt ? dt.toLocaleString('es-CO', {
+        weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+        hour: 'numeric', minute: '2-digit', hour12: true
+    }) : '—';
+
+    return `
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 relative group">
+            <div class="flex justify-between items-start">
+                <div class="flex-1">
+                    <p class="font-medium text-amber-800 text-sm">${dateStr}</p>
+                    <p class="text-xs text-gray-600 mt-1">
+                        <span class="font-medium">Encargado:</span> ${appt.worker_name || '—'}
+                    </p>
+                    ${appt.notes ? `<p class="text-xs text-gray-500 mt-1 italic">${appt.notes}</p>` : ''}
+                </div>
+                <div class="flex gap-1 opacity-70 group-hover:opacity-100">
+                    <button onclick="editAppointment('${appt.id}')" 
+                        class="p-1.5 text-blue-600 hover:bg-blue-100 rounded transition-colors" title="Editar">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                        </svg>
+                    </button>
+                    <button onclick="deleteAppointment('${appt.id}')" 
+                        class="p-1.5 text-red-600 hover:bg-red-100 rounded transition-colors" title="Eliminar">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function _renderPastAppointment(appt) {
+    const dt = appt.appointment_dt ? new Date(appt.appointment_dt) : null;
+    const dateStr = dt ? dt.toLocaleString('es-CO', {
+        dateStyle: 'short', timeStyle: 'short'
+    }) : '—';
+    const isCancelled = appt.status === 'cancelled';
+    const statusClass = isCancelled ? 'text-red-400 line-through' : 'text-gray-600';
+    const statusBadge = isCancelled ? '<span class="text-red-400 text-xs ml-1">(cancelada)</span>' : '';
+
+    return `<div class="${statusClass}">📅 ${dateStr} — ${appt.worker_name}${appt.notes ? ` | ${appt.notes}` : ''}${statusBadge}</div>`;
+}
+
+function showAppointmentForm(isEdit = false) {
+    const listView = document.getElementById('appointmentListView');
+    const formView = document.getElementById('appointmentForm');
+    const submitBtn = document.getElementById('apptSubmitBtn');
+    const modalTitle = document.getElementById('apptModalTitle');
+
+    if (!isEdit) {
+        // Nueva cita - resetear form
+        document.getElementById('editingApptId').value = '';
+        document.getElementById('apptWorkerSelect').value = '';
+        document.getElementById('apptNotes').value = '';
+        submitBtn.textContent = 'Agendar Cita';
+        modalTitle.textContent = '📅 Nueva Cita';
+
+        // Fecha por defecto: mañana 10AM
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(10, 0, 0, 0);
+        document.getElementById('apptDatetime').value = tomorrow.toISOString().slice(0, 16);
+    }
+
+    listView.classList.add('hidden');
+    formView.classList.remove('hidden');
+    submitBtn.disabled = false;
+}
+
+function hideAppointmentForm() {
+    // Volver a la vista de lista
+    if (currentAppointments.length > 0) {
+        document.getElementById('appointmentListView').classList.remove('hidden');
+        document.getElementById('appointmentForm').classList.add('hidden');
+        document.getElementById('apptModalTitle').textContent = '📅 Citas';
+    } else {
+        closeAppointmentModal();
+    }
+}
+
+function editAppointment(apptId) {
+    const appt = currentAppointments.find(a => a.id === apptId);
+    if (!appt) return;
+
+    document.getElementById('editingApptId').value = apptId;
+    document.getElementById('apptModalTitle').textContent = '📅 Editar Cita';
+    document.getElementById('apptSubmitBtn').textContent = 'Guardar Cambios';
+
+    // Cargar datos en el form
+    const select = document.getElementById('apptWorkerSelect');
+    for (let opt of select.options) {
+        if (opt.value === appt.worker_id) {
+            opt.selected = true;
+            break;
+        }
+    }
+
+    if (appt.appointment_dt) {
+        const dt = new Date(appt.appointment_dt);
+        document.getElementById('apptDatetime').value = dt.toISOString().slice(0, 16);
+    }
+
+    document.getElementById('apptNotes').value = appt.notes || '';
+
+    showAppointmentForm(true);
+}
+
+async function deleteAppointment(apptId) {
+    if (!confirm('¿Eliminar esta cita permanentemente?')) return;
+
+    try {
+        const response = await fetch(`${BASE_URL}/appointments/${apptId}`, {
+            method: 'DELETE',
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        if (response.ok) {
+            showToast('Cita eliminada', 'success');
+            await _loadAppointmentsAndRender();
+            loadContacts(); // Actualizar badge
+        } else {
+            showToast('Error al eliminar cita', 'error');
+        }
+    } catch (e) {
+        showToast('Error de conexión', 'error');
     }
 }
 
@@ -3057,6 +3225,7 @@ async function submitAppointment(event) {
     event.preventDefault();
     if (!currentContactId) return;
 
+    const editingId = document.getElementById('editingApptId').value;
     const select = document.getElementById('apptWorkerSelect');
     const workerId = select.value;
     const workerName = select.options[select.selectedIndex]?.dataset?.name || '';
@@ -3067,20 +3236,36 @@ async function submitAppointment(event) {
 
     const submitBtn = document.getElementById('apptSubmitBtn');
     submitBtn.disabled = true;
-    submitBtn.textContent = 'Agendando...';
+    submitBtn.textContent = editingId ? 'Guardando...' : 'Agendando...';
 
     try {
-        const response = await fetch(`${BASE_URL}/contacts/${currentContactId}/appointments`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
-            body: JSON.stringify({
-                worker_id: workerId,
-                worker_name: workerName,
-                appointment_dt: datetimeVal,
-                notes: notes,
-                advisor_id: ADVISOR_ID || null
-            })
-        });
+        let response;
+        if (editingId) {
+            // Actualizar cita existente
+            response = await fetch(`${BASE_URL}/appointments/${editingId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+                body: JSON.stringify({
+                    worker_id: workerId,
+                    worker_name: workerName,
+                    appointment_dt: datetimeVal,
+                    notes: notes
+                })
+            });
+        } else {
+            // Crear nueva cita
+            response = await fetch(`${BASE_URL}/contacts/${currentContactId}/appointments`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+                body: JSON.stringify({
+                    worker_id: workerId,
+                    worker_name: workerName,
+                    appointment_dt: datetimeVal,
+                    notes: notes,
+                    advisor_id: ADVISOR_ID || null
+                })
+            });
+        }
 
         const data = await response.json();
         const resultDiv = document.getElementById('appointmentResult');
@@ -3088,19 +3273,23 @@ async function submitAppointment(event) {
 
         if (response.ok) {
             content.className = 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
-            content.innerHTML = `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display}</span><br><span class="text-xs text-gray-500">Nota creada en HubSpot ✓</span>`;
+            content.innerHTML = editingId
+                ? `✅ Cita actualizada correctamente`
+                : `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`;
             resultDiv.classList.remove('hidden');
-            // Recargar lista para mostrar badge de cita en el contacto
-            setTimeout(() => {
-                loadContacts();
-                closeAppointmentModal();
-            }, 2000);
+
+            // Recargar y volver a lista
+            setTimeout(async () => {
+                await _loadAppointmentsAndRender();
+                loadContacts(); // Actualizar badge
+                resultDiv.classList.add('hidden');
+            }, 1500);
         } else {
             content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
-            content.textContent = 'Error: ' + (data.detail || 'No se pudo agendar la cita');
+            content.textContent = 'Error: ' + (data.detail || 'No se pudo guardar la cita');
             resultDiv.classList.remove('hidden');
             submitBtn.disabled = false;
-            submitBtn.textContent = 'Agendar Cita';
+            submitBtn.textContent = editingId ? 'Guardar Cambios' : 'Agendar Cita';
         }
     } catch (err) {
         const resultDiv = document.getElementById('appointmentResult');
@@ -3109,6 +3298,6 @@ async function submitAppointment(event) {
         content.textContent = 'Error de conexión. Intenta de nuevo.';
         resultDiv.classList.remove('hidden');
         submitBtn.disabled = false;
-        submitBtn.textContent = 'Agendar Cita';
+        submitBtn.textContent = editingId ? 'Guardar Cambios' : 'Agendar Cita';
     }
 }

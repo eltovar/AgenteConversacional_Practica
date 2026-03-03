@@ -1874,45 +1874,6 @@ async def transfer_contact(
     }
 
 
-@router.get("/advisors")
-async def get_advisors_list(x_api_key: str = Header(None, alias="X-API-Key")):
-    """
-    Retorna la lista de asesores disponibles para transferencias.
-    """
-    if not _validate_api_key(x_api_key):
-        raise HTTPException(status_code=401, detail="API Key inválida")
-
-    try:
-        from integrations.hubspot.lead_assigner import LeadAssigner
-
-        logger.info("[Panel] GET /advisors - Obteniendo lista de asesores")
-
-        advisors = []
-        for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
-            for member in team_members:
-                if member.get("active", True):
-                    advisors.append({
-                        "id": member["id"],
-                        "name": member["name"],
-                        "team": team_name
-                    })
-
-        # Eliminar duplicados por ID
-        seen_ids = set()
-        unique_advisors = []
-        for advisor in advisors:
-            if advisor["id"] not in seen_ids:
-                seen_ids.add(advisor["id"])
-                unique_advisors.append(advisor)
-
-        logger.info(f"[Panel] GET /advisors - Retornando {len(unique_advisors)} asesores: {[a['name'] for a in unique_advisors]}")
-        return {"advisors": unique_advisors}
-
-    except Exception as e:
-        logger.error(f"[Panel] Error obteniendo lista de asesores: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ============================================================================
 # Endpoint para editar nombre de contacto
 # ============================================================================
@@ -3532,6 +3493,64 @@ async def cancel_appointment(
         raise HTTPException(status_code=401, detail="API Key inválida")
     mongo_mgr = get_mongo_manager()
     ok = await mongo_mgr.cancel_appointment(appointment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    return {"ok": True}
+
+
+class AppointmentUpdateBody(BaseModel):
+    worker_id: str = None
+    worker_name: str = None
+    appointment_dt: str = None
+    notes: str = None
+
+
+@router.patch("/appointments/{appointment_id}")
+async def update_appointment(
+    appointment_id: str,
+    body: AppointmentUpdateBody,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Actualiza una cita existente."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    BOGOTA_TZ = ZoneInfo("America/Bogota")
+
+    appt_dt = None
+    if body.appointment_dt:
+        try:
+            appt_dt = dt.fromisoformat(body.appointment_dt)
+            if appt_dt.tzinfo is None:
+                appt_dt = appt_dt.replace(tzinfo=BOGOTA_TZ)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Formato de fecha inválido")
+
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.update_appointment(
+        appointment_id=appointment_id,
+        worker_id=body.worker_id,
+        worker_name=body.worker_name,
+        appointment_dt=appt_dt,
+        notes=body.notes
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    return {"ok": True}
+
+
+@router.delete("/appointments/{appointment_id}")
+async def delete_appointment(
+    appointment_id: str,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Elimina una cita permanentemente."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.delete_appointment(appointment_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
     return {"ok": True}

@@ -915,6 +915,50 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error cancelando cita {appointment_id}: {e}")
             return False
 
+    async def update_appointment(
+        self,
+        appointment_id: str,
+        worker_id: str = None,
+        worker_name: str = None,
+        appointment_dt: datetime = None,
+        notes: str = None
+    ) -> bool:
+        """Actualiza una cita existente."""
+        if not await self.connect():
+            return False
+        try:
+            update_fields = {"updated_at": datetime.now(TIMEZONE)}
+            if worker_id is not None:
+                update_fields["worker_id"] = worker_id
+            if worker_name is not None:
+                update_fields["worker_name"] = worker_name
+            if appointment_dt is not None:
+                update_fields["appointment_dt"] = appointment_dt
+            if notes is not None:
+                update_fields["notes"] = notes
+
+            result = await self.db.appointments.update_one(
+                {"_id": ObjectId(appointment_id)},
+                {"$set": update_fields}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando cita {appointment_id}: {e}")
+            return False
+
+    async def delete_appointment(self, appointment_id: str) -> bool:
+        """Elimina una cita permanentemente."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.appointments.delete_one(
+                {"_id": ObjectId(appointment_id)}
+            )
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error eliminando cita {appointment_id}: {e}")
+            return False
+
     async def close(self):
         """Cierra la conexión."""
         if self.client:

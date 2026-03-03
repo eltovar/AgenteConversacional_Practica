@@ -824,16 +824,16 @@ function renderContactsList(contacts) {
         }
 
         let badge = '';
-        if (isInConversation) {
-            badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
-        } else if (isHumanActive || isActive) {
-            // Mostrar dropdown de pipeline si hay deal, sino mostrar badge "En espera"
+        if (isInConversation || isHumanActive || isActive) {
+            // Mostrar dropdown de pipeline si hay deal, sino mostrar badge de estado
             const pipelineDropdown = buildPipelineDropdown(contactId, dealId, currentStage);
             if (pipelineDropdown) {
                 badge = `${canalBadge}${pipelineDropdown}
                          ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
                          ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+            } else if (isInConversation) {
+                badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
+                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
             } else {
                 badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
                          ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}

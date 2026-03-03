@@ -392,6 +392,22 @@ async def _update_deal_to_en_conversacion(contact_id: str) -> None:
             # Actualizar el primer deal encontrado
             deal_id = results[0].get("id")
             patch_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
+
+            # Solo avanzar si el deal está en "Nuevo Lead" — no sobreescribir etapas más avanzadas
+            stage_r = await client.get(
+                patch_url,
+                headers=headers,
+                params={"properties": "dealstage"}
+            )
+            if stage_r.status_code == 200:
+                current_stage = stage_r.json().get("properties", {}).get("dealstage", "")
+                if current_stage and current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
+                    logger.info(
+                        f"[Panel] Deal {deal_id} ya en etapa '{current_stage}', "
+                        f"no se sobreescribe con 'En conversación'"
+                    )
+                    return
+
             patch_payload = {
                 "properties": {
                     "dealstage": HUBSPOT_STAGE_EN_CONVERSACION,  # 1275156340

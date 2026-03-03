@@ -101,9 +101,10 @@ class ConversationStateManager:
     ACTIVE_CONTACTS_SET = "active_conversations_index"  # Legacy SET (compatibilidad)
     ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # Nuevo ZSET ordenado por timestamp
     
-    # TTL dinámico: 24h días laborales, 72h fines de semana (para que duren hasta el lunes)
-    HANDOFF_TTL_SECONDS = 86400  # Default 24h (días laborales)
+    # TTL dinámico: 48h días laborales, 72h fines de semana (para que duren hasta el lunes)
+    HANDOFF_TTL_SECONDS = 172800  # Default 48h
     HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
+    INACTIVITY_THRESHOLD = 172800  # 48h — umbral para limpiar BOT_ACTIVE del ZSET
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -254,6 +255,23 @@ class ConversationStateManager:
                         f"mostrando como BOT_ACTIVE en el panel"
                     )
 
+                # Filtro de inactividad 48h para contactos BOT_ACTIVE:
+                # Si llevan más de INACTIVITY_THRESHOLD sin interacción humana,
+                # salen del ZSET (prioridad/notificaciones) pero sus metadatos
+                # permanecen en Redis para consulta directa por teléfono.
+                if status == ConversationStatus.BOT_ACTIVE.value:
+                    score = await self.redis.zscore(self.ACTIVE_CONTACTS_ZSET, member)
+                    if score is not None:
+                        now_ts = get_bogota_now().timestamp()
+                        if (now_ts - score) > self.INACTIVITY_THRESHOLD:
+                            await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                            await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
+                            logger.debug(
+                                f"[ConversationState] {phone}:{canal} BOT_ACTIVE "
+                                f">48h inactivo, removido del ZSET"
+                            )
+                            continue
+
                 ttl = await self.redis.ttl(state_key)
 
                 contacts.append({
@@ -353,19 +371,29 @@ class ConversationStateManager:
     async def activate_bot(self, phone: str, canal: str = "whatsapp") -> bool:
         """
         Reactiva el bot para una conversación (cierra sesión de asesor).
-        También elimina del índice de contactos activos.
+        El contacto permanece en el ZSET con su score original; la limpieza
+        por inactividad ocurre en get_active_contacts() tras INACTIVITY_THRESHOLD.
 
         Returns:
             True si se reactivó correctamente
         """
         try:
-            # Cambiar estado a BOT_ACTIVE
+            # Cambiar estado a BOT_ACTIVE (TTL dinámico)
             await self.set_status(phone, ConversationStatus.BOT_ACTIVE, canal)
 
-            # Remover del índice de contactos activos (ZSET + SET legacy)
-            index_member = f"{phone}:{canal.lower()}"
-            await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
-            await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy cleanup
+            # Actualizar campo status en meta sin tocar last_activity
+            # (el score del ZSET ya registra el momento de la última interacción humana)
+            meta_key = f"{self.META_PREFIX}{phone}:{canal.lower()}"
+            raw = await self.redis.get(meta_key)
+            if raw:
+                try:
+                    meta_dict = json.loads(raw)
+                    meta_dict["status"] = ConversationStatus.BOT_ACTIVE.value
+                    ttl = await self.redis.ttl(meta_key)
+                    ex = ttl if ttl and ttl > 0 else self._calculate_dynamic_ttl()
+                    await self.redis.set(meta_key, json.dumps(meta_dict), ex=ex)
+                except Exception:
+                    pass  # Meta update is best-effort
 
             logger.info(f"[ConversationState] Bot reactivado para {phone}:{canal}")
             return True

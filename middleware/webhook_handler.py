@@ -535,6 +535,24 @@ async def whatsapp_webhook(
             else:
                 logger.warning(f"[Webhook] ⚠️ contact_info es None para {phone_normalized} - Solo MongoDB (sin HubSpot)")
 
+            # ════════════════════════════════════════════════════════════
+            # NOTIFICAR AL PANEL VÍA WEBSOCKET (bot silenciado)
+            # ════════════════════════════════════════════════════════════
+            # CRÍTICO: Notificar ANTES de retornar para que el panel
+            # muestre el mensaje nuevo inmediatamente con sonido y badge
+            try:
+                logger.info(f"[Webhook] Notificando panel (bot silenciado) - phone={phone_normalized}")
+                sent = await ws_manager.notify_new_message(
+                    phone=phone_normalized,
+                    canal=final_channel or "whatsapp",
+                    message_preview=Body[:100] if Body else "",
+                    sender="client",
+                    contact_name=""
+                )
+                logger.info(f"[Webhook] notify_new_message enviado a {sent} conexiones (bot silenciado)")
+            except Exception as ws_err:
+                logger.error(f"[Webhook] Error notificando WebSocket (bot silenciado): {ws_err}")
+
             # Si hay mensaje especial (ej: PENDING_HANDOFF), enviarlo
             if special_message:
                 logger.info(f"[Webhook] {reason} - Enviando mensaje especial")

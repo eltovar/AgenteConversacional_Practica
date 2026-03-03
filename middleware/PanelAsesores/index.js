@@ -548,8 +548,10 @@ async function loadContacts() {
             let deepLinkPhone = urlParams.get('phone');
             if (deepLinkPhone) {
                 deepLinkHandled = true;
-                // Normalizar: agregar + si no lo tiene (URLs pierden el + porque se interpreta como espacio)
-                if (deepLinkPhone && !deepLinkPhone.startsWith('+')) {
+                // Normalizar: quitar espacios y agregar + si no lo tiene
+                // (URLs convierten + en espacio, así que "+" llega como " ")
+                deepLinkPhone = deepLinkPhone.replace(/\s+/g, '').trim();
+                if (!deepLinkPhone.startsWith('+')) {
                     deepLinkPhone = '+' + deepLinkPhone;
                 }
                 const target = allContacts.find(c => c.phone === deepLinkPhone);

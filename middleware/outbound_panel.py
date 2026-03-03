@@ -1676,10 +1676,11 @@ async def create_manual_contact(
     # === 5.5. Escribir url_chat en Contacto y Deal ===
     try:
         panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
-        if panel_base_url and owner_id:
+        admin_api_key = os.getenv("ADMIN_API_KEY", "")
+        if panel_base_url and owner_id and admin_api_key:
             from urllib.parse import quote
             phone_encoded = quote(phone_normalized, safe='')
-            url_chat = f"{panel_base_url}/whatsapp/panel/?advisor={owner_id}&phone={phone_encoded}"
+            url_chat = f"{panel_base_url}/whatsapp/panel/?key={admin_api_key}&advisor={owner_id}&phone={phone_encoded}"
             
             # Escribir en contacto
             async with httpx.AsyncClient(timeout=15.0) as client:

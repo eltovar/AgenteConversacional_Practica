@@ -545,9 +545,13 @@ async function loadContacts() {
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
         if (!deepLinkHandled) {
-            const deepLinkPhone = urlParams.get('phone');
+            let deepLinkPhone = urlParams.get('phone');
             if (deepLinkPhone) {
                 deepLinkHandled = true;
+                // Normalizar: agregar + si no lo tiene (URLs pierden el + porque se interpreta como espacio)
+                if (deepLinkPhone && !deepLinkPhone.startsWith('+')) {
+                    deepLinkPhone = '+' + deepLinkPhone;
+                }
                 const target = allContacts.find(c => c.phone === deepLinkPhone);
                 if (target) {
                     console.log('[Panel] Deep link: auto-seleccionando', deepLinkPhone);

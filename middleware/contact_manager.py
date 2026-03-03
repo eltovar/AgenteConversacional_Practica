@@ -414,8 +414,11 @@ class ContactManager:
 
         # Construir url_chat para deep link CRM → Panel (requiere PANEL_BASE_URL en env)
         panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+        # URL encode del teléfono para que el + se preserve como %2B
+        from urllib.parse import quote
+        phone_encoded = quote(phone_normalized, safe='')
         url_chat = (
-            f"{panel_base_url}/whatsapp/panel/?advisor={owner_id}&phone={phone_normalized}"
+            f"{panel_base_url}/whatsapp/panel/?advisor={owner_id}&phone={phone_encoded}"
             if panel_base_url and owner_id else ""
         )
 

@@ -3278,6 +3278,41 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
 
 
 # ============================================================================
+# ADVISORS (Asesores del panel - nombres editables)
+# ============================================================================
+
+@router.get("/advisors")
+async def list_advisors(x_api_key: str = Header(None, alias="X-API-Key")):
+    """Lista todos los asesores con sus nombres editables."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    advisors = await mongo_mgr.get_advisors()
+    return {"advisors": advisors}
+
+
+class AdvisorUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+@router.patch("/advisors/{advisor_id}")
+async def update_advisor(
+    advisor_id: str,
+    body: AdvisorUpdateRequest,
+    x_api_key: str = Header(None, alias="X-API-Key")
+):
+    """Actualiza el nombre de un asesor."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    ok = await mongo_mgr.update_advisor(advisor_id, body.name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Asesor no encontrado")
+    logger.info(f"[Panel] Advisor {advisor_id} renombrado a: {body.name}")
+    return {"ok": True, "id": advisor_id, "name": body.name}
+
+
+# ============================================================================
 # WORKERS (Equipo de campo para citas)
 # ============================================================================
 
@@ -3514,14 +3549,12 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
             status_code=401
         )
 
-    # Mapeo de advisor ID a nombre para mostrar en la UI
-    # Los nombres son placeholders editables, excepto Equipo de Marketing que es fijo
-    advisor_names = {
-        '89096380': 'Asesor Portales',
-        '89096378': 'Asesor Directo',
-        '82598814': 'Equipo de Marketing',
-        '89096379': 'Asesor Respaldo'
-    }
+    # Cargar nombres de asesores desde MongoDB (editables)
+    mongo_mgr = get_mongo_manager()
+    advisors_list = await mongo_mgr.get_advisors()
+    
+    # Convertir lista a diccionario {id: name} para el template
+    advisor_names = {a["id"]: a["name"] for a in advisors_list}
 
     return templates.TemplateResponse("index.html", {
         "request": request,

@@ -669,6 +669,91 @@ class MongoDBManager:
             return []
 
     # =========================================================================
+    # OPERACIONES DE ADVISORS (ASESORES DEL PANEL)
+    # =========================================================================
+
+    # Configuración predeterminada de asesores (ID → nombre placeholder)
+    DEFAULT_ADVISORS = {
+        "89096380": "Asesor Portales",
+        "89096378": "Asesor Directo",
+        "82598814": "Equipo de Marketing",
+        "89096379": "Asesor Respaldo"
+    }
+
+    async def init_advisors(self) -> bool:
+        """Inicializa los asesores predeterminados si no existen."""
+        if not await self.connect():
+            return False
+        try:
+            for advisor_id, name in self.DEFAULT_ADVISORS.items():
+                # Upsert: crear solo si no existe
+                await self.db.panel_advisors.update_one(
+                    {"advisor_id": advisor_id},
+                    {"$setOnInsert": {
+                        "advisor_id": advisor_id,
+                        "name": name,
+                        "active": True,
+                        "created_at": datetime.now(TIMEZONE)
+                    }},
+                    upsert=True
+                )
+            logger.info(f"[MongoDB] Advisors inicializados: {len(self.DEFAULT_ADVISORS)}")
+            return True
+        except Exception as e:
+            logger.error(f"[MongoDB] Error inicializando advisors: {e}")
+            return False
+
+    async def get_advisors(self) -> List[Dict[str, Any]]:
+        """Lista todos los asesores activos."""
+        if not await self.connect():
+            return []
+        try:
+            # Asegurar que existan los advisors predeterminados
+            await self.init_advisors()
+            
+            cursor = self.db.panel_advisors.find(
+                {"active": True}
+            ).sort("name", ASCENDING)
+            advisors = await cursor.to_list(length=50)
+            return [
+                {"id": a["advisor_id"], "name": a["name"]}
+                for a in advisors
+            ]
+        except Exception as e:
+            logger.error(f"[MongoDB] Error listando advisors: {e}")
+            return []
+
+    async def get_advisor_name(self, advisor_id: str) -> str:
+        """Obtiene el nombre de un asesor por su ID."""
+        if not await self.connect():
+            return self.DEFAULT_ADVISORS.get(advisor_id, f"Asesor {advisor_id}")
+        try:
+            advisor = await self.db.panel_advisors.find_one({"advisor_id": advisor_id})
+            if advisor:
+                return advisor["name"]
+            return self.DEFAULT_ADVISORS.get(advisor_id, f"Asesor {advisor_id}")
+        except Exception as e:
+            logger.error(f"[MongoDB] Error obteniendo advisor {advisor_id}: {e}")
+            return self.DEFAULT_ADVISORS.get(advisor_id, f"Asesor {advisor_id}")
+
+    async def update_advisor(self, advisor_id: str, name: str) -> bool:
+        """Actualiza el nombre de un asesor."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.panel_advisors.update_one(
+                {"advisor_id": advisor_id},
+                {"$set": {"name": name.strip(), "updated_at": datetime.now(TIMEZONE)}}
+            )
+            if result.modified_count > 0:
+                logger.info(f"[MongoDB] Advisor {advisor_id} actualizado a: {name}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando advisor {advisor_id}: {e}")
+            return False
+
+    # =========================================================================
     # OPERACIONES DE WORKERS (EQUIPO DE CAMPO)
     # =========================================================================
 

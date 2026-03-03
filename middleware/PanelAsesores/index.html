@@ -518,28 +518,51 @@
     </div>
 
     <!-- ======================================================================= -->
-    <!-- Modal: Gestión de Workers (Equipo de campo)                             -->
+    <!-- Modal: Configuración del Panel                                          -->
     <!-- ======================================================================= -->
     <div id="workersModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
         <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
             <div class="p-4 border-b flex justify-between items-center bg-gray-50">
-                <h2 class="text-lg font-semibold text-gray-800">&#9881;&#65039; Equipo de Campo</h2>
+                <h2 class="text-lg font-semibold text-gray-800">&#9881;&#65039; Configuración</h2>
                 <button onclick="closeWorkersModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
             </div>
-            <div class="p-4">
-                <p class="text-sm text-gray-500 mb-3">Agrega, edita o elimina los encargados de mostrar los inmuebles.</p>
-                <!-- Agregar nuevo worker -->
-                <div class="flex gap-2 mb-4">
-                    <input type="text" id="newWorkerName" placeholder="Nombre del encargado (ej. Mauricio)"
-                        class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400">
-                    <button onclick="createWorker()"
-                        class="bg-green-600 text-white px-3 py-2 rounded text-sm hover:bg-green-700 transition-colors">
-                        + Agregar
-                    </button>
+            <div class="p-4 space-y-6">
+                <!-- Sección: Nombre del Asesor (solo visible si hay advisor_id) -->
+                <div id="advisorNameSection" class="hidden">
+                    <h3 class="text-sm font-semibold text-gray-700 mb-2">&#128100; Nombre del Asesor</h3>
+                    <p class="text-xs text-gray-500 mb-2">Este nombre aparece en el título del panel y en las transferencias de contactos.</p>
+                    <div class="flex gap-2">
+                        <input type="text" id="advisorNameInput"
+                            class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
+                            placeholder="Nombre del asesor">
+                        <button onclick="saveAdvisorName()"
+                            class="bg-blue-600 text-white px-3 py-2 rounded text-sm hover:bg-blue-700 transition-colors">
+                            Guardar
+                        </button>
+                    </div>
+                    <p id="advisorNameStatus" class="text-xs mt-1 hidden"></p>
                 </div>
-                <!-- Lista de workers -->
-                <div id="workersList" class="space-y-2 max-h-64 overflow-y-auto">
-                    <p class="text-sm text-gray-400 text-center py-4">Cargando...</p>
+                
+                <!-- Separador (solo visible si hay advisor_id) -->
+                <hr id="advisorSeparator" class="hidden border-gray-200">
+                
+                <!-- Sección: Equipo de Campo -->
+                <div>
+                    <h3 class="text-sm font-semibold text-gray-700 mb-2">&#128736; Equipo de Campo</h3>
+                    <p class="text-xs text-gray-500 mb-3">Agrega, edita o elimina los encargados de mostrar los inmuebles.</p>
+                    <!-- Agregar nuevo worker -->
+                    <div class="flex gap-2 mb-4">
+                        <input type="text" id="newWorkerName" placeholder="Nombre del encargado (ej. Mauricio)"
+                            class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400">
+                        <button onclick="createWorker()"
+                            class="bg-green-600 text-white px-3 py-2 rounded text-sm hover:bg-green-700 transition-colors">
+                            + Agregar
+                        </button>
+                    </div>
+                    <!-- Lista de workers -->
+                    <div id="workersList" class="space-y-2 max-h-48 overflow-y-auto">
+                        <p class="text-sm text-gray-400 text-center py-4">Cargando...</p>
+                    </div>
                 </div>
             </div>
             <div class="p-4 border-t flex justify-end">
@@ -556,7 +579,8 @@
         // Variables inyectadas por Jinja2
         const API_KEY = '{{ api_key }}';
         const BASE_URL = '{{ base_url }}';
-        const ADVISOR_NAMES = '{{ advisor_names | tojson }}';
+        // ADVISOR_NAMES es un objeto mutable para poder actualizarlo desde el panel
+        let ADVISOR_NAMES = {{ advisor_names | tojson | safe }};
     </script>
     <script src="/whatsapp/panel/static/index.js"></script>
 </body>

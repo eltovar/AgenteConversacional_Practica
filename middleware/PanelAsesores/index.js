@@ -2671,7 +2671,7 @@ async function loadAdvisorsList() {
             for (const advisor of advisorsList) {
                 const option = document.createElement('option');
                 option.value = advisor.id;
-                option.textContent = `${advisor.name} (${advisor.team})`;
+                option.textContent = advisor.name;
                 select.appendChild(option);
             }
 
@@ -2784,12 +2784,80 @@ let workersCache = [];  // Cache local de workers para el selector del modal de 
 
 async function openWorkersModal() {
     document.getElementById('workersModal').classList.remove('hidden');
+
+    // Mostrar sección de nombre del asesor si hay ADVISOR_ID
+    if (ADVISOR_ID) {
+        document.getElementById('advisorNameSection').classList.remove('hidden');
+        document.getElementById('advisorSeparator').classList.remove('hidden');
+        document.getElementById('advisorNameInput').value = ADVISOR_NAME || '';
+        document.getElementById('advisorNameStatus').classList.add('hidden');
+    }
+
     await loadWorkers();
 }
 
 function closeWorkersModal() {
     document.getElementById('workersModal').classList.add('hidden');
     document.getElementById('newWorkerName').value = '';
+    document.getElementById('advisorNameStatus').classList.add('hidden');
+}
+
+/**
+ * Guarda el nuevo nombre del asesor en MongoDB y actualiza el título del panel.
+ */
+async function saveAdvisorName() {
+    const input = document.getElementById('advisorNameInput');
+    const statusEl = document.getElementById('advisorNameStatus');
+    const newName = input.value.trim();
+
+    if (!newName) {
+        input.focus();
+        return;
+    }
+
+    if (!ADVISOR_ID) {
+        statusEl.textContent = 'Error: No hay ID de asesor';
+        statusEl.className = 'text-xs mt-1 text-red-500';
+        statusEl.classList.remove('hidden');
+        return;
+    }
+
+    try {
+        const response = await fetch(`${BASE_URL}/advisors/${ADVISOR_ID}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ name: newName })
+        });
+
+        if (response.ok) {
+            // Actualizar variables globales y título del panel
+            ADVISOR_NAMES[ADVISOR_ID] = newName;
+            // No podemos reasignar ADVISOR_NAME (const), pero actualizamos el DOM directamente
+            document.getElementById('panelTitle').textContent = `Panel de ${newName}`;
+
+            // Actualizar también la lista de advisors para el dropdown de transferencias
+            const advisorIndex = advisorsList.findIndex(a => a.id === ADVISOR_ID);
+            if (advisorIndex >= 0) {
+                advisorsList[advisorIndex].name = newName;
+            }
+
+            statusEl.textContent = '✓ Nombre actualizado correctamente';
+            statusEl.className = 'text-xs mt-1 text-green-600';
+            statusEl.classList.remove('hidden');
+
+            console.log(`[Panel] Nombre del asesor actualizado a: ${newName}`);
+        } else {
+            const err = await response.json();
+            statusEl.textContent = 'Error: ' + (err.detail || 'No se pudo actualizar');
+            statusEl.className = 'text-xs mt-1 text-red-500';
+            statusEl.classList.remove('hidden');
+        }
+    } catch (e) {
+        statusEl.textContent = 'Error de conexión al guardar';
+        statusEl.className = 'text-xs mt-1 text-red-500';
+        statusEl.classList.remove('hidden');
+        console.error('[Panel] Error guardando nombre del asesor:', e);
+    }
 }
 
 async function loadWorkers() {

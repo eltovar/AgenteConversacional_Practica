@@ -1673,6 +1673,37 @@ async def create_manual_contact(
     except Exception as e:
         logger.warning(f"[Panel] Error creando deal (no crítico): {e}")
 
+    # === 5.5. Escribir url_chat en Contacto y Deal ===
+    try:
+        panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+        if panel_base_url and owner_id:
+            from urllib.parse import quote
+            phone_encoded = quote(phone_normalized, safe='')
+            url_chat = f"{panel_base_url}/whatsapp/panel/?advisor={owner_id}&phone={phone_encoded}"
+            
+            # Escribir en contacto
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                contact_patch_url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+                await client.patch(
+                    contact_patch_url,
+                    headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
+                    json={"properties": {"url_chat": url_chat}}
+                )
+                logger.info(f"[Panel] url_chat escrito en contacto {contact_id}")
+            
+            # Escribir en deal si existe
+            if deal_id:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    deal_patch_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
+                    await client.patch(
+                        deal_patch_url,
+                        headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
+                        json={"properties": {"url_chat": url_chat}}
+                    )
+                    logger.info(f"[Panel] url_chat escrito en deal {deal_id}")
+    except Exception as e:
+        logger.warning(f"[Panel] Error escribiendo url_chat (no crítico): {e}")
+
     # === 6. Activar HUMAN_ACTIVE en Redis ===
     try:
         is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None

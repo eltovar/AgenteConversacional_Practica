@@ -3515,10 +3515,12 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
         )
 
     # Mapeo de advisor ID a nombre para mostrar en la UI
+    # Los nombres son placeholders editables, excepto Equipo de Marketing que es fijo
     advisor_names = {
-        '87367331': 'Luisa',
-        '88251457': 'Yubeny',
-        '88558384': 'Analista Redes'
+        '89096380': 'Asesor Portales',
+        '89096378': 'Asesor Directo',
+        '82598814': 'Equipo de Marketing',
+        '89096379': 'Asesor Respaldo'
     }
 
     return templates.TemplateResponse("index.html", {

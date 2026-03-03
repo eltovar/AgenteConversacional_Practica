@@ -20,28 +20,34 @@ class LeadAssigner:
     # ═══════════════════════════════════════════════════════════════════════════
     
     OWNERS_CONFIG = {
-        # === ASESORA LUISA ===
-        # Portales inmobiliarios: MetroCuadrado, Finca Raíz, Mercado Libre
-        "equipo_luisa": [
-            {"name": "Luisa", "id": "87367331", "active": True},
+        # === ASESOR PORTALES INMOBILIARIOS ===
+        # Portales: MetroCuadrado, Finca Raíz, Mercado Libre, LinkedIn
+        "equipo_portales": [
+            {"name": "Asesor Portales", "id": "89096380", "active": True},
         ],
 
-        # === ASESORA YUBENY ===
-        # Directo + Redes Sociales: Página Web, WhatsApp, Facebook, Instagram, Ciencuadras
-        "equipo_yubeny": [
-            {"name": "Yubeny", "id": "88251457", "active": True},
+        # === ASESOR DIRECTO + REDES SOCIALES ===
+        # Directo + Redes: Página Web, WhatsApp, Facebook, Instagram, Ciencuadras, YouTube, TikTok
+        "equipo_directo": [
+            {"name": "Asesor Directo", "id": "89096378", "active": True},
         ],
 
-        # === ANALISTA REDES SOCIALES (Solo métricas - NO responde) ===
+        # === EQUIPO DE MARKETING (Solo métricas - NO responde) ===
         # NOTA: Este ID no se usa para asignación de leads, solo para filtrar métricas
-        "analista_redes": [
-            {"name": "Analista Redes", "id": "88558384", "active": False},  # Inactivo para asignación
+        "equipo_marketing": [
+            {"name": "Equipo de Marketing", "id": "82598814", "active": False},  # Inactivo para asignación
         ],
 
-        # Equipo default (fallback - ambas asesoras en round robin)
+        # === ASESOR RESPALDO (Solo transferencias manuales) ===
+        # No recibe asignación automática, solo contactos transferidos manualmente
+        "equipo_respaldo": [
+            {"name": "Asesor Respaldo", "id": "89096379", "active": False},  # Inactivo para asignación automática
+        ],
+
+        # Equipo default (fallback - round robin entre portales y directo)
         "default": [
-            {"name": "Luisa", "id": "87367331", "active": True},
-            {"name": "Yubeny", "id": "88251457", "active": True},
+            {"name": "Asesor Portales", "id": "89096380", "active": True},
+            {"name": "Asesor Directo", "id": "89096378", "active": True},
         ],
     }
 
@@ -49,44 +55,47 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        # === LUISA: Portales Inmobiliarios ===
-        "metrocuadrado": "equipo_luisa",
-        "finca_raiz": "equipo_luisa",
-        "mercado_libre": "equipo_luisa",
+        # === PORTALES INMOBILIARIOS (ID: 89096380) ===
+        "metrocuadrado": "equipo_portales",
+        "finca_raiz": "equipo_portales",
+        "mercado_libre": "equipo_portales",
+        "linkedin": "equipo_portales",
 
-        # === YUBENY: Directo + Redes Sociales + Ciencuadras ===
-        "pagina_web": "equipo_yubeny",
-        "whatsapp_directo": "equipo_yubeny",
-        "whatsapp": "equipo_yubeny",  # Alias para compatibilidad con webhook
-        "facebook": "equipo_yubeny",
-        "instagram": "equipo_yubeny",
-        "ciencuadras": "equipo_yubeny",
+        # === DIRECTO + REDES SOCIALES (ID: 89096378) ===
+        "pagina_web": "equipo_directo",
+        "whatsapp_directo": "equipo_directo",
+        "whatsapp": "equipo_directo",  # Alias para compatibilidad con webhook
+        "facebook": "equipo_directo",
+        "instagram": "equipo_directo",
+        "ciencuadras": "equipo_directo",
+        "youtube": "equipo_directo",
+        "tiktok": "equipo_directo",
 
-        # === FALLBACK ===
+        # === FALLBACK (Round robin entre portales y directo) ===
         "desconocido": "default",
         "google_ads": "default",
         "referido": "default",
-        "linkedin": "default",
-        "youtube": "default",
-        "tiktok": "default",
     }
 
     # ═══════════════════════════════════════════════════════════════════════════
     # MAPEO DIRECTO CANAL → OWNER ID (para filtro del panel)
     # ═══════════════════════════════════════════════════════════════════════════
     CHANNEL_TO_OWNER = {
-        # Luisa (87367331)
-        "metrocuadrado": "87367331",
-        "finca_raiz": "87367331",
-        "mercado_libre": "87367331",
+        # Asesor Portales (89096380)
+        "metrocuadrado": "89096380",
+        "finca_raiz": "89096380",
+        "mercado_libre": "89096380",
+        "linkedin": "89096380",
 
-        # Yubeny (88251457)
-        "pagina_web": "88251457",
-        "whatsapp_directo": "88251457",
-        "whatsapp": "88251457",  # Alias para compatibilidad
-        "facebook": "88251457",
-        "instagram": "88251457",
-        "ciencuadras": "88251457",
+        # Asesor Directo (89096378)
+        "pagina_web": "89096378",
+        "whatsapp_directo": "89096378",
+        "whatsapp": "89096378",  # Alias para compatibilidad
+        "facebook": "89096378",
+        "instagram": "89096378",
+        "ciencuadras": "89096378",
+        "youtube": "89096378",
+        "tiktok": "89096378",
     }
 
     # Canales para métricas de analista de redes sociales

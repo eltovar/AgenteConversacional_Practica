@@ -143,6 +143,29 @@ Cuando el cliente envíe un link de Instagram, Facebook o TikTok:
 - Responde algo como: "¡Perfecto! Vi que te interesa este inmueble. Para que uno de nuestros asesores te dé información detallada, ¿me compartes tu nombre?"
 - Marca handoff_priority como "high" y link_redes_sociales como true
 
+DETECCIÓN DE POSIBLE ORIGEN EN REDES SOCIALES (SIN LINK):
+Muchos clientes llegan de redes sociales pero NO envían el link del inmueble.
+Detecta si el cliente menciona frases como:
+- "Vi una publicación", "Vi la publicación"
+- "Vi un video", "Vi un reel", "Vi una story", "Vi un post"
+- "Me interesó lo de Instagram", "Vi algo en Facebook", "Lo vi en TikTok"
+- "Vi algo en redes", "Lo vi en redes sociales"
+- "Me llegó por Instagram", "Me apareció en Facebook"
+- "Vi su contenido", "Vi el anuncio"
+
+Cuando detectes esto SIN que el cliente envíe link:
+1. Marca posible_origen_social como true
+2. Mantén handoff_priority en "medium" (no "high" hasta tener link)
+3. Pídele el link o imagen del inmueble de forma amable:
+   "¡Qué bueno que te interesa! Para darte información precisa sobre ese inmueble, ¿podrías compartirme el link de la publicación o una captura de pantalla? Si me envías el link sería ideal."
+4. NO asumas el portal específico (Instagram/Facebook/TikTok) hasta confirmarlo con link
+5. El canal_origen se mantiene en "whatsapp" hasta que envíe el link
+
+IMPORTANTE PARA MÉTRICAS DE REDES SOCIALES:
+- Es CRÍTICO obtener el link para identificar correctamente la red social
+- Cada red (Instagram, Facebook, TikTok, YouTube, LinkedIn) se mide por separado
+- Sin el link, no podemos atribuir correctamente el lead a la red social
+
 REGLAS IMPORTANTES:
 - NO inventes información sobre propiedades específicas
 - NO des precios exactos (eso lo manejan los Asesores Comerciales)
@@ -168,6 +191,7 @@ Debes responder SIEMPRE en formato JSON con la siguiente estructura:
         "pregunta_tecnica": false,
         "handoff_priority": "none|low|medium|high|immediate",
         "link_redes_sociales": false,
+        "posible_origen_social": false,
         "suspicious_indicators": [],
         "summary_update": "Resumen breve de lo nuevo aprendido del cliente (o null)",
         "fecha_cita_mencionada": null,
@@ -210,6 +234,15 @@ GUÍA PARA EL ANÁLISIS:
 
 - link_redes_sociales: true si el cliente envió un link de Instagram, Facebook o TikTok
   Estos links usualmente son videos de inmuebles. Marca true y handoff_priority "high".
+
+- posible_origen_social: true si el cliente MENCIONA que viene de redes sociales pero NO envió link
+  Detecta frases como: "vi una publicación", "vi un video/reel/story", "me interesó lo de Instagram",
+  "vi algo en redes", "vi el anuncio", "me llegó por Facebook", etc.
+  Si detectas esto:
+  - Marca posible_origen_social como true
+  - Mantén handoff_priority en "medium" (no "high")
+  - Tu respuesta debe pedir el link o captura de pantalla del inmueble
+  IMPORTANTE: NO es lo mismo que link_redes_sociales (ese es cuando SÍ envía link)
 
 - suspicious_indicators: Lista de indicadores sospechosos detectados (o lista vacía [])
   Posibles valores:
@@ -289,6 +322,10 @@ SINGLE_STREAM_ANALYSIS_SCHEMA = {
                 "link_redes_sociales": {
                     "type": "boolean",
                     "description": "True si el cliente envió link de Instagram/Facebook/TikTok"
+                },
+                "posible_origen_social": {
+                    "type": "boolean",
+                    "description": "True si el cliente MENCIONA redes sociales pero NO envió link"
                 },
                 "suspicious_indicators": {
                     "type": "array",

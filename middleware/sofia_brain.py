@@ -36,6 +36,7 @@ class MessageAnalysis:
     pregunta_tecnica: bool = False
     handoff_priority: str = "none"
     link_redes_sociales: bool = False  # True si envió link de Instagram/Facebook/TikTok
+    posible_origen_social: bool = False  # True si MENCIONA redes pero NO envía link
     suspicious_indicators: list = None  # Lista de indicadores sospechosos
     summary_update: Optional[str] = None
     # Campos para detección de citas
@@ -59,6 +60,7 @@ class MessageAnalysis:
             pregunta_tecnica=data.get("pregunta_tecnica", False),
             handoff_priority=data.get("handoff_priority", "none"),
             link_redes_sociales=data.get("link_redes_sociales", False),
+            posible_origen_social=data.get("posible_origen_social", False),
             suspicious_indicators=data.get("suspicious_indicators", []),
             summary_update=data.get("summary_update"),
             fecha_cita_mencionada=data.get("fecha_cita_mencionada"),
@@ -325,11 +327,18 @@ class SofiaBrain:
             # Parsear JSON de la respuesta
             parsed = self._parse_single_stream_response(raw_content)
 
+            # Log con info relevante de redes sociales
+            social_info = ""
+            if parsed.analisis.link_redes_sociales:
+                social_info = ", Link RRSS: ✓"
+            elif parsed.analisis.posible_origen_social:
+                social_info = ", Posible RRSS: ✓ (sin link)"
+
             logger.info(
                 f"[SofiaBrain] Single-Stream completado para {session_id} | "
                 f"Emoción: {parsed.analisis.emocion}, "
                 f"Score: {parsed.analisis.sentiment_score}, "
-                f"Handoff: {parsed.analisis.handoff_priority}"
+                f"Handoff: {parsed.analisis.handoff_priority}{social_info}"
             )
 
             # Truncar historial si excede el máximo

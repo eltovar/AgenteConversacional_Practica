@@ -2766,10 +2766,18 @@ async def get_active_contacts(
 
         active_contacts = await state_manager.get_all_human_active_contacts()
 
-        logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en HUMAN_ACTIVE")
-        if active_contacts:
-            for contact in active_contacts:
-                logger.debug(f"[Panel] Contacto activo: {contact}")
+        logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
+
+        # ── Pre-filtrar por asesora ANTES del enriquecimiento con HubSpot.
+        # Sin esto, los 1,602 contactos migrados se enrichen todos a la vez,
+        # disparando ~3,204 llamadas HubSpot y colapsando el rate limit.
+        if advisor:
+            active_contacts = [
+                c for c in active_contacts
+                if c.get("owner_id") == advisor
+                or advisor in (c.get("assigned_owner_ids") or [])
+            ]
+            logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(active_contacts)} contactos")
 
         # === PASO 2: Enriquecer contactos activos con HubSpot (PARALELO) ===
         contact_manager = ContactManager()
@@ -2789,15 +2797,19 @@ async def get_active_contacts(
 
             # Si tenemos contact_id, obtener nombre de HubSpot y deal info
             if contact.get("contact_id"):
-                try:
-                    hs_info = await _get_hubspot_contact_info(contact["contact_id"])
-                    if hs_info:
-                        firstname = hs_info.get("firstname", "")
-                        lastname = hs_info.get("lastname", "")
-                        contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
-                        contact["email"] = hs_info.get("email")
-                except Exception as e:
-                    logger.debug(f"[Panel] No se pudo enriquecer contacto: {e}")
+                # Solo llamar HubSpot para el nombre si Redis meta NO lo tiene ya.
+                # Los contactos migrados traen display_name en meta → ahorra 1 call/contacto.
+                existing_name = contact.get("display_name", "").strip()
+                if not existing_name or existing_name in ("Cliente Nuevo", "Sin nombre"):
+                    try:
+                        hs_info = await _get_hubspot_contact_info(contact["contact_id"])
+                        if hs_info:
+                            firstname = hs_info.get("firstname", "")
+                            lastname = hs_info.get("lastname", "")
+                            contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
+                            contact["email"] = hs_info.get("email")
+                    except Exception as e:
+                        logger.debug(f"[Panel] No se pudo enriquecer contacto: {e}")
 
                 # Buscar deal asociado para el dropdown de pipeline
                 try:

@@ -705,6 +705,14 @@ async def whatsapp_webhook(
         # ════════════════════════════════════════════════════════════
         state_manager = get_state_manager()
 
+        # Log especial si hay posible origen social sin link
+        if hasattr(analysis, 'posible_origen_social') and analysis.posible_origen_social:
+            logger.info(
+                f"[Webhook] 📱 POSIBLE ORIGEN SOCIAL detectado (sin link): "
+                f"phone={phone_normalized}. Sofía solicitó link/imagen. "
+                f"Canal permanece en 'whatsapp' hasta confirmar."
+            )
+
         # Handoff inmediato si cliente enojado o lo solicita explícitamente
         if analysis.handoff_priority == "immediate":
             logger.info(

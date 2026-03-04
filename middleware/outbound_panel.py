@@ -2779,6 +2779,27 @@ async def get_active_contacts(
             ]
             logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(active_contacts)} contactos")
 
+        # ── Pre-limitar ANTES del enriquecimiento con HubSpot.
+        # Los contactos de prioridad (ZSET) siempre van; del resto solo los más recientes.
+        # Sin esto, 534 contactos × waits de 429 (36s c/u) = timeout de Railway.
+        priority_contacts = [c for c in active_contacts if c.get("in_priority_zset", True)]
+        bot_contacts = [c for c in active_contacts if not c.get("in_priority_zset", True)]
+
+        # Ordenar bot_contacts por última actividad (más reciente primero)
+        def _sort_key(c):
+            ts = c.get("last_activity") or ""
+            return ts
+
+        bot_contacts.sort(key=_sort_key, reverse=True)
+
+        # Solo enriquecer los slots restantes hasta `limit`
+        remaining_slots = max(0, limit - len(priority_contacts))
+        active_contacts = priority_contacts + bot_contacts[:remaining_slots]
+        logger.info(
+            f"[Panel] Pre-limitado a {len(active_contacts)} contactos para enriquecimiento "
+            f"({len(priority_contacts)} prioridad + {len(bot_contacts[:remaining_slots])} bot)"
+        )
+
         # === PASO 2: Enriquecer contactos activos con HubSpot (PARALELO) ===
         contact_manager = ContactManager()
 

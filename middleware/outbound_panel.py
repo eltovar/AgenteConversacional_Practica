@@ -2832,36 +2832,39 @@ async def get_active_contacts(
                     except Exception as e:
                         logger.debug(f"[Panel] No se pudo enriquecer contacto: {e}")
 
-                # Buscar deal asociado para el dropdown de pipeline
-                try:
-                    deal_info = await _get_contact_deal_info(contact["contact_id"])
-                    if deal_info:
-                        contact["deal_id"] = deal_info.get("deal_id")
-                        contact["current_stage"] = deal_info.get("current_stage")
-                    else:
-                        # ✅ AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
-                        try:
-                            created_deal = await contact_manager._create_deal_for_new_lead(
-                                contact_id=contact["contact_id"],
-                                phone_normalized=phone,
-                                source_channel="panel_auto"
-                            )
-                            if created_deal:
-                                # Usar directamente el deal creado sin consultar HubSpot de nuevo
-                                contact["deal_id"] = created_deal.get("deal_id")
-                                contact["current_stage"] = created_deal.get("current_stage")
-                                # Guardar en cache para evitar que desaparezca en próximos polls
-                                import time
-                                _deal_info_cache[contact["contact_id"]] = {
-                                    "deal_id": created_deal.get("deal_id"),
-                                    "current_stage": created_deal.get("current_stage"),
-                                    "cached_at": time.time()
-                                }
-                                logger.info(f"[Panel] Deal auto-creado para contacto {contact['contact_id']}: {created_deal.get('deal_id')}")
-                        except Exception as create_err:
-                            logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
-                except Exception as e:
-                    logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
+                # Buscar deal asociado para el dropdown de pipeline.
+                # Si Redis meta ya tiene deal_id (contactos migrados via patch_redis_deal_ids.py),
+                # usarlo directamente sin llamar HubSpot → elimina los 429 en carga del panel.
+                if contact.get("deal_id"):
+                    contact.setdefault("current_stage", contact.get("deal_stage", "1275156339"))
+                else:
+                    try:
+                        deal_info = await _get_contact_deal_info(contact["contact_id"])
+                        if deal_info:
+                            contact["deal_id"] = deal_info.get("deal_id")
+                            contact["current_stage"] = deal_info.get("current_stage")
+                        else:
+                            # AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
+                            try:
+                                created_deal = await contact_manager._create_deal_for_new_lead(
+                                    contact_id=contact["contact_id"],
+                                    phone_normalized=phone,
+                                    source_channel="panel_auto"
+                                )
+                                if created_deal:
+                                    contact["deal_id"] = created_deal.get("deal_id")
+                                    contact["current_stage"] = created_deal.get("current_stage")
+                                    import time
+                                    _deal_info_cache[contact["contact_id"]] = {
+                                        "deal_id": created_deal.get("deal_id"),
+                                        "current_stage": created_deal.get("current_stage"),
+                                        "cached_at": time.time()
+                                    }
+                                    logger.info(f"[Panel] Deal auto-creado para contacto {contact['contact_id']}: {created_deal.get('deal_id')}")
+                            except Exception as create_err:
+                                logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
+                    except Exception as e:
+                        logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
 
             # Si aún no tenemos nombre, usar teléfono
             if not contact.get("display_name"):

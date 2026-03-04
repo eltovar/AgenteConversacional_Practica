@@ -100,11 +100,12 @@ class ConversationStateManager:
     META_PREFIX = "conv_meta:"
     ACTIVE_CONTACTS_SET = "active_conversations_index"  # Legacy SET (compatibilidad)
     ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # Nuevo ZSET ordenado por timestamp
+    BOT_CONTROLLED_SET = "bot_controlled_conversations"  # SET para contactos en modo BOT que salen del ZSET
     
     # TTL dinámico: 48h días laborales, 72h fines de semana (para que duren hasta el lunes)
     HANDOFF_TTL_SECONDS = 172800  # Default 48h
     HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
-    INACTIVITY_THRESHOLD = 172800  # 48h — umbral para limpiar BOT_ACTIVE del ZSET
+    INACTIVITY_THRESHOLD = 172800  # 48h — umbral para mover BOT_ACTIVE del ZSET a BOT_CONTROLLED_SET
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -257,20 +258,24 @@ class ConversationStateManager:
 
                 # Filtro de inactividad 48h para contactos BOT_ACTIVE:
                 # Si llevan más de INACTIVITY_THRESHOLD sin interacción humana,
-                # salen del ZSET (prioridad/notificaciones) pero sus metadatos
-                # permanecen en Redis para consulta directa por teléfono.
+                # salen del ZSET (prioridad/notificaciones) pero PERMANECEN VISIBLES
+                # en el panel a través del BOT_CONTROLLED_SET.
+                in_priority_zset = True
                 if status == ConversationStatus.BOT_ACTIVE.value:
                     score = await self.redis.zscore(self.ACTIVE_CONTACTS_ZSET, member)
                     if score is not None:
                         now_ts = get_bogota_now().timestamp()
                         if (now_ts - score) > self.INACTIVITY_THRESHOLD:
+                            # Mover a BOT_CONTROLLED_SET (sin notificaciones pero visible)
+                            await self.redis.sadd(self.BOT_CONTROLLED_SET, member)
                             await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
                             await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
+                            in_priority_zset = False
                             logger.debug(
                                 f"[ConversationState] {phone}:{canal} BOT_ACTIVE "
-                                f">48h inactivo, removido del ZSET"
+                                f">48h inactivo, movido a BOT_CONTROLLED_SET (sigue visible)"
                             )
-                            continue
+                            # NO hacer continue — el contacto debe seguir en la lista
 
                 ttl = await self.redis.ttl(state_key)
 
@@ -289,8 +294,53 @@ class ConversationStateManager:
                     "is_active": True,  # Marcar como activo para el panel
                     "canal_origen": (meta.canal_origen if meta else canal) or canal,  # Segregación por equipo
                     "activated_at": meta.created_at if meta else get_bogota_now_iso(),  # Filtro de tiempo
-                    "conversation_status": status  # Estado real de Redis (HUMAN_ACTIVE/IN_CONVERSATION)
+                    "conversation_status": status,  # Estado real de Redis (HUMAN_ACTIVE/IN_CONVERSATION)
+                    "in_priority_zset": in_priority_zset  # False = BOT controla, sin notificaciones
                 })
+            
+            # === FASE 2: Contactos en BOT_CONTROLLED_SET (visibles pero sin ZSET) ===
+            # Estos son contactos BOT_ACTIVE que salieron del ZSET por inactividad >48h
+            # pero deben seguir visibles en el panel.
+            bot_controlled = await self.redis.smembers(self.BOT_CONTROLLED_SET)
+            processed_in_zset = {f"{c['phone']}:{c['canal']}" for c in contacts}
+            
+            for member in bot_controlled:
+                if member in processed_in_zset:
+                    continue  # Ya procesado arriba
+                    
+                if ":" not in member:
+                    continue
+                    
+                phone, canal = member.split(":", 1)
+                meta = await self.get_meta(phone, canal)
+                
+                if not meta:
+                    # Sin meta = contacto fantasma, limpiar
+                    await self.redis.srem(self.BOT_CONTROLLED_SET, member)
+                    continue
+                
+                state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
+                status = await self.redis.get(state_key) or ConversationStatus.BOT_ACTIVE.value
+                ttl = await self.redis.ttl(state_key)
+                
+                contacts.append({
+                    "phone": phone,
+                    "canal": canal,
+                    "status": status,
+                    "display_name": meta.display_name or "Cliente Nuevo",
+                    "last_activity": meta.last_activity,
+                    "owner_id": meta.assigned_owner_id,
+                    "assigned_owner_ids": meta.assigned_owner_ids or [],
+                    "handoff_reason": meta.handoff_reason or "Sofía atiende",
+                    "ttl_remaining": ttl,
+                    "contact_id": meta.contact_id,
+                    "is_active": True,
+                    "canal_origen": meta.canal_origen or canal,
+                    "activated_at": meta.created_at,
+                    "conversation_status": status,
+                    "in_priority_zset": False  # Fuera del ZSET = sin notificaciones
+                })
+                
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
         return contacts
@@ -459,12 +509,14 @@ class ConversationStateManager:
             await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             # 3. Agregar al índice de contactos activos (ZSET ordenado por timestamp)
+            # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
             index_member = f"{phone_num}:{canal_safe}"
             score = get_bogota_now().timestamp()  # Unix timestamp como score
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
             await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
+            await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
-            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe}")
+            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe} (re-agregado al ZSET)")
             return True
 
         except Exception as e:
@@ -504,12 +556,14 @@ class ConversationStateManager:
             await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             # Agregar al índice de contactos activos (ZSET ordenado por timestamp)
+            # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
             index_member = f"{phone}:{canal_safe}"
             score = get_bogota_now().timestamp()  # Unix timestamp como score
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
             await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
+            await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
-            logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason}")
+            logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason} (ZSET índice 0)")
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en request_handoff: {e}")

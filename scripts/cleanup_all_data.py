@@ -163,7 +163,8 @@ async def cleanup_redis(dry_run: bool = False) -> dict:
         # Limpiar ZSETs específicos
         zsets_to_clear = [
             "active_conversations_sorted",
-            "active_conversations_index"
+            "active_conversations_index",
+            "bot_controlled_conversations"  # SET para contactos BOT_ACTIVE sin notificaciones
         ]
         
         for zset in zsets_to_clear:

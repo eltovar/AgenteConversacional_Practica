@@ -478,6 +478,9 @@ class CRMAgent:
                 channel_origin = state.metadata["canal_origen"]
             else:
                 channel_origin = self.assigner.detect_channel_origin(metadata, state.session_id)
+            # HubSpot no acepta "whatsapp" como canal_origen; mapear a "whatsapp_directo"
+            if channel_origin == "whatsapp":
+                channel_origin = "whatsapp_directo"
 
             # Calcular score de calidad del lead (incluye bonus por canal y código)
             score_data = {

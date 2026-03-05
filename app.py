@@ -110,6 +110,19 @@ def get_redis_url() -> str:
 
 app = FastAPI(title="Sofía IA - Middleware", version="2.0.0")
 
+# Handler para loguear detalles de errores de validación (diagnóstico 422)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+import logging as _logging
+_diag_logger = _logging.getLogger("agent_system")
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    _diag_logger.error(
+        f"[422 DETAIL] path={request.url.path} errors={exc.errors()}"
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
 # Montar archivos estáticos para el panel
 PANEL_STATIC_PATH = Path(__file__).parent / "middleware" / "PanelAsesores"
 if PANEL_STATIC_PATH.exists():

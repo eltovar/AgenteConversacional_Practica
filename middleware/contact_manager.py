@@ -380,6 +380,9 @@ class ContactManager:
         # Obtener owner basado en el canal de origen
         owner_id = lead_assigner.get_next_owner(source_channel)
 
+        # HubSpot no acepta "whatsapp" como valor de canal_origen; mapear a "whatsapp_directo"
+        hs_canal = "whatsapp_directo" if source_channel == "whatsapp" else source_channel
+
         # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
         from datetime import timezone
         midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -392,7 +395,7 @@ class ContactManager:
             "phone": phone_normalized,
 
             # Metadata del chatbot
-            "canal_origen": source_channel,
+            "canal_origen": hs_canal,
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
 
             # Lifecycle stage inicial

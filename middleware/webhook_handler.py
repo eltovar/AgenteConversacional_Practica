@@ -55,6 +55,9 @@ from utils.business_hours import (
 # Cliente Twilio para respuestas diferidas (evita timeout de 15 segundos)
 from utils.twilio_client import twilio_client
 
+# Agregador de mensajes para esperar múltiples mensajes antes de responder
+from utils.message_aggregator import message_aggregator
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESPUESTA DIFERIDA PARA EVITAR TIMEOUT DE TWILIO (15 segundos)
@@ -258,6 +261,52 @@ async def _process_message_deferred(
             contact_name=""
         )
         
+        # ════════════════════════════════════════════════════════════
+        # AGREGACIÓN DE MENSAJES: Esperar que el cliente termine de escribir
+        # ════════════════════════════════════════════════════════════
+        # Agregar mensaje al buffer del agregador
+        # Si hay otro mensaje siendo procesado, este se agrega al buffer y termina
+        # El proceso principal espera ~30s y procesa todos los mensajes juntos
+        aggregation_result = await message_aggregator.add_message_to_buffer(
+            session_id=phone_normalized,
+            message=processed_body
+        )
+        
+        if not aggregation_result.get("should_process", True):
+            # Ya hay un proceso esperando - este mensaje se agregó al buffer
+            # Sincronizar con HubSpot y salir (el proceso principal responderá)
+            logger.info(
+                f"[DeferredProcess] Mensaje agregado al buffer (total: {aggregation_result.get('buffer_count', 1)}). "
+                f"Otro proceso responderá."
+            )
+            
+            # Sincronizar con HubSpot incluso si no procesamos con Sofia
+            if contact_info:
+                await _sync_message_to_hubspot(
+                    contact_info.contact_id,
+                    processed_body,
+                    "incoming",
+                    phone_normalized,
+                    final_channel,
+                    media_result,
+                    message_sid
+                )
+            return
+        
+        # Este proceso es el principal - esperar a que lleguen más mensajes
+        if aggregation_result.get("is_aggregating", False):
+            logger.info(
+                f"[DeferredProcess] Proceso principal. Esperando mensajes adicionales..."
+            )
+            # Esperar y obtener mensajes combinados
+            combined_message = await message_aggregator.wait_and_get_combined_message(phone_normalized)
+            
+            if combined_message:
+                logger.info(
+                    f"[DeferredProcess] Mensajes combinados: '{combined_message[:100]}...'"
+                )
+                processed_body = combined_message
+        
         if not should_respond:
             logger.info(f"[DeferredProcess] Bot silenciado ({reason})")
             
@@ -382,14 +431,20 @@ async def _process_message_deferred(
         
         await state_manager.update_activity(phone_normalized)
         
-        # ✅ FIX: Persistir canal_origen en Redis para asignación correcta de asesores
+        # ✅ FIX: Persistir canal_origen y owner_id en Redis para asignación correcta de asesores
         # El canal histórico se preserva para futuros mensajes del mismo contacto
+        # El owner_id es CRÍTICO para que el contacto aparezca en el panel del asesor correcto
+        hubspot_owner_id = None
+        if contact_info and contact_info.properties:
+            hubspot_owner_id = contact_info.properties.get("hubspot_owner_id")
+        
         await state_manager.ensure_meta_with_channel(
             phone=phone_normalized,
             canal=final_channel,
             canal_origen=historical_channel,
             contact_id=contact_id,
-            display_name=contact_info.firstname if contact_info else None
+            display_name=contact_info.firstname if contact_info else None,
+            owner_id=hubspot_owner_id
         )
         
         # ════════════════════════════════════════════════════════════

@@ -129,7 +129,8 @@ class SofiaBrain:
         self.llm = ChatOpenAI(
             model=model,
             temperature=temperature,
-            max_tokens=800,  # Aumentado para incluir JSON de análisis
+            # Aumentado de 800 a 1200 para evitar truncamiento del JSON con análisis
+            max_tokens=1200,
         )
 
         # Configurar prompt usando el prompt centralizado

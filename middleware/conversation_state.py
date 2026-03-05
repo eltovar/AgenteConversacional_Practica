@@ -610,7 +610,8 @@ class ConversationStateManager:
         canal: str = "whatsapp",
         canal_origen: str = None,
         contact_id: str = None,
-        display_name: str = None
+        display_name: str = None,
+        owner_id: str = None
     ) -> bool:
         """
         Asegura que exista conv_meta y actualiza el canal_origen si es específico.
@@ -623,12 +624,16 @@ class ConversationStateManager:
         Esto garantiza que los leads de portales/redes sociales siempre tengan
         su canal_origen correcto para la asignación de asesores.
         
+        El owner_id (hubspot_owner_id) se guarda en el meta para que el panel
+        de asesores pueda filtrar correctamente por propietario.
+        
         Args:
             phone: Teléfono normalizado
             canal: Canal de la conversación (para la key de Redis)
             canal_origen: Canal de origen detectado del mensaje
             contact_id: ID del contacto en HubSpot
             display_name: Nombre para mostrar
+            owner_id: ID del propietario en HubSpot (para filtrado en panel)
             
         Returns:
             True si se creó/actualizó correctamente
@@ -662,6 +667,15 @@ class ConversationStateManager:
                 if display_name and not meta.get("display_name"):
                     meta["display_name"] = display_name
                 
+                # ✅ FIX: Actualizar owner_id si se proporciona y no existe en meta
+                # Esto es CRÍTICO para que el panel de asesores filtre correctamente
+                if owner_id and not meta.get("owner_id"):
+                    meta["owner_id"] = owner_id
+                    logger.info(
+                        f"[ConversationState] owner_id asignado en meta: {owner_id} "
+                        f"(teléfono: {phone})"
+                    )
+                
                 meta["last_activity"] = now_iso
                 
                 ttl = await self.redis.ttl(meta_key)
@@ -677,7 +691,9 @@ class ConversationStateManager:
                     "last_activity": now_iso,
                     "canal_origen": canal_origen or canal_safe,
                     "display_name": display_name,
-                    "created_at": now_iso
+                    "created_at": now_iso,
+                    # ✅ FIX: Incluir owner_id para filtrado correcto en panel de asesores
+                    "owner_id": owner_id
                 }
                 
                 ttl = self._calculate_dynamic_ttl()
@@ -690,8 +706,8 @@ class ConversationStateManager:
                 await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
                 
                 logger.info(
-                    f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe} "
-                    f"(teléfono: {phone})"
+                    f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe}, "
+                    f"owner_id={owner_id} (teléfono: {phone})"
                 )
             
             return True

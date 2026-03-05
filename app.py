@@ -118,8 +118,17 @@ _diag_logger = _logging.getLogger("agent_system")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
+    content_type = request.headers.get("content-type", "MISSING")
+    try:
+        raw_body = await request.body()
+        body_preview = raw_body[:300].decode("utf-8", errors="replace")
+    except Exception as be:
+        body_preview = f"[error leyendo body: {be}]"
     _diag_logger.error(
-        f"[422 DETAIL] path={request.url.path} errors={exc.errors()}"
+        f"[422 DETAIL] path={request.url.path} "
+        f"content-type='{content_type}' "
+        f"body='{body_preview}' "
+        f"errors={exc.errors()}"
     )
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 

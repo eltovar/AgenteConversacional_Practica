@@ -110,6 +110,18 @@ def get_redis_url() -> str:
 
 app = FastAPI(title="Sofía IA - Middleware", version="2.0.0")
 
+# Middleware para loguear PID del worker en cada request (diagnóstico multi-worker)
+from starlette.middleware.base import BaseHTTPMiddleware
+import os as _os
+
+class WorkerPIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path == "/whatsapp/webhook":
+            logger.info(f"[Worker PID={_os.getpid()}] Procesando webhook request")
+        return await call_next(request)
+
+app.add_middleware(WorkerPIDMiddleware)
+
 # Handler para loguear detalles de errores de validación (diagnóstico 422)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -706,8 +718,10 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Inicializa RAG y schedulers."""
+    import os
+    pid = os.getpid()
     logger.info("=" * 60)
-    logger.info("[STARTUP] Iniciando servidor Sofía v2.0...")
+    logger.info("[STARTUP] Iniciando servidor Sofía v2.0... (Worker PID: %s)", pid)
 
     # Cargar Knowledge Base
     try:

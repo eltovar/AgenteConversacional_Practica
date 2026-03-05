@@ -218,7 +218,8 @@ class ContactManager:
         Versión segura que NUNCA detiene el procesamiento del mensaje.
 
         Retorna None si falla en lugar de propagar excepción.
-        Útil para casos donde el mensaje debe procesarse aunque falle HubSpot.
+        Incluye timeout de 10s para evitar que Railway proxy (límite ~15s)
+        mate la conexión y Twilio reintente con 502/422.
 
         Args:
             phone_raw: Número de teléfono sin normalizar
@@ -228,7 +229,21 @@ class ContactManager:
             ContactInfo o None si hay error
         """
         try:
-            return await self.identify_or_create_contact(phone_raw, source_channel)
+            return await asyncio.wait_for(
+                self.identify_or_create_contact(phone_raw, source_channel),
+                timeout=10.0
+            )
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ContactManager] Timeout (10s) identificando contacto %s. "
+                "Webhook responde sin CRM; creación continúa en background.",
+                phone_raw
+            )
+            # Completar la creación en background para que el siguiente mensaje
+            # encuentre el contacto en HubSpot y en el cache Redis
+            asyncio.create_task(self._background_ensure_contact(phone_raw, source_channel))
+            return None
 
         except HubSpotRateLimitError as e:
             logger.warning(
@@ -261,6 +276,25 @@ class ContactManager:
             )
             return None
 
+    async def _background_ensure_contact(self, phone_raw: str, source_channel: str) -> None:
+        """
+        Asegura que el contacto exista en HubSpot y quede en cache Redis.
+        Se llama como background task tras un timeout en identify_or_create_contact_safe.
+        Espera 2s antes de buscar/crear para darle tiempo a cualquier llamada en vuelo.
+        """
+        await asyncio.sleep(2.0)
+        try:
+            result = await self.identify_or_create_contact(phone_raw, source_channel)
+            logger.info(
+                "[ContactManager] Background: contacto asegurado %s → %s",
+                phone_raw, result.contact_id if result else None
+            )
+        except Exception as e:
+            logger.error(
+                "[ContactManager] Background: falló asegurar contacto %s: %s",
+                phone_raw, e
+            )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # MÉTODOS PRIVADOS - BÚSQUEDA
     # ═══════════════════════════════════════════════════════════════════════════
@@ -268,6 +302,7 @@ class ContactManager:
     async def _search_contact(self, phone_normalized: str) -> Optional[str]:
         """
         Busca un contacto por whatsapp_id (número normalizado).
+        Verifica Redis cache antes de consultar HubSpot.
 
         Args:
             phone_normalized: Número en formato E.164
@@ -275,8 +310,29 @@ class ContactManager:
         Returns:
             contact_id si existe, None si no
         """
+        # --- Fast path: Redis cache ---
+        cache_key = f"phone_cache:{phone_normalized}"
+        try:
+            r = await self._get_redis()
+            cached_id = await r.get(cache_key)
+            if cached_id:
+                logger.info(
+                    "[ContactManager] Cache hit: %s → %s", phone_normalized, cached_id
+                )
+                return cached_id
+        except Exception:
+            pass  # Cache unavailable, fall through to HubSpot
+
+        # --- Slow path: HubSpot API ---
         try:
             contact_id = await self.hubspot.search_contact_by_phone(phone_normalized)
+            # Populate cache for next time
+            if contact_id:
+                try:
+                    r = await self._get_redis()
+                    await r.set(cache_key, contact_id, ex=86400)  # 24h TTL
+                except Exception:
+                    pass
             return contact_id
         except Exception as e:
             logger.error("[ContactManager] Error buscando contacto: %s", e)
@@ -414,6 +470,14 @@ class ContactManager:
         contact_id = await self._create_contact_with_retry(
             properties, phone_normalized
         )
+
+        # Guardar en cache Redis para evitar búsquedas futuras lentas a HubSpot
+        try:
+            r = await self._get_redis()
+            await r.set(f"phone_cache:{phone_normalized}", contact_id, ex=86400)
+            logger.info("[ContactManager] phone_cache guardado para %s", phone_normalized)
+        except Exception:
+            pass
 
         # Construir url_chat para deep link CRM → Panel (requiere PANEL_BASE_URL en env)
         panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")

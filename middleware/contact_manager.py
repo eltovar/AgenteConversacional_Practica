@@ -207,19 +207,40 @@ class ContactManager:
             raise  # webhook_handler lo captura → contact_info = None
 
         if contact_result:
+            contact_id = contact_result["contact_id"]
+            properties = contact_result.get("properties") or {}
+            existing_owner = properties.get("hubspot_owner_id")
+            
             logger.info(
-                "[ContactManager] Contacto existente encontrado: %s (nombre: %s)",
-                contact_result["contact_id"],
-                contact_result.get("firstname", "N/A")
+                "[ContactManager] Contacto existente encontrado: %s (nombre: %s, owner: %s)",
+                contact_id,
+                contact_result.get("firstname", "N/A"),
+                existing_owner or "SIN ASIGNAR"
             )
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # FIX: Asignar owner a contactos existentes que no tienen uno
+            # ═══════════════════════════════════════════════════════════════════
+            if not existing_owner:
+                logger.info(
+                    "[ContactManager] Contacto %s sin owner. Asignando por canal: %s",
+                    contact_id, source_channel
+                )
+                # Asignar owner en background para no bloquear respuesta de Sofia
+                asyncio.create_task(
+                    self._assign_owner_to_existing_contact(
+                        contact_id, phone_normalized, source_channel
+                    )
+                )
+            
             return ContactInfo(
-                contact_id=contact_result["contact_id"],
+                contact_id=contact_id,
                 phone_normalized=phone_normalized,
                 is_new=False,
                 firstname=contact_result.get("firstname"),
                 lastname=contact_result.get("lastname"),
                 email=contact_result.get("email"),
-                properties=contact_result.get("properties")
+                properties=properties
             )
 
         # Paso 3: Crear nuevo lead básico (con tiempo restante del timeout)
@@ -676,6 +697,118 @@ class ContactManager:
             logger.info("[ContactManager] url_chat registrado para contacto %s", contact_id)
         except Exception as e:
             logger.warning("[ContactManager] No se pudo escribir url_chat para %s: %s", contact_id, e)
+
+    async def _assign_owner_to_existing_contact(
+        self,
+        contact_id: str,
+        phone_normalized: str,
+        source_channel: str
+    ) -> None:
+        """
+        Asigna owner a un contacto existente que no tiene uno.
+        
+        Se ejecuta en background para no bloquear la respuesta de Sofía.
+        También crea deal si no existe y actualiza url_chat.
+        
+        Args:
+            contact_id: ID del contacto en HubSpot
+            phone_normalized: Teléfono en formato E.164
+            source_channel: Canal de origen para determinar el equipo
+        """
+        try:
+            # 1. Obtener owner basado en el canal
+            owner_id = lead_assigner.get_next_owner(source_channel)
+            
+            if not owner_id:
+                logger.warning(
+                    "[ContactManager] No se pudo obtener owner para canal %s. "
+                    "Contacto %s no será asignado.",
+                    source_channel, contact_id
+                )
+                return
+            
+            logger.info(
+                "[ContactManager] Asignando owner %s a contacto existente %s (canal: %s)",
+                owner_id, contact_id, source_channel
+            )
+            
+            # 2. Actualizar contacto con owner
+            await self.hubspot.update_contact(contact_id, {
+                "hubspot_owner_id": owner_id
+            })
+            logger.info(
+                "[ContactManager] ✅ Owner %s asignado a contacto %s",
+                owner_id, contact_id
+            )
+            
+            # 3. Construir url_chat para deep link
+            panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+            admin_api_key = os.getenv("ADMIN_API_KEY", "")
+            from urllib.parse import quote
+            phone_encoded = quote(phone_normalized, safe='')
+            url_chat = (
+                f"{panel_base_url}/whatsapp/panel/?key={admin_api_key}&advisor={owner_id}&phone={phone_encoded}"
+                if panel_base_url and owner_id and admin_api_key else ""
+            )
+            
+            # 4. Escribir url_chat en contacto
+            if url_chat:
+                try:
+                    await self.hubspot.update_contact(contact_id, {"url_chat": url_chat})
+                    logger.info("[ContactManager] url_chat actualizado para contacto %s", contact_id)
+                except Exception as url_err:
+                    logger.warning(
+                        "[ContactManager] No se pudo actualizar url_chat: %s", url_err
+                    )
+            
+            # 5. Verificar si ya tiene deal y crear uno si no
+            try:
+                has_deal = await self._check_contact_has_deal(contact_id)
+                if not has_deal:
+                    logger.info(
+                        "[ContactManager] Contacto %s sin deal. Creando...",
+                        contact_id
+                    )
+                    await self._create_deal_for_new_lead(
+                        contact_id, phone_normalized, source_channel, url_chat, owner_id
+                    )
+                else:
+                    logger.info(
+                        "[ContactManager] Contacto %s ya tiene deal. No se crea duplicado.",
+                        contact_id
+                    )
+            except Exception as deal_err:
+                logger.warning(
+                    "[ContactManager] Error verificando/creando deal para %s: %s",
+                    contact_id, deal_err
+                )
+                
+        except Exception as e:
+            logger.warning(
+                "[ContactManager] Error asignando owner a contacto %s: %s",
+                contact_id, e
+            )
+
+    async def _check_contact_has_deal(self, contact_id: str) -> bool:
+        """
+        Verifica si un contacto ya tiene al menos un deal asociado.
+        
+        Args:
+            contact_id: ID del contacto en HubSpot
+            
+        Returns:
+            True si tiene al menos un deal, False si no
+        """
+        try:
+            deals = await self.hubspot.get_contact_deals(contact_id)
+            return bool(deals and len(deals) > 0)
+        except Exception as e:
+            logger.warning(
+                "[ContactManager] Error verificando deals para contacto %s: %s",
+                contact_id, e
+            )
+            # En caso de error, asumir que no tiene deal para crear uno
+            return False
 
     async def _create_contact_with_retry(
         self,

@@ -6,7 +6,7 @@ Maneja autenticación, retry logic y deduplicación de contactos.
 
 import os
 import httpx
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from logging_config import logger
 
@@ -18,12 +18,6 @@ from logging_config import logger
 class HubSpotPropertyValidator:
     """
     Valida que las propiedades existan en HubSpot antes de enviarlas.
-    
-    Basado en auditoría del 2026-02-27:
-    ✅ EXISTEN: chatbot_conversation, chatbot_timestamp, chatbot_sentiment_alert, 
-                chatbot_social_media_link
-    ❌ NO EXISTEN: chatbot_summary, chatbot_suspicious_indicators, chatbot_canal_origen, 
-                  chatbot_social_media_url
     """
     
     # Propiedades que están confirmadas que EXISTEN en HubSpot
@@ -206,6 +200,8 @@ class HubSpotClient:
         payload = {
             "properties": [
                 "id", "firstname", "lastname", "email",
+                # Owner del contacto (para verificar si ya está asignado)
+                "hubspot_owner_id",
                 # Propiedades del chatbot
                 "chatbot_property_type",
                 "chatbot_operation_type", 
@@ -428,3 +424,28 @@ class HubSpotClient:
         except Exception as e:
             logger.error(f"[HubSpotClient] Error obteniendo contacto {contact_id}: {e}")
             raise
+
+    async def get_contact_deals(self, contact_id: str) -> List[Dict[str, Any]]:
+        """
+        Obtiene los deals asociados a un contacto.
+        
+        Args:
+            contact_id: ID del contacto en HubSpot
+            
+        Returns:
+            Lista de deals asociados (puede estar vacía)
+        """
+        endpoint = f"/crm/v3/objects/contacts/{contact_id}/associations/deals"
+        
+        try:
+            response = await self._request("GET", endpoint)
+            results = response.get("results", [])
+            logger.info(
+                f"[HubSpotClient] Contacto {contact_id} tiene {len(results)} deals asociados"
+            )
+            return results
+        except Exception as e:
+            logger.warning(
+                f"[HubSpotClient] Error obteniendo deals para contacto {contact_id}: {e}"
+            )
+            return []

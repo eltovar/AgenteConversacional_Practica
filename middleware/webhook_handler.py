@@ -52,6 +52,313 @@ from utils.business_hours import (
     should_add_out_of_hours_message
 )
 
+# Cliente Twilio para respuestas diferidas (evita timeout de 15 segundos)
+from utils.twilio_client import twilio_client
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESPUESTA DIFERIDA PARA EVITAR TIMEOUT DE TWILIO (15 segundos)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Twilio cierra la conexión del webhook después de 15 segundos y envía un retry.
+# El retry causa errores 422 porque el body ya fue consumido en la primera request.
+#
+# SOLUCIÓN: Responder inmediatamente con 200 OK (TwiML vacío) y procesar
+# el mensaje en background, enviando la respuesta de Sofia via REST API.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _process_message_deferred(
+    phone_normalized: str,
+    phone_raw: str,
+    body: str,
+    profile_name: Optional[str],
+    message_sid: Optional[str],
+    num_media: int,
+    media_url: Optional[str],
+    media_content_type: Optional[str],
+    early_channel: str
+):
+    """
+    Procesa un mensaje de WhatsApp de forma diferida (background task).
+    
+    Esta función contiene toda la lógica pesada:
+    - Procesamiento de multimedia
+    - Identificación/creación de contacto en HubSpot
+    - Verificación de estado de conversación
+    - Procesamiento con Sofia
+    - Envío de respuesta via Twilio REST API
+    """
+    try:
+        logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {phone_normalized}")
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 1: Procesamiento de Multimedia (si existe)
+        # ════════════════════════════════════════════════════════════
+        media_result = None
+        processed_body = body
+        
+        if num_media > 0 and media_url:
+            logger.info(f"[DeferredProcess] Procesando {num_media} archivo(s) multimedia")
+            try:
+                media_result = await media_processor.process_incoming_media(
+                    media_url=media_url,
+                    content_type=media_content_type or "application/octet-stream",
+                    phone=phone_normalized
+                )
+                
+                if media_result.get("transcription"):
+                    processed_body = media_result.get("body_for_ai", body)
+                elif media_result.get("analysis"):
+                    if body:
+                        processed_body = f"{body}\n\n{media_result.get('body_for_ai', '')}"
+                    else:
+                        processed_body = media_result.get("body_for_ai", "[Imagen recibida]")
+                        
+            except Exception as e:
+                logger.error(f"[DeferredProcess] Error procesando multimedia: {e}")
+                processed_body = body or "[El cliente envió un archivo]"
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 2: Identificar/crear contacto en HubSpot
+        # ════════════════════════════════════════════════════════════
+        contact_manager = get_contact_manager()
+        contact_info = None
+        
+        try:
+            contact_info = await contact_manager.identify_or_create_contact(
+                phone_raw=phone_raw,
+                source_channel=early_channel
+            )
+            contact_id = contact_info.contact_id if contact_info else None
+            logger.info(f"[DeferredProcess] Contacto: {contact_id}")
+        except Exception as e:
+            logger.error(f"[DeferredProcess] Error con HubSpot: {e}")
+            contact_id = None
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 3: Verificar si Sofía debe responder
+        # ════════════════════════════════════════════════════════════
+        should_respond, reason, special_message, redis_channel = await should_bot_respond(
+            phone_normalized=phone_normalized,
+            contact_id=contact_id
+        )
+        
+        final_channel = detect_channel_dynamic(processed_body, redis_channel)
+        
+        # Guardar mensaje en MongoDB SIEMPRE (para el panel)
+        mongo_manager = get_mongo_manager()
+        media_dict = None
+        if media_result and media_result.get("permanent_url"):
+            media_dict = {
+                "permanent_url": media_result.get("permanent_url"),
+                "type": media_result.get("media_type"),
+                "transcription": media_result.get("transcription"),
+                "analysis": media_result.get("analysis"),
+            }
+        
+        client_mongo_id = await mongo_manager.save_message(
+            phone=phone_normalized,
+            content=processed_body,
+            sender="client",
+            channel=final_channel,
+            hubspot_contact_id=contact_id,
+            message_sid=message_sid,
+            media=media_dict
+        )
+        logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
+        
+        # Notificar al panel vía WebSocket
+        await ws_manager.notify_new_message(
+            phone=phone_normalized,
+            canal=final_channel or "whatsapp",
+            message_preview=processed_body[:100] if processed_body else "",
+            sender="client",
+            contact_name=""
+        )
+        
+        if not should_respond:
+            logger.info(f"[DeferredProcess] Bot silenciado ({reason})")
+            
+            # Sincronizar con HubSpot si hay contacto
+            if contact_info:
+                await _sync_message_to_hubspot(
+                    contact_info.contact_id,
+                    processed_body,
+                    "incoming",
+                    phone_normalized,
+                    final_channel,
+                    media_result,
+                    message_sid
+                )
+            
+            # Enviar mensaje especial si existe (ej: PENDING_HANDOFF)
+            if special_message:
+                result = await twilio_client.send_whatsapp_message(
+                    to=phone_normalized,
+                    body=special_message
+                )
+                logger.info(f"[DeferredProcess] Mensaje especial enviado: {result}")
+            
+            return
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 4: Procesar con Sofia y enviar respuesta
+        # ════════════════════════════════════════════════════════════
+        logger.info(f"[DeferredProcess] Procesando con Sofia...")
+        
+        sofia = get_sofia_brain()
+        
+        # Detectar código de inmueble o link de red social
+        property_code_result = detect_property_code(processed_body)
+        link_detector = get_link_detector()
+        link_result = link_detector.analizar_mensaje(processed_body)
+        
+        lead_context = None
+        if property_code_result.has_code:
+            lead_context = {
+                "property_code": property_code_result.code,
+                "high_intent": True,
+                "code_context": property_code_result.context
+            }
+        elif link_result.tiene_link and link_result.portal in [
+            PortalOrigen.INSTAGRAM, PortalOrigen.FACEBOOK, 
+            PortalOrigen.TIKTOK, PortalOrigen.YOUTUBE, PortalOrigen.LINKEDIN
+        ]:
+            lead_context = {
+                "social_media_link": True,
+                "social_media_portal": link_result.portal.value,
+                "social_media_url": link_result.url_original,
+                "es_inmueble": link_result.es_inmueble,
+                "high_intent": True
+            }
+        
+        # Procesar mensaje con Sofia
+        result = await sofia.process_message_with_analysis(
+            session_id=phone_normalized,
+            user_message=processed_body,
+            lead_context=lead_context
+        )
+        
+        response_text = result.respuesta
+        analysis = result.analisis
+        logger.info(f"[DeferredProcess] Sofia respondió: {response_text[:100]}...")
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 5: Manejar handoff según análisis
+        # ════════════════════════════════════════════════════════════
+        state_manager = get_state_manager()
+        
+        if analysis.handoff_priority == "immediate":
+            await state_manager.request_handoff(
+                phone_normalized,
+                reason=f"Cliente urgente - Emoción: {analysis.emocion}",
+                contact_id=contact_id,
+                canal=final_channel
+            )
+        elif analysis.handoff_priority == "high":
+            reason_parts = []
+            if analysis.intencion_visita:
+                reason_parts.append("Intención de visita")
+            reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
+            await state_manager.request_handoff(
+                phone_normalized,
+                reason=reason,
+                contact_id=contact_id,
+                canal=final_channel
+            )
+        
+        await state_manager.update_activity(phone_normalized)
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 6: Verificar horario y estado final
+        # ════════════════════════════════════════════════════════════
+        out_of_hours_msg = None
+        if should_add_out_of_hours_message(analysis.handoff_priority):
+            out_of_hours_msg = get_out_of_hours_message()
+        
+        # Re-verificar estado (anti race-condition)
+        final_status = await state_manager.get_status(phone_normalized)
+        if final_status in [
+            ConversationStatus.HUMAN_ACTIVE,
+            ConversationStatus.IN_CONVERSATION,
+            ConversationStatus.PENDING_HANDOFF
+        ]:
+            logger.warning(f"[DeferredProcess] Race condition: estado={final_status.value}")
+            
+            if contact_info:
+                await _sync_conversation_with_analysis_to_hubspot(
+                    contact_info.contact_id,
+                    processed_body,
+                    f"[BOT BLOQUEADO] {response_text}",
+                    phone_normalized,
+                    analysis,
+                    final_channel,
+                    media_result,
+                    client_mongo_id
+                )
+            
+            if out_of_hours_msg:
+                await twilio_client.send_whatsapp_message(
+                    to=phone_normalized,
+                    body=out_of_hours_msg
+                )
+            return
+        
+        # Concatenar mensaje de fuera de horario si aplica
+        if out_of_hours_msg:
+            response_text = f"{response_text}\n\n{out_of_hours_msg}"
+        
+        # ════════════════════════════════════════════════════════════
+        # PASO 7: Enviar respuesta via Twilio REST API
+        # ════════════════════════════════════════════════════════════
+        send_result = await twilio_client.send_whatsapp_message(
+            to=phone_normalized,
+            body=response_text
+        )
+        
+        if send_result.get("status") == "error":
+            logger.error(f"[DeferredProcess] Error enviando respuesta: {send_result}")
+        else:
+            logger.info(f"[DeferredProcess] ✅ Respuesta enviada: {send_result.get('message_sid', 'OK')}")
+        
+        # Guardar respuesta de Sofia en MongoDB
+        await mongo_manager.save_message(
+            phone=phone_normalized,
+            content=response_text,
+            sender="bot",
+            channel=final_channel,
+            hubspot_contact_id=contact_id
+        )
+        
+        # Sincronizar con HubSpot
+        if contact_info:
+            await _sync_conversation_with_analysis_to_hubspot(
+                contact_info.contact_id,
+                processed_body,
+                response_text,
+                phone_normalized,
+                analysis,
+                final_channel,
+                media_result,
+                client_mongo_id
+            )
+        
+        logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {phone_normalized}")
+        
+    except Exception as e:
+        logger.error(f"[DeferredProcess] Error fatal: {e}", exc_info=True)
+        # Intentar enviar mensaje de error al usuario
+        try:
+            await twilio_client.send_whatsapp_message(
+                to=phone_normalized,
+                body="Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
+            )
+        except:
+            pass
+
+
 # Instancia global del detector de links
 _link_detector: Optional[LinkDetector] = None
 
@@ -290,9 +597,95 @@ async def whatsapp_webhook(
 ):
     """
     Endpoint principal del webhook de Twilio.
+    
+    PATRÓN DE RESPUESTA DIFERIDA:
+    - Twilio cierra la conexión después de 15 segundos
+    - Responder inmediatamente con 200 OK (TwiML vacío)
+    - Procesar el mensaje en background
+    - Enviar respuesta de Sofia via Twilio REST API
+    
+    Esto evita errores 422 por retry y timeouts.
+    """
+    body_preview = Body[:50] if Body else "[Sin texto]"
+    logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")
 
-    Recibe mensajes de WhatsApp y los procesa según el estado de la conversación.
-    Soporta texto, imágenes y audios.
+    try:
+        # ════════════════════════════════════════════════════════════
+        # PASO 1: Validación rápida del número (< 1ms)
+        # ════════════════════════════════════════════════════════════
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(From)
+
+        if not validation.is_valid:
+            logger.error(f"[Webhook] Número inválido: {From} - {validation.error_message}")
+            return _create_error_response(
+                "Lo siento, no pude procesar tu mensaje. Por favor intenta de nuevo."
+            )
+
+        phone_normalized = validation.normalized
+        logger.info(f"[Webhook] Número normalizado: {From} → {phone_normalized}")
+
+        # ════════════════════════════════════════════════════════════
+        # PASO 2: Detección temprana del canal (< 1ms)
+        # ════════════════════════════════════════════════════════════
+        early_channel = detect_channel_dynamic(Body, None)
+        logger.info(f"[Webhook] Canal detectado tempranamente: {early_channel}")
+
+        # ════════════════════════════════════════════════════════════
+        # PASO 3: Encolar procesamiento en background y retornar OK
+        # ════════════════════════════════════════════════════════════
+        # CRÍTICO: Retornar 200 OK inmediatamente para evitar timeout de Twilio
+        background_tasks.add_task(
+            _process_message_deferred,
+            phone_normalized,
+            From,
+            Body,
+            ProfileName,
+            MessageSid,
+            NumMedia,
+            MediaUrl0,
+            MediaContentType0,
+            early_channel
+        )
+        
+        # Actualizar timestamps en background
+        background_tasks.add_task(update_last_client_message, phone_normalized)
+        background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
+        
+        logger.info(f"[Webhook] ✅ Procesamiento encolado, retornando 200 OK inmediatamente")
+        
+        # Retornar TwiML vacío - la respuesta real se envía via REST API
+        return Response(content="", media_type="text/xml")
+
+    except Exception as e:
+        logger.error("[Webhook] Error en validación inicial: %s", e, exc_info=True)
+        return _create_error_response(
+            "Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEBHOOK ORIGINAL (DESHABILITADO - Mantenido como referencia)
+# ═══════════════════════════════════════════════════════════════════════════════
+# El código original del webhook se mantiene abajo comentado como referencia.
+# La lógica principal ahora está en _process_message_deferred().
+
+
+async def _whatsapp_webhook_original_DISABLED(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    From: str = Form(...),
+    Body: str = Form(""),
+    ProfileName: Optional[str] = Form(None),
+    MessageSid: Optional[str] = Form(None),
+    # Parámetros de multimedia (Twilio envía NumMedia, MediaUrl0, MediaContentType0)
+    NumMedia: int = Form(0),
+    MediaUrl0: Optional[str] = Form(None),
+    MediaContentType0: Optional[str] = Form(None),
+):
+    """
+    [DESHABILITADO] Webhook original - Mantenido como referencia.
+    La lógica ha sido movida a _process_message_deferred() para respuesta diferida.
     """
     body_preview = Body[:50] if Body else "[Sin texto]"
     logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")

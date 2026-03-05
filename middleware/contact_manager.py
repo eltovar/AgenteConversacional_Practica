@@ -188,7 +188,7 @@ class ContactManager:
             phone_raw, phone_normalized
         )
 
-        _deadline = 7.0  # segundos totales para llamadas HubSpot
+        _deadline = 3.0  # segundos totales para llamadas HubSpot (reducido para responder más rápido)
         _t0 = _time.monotonic()
 
         # Paso 2: Buscar contacto existente (con timeout global)

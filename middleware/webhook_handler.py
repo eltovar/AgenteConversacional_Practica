@@ -69,6 +69,70 @@ from utils.twilio_client import twilio_client
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+async def _get_historical_channel(
+    phone_normalized: str, 
+    detected_channel: str,
+    hubspot_client=None
+) -> str:
+    """
+    Obtiene el canal histórico del contacto (Redis → HubSpot → detectado actual).
+    
+    ORDEN DE PRIORIDAD:
+    1. Si el contacto ya existe en Redis: usar su canal_origen persistido
+    2. Si existe en HubSpot: usar su canal_origen de la propiedad
+    3. Si es contacto NUEVO: usar el canal detectado del mensaje actual
+    
+    Esto asegura que un lead de metrocuadrado siempre vaya al asesor de portales,
+    incluso si sus mensajes posteriores no tienen links.
+    
+    Args:
+        phone_normalized: Teléfono en formato E.164
+        detected_channel: Canal detectado del mensaje actual (puede ser "whatsapp")
+        hubspot_client: Cliente HubSpot (opcional, para evitar import circular)
+        
+    Returns:
+        Canal histórico o detectado si es contacto nuevo
+    """
+    state_manager = get_state_manager()
+    
+    # ── 1. Verificar Redis (todos los canales posibles) ──
+    for canal in CANALES_A_VERIFICAR:
+        meta = await state_manager.get_meta(phone_normalized, canal)
+        if meta and meta.canal_origen and meta.canal_origen != "whatsapp":
+            logger.info(
+                f"[ChannelHistory] Canal histórico de Redis: {meta.canal_origen} "
+                f"(teléfono: {phone_normalized})"
+            )
+            return meta.canal_origen
+        elif meta and meta.canal_origen:
+            # Tiene meta con canal whatsapp, pero seguir buscando por si hay otro
+            continue
+    
+    # ── 2. Verificar HubSpot (si hay cliente disponible) ──
+    if hubspot_client:
+        try:
+            contact_result = await hubspot_client.search_contact_by_phone_with_properties(phone_normalized)
+            if contact_result:
+                props = contact_result.get("properties", {})
+                hs_canal = props.get("canal_origen", "").lower().strip()
+                if hs_canal and hs_canal not in ("whatsapp", "whatsapp_directo", ""):
+                    logger.info(
+                        f"[ChannelHistory] Canal histórico de HubSpot: {hs_canal} "
+                        f"(teléfono: {phone_normalized})"
+                    )
+                    return hs_canal
+        except Exception as e:
+            logger.debug(f"[ChannelHistory] Error consultando HubSpot: {e}")
+    
+    # ── 3. Contacto nuevo: usar canal detectado del mensaje actual ──
+    if detected_channel and detected_channel != "whatsapp":
+        logger.info(
+            f"[ChannelHistory] Contacto nuevo con canal detectado: {detected_channel} "
+            f"(teléfono: {phone_normalized})"
+        )
+    return detected_channel
+
+
 async def _process_message_deferred(
     phone_normalized: str,
     phone_raw: str,
@@ -121,15 +185,30 @@ async def _process_message_deferred(
                 processed_body = body or "[El cliente envió un archivo]"
         
         # ════════════════════════════════════════════════════════════
-        # PASO 2: Identificar/crear contacto en HubSpot
+        # PASO 2: Obtener canal histórico y crear/identificar contacto
         # ════════════════════════════════════════════════════════════
         contact_manager = get_contact_manager()
         contact_info = None
         
+        # ✅ FIX: Obtener canal histórico ANTES de crear el contacto
+        # Si el contacto ya existe, usa su canal persistido (portales, redes sociales)
+        # Si es nuevo y el mensaje tiene link, usa ese canal
+        # Esto asegura asignación correcta al asesor correspondiente
+        historical_channel = await _get_historical_channel(
+            phone_normalized=phone_normalized,
+            detected_channel=early_channel,
+            hubspot_client=contact_manager.hubspot if contact_manager else None
+        )
+        
+        logger.info(
+            f"[DeferredProcess] Canal: detectado={early_channel}, "
+            f"histórico={historical_channel}"
+        )
+        
         try:
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=phone_raw,
-                source_channel=early_channel
+                source_channel=historical_channel  # ← Usar canal histórico
             )
             contact_id = contact_info.contact_id if contact_info else None
             logger.info(f"[DeferredProcess] Contacto: {contact_id}")
@@ -145,7 +224,8 @@ async def _process_message_deferred(
             contact_id=contact_id
         )
         
-        final_channel = detect_channel_dynamic(processed_body, redis_channel)
+        # Usar el canal histórico para consistencia
+        final_channel = historical_channel if historical_channel != "whatsapp" else detect_channel_dynamic(processed_body, redis_channel)
         
         # Guardar mensaje en MongoDB SIEMPRE (para el panel)
         mongo_manager = get_mongo_manager()
@@ -301,6 +381,16 @@ async def _process_message_deferred(
             )
         
         await state_manager.update_activity(phone_normalized)
+        
+        # ✅ FIX: Persistir canal_origen en Redis para asignación correcta de asesores
+        # El canal histórico se preserva para futuros mensajes del mismo contacto
+        await state_manager.ensure_meta_with_channel(
+            phone=phone_normalized,
+            canal=final_channel,
+            canal_origen=historical_channel,
+            contact_id=contact_id,
+            display_name=contact_info.firstname if contact_info else None
+        )
         
         # ════════════════════════════════════════════════════════════
         # PASO 6: Verificar horario y estado final

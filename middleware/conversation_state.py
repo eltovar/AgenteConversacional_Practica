@@ -604,6 +604,102 @@ class ConversationStateManager:
             logger.error(f"[ConversationState] Error en update_activity: {e}")
             return False
 
+    async def ensure_meta_with_channel(
+        self,
+        phone: str,
+        canal: str = "whatsapp",
+        canal_origen: str = None,
+        contact_id: str = None,
+        display_name: str = None
+    ) -> bool:
+        """
+        Asegura que exista conv_meta y actualiza el canal_origen si es específico.
+        
+        IMPORTANTE para asignación de asesores:
+        - Si el contacto NO tiene meta → crea uno con el canal detectado
+        - Si el contacto YA tiene meta con canal específico (no whatsapp) → lo preserva
+        - Si el contacto tiene meta con canal "whatsapp" Y llega uno específico → actualiza
+        
+        Esto garantiza que los leads de portales/redes sociales siempre tengan
+        su canal_origen correcto para la asignación de asesores.
+        
+        Args:
+            phone: Teléfono normalizado
+            canal: Canal de la conversación (para la key de Redis)
+            canal_origen: Canal de origen detectado del mensaje
+            contact_id: ID del contacto en HubSpot
+            display_name: Nombre para mostrar
+            
+        Returns:
+            True si se creó/actualizó correctamente
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            
+            data = await self.redis.get(meta_key)
+            now_iso = get_bogota_now_iso()
+            
+            if data:
+                # Meta ya existe - verificar si actualizar canal
+                meta = json.loads(data)
+                current_canal = meta.get("canal_origen", "whatsapp")
+                
+                # Solo actualizar si:
+                # 1. El canal actual es genérico (whatsapp/whatsapp_directo)
+                # 2. Y tenemos un canal específico nuevo
+                canales_genericos = ("whatsapp", "whatsapp_directo", "", None)
+                if current_canal in canales_genericos and canal_origen and canal_origen not in canales_genericos:
+                    meta["canal_origen"] = canal_origen
+                    logger.info(
+                        f"[ConversationState] Canal actualizado: {current_canal} → {canal_origen} "
+                        f"(teléfono: {phone})"
+                    )
+                
+                # Actualizar otros campos si se proporcionan
+                if contact_id and not meta.get("contact_id"):
+                    meta["contact_id"] = contact_id
+                if display_name and not meta.get("display_name"):
+                    meta["display_name"] = display_name
+                
+                meta["last_activity"] = now_iso
+                
+                ttl = await self.redis.ttl(meta_key)
+                ex = ttl if ttl and ttl > 0 else self._calculate_dynamic_ttl()
+                await self.redis.set(meta_key, json.dumps(meta), ex=ex)
+                
+            else:
+                # Meta no existe - crear nuevo
+                meta = {
+                    "phone_normalized": phone,
+                    "contact_id": contact_id,
+                    "status": ConversationStatus.BOT_ACTIVE.value,
+                    "last_activity": now_iso,
+                    "canal_origen": canal_origen or canal_safe,
+                    "display_name": display_name,
+                    "created_at": now_iso
+                }
+                
+                ttl = self._calculate_dynamic_ttl()
+                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                
+                # Agregar al ZSET para que aparezca en el panel
+                index_member = f"{phone}:{canal_safe}"
+                score = get_bogota_now().timestamp()
+                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
+                
+                logger.info(
+                    f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe} "
+                    f"(teléfono: {phone})"
+                )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en ensure_meta_with_channel: {e}")
+            return False
+
     async def transfer_contact(
         self,
         phone: str,

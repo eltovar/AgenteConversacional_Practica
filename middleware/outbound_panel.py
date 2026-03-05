@@ -363,6 +363,66 @@ async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_
     return await client.get(url, headers=headers, params=params)
 
 
+# ============================================================================
+# BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
+# ============================================================================
+
+async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Obtiene información de múltiples contactos en UNA sola llamada batch.
+    
+    Usa POST /crm/v3/objects/contacts/batch/read que permite hasta 100 IDs por llamada.
+    Esto reduce drásticamente los 429 rate limits al cargar el panel.
+    
+    Args:
+        contact_ids: Lista de IDs de contactos HubSpot (max 100)
+        
+    Returns:
+        Dict[contact_id, properties] con firstname, lastname, email, phone
+    """
+    if not contact_ids or not HUBSPOT_API_KEY:
+        return {}
+    
+    # HubSpot batch acepta máximo 100 IDs
+    contact_ids = contact_ids[:100]
+    
+    url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
+    payload = {
+        "properties": ["firstname", "lastname", "email", "phone"],
+        "inputs": [{"id": cid} for cid in contact_ids]
+    }
+    
+    try:
+        client = get_httpx_client()
+        response = await _hubspot_post(client, url, payload, HUBSPOT_API_KEY, max_retries=2)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = {}
+            for contact in data.get("results", []):
+                cid = contact.get("id")
+                props = contact.get("properties", {})
+                results[cid] = {
+                    "firstname": props.get("firstname", ""),
+                    "lastname": props.get("lastname", ""),
+                    "email": props.get("email"),
+                    "phone": props.get("phone")
+                }
+            logger.info(f"[Panel] Batch HubSpot: obtenidos {len(results)}/{len(contact_ids)} contactos")
+            return results
+        else:
+            logger.warning(f"[Panel] Batch HubSpot falló: {response.status_code}")
+            return {}
+            
+    except Exception as e:
+        logger.error(f"[Panel] Error en batch HubSpot: {e}")
+        return {}
+
+
+# Caché temporal para datos de contactos (se llena con batch, se consume en enriquecimiento)
+_batch_contact_cache: Dict[str, Dict[str, Any]] = {}
+
+
 async def _update_deal_to_en_conversacion(contact_id: str) -> None:
     """
     Busca el deal activo del contacto y actualiza su stage a 'En conversación'
@@ -2800,8 +2860,21 @@ async def get_active_contacts(
             f"({len(priority_contacts)} prioridad + {len(bot_contacts[:remaining_slots])} bot)"
         )
 
-        # === PASO 2: Enriquecer contactos activos con HubSpot (PARALELO) ===
+        # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
         contact_manager = ContactManager()
+        
+        # ── PASO 2.1: Batch request para obtener nombres de TODOS los contactos en 1 llamada ──
+        # Esto reduce drásticamente los 429 (de N llamadas a 1)
+        contact_ids_to_fetch = [
+            c.get("contact_id") for c in active_contacts 
+            if c.get("contact_id") and not c.get("display_name") 
+            or c.get("display_name") in ("Cliente Nuevo", "Sin nombre", "")
+        ]
+        
+        batch_contact_data = {}
+        if contact_ids_to_fetch:
+            batch_contact_data = await _hubspot_batch_get_contacts(contact_ids_to_fetch)
+            logger.info(f"[Panel] Batch pre-fetch: {len(batch_contact_data)} contactos obtenidos")
 
         async def _enrich_single_contact(contact: dict) -> dict:
             """Enriquece un contacto individual con datos de HubSpot."""
@@ -2818,19 +2891,20 @@ async def get_active_contacts(
 
             # Si tenemos contact_id, obtener nombre de HubSpot y deal info
             if contact.get("contact_id"):
-                # Solo llamar HubSpot para el nombre si Redis meta NO lo tiene ya.
-                # Los contactos migrados traen display_name en meta → ahorra 1 call/contacto.
+                cid = contact["contact_id"]
+                
+                # ✅ OPTIMIZADO: Usar datos del batch en lugar de llamada individual
                 existing_name = contact.get("display_name", "").strip()
                 if not existing_name or existing_name in ("Cliente Nuevo", "Sin nombre"):
-                    try:
-                        hs_info = await _get_hubspot_contact_info(contact["contact_id"])
-                        if hs_info:
-                            firstname = hs_info.get("firstname", "")
-                            lastname = hs_info.get("lastname", "")
-                            contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
-                            contact["email"] = hs_info.get("email")
-                    except Exception as e:
-                        logger.debug(f"[Panel] No se pudo enriquecer contacto: {e}")
+                    # Primero intentar desde batch cache (SIN llamada HTTP)
+                    if cid in batch_contact_data:
+                        hs_info = batch_contact_data[cid]
+                        firstname = hs_info.get("firstname", "")
+                        lastname = hs_info.get("lastname", "")
+                        contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
+                        contact["email"] = hs_info.get("email")
+                    # Si no estaba en batch (raro), no llamar HubSpot - usar teléfono
+                    # Esto evita llamadas individuales que causan 429
 
                 # Buscar deal asociado para el dropdown de pipeline.
                 # Si Redis meta ya tiene deal_id (contactos migrados via patch_redis_deal_ids.py),
@@ -2839,7 +2913,7 @@ async def get_active_contacts(
                     contact.setdefault("current_stage", contact.get("deal_stage", "1275156339"))
                 else:
                     try:
-                        deal_info = await _get_contact_deal_info(contact["contact_id"])
+                        deal_info = await _get_contact_deal_info(cid)
                         if deal_info:
                             contact["deal_id"] = deal_info.get("deal_id")
                             contact["current_stage"] = deal_info.get("current_stage")
@@ -2847,7 +2921,7 @@ async def get_active_contacts(
                             # AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
                             try:
                                 created_deal = await contact_manager._create_deal_for_new_lead(
-                                    contact_id=contact["contact_id"],
+                                    contact_id=cid,
                                     phone_normalized=phone,
                                     source_channel="panel_auto"
                                 )
@@ -2855,12 +2929,12 @@ async def get_active_contacts(
                                     contact["deal_id"] = created_deal.get("deal_id")
                                     contact["current_stage"] = created_deal.get("current_stage")
                                     import time
-                                    _deal_info_cache[contact["contact_id"]] = {
+                                    _deal_info_cache[cid] = {
                                         "deal_id": created_deal.get("deal_id"),
                                         "current_stage": created_deal.get("current_stage"),
                                         "cached_at": time.time()
                                     }
-                                    logger.info(f"[Panel] Deal auto-creado para contacto {contact['contact_id']}: {created_deal.get('deal_id')}")
+                                    logger.info(f"[Panel] Deal auto-creado para contacto {cid}: {created_deal.get('deal_id')}")
                             except Exception as create_err:
                                 logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
                     except Exception as e:
@@ -2879,8 +2953,8 @@ async def get_active_contacts(
 
             return contact
 
-        # ✅ FIX: Semáforo para limitar llamadas concurrentes a HubSpot (evitar 429)
-        hubspot_semaphore = asyncio.Semaphore(3)  # Máximo 3 llamadas simultáneas
+        # ✅ FIX: Semáforo REDUCIDO para limitar llamadas concurrentes (deal lookups)
+        hubspot_semaphore = asyncio.Semaphore(2)  # Reducido de 3 a 2 para evitar 429
         
         async def _enrich_with_rate_limit(contact: dict) -> dict:
             async with hubspot_semaphore:

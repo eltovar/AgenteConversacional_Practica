@@ -194,6 +194,55 @@ class HubSpotClient:
             logger.error(f"[HubSpotClient] Error buscando contacto: {e}", exc_info=True)
             return None
 
+    async def search_contact_by_phone_with_properties(self, phone: str) -> Optional[Dict[str, Any]]:
+        """
+        Busca contacto por whatsapp_id y retorna ID + propiedades chatbot.
+        
+        Returns:
+            Dict con 'id' y 'properties' o None si no existe.
+        """
+        endpoint = "/crm/v3/objects/contacts/batch/read"
+        # Obtener todas las propiedades relevantes para el chatbot
+        payload = {
+            "properties": [
+                "id", "firstname", "lastname", "email",
+                # Propiedades del chatbot
+                "chatbot_property_type",
+                "chatbot_operation_type", 
+                "chatbot_location",
+                "chatbot_budget",
+                "chatbot_preference",
+                "chatbot_score",
+                "chatbot_rooms",
+                "chatbot_conversation",
+                "chatbot_timestamp",
+                "canal_origen",
+            ],
+            "idProperty": "whatsapp_id",
+            "inputs": [{"id": phone}]
+        }
+
+        try:
+            response = await self._request("POST", endpoint, payload)
+            results = response.get("results", [])
+
+            if results:
+                contact = results[0]
+                contact_id = contact["id"]
+                properties = contact.get("properties", {})
+                logger.info(
+                    f"[HubSpotClient] Contacto encontrado con propiedades: {contact_id} "
+                    f"(firstname: {properties.get('firstname', 'N/A')})"
+                )
+                return {"id": contact_id, "properties": properties}
+
+            logger.info(f"[HubSpotClient] No se encontró contacto con whatsapp_id: {phone}")
+            return None
+
+        except Exception as e:
+            logger.error(f"[HubSpotClient] Error buscando contacto con propiedades: {e}", exc_info=True)
+            return None
+
     async def search_contacts_by_email(self, email: str) -> Dict[str, Any]:
         """
         Busca contactos por email usando la API de búsqueda.

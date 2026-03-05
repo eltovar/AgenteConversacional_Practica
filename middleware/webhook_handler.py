@@ -215,24 +215,55 @@ async def _process_message_deferred(
         link_detector = get_link_detector()
         link_result = link_detector.analizar_mensaje(processed_body)
         
-        lead_context = None
+        # Construir lead_context con propiedades del contacto de HubSpot
+        lead_context = {}
+        
+        # Incluir propiedades del contacto si existen
+        if contact_info:
+            if contact_info.firstname:
+                lead_context["firstname"] = contact_info.firstname
+            if contact_info.lastname:
+                lead_context["lastname"] = contact_info.lastname
+            if contact_info.email:
+                lead_context["email"] = contact_info.email
+            
+            # Incluir propiedades chatbot de HubSpot
+            if contact_info.properties:
+                props = contact_info.properties
+                if props.get("chatbot_property_type"):
+                    lead_context["chatbot_property_type"] = props["chatbot_property_type"]
+                if props.get("chatbot_operation_type"):
+                    lead_context["chatbot_operation_type"] = props["chatbot_operation_type"]
+                if props.get("chatbot_location"):
+                    lead_context["chatbot_location"] = props["chatbot_location"]
+                if props.get("chatbot_budget"):
+                    lead_context["chatbot_budget"] = props["chatbot_budget"]
+                if props.get("chatbot_preference"):
+                    lead_context["chatbot_preference"] = props["chatbot_preference"]
+                if props.get("chatbot_rooms"):
+                    lead_context["chatbot_rooms"] = props["chatbot_rooms"]
+                if props.get("chatbot_score"):
+                    lead_context["chatbot_score"] = props["chatbot_score"]
+                logger.info(f"[DeferredProcess] Propiedades HubSpot cargadas: {list(lead_context.keys())}")
+        
+        # Agregar contexto de código de propiedad si existe
         if property_code_result.has_code:
-            lead_context = {
+            lead_context.update({
                 "property_code": property_code_result.code,
                 "high_intent": True,
                 "code_context": property_code_result.context
-            }
+            })
         elif link_result.tiene_link and link_result.portal in [
             PortalOrigen.INSTAGRAM, PortalOrigen.FACEBOOK, 
             PortalOrigen.TIKTOK, PortalOrigen.YOUTUBE, PortalOrigen.LINKEDIN
         ]:
-            lead_context = {
+            lead_context.update({
                 "social_media_link": True,
                 "social_media_portal": link_result.portal.value,
                 "social_media_url": link_result.url_original,
                 "es_inmueble": link_result.es_inmueble,
                 "high_intent": True
-            }
+            })
         
         # Procesar mensaje con Sofia
         result = await sofia.process_message_with_analysis(

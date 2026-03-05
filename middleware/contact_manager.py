@@ -191,10 +191,10 @@ class ContactManager:
         _deadline = 3.0  # segundos totales para llamadas HubSpot (reducido para responder más rápido)
         _t0 = _time.monotonic()
 
-        # Paso 2: Buscar contacto existente (con timeout global)
+        # Paso 2: Buscar contacto existente CON PROPIEDADES (con timeout global)
         try:
-            contact_id = await asyncio.wait_for(
-                self._search_contact(phone_normalized),
+            contact_result = await asyncio.wait_for(
+                self._search_contact_with_properties(phone_normalized),
                 timeout=_deadline
             )
         except asyncio.TimeoutError:
@@ -206,15 +206,20 @@ class ContactManager:
             asyncio.create_task(self._background_ensure_contact(phone_raw, source_channel))
             raise  # webhook_handler lo captura → contact_info = None
 
-        if contact_id:
+        if contact_result:
             logger.info(
-                "[ContactManager] Contacto existente encontrado: %s",
-                contact_id
+                "[ContactManager] Contacto existente encontrado: %s (nombre: %s)",
+                contact_result["contact_id"],
+                contact_result.get("firstname", "N/A")
             )
             return ContactInfo(
-                contact_id=contact_id,
+                contact_id=contact_result["contact_id"],
                 phone_normalized=phone_normalized,
-                is_new=False
+                is_new=False,
+                firstname=contact_result.get("firstname"),
+                lastname=contact_result.get("lastname"),
+                email=contact_result.get("email"),
+                properties=contact_result.get("properties")
             )
 
         # Paso 3: Crear nuevo lead básico (con tiempo restante del timeout)
@@ -369,6 +374,69 @@ class ContactManager:
         except Exception as e:
             logger.error("[ContactManager] Error buscando contacto: %s", e)
             # En caso de error, asumimos que no existe para evitar duplicados
+            return None
+
+    async def _search_contact_with_properties(
+        self, 
+        phone_normalized: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Busca un contacto por whatsapp_id y retorna ID + propiedades chatbot.
+        
+        Usa cache de Redis para el contact_id, pero siempre obtiene
+        propiedades frescas de HubSpot para contexto de Sofia.
+
+        Args:
+            phone_normalized: Número en formato E.164
+
+        Returns:
+            Dict con 'contact_id', 'firstname', 'properties' o None
+        """
+        # --- Fast path: Redis cache para contact_id ---
+        cache_key = f"phone_cache:{phone_normalized}"
+        cached_id = None
+        try:
+            r = await self._get_redis()
+            cached_id = await r.get(cache_key)
+        except Exception:
+            pass
+
+        # --- Obtener propiedades de HubSpot ---
+        try:
+            result = await self.hubspot.search_contact_by_phone_with_properties(phone_normalized)
+            
+            if result:
+                contact_id = result["id"]
+                properties = result.get("properties", {})
+                
+                # Actualizar cache si no estaba
+                if not cached_id:
+                    try:
+                        r = await self._get_redis()
+                        await r.set(cache_key, contact_id, ex=86400)
+                    except Exception:
+                        pass
+                
+                logger.info(
+                    "[ContactManager] Contacto encontrado con propiedades: %s "
+                    "(nombre: %s, zona: %s)",
+                    contact_id,
+                    properties.get("firstname", "N/A"),
+                    properties.get("chatbot_location", "N/A")
+                )
+                
+                return {
+                    "contact_id": contact_id,
+                    "firstname": properties.get("firstname"),
+                    "lastname": properties.get("lastname"),
+                    "email": properties.get("email"),
+                    "properties": properties
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error("[ContactManager] Error buscando contacto con propiedades: %s", e)
             return None
 
     # ═══════════════════════════════════════════════════════════════════════════

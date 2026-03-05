@@ -195,6 +195,9 @@ class ConversationStateManager:
             # Mapeos de compatibilidad para datos legacy
             if 'advisor' in payload and not payload.get('assigned_owner_id'):
                 payload['assigned_owner_id'] = payload['advisor']
+            # ✅ FIX: Mapear owner_id → assigned_owner_id (campo usado por ensure_meta_with_channel)
+            if 'owner_id' in payload and not payload.get('assigned_owner_id'):
+                payload['assigned_owner_id'] = payload['owner_id']
             if 'phone' in payload and not payload.get('phone_normalized'):
                 payload['phone_normalized'] = payload['phone']
             if 'name' in payload and not payload.get('display_name'):
@@ -667,12 +670,12 @@ class ConversationStateManager:
                 if display_name and not meta.get("display_name"):
                     meta["display_name"] = display_name
                 
-                # ✅ FIX: Actualizar owner_id si se proporciona y no existe en meta
+                # ✅ FIX: Actualizar assigned_owner_id si se proporciona y no existe en meta
                 # Esto es CRÍTICO para que el panel de asesores filtre correctamente
-                if owner_id and not meta.get("owner_id"):
-                    meta["owner_id"] = owner_id
+                if owner_id and not meta.get("assigned_owner_id"):
+                    meta["assigned_owner_id"] = owner_id
                     logger.info(
-                        f"[ConversationState] owner_id asignado en meta: {owner_id} "
+                        f"[ConversationState] assigned_owner_id asignado en meta: {owner_id} "
                         f"(teléfono: {phone})"
                     )
                 
@@ -692,8 +695,8 @@ class ConversationStateManager:
                     "canal_origen": canal_origen or canal_safe,
                     "display_name": display_name,
                     "created_at": now_iso,
-                    # ✅ FIX: Incluir owner_id para filtrado correcto en panel de asesores
-                    "owner_id": owner_id
+                    # ✅ FIX: Incluir assigned_owner_id para filtrado correcto en panel de asesores
+                    "assigned_owner_id": owner_id
                 }
                 
                 ttl = self._calculate_dynamic_ttl()
@@ -707,7 +710,7 @@ class ConversationStateManager:
                 
                 logger.info(
                     f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe}, "
-                    f"owner_id={owner_id} (teléfono: {phone})"
+                    f"assigned_owner_id={owner_id} (teléfono: {phone})"
                 )
             
             return True

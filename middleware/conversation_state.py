@@ -89,6 +89,9 @@ class ConversationMeta:
     assigned_owner_ids: Optional[List[str]] = None  # Colaboradores (modo collaborative)
     primary_owner_id: Optional[str] = None  # Owner principal en HubSpot
     transfer_history: Optional[List[dict]] = None  # Historial de transferencias
+    # === CAMPOS DE DEAL HUBSPOT (parchados por patch_redis_deal_ids.py) ===
+    deal_id: Optional[str] = None
+    deal_stage: Optional[str] = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -295,7 +298,9 @@ class ConversationStateManager:
                     "canal_origen": (meta.canal_origen if meta else canal) or canal,  # Segregación por equipo
                     "activated_at": meta.created_at if meta else get_bogota_now_iso(),  # Filtro de tiempo
                     "conversation_status": status,  # Estado real de Redis (HUMAN_ACTIVE/IN_CONVERSATION)
-                    "in_priority_zset": in_priority_zset  # False = BOT controla, sin notificaciones
+                    "in_priority_zset": in_priority_zset,  # False = BOT controla, sin notificaciones
+                    "deal_id": meta.deal_id if meta else None,
+                    "deal_stage": meta.deal_stage if meta else None,
                 })
             
             # === FASE 2: Contactos en BOT_CONTROLLED_SET (visibles pero sin ZSET) ===
@@ -338,7 +343,9 @@ class ConversationStateManager:
                     "canal_origen": meta.canal_origen or canal,
                     "activated_at": meta.created_at,
                     "conversation_status": status,
-                    "in_priority_zset": False  # Fuera del ZSET = sin notificaciones
+                    "in_priority_zset": False,  # Fuera del ZSET = sin notificaciones
+                    "deal_id": meta.deal_id,
+                    "deal_stage": meta.deal_stage,
                 })
                 
         except Exception as e:

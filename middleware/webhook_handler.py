@@ -1817,6 +1817,22 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 f"{analysis.suspicious_indicators}"
             )
 
+        # ═══════════════════════════════════════════════════════════════════
+        # ACTUALIZAR NOMBRE DEL CLIENTE SI FUE DETECTADO (CRÍTICO)
+        # ═══════════════════════════════════════════════════════════════════
+        if analysis.nombre_detectado:
+            # firstname es propiedad estándar de HubSpot, siempre existe
+            try:
+                await contact_manager.update_contact_info(contact_id, {
+                    "firstname": analysis.nombre_detectado
+                })
+                logger.info(
+                    f"[HubSpot Sync] ✅ Nombre del cliente actualizado: {analysis.nombre_detectado} "
+                    f"(contact_id: {contact_id})"
+                )
+            except Exception as name_err:
+                logger.error(f"[HubSpot Sync] Error actualizando nombre: {name_err}")
+
         # Intentar actualizar propiedades opcionales (ignorar si no existen en HubSpot)
         if optional_properties:
             try:
@@ -2146,7 +2162,13 @@ async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None)
     except ValueError as e:
         logger.error(f"[Admin] Teléfono inválido: %s", e)
         return {"error": "Teléfono inválido"}
-    except Exception as e:
+    except Exception as e:    Cliente: "Salo"
+         ↓
+    Sofia JSON: {"analisis": {"nombre_detectado": "Salo", ...}}
+         ↓
+    HubSpot: contact.firstname = "Salo" ✅
+         ↓
+    Log: "[SofiaBrain] ... Nombre: Salo"
         logger.error("[Admin] Error al limpiar duplicados: %s", e)
         return {"error": str(e)}
 

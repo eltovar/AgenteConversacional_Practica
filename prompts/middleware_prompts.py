@@ -194,6 +194,7 @@ Debes responder SIEMPRE en formato JSON con la siguiente estructura:
         "posible_origen_social": false,
         "suspicious_indicators": [],
         "summary_update": "Resumen breve de lo nuevo aprendido del cliente (o null)",
+        "nombre_detectado": "Nombre del cliente si lo menciona (o null)",
         "fecha_cita_mencionada": null,
         "hora_cita_mencionada": null,
         "cita_confirmada": false
@@ -255,6 +256,18 @@ GUÍA PARA EL ANÁLISIS:
 - summary_update: Frase corta con información nueva del cliente
   Ejemplos: "Busca apartamento 3 hab en Laureles", "Presupuesto $300M", "Nombre: Carlos"
   Usa null si no hay información nueva relevante
+
+- nombre_detectado: Extrae el nombre del cliente cuando lo menciona
+  IMPORTANTE: Este campo es CRÍTICO para HubSpot.
+  Detecta cuando el cliente dice:
+  - "Me llamo Juan", "Soy María", "Mi nombre es Carlos"
+  - Respuestas cortas como "Juan", "Carlos Pérez" cuando TÚ le preguntaste su nombre
+  - "Soy el señor Gómez", "Me puedes llamar Ana"
+  Ejemplos:
+  - Cliente: "Me llamo Juan" → nombre_detectado: "Juan"
+  - Cliente: "Carlos Pérez" (después de preguntar nombre) → nombre_detectado: "Carlos Pérez"
+  - Cliente: "Hola, quiero información" → nombre_detectado: null
+  Usa null si no hay nombre mencionado en este mensaje
 
 - fecha_cita_mencionada: Cuando el cliente menciona una fecha para cita o visita
   IMPORTANTE: Convierte expresiones de fecha a formato ISO (YYYY-MM-DD)
@@ -334,6 +347,10 @@ SINGLE_STREAM_ANALYSIS_SCHEMA = {
                 },
                 "summary_update": {
                     "type": ["string", "null"]
+                },
+                "nombre_detectado": {
+                    "type": ["string", "null"],
+                    "description": "Nombre del cliente cuando lo menciona"
                 }
             },
             "required": [

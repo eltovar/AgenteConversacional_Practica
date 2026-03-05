@@ -43,6 +43,8 @@ class MessageAnalysis:
     fecha_cita_mencionada: Optional[str] = None  # ISO format (YYYY-MM-DD)
     hora_cita_mencionada: Optional[str] = None   # HH:MM format
     cita_confirmada: bool = False  # True si el cliente confirma una cita propuesta
+    # Campo para extracción de nombre del cliente
+    nombre_detectado: Optional[str] = None  # Nombre del cliente cuando lo menciona
 
     def __post_init__(self):
         if self.suspicious_indicators is None:
@@ -65,7 +67,8 @@ class MessageAnalysis:
             summary_update=data.get("summary_update"),
             fecha_cita_mencionada=data.get("fecha_cita_mencionada"),
             hora_cita_mencionada=data.get("hora_cita_mencionada"),
-            cita_confirmada=data.get("cita_confirmada", False)
+            cita_confirmada=data.get("cita_confirmada", False),
+            nombre_detectado=data.get("nombre_detectado")
         )
 
 
@@ -334,11 +337,16 @@ class SofiaBrain:
             elif parsed.analisis.posible_origen_social:
                 social_info = ", Posible RRSS: ✓ (sin link)"
 
+            # Log si se detectó nombre del cliente
+            name_info = ""
+            if parsed.analisis.nombre_detectado:
+                name_info = f", Nombre: {parsed.analisis.nombre_detectado}"
+
             logger.info(
                 f"[SofiaBrain] Single-Stream completado para {session_id} | "
                 f"Emoción: {parsed.analisis.emocion}, "
                 f"Score: {parsed.analisis.sentiment_score}, "
-                f"Handoff: {parsed.analisis.handoff_priority}{social_info}"
+                f"Handoff: {parsed.analisis.handoff_priority}{social_info}{name_info}"
             )
 
             # Truncar historial si excede el máximo

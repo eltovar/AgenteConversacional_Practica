@@ -153,6 +153,10 @@ class ContactManager:
         2. No se creen duplicados en HubSpot (usa lock de Redis)
         3. Siempre se retorne un contact_id válido
 
+        Incluye timeout de 7s en las llamadas a HubSpot para evitar que
+        el proxy de Railway (límite ~15s) mate la conexión antes de que
+        el webhook responda con el TwiML de Sofía.
+
         Args:
             phone_raw: Número de teléfono sin normalizar
             source_channel: Canal de origen del contacto
@@ -162,9 +166,13 @@ class ContactManager:
 
         Raises:
             ValueError: Si el número es inválido
+            asyncio.TimeoutError: Si HubSpot no responde en 7s (webhook_handler
+                                  lo captura como contact_info=None)
             HubSpotRateLimitError: Si HubSpot devuelve 429 (después de reintentos)
         """
-        # Paso 1: Normalizar el número
+        import time as _time
+
+        # Paso 1: Normalizar el número (rápido, sin red)
         validation = self.normalizer.normalize(phone_raw)
 
         if not validation.is_valid:
@@ -180,8 +188,23 @@ class ContactManager:
             phone_raw, phone_normalized
         )
 
-        # Paso 2: Buscar contacto existente en HubSpot
-        contact_id = await self._search_contact(phone_normalized)
+        _deadline = 7.0  # segundos totales para llamadas HubSpot
+        _t0 = _time.monotonic()
+
+        # Paso 2: Buscar contacto existente (con timeout global)
+        try:
+            contact_id = await asyncio.wait_for(
+                self._search_contact(phone_normalized),
+                timeout=_deadline
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ContactManager] Timeout (%.1fs) buscando contacto %s. "
+                "Sofía responderá sin CRM; contacto se asegura en background.",
+                _deadline, phone_normalized
+            )
+            asyncio.create_task(self._background_ensure_contact(phone_raw, source_channel))
+            raise  # webhook_handler lo captura → contact_info = None
 
         if contact_id:
             logger.info(
@@ -194,14 +217,25 @@ class ContactManager:
                 is_new=False
             )
 
-        # Paso 3: Crear nuevo lead básico (con lock distribuido)
+        # Paso 3: Crear nuevo lead básico (con tiempo restante del timeout)
         logger.info(
             "[ContactManager] Creando nuevo lead para: %s",
             phone_normalized
         )
-        contact_id = await self._create_basic_lead_with_lock(
-            phone_normalized, source_channel
-        )
+        remaining = max(1.0, _deadline - (_time.monotonic() - _t0))
+        try:
+            contact_id = await asyncio.wait_for(
+                self._create_basic_lead_with_lock(phone_normalized, source_channel),
+                timeout=remaining
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ContactManager] Timeout (%.1fs restante) creando contacto %s. "
+                "Sofía responderá sin CRM; creación continúa en background.",
+                remaining, phone_normalized
+            )
+            asyncio.create_task(self._background_ensure_contact(phone_raw, source_channel))
+            raise
 
         return ContactInfo(
             contact_id=contact_id,
@@ -229,20 +263,18 @@ class ContactManager:
             ContactInfo o None si hay error
         """
         try:
-            return await asyncio.wait_for(
-                self.identify_or_create_contact(phone_raw, source_channel),
-                timeout=10.0
-            )
+            # identify_or_create_contact ya tiene timeout interno de 7s.
+            # Si lanza TimeoutError, lo capturamos aquí sin re-agendar background
+            # (ya fue agendado dentro de identify_or_create_contact).
+            return await self.identify_or_create_contact(phone_raw, source_channel)
 
         except asyncio.TimeoutError:
+            # El timeout interno (7s) ya agendó _background_ensure_contact.
             logger.warning(
-                "[ContactManager] Timeout (10s) identificando contacto %s. "
-                "Webhook responde sin CRM; creación continúa en background.",
+                "[ContactManager] Timeout HubSpot para %s. "
+                "Sofía responderá sin CRM.",
                 phone_raw
             )
-            # Completar la creación en background para que el siguiente mensaje
-            # encuentre el contacto en HubSpot y en el cache Redis
-            asyncio.create_task(self._background_ensure_contact(phone_raw, source_channel))
             return None
 
         except HubSpotRateLimitError as e:

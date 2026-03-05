@@ -590,9 +590,9 @@ class ContactManager:
             if panel_base_url and owner_id and admin_api_key else ""
         )
 
-        # Crear deal asociado en background (le pasamos url_chat para que lo escriba en el negocio)
+        # Crear deal asociado en background (le pasamos url_chat y owner_id para asignar a asesor)
         asyncio.create_task(
-            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat)
+            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat, owner_id)
         )
 
         # Escribir url_chat en el contacto (en background, independiente del deal)
@@ -606,7 +606,8 @@ class ContactManager:
         contact_id: str,
         phone_normalized: str,
         source_channel: str,
-        url_chat: str = ""
+        url_chat: str = "",
+        owner_id: str | None = None
     ) -> dict | None:
         """
         Crea un Deal en HubSpot y lo asocia al contacto recién creado.
@@ -620,6 +621,8 @@ class ContactManager:
         Si se provee url_chat, también actualiza la propiedad url_chat del negocio
         para que el deep link esté disponible tanto en el Contacto como en el Negocio.
 
+        Si se provee owner_id, asigna el deal a ese asesor.
+
         Returns:
             dict con deal_id y current_stage si se creó exitosamente, None si falló
         """
@@ -629,9 +632,12 @@ class ContactManager:
 
         try:
             deal_name = f"Lead WA {phone_normalized}"
+            deal_properties = {"dealname": deal_name}
+            if owner_id:
+                deal_properties["hubspot_owner_id"] = owner_id
             deal_id = await self.hubspot.create_deal(
                 contact_id=contact_id,
-                properties={"dealname": deal_name},
+                properties=deal_properties,
                 pipeline_id=PIPELINE_ID,
                 dealstage=STAGE_NUEVO_LEAD
             )

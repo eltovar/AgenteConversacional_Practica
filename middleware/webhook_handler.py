@@ -2162,14 +2162,9 @@ async def admin_cleanup_duplicates(phone: str, keep_canal: Optional[str] = None)
     except ValueError as e:
         logger.error(f"[Admin] Teléfono inválido: %s", e)
         return {"error": "Teléfono inválido"}
-    except Exception as e:    Cliente: "Salo"
-         ↓
-    Sofia JSON: {"analisis": {"nombre_detectado": "Salo", ...}}
-         ↓
-    HubSpot: contact.firstname = "Salo" ✅
-         ↓
-    Log: "[SofiaBrain] ... Nombre: Salo"
+    except Exception as e:
         logger.error("[Admin] Error al limpiar duplicados: %s", e)
+        return {"error": str(e)}
         return {"error": str(e)}
 
 

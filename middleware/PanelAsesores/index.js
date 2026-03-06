@@ -1,4 +1,26 @@
 // =========================================================================
+// Formatea la hora en zona Bogotá y con AM/PM claro y robusto
+function formatBogotaTime(ts) {
+    try {
+        if (!ts) return '';
+        // Forzar que el string termine en 'Z' (UTC) si no la tiene
+        let safeTs = ts.trim();
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !safeTs.includes('+')) {
+            safeTs += 'Z';
+        }
+        // Parsear como UTC
+        const date = new Date(safeTs);
+        // Convertir a hora de Bogotá
+        return date.toLocaleTimeString('es-CO', {
+            timeZone: 'America/Bogota',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        });
+    } catch (e) {
+        return '';
+    }
+}
 // CONFIGURACION
 // =========================================================================
 // Las variables API_KEY, BASE_URL y ADVISOR_NAMES son inyectadas desde index.html
@@ -1130,7 +1152,7 @@ function renderChatBubbles(messages) {
             else if (msg.sender === 'advisor') bubbleClass = 'bubble-advisor';
 
             const timestamp = msg.timestamp
-                ? new Date(msg.timestamp).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+                ? formatBogotaTime(msg.timestamp)
                 : '';
 
             // Renderizar multimedia si existe

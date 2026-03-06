@@ -342,7 +342,7 @@ class OrphanLeadAlert:
             "contact_id": contact_id,
             "phone": phone,
             "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
             "metadata": metadata or {}
         }
 
@@ -511,7 +511,7 @@ class OrphanLeadMonitor:
                 lead_data = {
                     "contact_id": lead["id"],
                     "properties": lead.get("properties", {}),
-                    "detected_at": datetime.now(timezone.utc).isoformat()
+                    "detected_at": datetime.now(timezone.utc).isoformat() + "Z"
                 }
 
                 # Guardar con key única por contact_id

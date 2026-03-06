@@ -574,7 +574,7 @@ async def update_last_client_message(phone_normalized: str) -> None:
         # Guardar con TTL de 25 horas (un poco más que la ventana)
         await r.set(
             key,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc).isoformat() + "Z",
             ex=25 * 60 * 60
         )
 
@@ -1433,7 +1433,7 @@ async def create_template(
         "body": body.strip(),
         "variables": vars_list,
         "is_default": False,
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "created_at": datetime.now(timezone.utc).isoformat() + "Z"
     }
     success = await _save_template_by_advisor(advisor_id, template_data)
     if not success:
@@ -1475,7 +1475,7 @@ async def update_template(
             template["variables"] = json.loads(variables)
         except json.JSONDecodeError:
             pass
-    template["updated_at"] = datetime.now(timezone.utc).isoformat()
+    template["updated_at"] = datetime.now(timezone.utc).isoformat() + "Z"
     success = await _save_template_by_advisor(advisor_id, template)
     if not success:
         raise HTTPException(status_code=500, detail="Error actualizando template")

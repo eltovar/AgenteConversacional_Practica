@@ -8,6 +8,7 @@ let dailyChart = null;
 
 async function loadMetrics() {
     const days = document.getElementById('periodSelect').value;
+    console.log(`[Métricas] Cargando datos → período: ${days} días`);
 
     try {
         const response = await fetch(`${BASE_URL}/metrics?days=${days}`, {
@@ -17,10 +18,13 @@ async function loadMetrics() {
         if (!response.ok) throw new Error('Error al cargar metricas');
 
         const data = await response.json();
+        console.log(`[Métricas] Datos recibidos → total_leads: ${data.total_leads} | período: ${data.period_days}d | desde: ${data.since?.slice(0,10)} hasta: ${data.until?.slice(0,10)}`);
+        console.log('[Métricas] leads_by_channel:', data.leads_by_channel);
+        console.log('[Métricas] leads_by_day:', data.leads_by_day);
         updateDashboard(data);
 
     } catch (error) {
-        console.error('Error:', error);
+        console.error('[Métricas] Error al cargar:', error);
         document.getElementById('totalLeads').textContent = 'Error';
         alert('Error cargando metricas: ' + error.message);
     }
@@ -214,5 +218,12 @@ function updateChannelTable(channelData, total) {
 
 // Event listeners
 document.addEventListener('DOMContentLoaded', loadMetrics);
-document.getElementById('periodSelect').addEventListener('change', loadMetrics);
-document.getElementById('refreshBtn').addEventListener('click', loadMetrics);
+document.getElementById('periodSelect').addEventListener('change', () => {
+    const days = document.getElementById('periodSelect').value;
+    console.log(`[Métricas] Filtro cambiado → ${days} días`);
+    loadMetrics();
+});
+document.getElementById('refreshBtn').addEventListener('click', () => {
+    console.log('[Métricas] Refresh manual solicitado');
+    loadMetrics();
+});

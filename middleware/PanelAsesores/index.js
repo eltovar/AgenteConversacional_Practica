@@ -615,21 +615,24 @@ async function loadContacts() {
         const data = await response.json();
         allContacts = data.contacts || [];  // Guardar en cache para el buscador
 
-        // Detección de mensajes nuevos por polling (fallback cuando el WS no está activo)
-        const wsConnected = ws && ws.readyState === WebSocket.OPEN;
+        // Detección de mensajes nuevos por polling
+        // Se ejecuta siempre (independiente del estado del WS) para garantizar
+        // badge + sonido incluso cuando el WS está "conectado" pero no entrega mensajes.
+        // Deduplicación natural: el timestamp se actualiza antes de la notificación,
+        // por lo que si el WS ya disparó un loadContacts() previo, oldTime === newTime.
         for (const contact of allContacts) {
             const phone = contact.phone || '';
             const newTime = contact.last_activity || '';
             const oldTime = _lastContactTimestamps[phone];
-            if (!wsConnected && oldTime && newTime > oldTime) {
-                // Nuevo mensaje detectado por polling
+            if (newTime) _lastContactTimestamps[phone] = newTime;  // actualizar primero
+            if (oldTime && newTime > oldTime) {
+                console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
                 if (phone !== currentPhone) {
                     unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
                     updateUnreadBadge(phone, unreadCounts[phone]);
                 }
                 playNotificationSound();
             }
-            if (newTime) _lastContactTimestamps[phone] = newTime;
         }
 
         renderContactsList(allContacts);

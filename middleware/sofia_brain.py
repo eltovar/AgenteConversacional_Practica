@@ -15,7 +15,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage
 
 from logging_config import logger
-from prompts.middleware_prompts import (
+from prompts.middleware.brain import (
     SOFIA_MIDDLEWARE_SYSTEM_PROMPT,
     SOFIA_SINGLE_STREAM_SYSTEM_PROMPT,
     HANDOFF_KEYWORDS,

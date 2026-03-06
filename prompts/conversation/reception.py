@@ -1,5 +1,5 @@
-# prompts/reception_prompts.py
-from prompts.sofia_personality import SOFIA_PERSONALITY
+# prompts/conversation/reception.py
+from prompts.persona.identity import SOFIA_PERSONALITY
 
 RECEPTION_SYSTEM_PROMPT = (
     f"{SOFIA_PERSONALITY}\n\n"

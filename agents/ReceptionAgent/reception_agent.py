@@ -1,12 +1,12 @@
 # reception_agent.py
 from llm_client import llama_client
 from agents.ReceptionAgent.reception_tool import RECEPTION_TOOLS, classify_intent_func
-from prompts.reception_prompts import (
+from prompts.conversation.reception import (
     RECEPTION_SYSTEM_PROMPT,
     CLARIFICATION_PROMPTS,
 )
-from prompts.sofia_personality import GREETING_PREFIX
-from prompts.crm_prompts import PROPERTY_EXTRACTION_PROMPT
+from prompts.persona.identity import GREETING_PREFIX
+from prompts.conversation.crm import PROPERTY_EXTRACTION_PROMPT
 from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
 from logging_config import logger

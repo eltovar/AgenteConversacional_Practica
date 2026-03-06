@@ -41,7 +41,7 @@ class TestHandoffDetection:
     @pytest.fixture
     def handoff_keywords(self):
         """Keywords de handoff desde prompts."""
-        from prompts.middleware_prompts import HANDOFF_KEYWORDS
+        from prompts.middleware.brain import HANDOFF_KEYWORDS
         return HANDOFF_KEYWORDS
 
     def test_detects_asesor_request(self, handoff_keywords):

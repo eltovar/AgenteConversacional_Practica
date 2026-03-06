@@ -11,7 +11,7 @@ load_dotenv()
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from prompts.crm_prompts import CRM_SYSTEM_PROMPT
+from prompts.conversation.crm import CRM_SYSTEM_PROMPT
 
 def test_crm_single_message_questions():
     """

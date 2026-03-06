@@ -20,7 +20,7 @@ from integrations.hubspot.pipeline_router import (
     get_target_pipeline,
     get_analytics_source,
 )
-from prompts.crm_prompts import (
+from prompts.conversation.crm import (
     CRM_SYSTEM_PROMPT,
     CRM_CONFIRMATION_TEMPLATE,
     PROPERTY_EXTRACTION_PROMPT,

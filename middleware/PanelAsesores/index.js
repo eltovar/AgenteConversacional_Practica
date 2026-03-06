@@ -425,6 +425,13 @@ async function saveTemplate(event) {
     const form = event.target;
     const formData = new FormData(form);
 
+    // Relajar validación: permitir cualquier nombre, solo bloquear si está vacío
+    const name = formData.get('name').trim();
+    if (!name) {
+        alert('El nombre no puede estar vacío.');
+        return;
+    }
+
     // Detectar variables en el body
     const body = formData.get('body');
     const variables = [];
@@ -435,6 +442,7 @@ async function saveTemplate(event) {
             variables.push(match[1]);
         }
     }
+    // Siempre enviar variables como JSON válido
     formData.append('variables', JSON.stringify(variables));
 
     try {
@@ -444,14 +452,30 @@ async function saveTemplate(event) {
             body: formData
         });
 
-        const data = await response.json();
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (e) {
+            // Si no es JSON, mostrar mensaje genérico
+            alert('Error interno del servidor. Intenta nuevamente o contacta soporte.');
+            return;
+        }
 
         if (response.ok) {
             alert('Template creado exitosamente');
             await loadTemplates();
             renderTemplateList();
         } else {
-            throw new Error(data.detail || 'Error creando template');
+            // Mensajes claros según código
+            if (response.status === 409) {
+                alert('Ya existe un template con ese nombre. Elige otro nombre.');
+            } else if (response.status === 400) {
+                alert('Error en los datos enviados. Revisa los campos y variables.');
+            } else if (response.status === 500) {
+                alert('Error interno al guardar la plantilla. Intenta nuevamente o contacta soporte.');
+            } else {
+                alert((data && data.detail) || 'Error creando template');
+            }
         }
     } catch (error) {
         alert('Error: ' + error.message);
@@ -2183,6 +2207,7 @@ async function sendTemplateMessage() {
         formData.append('contact_id', contactId);
         formData.append('template_id', templateId);
         formData.append('variables', JSON.stringify(variables));
+        if (ADVISOR_ID) formData.append('advisor_id', ADVISOR_ID);
         // Incluir canal para segregacion correcta
         if (currentCanal) {
             formData.append('canal', currentCanal);

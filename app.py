@@ -110,6 +110,25 @@ def get_redis_url() -> str:
 
 app = FastAPI(title="Sofía IA - Middleware", version="2.0.0")
 
+# Manejador global de errores para devolver JSON en caso de error 500
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Loguear el error completo
+    _diag_logger.error(f"[500 ERROR] path={request.url.path} error={exc} traceback={traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Error interno del servidor. Intenta nuevamente o contacta soporte.",
+            "error_type": exc.__class__.__name__,
+            "path": str(request.url.path)
+        }
+    )
+
 # Handler para loguear detalles de errores de validación (diagnóstico 422)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse

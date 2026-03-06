@@ -1207,6 +1207,7 @@ async def send_template_message(
     variables: str = Form("{}", description="JSON con variables para el template"),
     contact_id: Optional[str] = Form(None, description="ID del contacto en HubSpot"),
     canal: Optional[str] = Form(None, description="Canal de origen para segregación"),
+    advisor_id: Optional[str] = Form(None, description="ID del asesor que envía el template"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -1257,8 +1258,8 @@ async def send_template_message(
 
     # Obtener template de Redis
     _t1 = time.monotonic()
-    template = await _get_template(template_id)
-    logger.info(f"[Panel][TIMING] _get_template: {(time.monotonic()-_t1)*1000:.1f}ms")
+    template = await _get_template_by_advisor(advisor_id or "default", template_id)
+    logger.info(f"[Panel][TIMING] _get_template_by_advisor: {(time.monotonic()-_t1)*1000:.1f}ms")
     if not template:
         raise HTTPException(
             status_code=404,
@@ -1414,17 +1415,20 @@ async def create_template(
     """Crea un nuevo template para un asesor."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-    template_id = re.sub(r'[^a-z0-9_]', '_', name.lower().strip())
-    template_id = re.sub(r'_+', '_', template_id).strip('_')
-    existing = await _get_template_by_advisor(advisor_id, template_id)
-    if existing:
+    # Permitir nombres flexibles, solo bloquear si el nombre ya existe (case-insensitive)
+    template_id = name.strip().lower()
+    existing_templates = await _get_template_by_advisor(advisor_id, template_id)
+    if existing_templates:
         raise HTTPException(
             status_code=409,
-            detail=f"Ya existe un template con ID '{template_id}'"
+            detail=f"Ya existe un template con ese nombre. Elige otro nombre."
         )
+    # Variables opcionales y siempre JSON válido
     try:
         vars_list = json.loads(variables) if variables else []
-    except json.JSONDecodeError:
+        if not isinstance(vars_list, list):
+            vars_list = []
+    except Exception:
         vars_list = []
     template_data = {
         "id": template_id,

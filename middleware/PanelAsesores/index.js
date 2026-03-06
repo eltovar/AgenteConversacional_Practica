@@ -41,6 +41,19 @@ let unreadCounts = {};
 let deepLinkHandled = false;
 
 // =========================================================================
+// LOADER GLOBAL (UX)
+// =========================================================================
+function showLoader() {
+    const loader = document.getElementById('globalLoader');
+    if (loader) loader.classList.remove('hidden');
+}
+
+function hideLoader() {
+    const loader = document.getElementById('globalLoader');
+    if (loader) loader.classList.add('hidden');
+}
+
+// =========================================================================
 // FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
 // =========================================================================
 
@@ -116,6 +129,7 @@ async function filterContacts(searchTerm) {
 
 async function updateDealStage(contactId, dealId, stageId) {
     try {
+        showLoader();
         const response = await fetch(`${BASE_URL}/contacts/${contactId}/stage`, {
             method: 'PATCH',
             headers: {
@@ -155,6 +169,8 @@ async function updateDealStage(contactId, dealId, stageId) {
         alert('Error al actualizar etapa: ' + error.message);
         // Recargar contactos para revertir el dropdown
         loadContacts();
+    } finally {
+        hideLoader();
     }
 }
 
@@ -168,6 +184,7 @@ async function loadTemplates(forceRefresh = false) {
         populateTemplateSelector();
         return;
     }
+    showLoader();
     try {
         const response = await fetch(`${BASE_URL}/templates?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
             headers: { 'X-API-Key': API_KEY }
@@ -181,6 +198,8 @@ async function loadTemplates(forceRefresh = false) {
 
     } catch (error) {
         console.error('[Panel] Error cargando templates:', error);
+    } finally {
+        hideLoader();
     }
 }
 
@@ -994,9 +1013,8 @@ function renderContactsList(contacts) {
 
     if (!contacts || contacts.length === 0) {
         container.innerHTML = `
-            <div class="p-4 text-center text-gray-500">
-                <p>No hay contactos esperando atencion</p>
-                <p class="text-sm mt-1">Los contactos apareceran automaticamente cuando Sofia haga handoff</p>
+            <div class="p-4 text-center text-gray-400">
+                <p>No hay contactos esperando atención.</p>
             </div>
         `;
         _contactFingerprints.clear();

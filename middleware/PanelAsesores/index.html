@@ -93,10 +93,7 @@
 
             <!-- Lista de contactos -->
             <div id="contactsList" class="flex-1 overflow-y-auto">
-                <div class="p-4 text-center text-gray-500">
-                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
-                    <p class="mt-2 text-sm">Cargando contactos...</p>
-                </div>
+                <!-- Loader eliminado, la lista se llena dinámicamente desde JS -->
             </div>
 
             <!-- Contador de activos -->
@@ -305,6 +302,13 @@
         <source src="https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3" type="audio/mpeg">
     </audio>
 
+    <!-- Loader global -->
+    <div id="globalLoader" class="fixed inset-0 bg-black bg-opacity-20 flex items-center justify-center z-50 hidden">
+        <div class="flex flex-col items-center">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-4 border-green-600 mb-4"></div>
+            <span class="text-white text-lg font-semibold drop-shadow">Cargando...</span>
+        </div>
+    </div>
     <!-- Modal: Crear Contacto Manualmente -->
     <div id="createContactModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
         <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">

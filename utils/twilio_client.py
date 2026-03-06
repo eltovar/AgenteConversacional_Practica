@@ -8,6 +8,7 @@ ya que Twilio cierra la conexión del webhook después de 15 segundos.
 En lugar de responder via TwiML, enviamos mensajes directamente via API.
 """
 
+import json
 import os
 from typing import Optional
 import httpx
@@ -51,15 +52,22 @@ class TwilioClient:
         self,
         to: str,
         body: str,
-        media_url: Optional[str] = None
+        media_url: Optional[str] = None,
+        content_sid: Optional[str] = None,
+        content_variables: Optional[dict] = None,
     ) -> dict:
         """
         Envía un mensaje de WhatsApp usando la API de Twilio.
 
         Args:
             to: Número de destino (puede ser con o sin prefijo whatsapp:)
-            body: Contenido del mensaje
+            body: Contenido del mensaje (usado si content_sid es None)
             media_url: URL de multimedia (imagen/audio) a enviar (opcional)
+            content_sid: Content-SID del template aprobado por Meta (HXxxx...).
+                         Cuando se provee, se usa ContentSid en lugar de Body,
+                         lo que permite enviar fuera de la ventana de 24h.
+            content_variables: Dict con variables numeradas para el template,
+                               ej: {"1": "Carlos", "2": "Monica"}.
 
         Returns:
             dict con status y mensaje_sid o error
@@ -85,8 +93,20 @@ class TwilioClient:
                 payload = {
                     "From": from_number,
                     "To": to,
-                    "Body": body
                 }
+
+                if content_sid:
+                    # Template aprobado por Meta → usa ContentSid (funciona fuera de ventana 24h)
+                    payload["ContentSid"] = content_sid
+                    if content_variables:
+                        payload["ContentVariables"] = json.dumps(content_variables)
+                    logger.info(
+                        f"[TwilioClient] Enviando con ContentSid={content_sid} "
+                        f"vars={content_variables}"
+                    )
+                else:
+                    # Texto libre (solo funciona con ventana de 24h abierta)
+                    payload["Body"] = body
 
                 # Agregar MediaUrl si se proporciona
                 if media_url:

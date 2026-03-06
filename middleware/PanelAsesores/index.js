@@ -59,6 +59,8 @@ const _contactFingerprints = new Map(); // Fingerprint del último render por ph
 
 // Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
 let unreadCounts = {};
+// Timestamps del último last_activity conocido por phone (para detección de nuevos mensajes en polling)
+let _lastContactTimestamps = {};
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
@@ -612,6 +614,24 @@ async function loadContacts() {
 
         const data = await response.json();
         allContacts = data.contacts || [];  // Guardar en cache para el buscador
+
+        // Detección de mensajes nuevos por polling (fallback cuando el WS no está activo)
+        const wsConnected = ws && ws.readyState === WebSocket.OPEN;
+        for (const contact of allContacts) {
+            const phone = contact.phone || '';
+            const newTime = contact.last_activity || '';
+            const oldTime = _lastContactTimestamps[phone];
+            if (!wsConnected && oldTime && newTime > oldTime) {
+                // Nuevo mensaje detectado por polling
+                if (phone !== currentPhone) {
+                    unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
+                    updateUnreadBadge(phone, unreadCounts[phone]);
+                }
+                playNotificationSound();
+            }
+            if (newTime) _lastContactTimestamps[phone] = newTime;
+        }
+
         renderContactsList(allContacts);
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga

@@ -1290,11 +1290,32 @@ async def send_template_message(
 
     logger.info(f"[Panel] Enviando template '{template_id}' a {phone_normalized}")
 
-    # Enviar mensaje (usando force porque es template)
+    # Construir content_variables numeradas para Twilio Content API
+    # (solo se usa cuando el template tiene content_sid aprobado por Meta)
+    content_sid = template.get("content_sid")
+    variables_map = template.get("content_variables_map", [])
+    content_variables = None
+    if content_sid and variables_map:
+        content_variables = {
+            str(i + 1): vars_dict.get(var_name, "")
+            for i, var_name in enumerate(variables_map)
+        }
+        logger.info(
+            f"[Panel] Usando ContentSid={content_sid} con variables={content_variables}"
+        )
+    elif not content_sid:
+        logger.warning(
+            f"[Panel] Template '{template_id}' sin content_sid — "
+            f"se enviará como texto plano (fallará con ventana cerrada)"
+        )
+
+    # Enviar mensaje via Twilio
     _t2 = time.monotonic()
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
-        body=template_message
+        body=template_message,
+        content_sid=content_sid,
+        content_variables=content_variables,
     )
     logger.info(
         f"[Panel][TIMING] twilio.send_whatsapp_message: {(time.monotonic()-_t2)*1000:.1f}ms | "
@@ -4547,11 +4568,17 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
     """
     await ws_manager.connect(websocket, advisor_id)
 
+    # Keepalive: si no llega ningún mensaje del cliente en 20s el servidor envía
+    # un ping para que Railway no cierre la conexión TCP por inactividad.
+    WS_KEEPALIVE_INTERVAL = 20
+
     try:
         while True:
-            # Recibir mensajes del cliente (para ping/pong o comandos)
             try:
-                data = await websocket.receive_text()
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=WS_KEEPALIVE_INTERVAL
+                )
                 message = json.loads(data) if data else {}
 
                 # Responder a pings
@@ -4568,8 +4595,14 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
                         ws_manager.register_phone_owner(phone, advisor_id)
                         logger.debug(f"[WebSocket] Asesor {advisor_id} observando {phone}")
 
+            except asyncio.TimeoutError:
+                # Sin mensajes del cliente → ping proactivo para mantener viva la conexión
+                await websocket.send_json({
+                    "type": "ping",
+                    "timestamp": datetime.now().isoformat()
+                })
+
             except json.JSONDecodeError:
-                # Ignorar mensajes mal formados
                 pass
 
     except WebSocketDisconnect:

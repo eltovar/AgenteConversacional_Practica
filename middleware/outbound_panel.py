@@ -83,6 +83,7 @@ LAST_CLIENT_MESSAGE_PREFIX = "last_client_msg:"
 
 # Prefijo en Redis para almacenar templates de WhatsApp
 TEMPLATE_PREFIX = "whatsapp_template:"
+DEFAULT_TEMPLATE_PREFIX = "whatsapp_template:default:"
 
 # IDs del Pipeline Comercial de HubSpot (actualizado)
 HUBSPOT_PIPELINE_ID = "854756009"
@@ -96,11 +97,11 @@ _redis_pool: Optional[redis.Redis] = None
 _httpx_client: Optional[httpx.AsyncClient] = None
 
 # ============================================================================
-# Caché en memoria para deal info (reduce llamadas a HubSpot)
+# Caché de deal info en Redis (compartida entre workers Railway)
 # ============================================================================
-# Estructura: { contact_id: {"deal_id": str, "current_stage": str, "cached_at": float} }
-_deal_info_cache: Dict[str, Dict[str, Any]] = {}
+# Key: deal_cache:{contact_id}  Value: JSON {"deal_id": str, "current_stage": str}  TTL: 3600s
 DEAL_CACHE_TTL_SECONDS = 3600  # TTL de 1 hora — deals no cambian frecuentemente; cubre propagación de HubSpot
+DEAL_CACHE_KEY_PREFIX = "deal_cache:"
 
 def get_httpx_client() -> httpx.AsyncClient:
     """
@@ -199,7 +200,7 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
 async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> Optional[Dict[str, Any]]:
     """
     Busca el deal asociado a un contacto y retorna su información.
-    Usa caché en memoria para reducir llamadas a HubSpot.
+    Usa caché en Redis (compartida entre workers Railway) para reducir llamadas a HubSpot.
 
     Args:
         contact_id: ID del contacto en HubSpot
@@ -208,22 +209,22 @@ async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> O
     Returns:
         dict con deal_id y current_stage, o None si no hay deal
     """
-    import time
-    global _deal_info_cache
-
     if not contact_id or not HUBSPOT_API_KEY:
         return None
 
-    # Verificar caché (si no se pide skip_cache)
-    if not skip_cache and contact_id in _deal_info_cache:
-        cached = _deal_info_cache[contact_id]
-        age = time.time() - cached.get("cached_at", 0)
-        if age < DEAL_CACHE_TTL_SECONDS:
-            logger.debug(f"[Panel] Deal info de caché para {contact_id} (age={age:.1f}s)")
-            return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
-        else:
-            # Caché expirado, limpiar
-            del _deal_info_cache[contact_id]
+    redis_client = await _get_redis_client()
+    cache_key = f"{DEAL_CACHE_KEY_PREFIX}{contact_id}"
+
+    # Verificar caché Redis
+    if not skip_cache:
+        try:
+            cached_raw = await redis_client.get(cache_key)
+            if cached_raw:
+                cached = json.loads(cached_raw)
+                logger.debug(f"[Panel] Deal info de Redis cache para {contact_id}")
+                return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
+        except Exception as cache_err:
+            logger.debug(f"[Panel] Error leyendo deal cache Redis: {cache_err}")
 
     try:
         base_url = "https://api.hubapi.com"
@@ -235,11 +236,13 @@ async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> O
         if response.status_code == 429:
             logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
             # Si hay rate limiting, intentar devolver del caché aunque esté expirado
-            if contact_id in _deal_info_cache:
-                return {
-                    "deal_id": _deal_info_cache[contact_id].get("deal_id"),
-                    "current_stage": _deal_info_cache[contact_id].get("current_stage")
-                }
+            try:
+                cached_raw = await redis_client.get(cache_key)
+                if cached_raw:
+                    cached = json.loads(cached_raw)
+                    return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
+            except Exception:
+                pass
             return None
         if response.status_code != 200:
             logger.debug(
@@ -268,12 +271,12 @@ async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> O
             deal_data = deal_response.json()
             result["current_stage"] = deal_data.get("properties", {}).get("dealstage")
 
-        # Guardar en caché
-        _deal_info_cache[contact_id] = {
-            "deal_id": result["deal_id"],
-            "current_stage": result["current_stage"],
-            "cached_at": time.time()
-        }
+        # Guardar en Redis con TTL
+        try:
+            cache_data = json.dumps({"deal_id": result["deal_id"], "current_stage": result["current_stage"]})
+            await redis_client.setex(cache_key, DEAL_CACHE_TTL_SECONDS, cache_data)
+        except Exception as write_err:
+            logger.debug(f"[Panel] Error escribiendo deal cache Redis: {write_err}")
 
         return result
 
@@ -282,12 +285,14 @@ async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> O
         return None
 
 
-def _invalidate_deal_cache(contact_id: str) -> None:
-    """Invalida el caché de deal info para un contacto específico."""
-    global _deal_info_cache
-    if contact_id in _deal_info_cache:
-        del _deal_info_cache[contact_id]
-        logger.debug(f"[Panel] Caché de deal invalidado para {contact_id}")
+async def _invalidate_deal_cache(contact_id: str) -> None:
+    """Invalida el caché de deal info en Redis para un contacto específico."""
+    try:
+        redis_client = await _get_redis_client()
+        await redis_client.delete(f"{DEAL_CACHE_KEY_PREFIX}{contact_id}")
+        logger.debug(f"[Panel] Caché de deal invalidado en Redis para {contact_id}")
+    except Exception as e:
+        logger.debug(f"[Panel] Error invalidando deal cache: {e}")
 
 
 async def _get_redis_client() -> redis.Redis:
@@ -482,7 +487,7 @@ async def _update_deal_to_en_conversacion(contact_id: str) -> None:
             if pr.status_code in [200, 201]:
                 logger.info(f"[Panel] Deal {deal_id} actualizado a 'En conversación' (contact={contact_id})")
                 # Invalidar caché de deal info para este contacto
-                _invalidate_deal_cache(contact_id)
+                await _invalidate_deal_cache(contact_id)
             else:
                 logger.warning(f"[Panel] Error actualizando deal stage: {pr.status_code} - {pr.text}")
 
@@ -595,7 +600,7 @@ async def _init_default_templates():
     try:
         r = await _get_redis_client()
         for template_id, template_data in DEFAULT_TEMPLATES.items():
-            key = f"{TEMPLATE_PREFIX}{template_id}"
+            key = f"{DEFAULT_TEMPLATE_PREFIX}{template_id}"
             if not await r.exists(key):
                 await r.set(key, json.dumps(template_data))
                 logger.debug(f"[Templates] Template predefinido creado: {template_id}")
@@ -632,61 +637,61 @@ async def _get_all_templates() -> list:
         logger.debug(f"[Templates][TIMING] Cache HIT: {len(_TEMPLATES_CACHE)} templates")
         return _TEMPLATES_CACHE
     
-    try:
-        r = await _get_redis_client()
+    # Cambiado: ahora requiere advisor_id como argumento
+    raise NotImplementedError("Usar _get_all_templates_by_advisor(advisor_id)")
 
-        # KEYS es 1 roundtrip vs SCAN que hace múltiples
-        # Seguro para <100 keys (tenemos ~10 templates)
-        _t1 = time.monotonic()
-        keys = await r.keys(f"{TEMPLATE_PREFIX}*")
-        _t2 = time.monotonic()
-        
-        if not keys:
-            logger.info(f"[Templates][TIMING] KEYS: {(_t2-_t1)*1000:.1f}ms | 0 templates")
-            return []
-
-        # Un pipeline → todos los GETs en un solo roundtrip
-        pipe = r.pipeline()
-        for key in keys:
-            pipe.get(key)
-        values = await pipe.execute()
-        _t3 = time.monotonic()
-        
-        logger.info(
-            f"[Templates][TIMING] KEYS({len(keys)}): {(_t2-_t1)*1000:.1f}ms | "
-            f"pipeline GET: {(_t3-_t2)*1000:.1f}ms | total: {(_t3-_t0)*1000:.1f}ms"
-        )
-
-        templates = []
-        for data in values:
-            if data:
-                templates.append(json.loads(data))
-
-        # Ordenar por categoría y nombre
-        templates.sort(key=lambda x: (x.get("category", ""), x.get("name", "")))
-        
-        # Actualizar caché
-        _TEMPLATES_CACHE = templates
-        _TEMPLATES_CACHE_TS = time.monotonic()
-        
-        return templates
-    except Exception as e:
-        logger.error(f"[Templates] Error obteniendo templates: {e}")
-        return _TEMPLATES_CACHE if _TEMPLATES_CACHE else []  # Fallback a caché
+async def _get_all_templates_by_advisor(advisor_id: str) -> list:
+    import time
+    r = await _get_redis_client()
+    # Personales
+    personal_keys = await r.keys(f"{TEMPLATE_PREFIX}{advisor_id}:*")
+    # Defaults
+    default_keys = await r.keys(f"{DEFAULT_TEMPLATE_PREFIX}*")
+    templates = []
+    personal_ids = set()
+    pipe = r.pipeline()
+    for key in personal_keys:
+        pipe.get(key)
+    personal_values = await pipe.execute()
+    for data in personal_values:
+        if data:
+            tpl = json.loads(data)
+            tpl['is_default'] = False
+            templates.append(tpl)
+            personal_ids.add(tpl['id'])
+    pipe = r.pipeline()
+    for key in default_keys:
+        pipe.get(key)
+    default_values = await pipe.execute()
+    for data in default_values:
+        if data:
+            tpl = json.loads(data)
+            if tpl['id'] not in personal_ids:
+                tpl['is_default'] = True
+                templates.append(tpl)
+    templates.sort(key=lambda x: (x.get("category", ""), x.get("name", "")))
+    return templates
 
 
 async def _get_template(template_id: str) -> Optional[dict]:
     """Obtiene un template específico de Redis."""
-    try:
-        r = await _get_redis_client()
-        key = f"{TEMPLATE_PREFIX}{template_id}"
-        data = await r.get(key)
-        if data:
-            return json.loads(data)
-        return None
-    except Exception as e:
-        logger.error(f"[Templates] Error obteniendo template {template_id}: {e}")
-        return None
+    # Cambiado: ahora requiere advisor_id como argumento
+    raise NotImplementedError("Usar _get_template_by_advisor(advisor_id, template_id)")
+
+async def _get_template_by_advisor(advisor_id: str, template_id: str) -> Optional[dict]:
+    r = await _get_redis_client()
+    key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
+    data = await r.get(key)
+    if data:
+        return json.loads(data)
+    # Fallback a default
+    key = f"{DEFAULT_TEMPLATE_PREFIX}{template_id}"
+    data = await r.get(key)
+    if data:
+        tpl = json.loads(data)
+        tpl['is_default'] = True
+        return tpl
+    return None
 
 
 def _invalidate_templates_cache():
@@ -698,45 +703,39 @@ def _invalidate_templates_cache():
 
 async def _save_template(template_data: dict) -> bool:
     """Guarda o actualiza un template en Redis."""
-    try:
-        r = await _get_redis_client()
-        template_id = template_data.get("id")
-        if not template_id:
-            return False
+    # Cambiado: ahora requiere advisor_id como argumento
+    raise NotImplementedError("Usar _save_template_by_advisor(advisor_id, template_data)")
 
-        key = f"{TEMPLATE_PREFIX}{template_id}"
-        await r.set(key, json.dumps(template_data))
-        _invalidate_templates_cache()  # Forzar recarga
-        logger.info(f"[Templates] Template guardado: {template_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[Templates] Error guardando template: {e}")
+async def _save_template_by_advisor(advisor_id: str, template_data: dict) -> bool:
+    r = await _get_redis_client()
+    template_id = template_data.get("id")
+    if not template_id:
         return False
+    key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
+    await r.set(key, json.dumps(template_data))
+    logger.info(f"[Templates] Template guardado: {template_id} para {advisor_id}")
+    return True
 
 
 async def _delete_template(template_id: str) -> bool:
     """Elimina un template de Redis."""
-    try:
-        r = await _get_redis_client()
-        key = f"{TEMPLATE_PREFIX}{template_id}"
+    # Cambiado: ahora requiere advisor_id como argumento
+    raise NotImplementedError("Usar _delete_template_by_advisor(advisor_id, template_id)")
 
-        # Verificar que existe y no es default
-        data = await r.get(key)
-        if data:
-            template = json.loads(data)
-            if template.get("is_default"):
-                logger.warning(f"[Templates] No se puede eliminar template predefinido: {template_id}")
-                return False
-
-        result = await r.delete(key)
-        if result > 0:
-            _invalidate_templates_cache()  # Forzar recarga
-            logger.info(f"[Templates] Template eliminado: {template_id}")
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"[Templates] Error eliminando template: {e}")
-        return False
+async def _delete_template_by_advisor(advisor_id: str, template_id: str) -> bool:
+    r = await _get_redis_client()
+    key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
+    data = await r.get(key)
+    if data:
+        template = json.loads(data)
+        if template.get("is_default"):
+            logger.warning(f"[Templates] No se puede eliminar template predefinido: {template_id}")
+            return False
+    result = await r.delete(key)
+    if result > 0:
+        logger.info(f"[Templates] Template eliminado: {template_id} para {advisor_id}")
+        return True
+    return False
 
 # ============================================================================
 # Endpoints de API
@@ -1367,25 +1366,20 @@ async def send_template_message(
 
 @router.get("/templates")
 async def list_templates(
+    advisor_id: str = Query(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
-    """Lista todos los templates disponibles."""
+    """Lista todos los templates disponibles para un asesor."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-
-    # Inicializar templates predefinidos si es necesario
     await _init_default_templates()
-
-    templates = await _get_all_templates()
-
-    # Agrupar por categoría
+    templates = await _get_all_templates_by_advisor(advisor_id)
     categories = {}
     for t in templates:
         cat = t.get("category", "otros")
         if cat not in categories:
             categories[cat] = []
         categories[cat].append(t)
-
     return {
         "templates": templates,
         "by_category": categories,
@@ -1396,50 +1390,42 @@ async def list_templates(
 @router.get("/templates/{template_id}")
 async def get_template_by_id(
     template_id: str,
+    advisor_id: str = Query(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
-    """Obtiene un template específico."""
+    """Obtiene un template específico para un asesor."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-
-    template = await _get_template(template_id)
+    template = await _get_template_by_advisor(advisor_id, template_id)
     if not template:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
-
     return template
 
 
 @router.post("/templates")
 async def create_template(
+    advisor_id: str = Query(...),
     name: str = Form(..., description="Nombre del template"),
     category: str = Form(..., description="Categoría: reactivacion, cita, seguimiento, recordatorio, promocion"),
     body: str = Form(..., description="Cuerpo del mensaje con variables {nombre}, {fecha}, etc."),
     variables: str = Form("[]", description="JSON array de nombres de variables"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
-    """Crea un nuevo template."""
+    """Crea un nuevo template para un asesor."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-
-    # Generar ID único basado en nombre
     template_id = re.sub(r'[^a-z0-9_]', '_', name.lower().strip())
     template_id = re.sub(r'_+', '_', template_id).strip('_')
-
-    # Verificar que no existe
-    existing = await _get_template(template_id)
+    existing = await _get_template_by_advisor(advisor_id, template_id)
     if existing:
         raise HTTPException(
             status_code=409,
             detail=f"Ya existe un template con ID '{template_id}'"
         )
-
-    # Parsear variables
     try:
         vars_list = json.loads(variables) if variables else []
     except json.JSONDecodeError:
         vars_list = []
-
-    # Crear template
     template_data = {
         "id": template_id,
         "name": name.strip(),
@@ -1449,11 +1435,9 @@ async def create_template(
         "is_default": False,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
-
-    success = await _save_template(template_data)
+    success = await _save_template_by_advisor(advisor_id, template_data)
     if not success:
         raise HTTPException(status_code=500, detail="Error guardando template")
-
     return JSONResponse(
         status_code=201,
         content={
@@ -1467,22 +1451,19 @@ async def create_template(
 @router.put("/templates/{template_id}")
 async def update_template(
     template_id: str,
+    advisor_id: str = Query(...),
     name: str = Form(None, description="Nombre del template"),
     category: str = Form(None, description="Categoría"),
     body: str = Form(None, description="Cuerpo del mensaje"),
     variables: str = Form(None, description="JSON array de variables"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
-    """Actualiza un template existente."""
+    """Actualiza un template existente para un asesor."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-
-    # Obtener template existente
-    template = await _get_template(template_id)
+    template = await _get_template_by_advisor(advisor_id, template_id)
     if not template:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
-
-    # Actualizar campos proporcionados
     if name is not None:
         template["name"] = name.strip()
     if category is not None:
@@ -1494,13 +1475,10 @@ async def update_template(
             template["variables"] = json.loads(variables)
         except json.JSONDecodeError:
             pass
-
     template["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-    success = await _save_template(template)
+    success = await _save_template_by_advisor(advisor_id, template)
     if not success:
         raise HTTPException(status_code=500, detail="Error actualizando template")
-
     return {
         "status": "success",
         "template": template,
@@ -1511,28 +1489,23 @@ async def update_template(
 @router.delete("/templates/{template_id}")
 async def delete_template(
     template_id: str,
+    advisor_id: str = Query(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
-    """Elimina un template (no se pueden eliminar templates predefinidos)."""
+    """Elimina un template de un asesor (no se pueden eliminar templates predefinidos)."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
-
-    # Verificar que existe
-    template = await _get_template(template_id)
+    template = await _get_template_by_advisor(advisor_id, template_id)
     if not template:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' no encontrado")
-
-    # Verificar que no es predefinido
     if template.get("is_default"):
         raise HTTPException(
             status_code=403,
             detail="No se pueden eliminar templates predefinidos"
         )
-
-    success = await _delete_template(template_id)
+    success = await _delete_template_by_advisor(advisor_id, template_id)
     if not success:
         raise HTTPException(status_code=500, detail="Error eliminando template")
-
     return {
         "status": "success",
         "message": f"Template '{template_id}' eliminado"
@@ -2189,8 +2162,8 @@ async def update_deal_stage(
                 )
                 
                 # Invalidar caché de deal info para este contacto
-                _invalidate_deal_cache(contact_id)
-                
+                await _invalidate_deal_cache(contact_id)
+
                 return {
                     "status": "success",
                     "message": f"Etapa actualizada a '{stage_name}'",
@@ -2389,6 +2362,90 @@ async def get_window_status(
         "time_remaining_seconds": window_status.time_remaining_seconds,
         "requires_template": window_status.requires_template,
         "message": window_status.message
+    }
+
+
+@router.get("/contacts/{phone}/detail")
+async def get_contact_detail(
+    phone: str,
+    contact_id: Optional[str] = Query(None, description="ID del contacto en HubSpot"),
+    canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
+    limit: int = Query(50, ge=1, le=100),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Endpoint combinado: devuelve en un solo round-trip los datos necesarios para
+    abrir el chat de un contacto — historial de mensajes + estado de ventana 24h.
+
+    Reemplaza las 2 llamadas paralelas GET /history/{id} + GET /window-status/{phone}
+    que se hacen en selectContact().
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    if not validation.is_valid:
+        raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
+
+    phone_normalized = validation.normalized
+    mongo_manager = get_mongo_manager()
+
+    async def _get_messages():
+        messages = []
+        source = "none"
+        try:
+            # Paso 1: MongoDB por teléfono (más eficiente)
+            messages = await mongo_manager.get_history(
+                phone=phone_normalized,
+                limit=limit,
+                channel=canal
+            )
+            if messages:
+                return messages, "mongodb"
+
+            # Paso 2: MongoDB por contact_id si hay
+            if contact_id and contact_id.isdigit():
+                messages = await mongo_manager.get_history_by_contact_id(
+                    hubspot_contact_id=contact_id,
+                    limit=limit
+                )
+                if messages:
+                    return messages, "mongodb"
+
+            # Paso 3: Fallback HubSpot
+            if contact_id and contact_id.isdigit():
+                timeline_logger = get_timeline_logger()
+                messages = await timeline_logger.get_notes_for_contact(
+                    contact_id=contact_id,
+                    limit=limit
+                )
+                if messages:
+                    return messages, "hubspot"
+        except Exception as e:
+            logger.error(f"[Panel] Error obteniendo mensajes en detail: {e}")
+        return messages or [], source
+
+    # Ejecutar historial + window-status en paralelo (1 round-trip combinado)
+    (messages, source), window_status = await asyncio.gather(
+        _get_messages(),
+        check_24h_window(phone_normalized),
+    )
+
+    return {
+        "phone": phone_normalized,
+        "contact_id": contact_id,
+        "canal": canal,
+        # Historial
+        "messages": messages,
+        "message_count": len(messages),
+        "message_source": source,
+        # Ventana 24h
+        "window_open": window_status.is_open,
+        "last_message_time": window_status.last_message_time.isoformat() if window_status.last_message_time else None,
+        "time_remaining_seconds": window_status.time_remaining_seconds,
+        "requires_template": window_status.requires_template,
+        "window_message": window_status.message,
     }
 
 
@@ -2801,6 +2858,7 @@ async def get_active_contacts(
     date_to: Optional[str] = Query(None, description="Fecha hasta (ISO) para filtro custom"),
     advisor: Optional[str] = Query(None, description="Owner ID para filtrar contactos por asesora"),
     limit: int = Query(30, ge=1, le=100),
+    page: int = Query(1, ge=1, description="Página (1-based) para paginación del ZSET"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -2824,7 +2882,8 @@ async def get_active_contacts(
         logger.info(f"[Panel] Usando Redis URL: {redis_url}")
         state_manager = ConversationStateManager(redis_url)
 
-        active_contacts = await state_manager.get_all_human_active_contacts()
+        zset_offset = (page - 1) * limit
+        active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)
 
         logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
 
@@ -2928,12 +2987,15 @@ async def get_active_contacts(
                                 if created_deal:
                                     contact["deal_id"] = created_deal.get("deal_id")
                                     contact["current_stage"] = created_deal.get("current_stage")
-                                    import time
-                                    _deal_info_cache[cid] = {
-                                        "deal_id": created_deal.get("deal_id"),
-                                        "current_stage": created_deal.get("current_stage"),
-                                        "cached_at": time.time()
-                                    }
+                                    try:
+                                        _rc = await _get_redis_client()
+                                        _cache_data = json.dumps({
+                                            "deal_id": created_deal.get("deal_id"),
+                                            "current_stage": created_deal.get("current_stage")
+                                        })
+                                        await _rc.setex(f"{DEAL_CACHE_KEY_PREFIX}{cid}", DEAL_CACHE_TTL_SECONDS, _cache_data)
+                                    except Exception:
+                                        pass
                                     logger.info(f"[Panel] Deal auto-creado para contacto {cid}: {created_deal.get('deal_id')}")
                             except Exception as create_err:
                                 logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
@@ -3324,6 +3386,8 @@ async def get_active_contacts(
             "active_count": active_count,
             "historical_count": len(contacts_sorted) - active_count,
             "total_count": len(contacts_sorted),
+            "page": page,
+            "limit": limit,
             "since": since.isoformat(),
             "until": until.isoformat()
         }

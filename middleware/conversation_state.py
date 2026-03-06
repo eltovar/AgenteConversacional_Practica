@@ -101,8 +101,7 @@ class ConversationStateManager:
     """Maneja la persistencia de estados y metadatos en Redis."""
     STATE_PREFIX = "conv_state:"
     META_PREFIX = "conv_meta:"
-    ACTIVE_CONTACTS_SET = "active_conversations_index"  # Legacy SET (compatibilidad)
-    ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # Nuevo ZSET ordenado por timestamp
+    ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"  # ZSET principal ordenado por timestamp
     BOT_CONTROLLED_SET = "bot_controlled_conversations"  # SET para contactos en modo BOT que salen del ZSET
     
     # TTL dinámico: 48h días laborales, 72h fines de semana (para que duren hasta el lunes)
@@ -184,6 +183,27 @@ class ConversationStateManager:
             health_check_interval=30     # Health check cada 30s
         )
 
+    def _parse_meta_raw(self, raw_json: Optional[str]) -> Optional[ConversationMeta]:
+        """Parsea JSON de meta desde Redis sin IO. Replica la lógica de get_meta()."""
+        if not raw_json:
+            return None
+        try:
+            payload = json.loads(raw_json)
+            if 'advisor' in payload and not payload.get('assigned_owner_id'):
+                payload['assigned_owner_id'] = payload['advisor']
+            if 'owner_id' in payload and not payload.get('assigned_owner_id'):
+                payload['assigned_owner_id'] = payload['owner_id']
+            if 'phone' in payload and not payload.get('phone_normalized'):
+                payload['phone_normalized'] = payload['phone']
+            if 'name' in payload and not payload.get('display_name'):
+                payload['display_name'] = payload['name']
+            valid_fields = {f.name for f in fields(ConversationMeta)}
+            filtered = {k: v for k, v in payload.items() if k in valid_fields}
+            return ConversationMeta(**filtered)
+        except Exception as e:
+            logger.error(f"[ConversationState] Error parseando meta JSON: {e}")
+            return None
+
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:
         """Recupera metadatos de Redis filtrando campos inválidos de forma segura."""
         meta_key = f"{self.META_PREFIX}{phone}:{canal.lower()}"
@@ -213,151 +233,164 @@ class ConversationStateManager:
             logger.error(f"[ConversationState] Error en get_meta para {phone}: {e}")
             return None
 
-    async def get_active_contacts(self) -> List[Dict[str, Any]]:
+    async def get_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """
         Retorna la lista de contactos activos ordenados por última actividad.
 
-        Usa ZSET (sorted set) con score = timestamp Unix para ordenamiento.
-        Los contactos con mensajes más recientes aparecen primero.
+        Args:
+            limit:  Máximo de contactos del ZSET a retornar (default 100).
+            offset: Posición inicial en el ZSET (para paginación).
+
+        v2: Optimizado con Redis pipeline — reduce N*4 round-trips seriales a 3 round-trips totales.
+        v3: Paginación via zrevrange(offset, offset+limit-1) — escala con >100 contactos.
         """
         contacts = []
         try:
-            # Usar ZSET para obtener contactos ordenados (más reciente primero)
-            # zrevrange retorna en orden descendente por score
-            members = await self.redis.zrevrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
+            # ── Paso 1: Obtener miembros del ZSET con paginación (1 round-trip) ──────
+            members = await self.redis.zrevrange(
+                self.ACTIVE_CONTACTS_ZSET, offset, offset + limit - 1
+            )
 
-            # Fallback: Si ZSET está vacío, intentar migrar desde SET legacy
-            if not members:
-                legacy_members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
-                if legacy_members:
-                    logger.info(f"[ConversationState] Migrando {len(legacy_members)} contactos de SET a ZSET")
-                    for legacy_member in legacy_members:
-                        # Migrar con timestamp actual (no tenemos el original)
-                        score = get_bogota_now().timestamp()
-                        await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {legacy_member: score})
-                    # Ahora sí obtener del ZSET
-                    members = await self.redis.zrevrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
+            # ── Paso 2: Pipeline de lectura para todos los miembros ZSET (1 round-trip) ─
+            valid_members = [m for m in members if ":" in m]
+            now_ts = get_bogota_now().timestamp()
+            ghosts_to_remove = []
+            to_move_to_bot_set = []
 
-            for member in members:
-                if ":" not in member: continue
-                phone, canal = member.split(":", 1)
-                state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
-                status = await self.redis.get(state_key)
-                
-                meta = await self.get_meta(phone, canal)
+            if valid_members:
+                pipe = self.redis.pipeline(transaction=False)
+                for member in valid_members:
+                    phone, canal = member.split(":", 1)
+                    c = canal.lower()
+                    pipe.get(f"{self.STATE_PREFIX}{phone}:{c}")   # status
+                    pipe.get(f"{self.META_PREFIX}{phone}:{c}")    # meta JSON
+                    pipe.zscore(self.ACTIVE_CONTACTS_ZSET, member)  # score
+                    pipe.ttl(f"{self.STATE_PREFIX}{phone}:{c}")   # TTL
+                results = await pipe.execute()
 
-                if not status:
-                    # TTL expiró: Sofía retomará la conversación.
-                    # NO eliminar del panel — las asesoras deben seguir
-                    # viendo el contacto y su historial. Se muestra con
-                    # estado BOT_ACTIVE para indicar que está en modo bot.
-                    if not meta:
-                        # Sin meta tampoco: contacto fantasma, limpiar silenciosamente
-                        await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
-                        await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
-                        continue
-                    status = ConversationStatus.BOT_ACTIVE.value
-                    logger.debug(
-                        f"[ConversationState] TTL expirado para {phone}:{canal} — "
-                        f"mostrando como BOT_ACTIVE en el panel"
-                    )
+                for i, member in enumerate(valid_members):
+                    phone, canal = member.split(":", 1)
+                    base = i * 4
+                    status_raw = results[base]
+                    meta_raw   = results[base + 1]
+                    score      = results[base + 2]
+                    ttl        = results[base + 3]
 
-                # Filtro de inactividad 48h para contactos BOT_ACTIVE:
-                # Si llevan más de INACTIVITY_THRESHOLD sin interacción humana,
-                # salen del ZSET (prioridad/notificaciones) pero PERMANECEN VISIBLES
-                # en el panel a través del BOT_CONTROLLED_SET.
-                in_priority_zset = True
-                if status == ConversationStatus.BOT_ACTIVE.value:
-                    score = await self.redis.zscore(self.ACTIVE_CONTACTS_ZSET, member)
-                    if score is not None:
-                        now_ts = get_bogota_now().timestamp()
-                        if (now_ts - score) > self.INACTIVITY_THRESHOLD:
-                            # Mover a BOT_CONTROLLED_SET (sin notificaciones pero visible)
-                            await self.redis.sadd(self.BOT_CONTROLLED_SET, member)
-                            await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, member)
-                            await self.redis.srem(self.ACTIVE_CONTACTS_SET, member)
+                    meta = self._parse_meta_raw(meta_raw)
+
+                    if not status_raw:
+                        if not meta:
+                            ghosts_to_remove.append(member)
+                            continue
+                        status_raw = ConversationStatus.BOT_ACTIVE.value
+                        logger.debug(
+                            f"[ConversationState] TTL expirado para {phone}:{canal} — "
+                            f"mostrando como BOT_ACTIVE en el panel"
+                        )
+
+                    in_priority_zset = True
+                    if status_raw == ConversationStatus.BOT_ACTIVE.value:
+                        if score is not None and (now_ts - float(score)) > self.INACTIVITY_THRESHOLD:
+                            to_move_to_bot_set.append(member)
                             in_priority_zset = False
                             logger.debug(
                                 f"[ConversationState] {phone}:{canal} BOT_ACTIVE "
                                 f">48h inactivo, movido a BOT_CONTROLLED_SET (sigue visible)"
                             )
-                            # NO hacer continue — el contacto debe seguir en la lista
 
-                ttl = await self.redis.ttl(state_key)
+                    contacts.append({
+                        "phone": phone,
+                        "canal": canal,
+                        "status": status_raw,
+                        "display_name": (meta.display_name if meta else None) or "Cliente Nuevo",
+                        "last_activity": meta.last_activity if meta else get_bogota_now_iso(),
+                        "owner_id": meta.assigned_owner_id if meta else None,
+                        "assigned_owner_ids": meta.assigned_owner_ids if meta else [],
+                        "handoff_reason": meta.handoff_reason if meta else "Transferencia manual",
+                        "ttl_remaining": ttl,
+                        "contact_id": meta.contact_id if meta else None,
+                        "is_active": True,
+                        "canal_origen": (meta.canal_origen if meta else canal) or canal,
+                        "activated_at": meta.created_at if meta else get_bogota_now_iso(),
+                        "conversation_status": status_raw,
+                        "in_priority_zset": in_priority_zset,
+                        "deal_id": meta.deal_id if meta else None,
+                        "deal_stage": meta.deal_stage if meta else None,
+                    })
 
-                contacts.append({
-                    "phone": phone,
-                    "canal": canal,
-                    "status": status,
-                    "display_name": (meta.display_name if meta else None) or "Cliente Nuevo",
-                    "last_activity": meta.last_activity if meta else get_bogota_now_iso(),
-                    "owner_id": meta.assigned_owner_id if meta else None,
-                    "assigned_owner_ids": meta.assigned_owner_ids if meta else [],  # Colaboradores (modo collaborative)
-                    "handoff_reason": meta.handoff_reason if meta else "Transferencia manual",
-                    "ttl_remaining": ttl,
-                    "contact_id": meta.contact_id if meta else None,
-                    # === CAMPOS CRÍTICOS PARA EL PANEL ===
-                    "is_active": True,  # Marcar como activo para el panel
-                    "canal_origen": (meta.canal_origen if meta else canal) or canal,  # Segregación por equipo
-                    "activated_at": meta.created_at if meta else get_bogota_now_iso(),  # Filtro de tiempo
-                    "conversation_status": status,  # Estado real de Redis (HUMAN_ACTIVE/IN_CONVERSATION)
-                    "in_priority_zset": in_priority_zset,  # False = BOT controla, sin notificaciones
-                    "deal_id": meta.deal_id if meta else None,
-                    "deal_stage": meta.deal_stage if meta else None,
-                })
-            
-            # === FASE 2: Contactos en BOT_CONTROLLED_SET (visibles pero sin ZSET) ===
-            # Estos son contactos BOT_ACTIVE que salieron del ZSET por inactividad >48h
-            # pero deben seguir visibles en el panel.
+            # ── Paso 3: Escrituras pendientes en un solo pipeline ─────────────────────
+            if ghosts_to_remove or to_move_to_bot_set:
+                write_pipe = self.redis.pipeline(transaction=False)
+                for member in ghosts_to_remove:
+                    write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                for member in to_move_to_bot_set:
+                    write_pipe.sadd(self.BOT_CONTROLLED_SET, member)
+                    write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                await write_pipe.execute()
+
+            # ── Paso 4: BOT_CONTROLLED_SET — pipeline separado (1 round-trip) ─────────
+            # Contactos BOT_ACTIVE >48h: visibles pero sin notificaciones
             bot_controlled = await self.redis.smembers(self.BOT_CONTROLLED_SET)
-            processed_in_zset = {f"{c['phone']}:{c['canal']}" for c in contacts}
-            
-            for member in bot_controlled:
-                if member in processed_in_zset:
-                    continue  # Ya procesado arriba
-                    
-                if ":" not in member:
-                    continue
-                    
-                phone, canal = member.split(":", 1)
-                meta = await self.get_meta(phone, canal)
-                
-                if not meta:
-                    # Sin meta = contacto fantasma, limpiar
-                    await self.redis.srem(self.BOT_CONTROLLED_SET, member)
-                    continue
-                
-                state_key = f"{self.STATE_PREFIX}{phone}:{canal}"
-                status = await self.redis.get(state_key) or ConversationStatus.BOT_ACTIVE.value
-                ttl = await self.redis.ttl(state_key)
-                
-                contacts.append({
-                    "phone": phone,
-                    "canal": canal,
-                    "status": status,
-                    "display_name": meta.display_name or "Cliente Nuevo",
-                    "last_activity": meta.last_activity,
-                    "owner_id": meta.assigned_owner_id,
-                    "assigned_owner_ids": meta.assigned_owner_ids or [],
-                    "handoff_reason": meta.handoff_reason or "Sofía atiende",
-                    "ttl_remaining": ttl,
-                    "contact_id": meta.contact_id,
-                    "is_active": True,
-                    "canal_origen": meta.canal_origen or canal,
-                    "activated_at": meta.created_at,
-                    "conversation_status": status,
-                    "in_priority_zset": False,  # Fuera del ZSET = sin notificaciones
-                    "deal_id": meta.deal_id,
-                    "deal_stage": meta.deal_stage,
-                })
-                
+            processed_keys = {f"{c['phone']}:{c['canal']}" for c in contacts}
+            bot_to_process = [m for m in bot_controlled if ":" in m and m not in processed_keys]
+
+            if bot_to_process:
+                pipe2 = self.redis.pipeline(transaction=False)
+                for member in bot_to_process:
+                    phone, canal = member.split(":", 1)
+                    c = canal.lower()
+                    pipe2.get(f"{self.META_PREFIX}{phone}:{c}")   # meta JSON
+                    pipe2.get(f"{self.STATE_PREFIX}{phone}:{c}")  # status
+                    pipe2.ttl(f"{self.STATE_PREFIX}{phone}:{c}")  # TTL
+                results2 = await pipe2.execute()
+
+                bot_ghosts = []
+                for i, member in enumerate(bot_to_process):
+                    phone, canal = member.split(":", 1)
+                    base = i * 3
+                    meta_raw   = results2[base]
+                    status_raw = results2[base + 1]
+                    ttl        = results2[base + 2]
+
+                    meta = self._parse_meta_raw(meta_raw)
+                    if not meta:
+                        bot_ghosts.append(member)
+                        continue
+
+                    status = status_raw or ConversationStatus.BOT_ACTIVE.value
+                    contacts.append({
+                        "phone": phone,
+                        "canal": canal,
+                        "status": status,
+                        "display_name": meta.display_name or "Cliente Nuevo",
+                        "last_activity": meta.last_activity,
+                        "owner_id": meta.assigned_owner_id,
+                        "assigned_owner_ids": meta.assigned_owner_ids or [],
+                        "handoff_reason": meta.handoff_reason or "Sofía atiende",
+                        "ttl_remaining": ttl,
+                        "contact_id": meta.contact_id,
+                        "is_active": True,
+                        "canal_origen": meta.canal_origen or canal,
+                        "activated_at": meta.created_at,
+                        "conversation_status": status,
+                        "in_priority_zset": False,
+                        "deal_id": meta.deal_id,
+                        "deal_stage": meta.deal_stage,
+                    })
+
+                if bot_ghosts:
+                    clean_pipe = self.redis.pipeline(transaction=False)
+                    for member in bot_ghosts:
+                        clean_pipe.srem(self.BOT_CONTROLLED_SET, member)
+                    await clean_pipe.execute()
+
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
         return contacts
 
-    async def get_all_human_active_contacts(self) -> List[Dict[str, Any]]:
+    async def get_all_human_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Alias para obtener contactos activos."""
-        return await self.get_active_contacts()
+        return await self.get_active_contacts(limit=limit, offset=offset)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # MÉTODOS DE COMPATIBILIDAD PARA app.py Y outbound_panel.py
@@ -523,7 +556,6 @@ class ConversationStateManager:
             index_member = f"{phone_num}:{canal_safe}"
             score = get_bogota_now().timestamp()  # Unix timestamp como score
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
             logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe} (re-agregado al ZSET)")
@@ -570,7 +602,6 @@ class ConversationStateManager:
             index_member = f"{phone}:{canal_safe}"
             score = get_bogota_now().timestamp()  # Unix timestamp como score
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-            await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy compatibilidad
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
             logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason} (ZSET índice 0)")
@@ -706,8 +737,7 @@ class ConversationStateManager:
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                await self.redis.sadd(self.ACTIVE_CONTACTS_SET, index_member)
-                
+
                 logger.info(
                     f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe}, "
                     f"assigned_owner_id={owner_id} (teléfono: {phone})"
@@ -904,10 +934,7 @@ class ConversationStateManager:
         """
         try:
             deleted = 0
-            # Usar ZSET como fuente principal, fallback a SET legacy
             members = await self.redis.zrange(self.ACTIVE_CONTACTS_ZSET, 0, -1)
-            if not members:
-                members = await self.redis.smembers(self.ACTIVE_CONTACTS_SET)
 
             # Encontrar todos los canales para este teléfono
             phone_channels = []
@@ -948,7 +975,6 @@ class ConversationStateManager:
                     await self.redis.delete(state_key)
                     await self.redis.delete(meta_key)
                     await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
-                    await self.redis.srem(self.ACTIVE_CONTACTS_SET, index_member)  # Legacy
                     deleted += 1
 
             logger.info(f"[ConversationState] Limpiados {deleted} estados duplicados para {phone}, manteniendo {canal_to_keep}")
@@ -956,6 +982,31 @@ class ConversationStateManager:
         except Exception as e:
             logger.error(f"[ConversationState] Error en cleanup_duplicate_states: {e}")
             return 0
+
+    async def cleanup_legacy_set(self):
+        """
+        Migración única: mueve cualquier miembro restante del SET legacy
+        (active_conversations_index) al ZSET principal y elimina la clave.
+        Se llama una sola vez en startup. Después de esto el SET no existe.
+        """
+        try:
+            legacy_key = "active_conversations_index"
+            legacy_members = await self.redis.smembers(legacy_key)
+            if legacy_members:
+                score = get_bogota_now().timestamp()
+                pipe = self.redis.pipeline(transaction=False)
+                for member in legacy_members:
+                    # Solo migrar si no existe ya en el ZSET
+                    pipe.zadd(self.ACTIVE_CONTACTS_ZSET, {member: score}, nx=True)
+                await pipe.execute()
+                logger.info(
+                    f"[ConversationState] cleanup_legacy_set: "
+                    f"migrados {len(legacy_members)} miembros de SET a ZSET"
+                )
+            await self.redis.delete(legacy_key)
+            logger.info("[ConversationState] SET legacy 'active_conversations_index' eliminado de Redis")
+        except Exception as e:
+            logger.warning(f"[ConversationState] cleanup_legacy_set: {e} (no crítico)")
 
     async def close(self):
         """Cierra la conexión a Redis de forma segura."""

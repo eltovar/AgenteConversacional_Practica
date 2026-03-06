@@ -759,6 +759,14 @@ async def startup_event():
 
     scheduler.start()
     logger.info("[STARTUP] Schedulers iniciados (Timezone: %s)", TIMEZONE_BOGOTA)
+
+    # Migrar SET legacy Redis → ZSET y eliminar la clave obsoleta (operación única)
+    try:
+        from middleware.conversation_state import state_manager
+        await state_manager.cleanup_legacy_set()
+    except Exception as e:
+        logger.warning("[STARTUP] cleanup_legacy_set: %s (no crítico)", e)
+
     logger.info("[STARTUP] Servidor listo para aceptar tráfico HTTP")
 
 

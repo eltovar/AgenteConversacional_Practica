@@ -835,11 +835,12 @@ class CRMAgent:
             meta_key = f"{META_PREFIX}{phone_normalized}:{canal_safe}"
             await r.set(meta_key, json.dumps(meta), ex=HANDOFF_TTL_SECONDS)
 
-            # 3. CRÍTICO: Agregar al índice de contactos activos
+            # 3. CRÍTICO: Agregar al ZSET de contactos activos con timestamp como score
             # Sin esto, get_all_human_active_contacts() NO encuentra el contacto
-            ACTIVE_CONTACTS_SET = "active_conversations_index"
+            ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"
             index_member = f"{phone_normalized}:{canal_safe}"
-            await r.sadd(ACTIVE_CONTACTS_SET, index_member)
+            score = now.timestamp()
+            await r.zadd(ACTIVE_CONTACTS_ZSET, {index_member: score})
 
             await r.close()
 

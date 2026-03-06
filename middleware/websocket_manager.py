@@ -249,25 +249,42 @@ class ConnectionManager:
         Returns:
             Número de conexiones a las que se envió
         """
+        connections = self.all_connections.copy()
+        if not connections:
+            logger.info("[WebSocket] Broadcast: sin conexiones activas")
+            return 0
+
+        async def _send_one(websocket):
+            try:
+                await asyncio.wait_for(websocket.send_json(message), timeout=2.0)
+                return (websocket, True)
+            except Exception as e:
+                logger.warning(f"[WebSocket] Error en broadcast a conexión: {e}")
+                return (websocket, False)
+
+        results = await asyncio.gather(
+            *[_send_one(ws) for ws in connections],
+            return_exceptions=True
+        )
+
         sent_count = 0
         failed_connections = []
-
-        for websocket in self.all_connections.copy():
-            try:
-                await websocket.send_json(message)
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            ws, success = result
+            if success:
                 sent_count += 1
-            except Exception as e:
-                logger.warning(f"[WebSocket] Error en broadcast: {e}")
-                failed_connections.append(websocket)
+            else:
+                failed_connections.append(ws)
 
-        # Limpiar conexiones fallidas (necesitamos encontrar el advisor_id)
+        # Limpiar conexiones fallidas
         for ws in failed_connections:
             self.all_connections.discard(ws)
-            # Buscar y limpiar de active_connections
-            for advisor_id, connections in list(self.active_connections.items()):
-                if ws in connections:
-                    connections.remove(ws)
-                    if not connections:
+            for advisor_id, conns in list(self.active_connections.items()):
+                if ws in conns:
+                    conns.remove(ws)
+                    if not conns:
                         del self.active_connections[advisor_id]
                     break
 

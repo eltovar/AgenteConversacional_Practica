@@ -33,6 +33,7 @@ let templatesData = [];  // Almacena templates cargados
 let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
+const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
 
 // Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
 let unreadCounts = {};
@@ -161,9 +162,14 @@ async function updateDealStage(contactId, dealId, stageId) {
 // FUNCIONES DE TEMPLATES
 // =========================================================================
 
-async function loadTemplates() {
+async function loadTemplates(forceRefresh = false) {
+    // Usar caché de sesión: los templates no cambian durante una sesión normal
+    if (!forceRefresh && templatesData && templatesData.length > 0) {
+        populateTemplateSelector();
+        return;
+    }
     try {
-        const response = await fetch(`${BASE_URL}/templates`, {
+        const response = await fetch(`${BASE_URL}/templates?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
             headers: { 'X-API-Key': API_KEY }
         });
 
@@ -391,7 +397,7 @@ async function saveTemplate(event) {
     formData.append('variables', JSON.stringify(variables));
 
     try {
-        const response = await fetch(`${BASE_URL}/templates`, {
+        const response = await fetch(`${BASE_URL}/templates?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
             method: 'POST',
             headers: { 'X-API-Key': API_KEY },
             body: formData
@@ -468,7 +474,7 @@ async function updateTemplate(event, templateId) {
     formData.append('variables', JSON.stringify(variables));
 
     try {
-        const response = await fetch(`${BASE_URL}/templates/${templateId}`, {
+        const response = await fetch(`${BASE_URL}/templates/${templateId}?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
             method: 'PUT',
             headers: { 'X-API-Key': API_KEY },
             body: formData
@@ -492,7 +498,7 @@ async function deleteTemplate(templateId) {
     if (!confirm('Eliminar este template?')) return;
 
     try {
-        const response = await fetch(`${BASE_URL}/templates/${templateId}`, {
+        const response = await fetch(`${BASE_URL}/templates/${templateId}?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
             method: 'DELETE',
             headers: { 'X-API-Key': API_KEY }
         });
@@ -729,10 +735,260 @@ async function checkWindowStatus(phone) {
     }
 }
 
+/**
+ * Carga historial + estado de ventana en un solo round-trip via GET /contacts/{phone}/detail.
+ * Reemplaza loadChatHistory() + checkWindowStatus() cuando se abre un contacto.
+ * @param {string} phone
+ * @param {string} contactId
+ * @param {string|null} canal
+ */
+async function loadContactDetail(phone, contactId, canal) {
+    const requestedContactId = contactId;
+
+    const windowWarning = document.getElementById('windowWarning');
+    const messageInput = document.getElementById('messageInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const templateSection = document.getElementById('templateSection');
+
+    try {
+        let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=50`;
+        if (contactId) url += `&contact_id=${encodeURIComponent(contactId)}`;
+        if (canal) url += `&canal=${encodeURIComponent(canal)}`;
+
+        const response = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
+
+        // Race condition: si el contacto cambió mientras esperábamos, descartar
+        if (currentContactId !== requestedContactId) {
+            console.warn(`[Panel] Race condition en loadContactDetail: descartado (${requestedContactId})`);
+            return;
+        }
+
+        const data = await response.json();
+
+        // Renderizar mensajes
+        renderChatBubbles(data.messages || []);
+
+        // Aplicar estado de ventana 24h
+        const statusDiv = document.getElementById('windowStatus');
+        statusDiv.classList.remove('hidden');
+
+        if (data.window_open) {
+            statusDiv.className = 'text-sm bg-green-100 text-green-700 px-3 py-1 rounded-full';
+            statusDiv.textContent = `Ventana: ${data.window_message}`;
+            if (messageInput) {
+                messageInput.disabled = false;
+                messageInput.placeholder = 'Escribe un mensaje personalizado...';
+                messageInput.classList.remove('bg-gray-200', 'cursor-not-allowed');
+            }
+            if (sendBtn) sendBtn.disabled = false;
+            windowWarning.classList.add('hidden');
+            if (templateSection) templateSection.classList.remove('border-red-300', 'bg-red-50');
+        } else {
+            statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
+            statusDiv.textContent = 'Ventana cerrada (>24h) - Usa template';
+            if (messageInput) {
+                messageInput.disabled = true;
+                messageInput.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
+                messageInput.classList.add('bg-gray-200', 'cursor-not-allowed');
+            }
+            if (sendBtn) sendBtn.disabled = true;
+            windowWarning.classList.remove('hidden');
+            if (templateSection) {
+                templateSection.classList.remove('bg-blue-50', 'border-blue-200');
+                templateSection.classList.add('bg-yellow-50', 'border-yellow-300');
+            }
+        }
+
+    } catch (error) {
+        if (currentContactId !== requestedContactId) return;
+        console.error('[Panel] Error en loadContactDetail:', error);
+        // Fallback: mostrar error en chat, habilitar inputs
+        document.getElementById('chatMessages').innerHTML =
+            `<div class="flex items-center justify-center h-full text-red-500"><p>Error al cargar: ${error.message}</p></div>`;
+        windowWarning.classList.add('hidden');
+        document.getElementById('windowStatus').classList.add('hidden');
+        if (messageInput) messageInput.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+    }
+}
+
 // =========================================================================
 // FUNCIONES DE RENDERIZADO
 // =========================================================================
 
+// =========================================================================
+// HELPERS PARA RENDERIZADO DIFERENCIAL DE CONTACTOS
+// =========================================================================
+
+/**
+ * Genera el HTML del dropdown de pipeline para un contacto.
+ * Extraído de la función anidada original para poder usarse en _buildContactHTML.
+ */
+function _buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {
+    if (!dealIdForDropdown) return '';
+    const options = PIPELINE_STAGES.map(stage =>
+        `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
+    ).join('');
+    return `
+        <select class="text-xs border rounded px-1 py-0.5 bg-white cursor-pointer hover:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                data-contact-id="${contactIdForDropdown}"
+                onchange="updateDealStage('${contactIdForDropdown}', '${dealIdForDropdown}', this.value)"
+                onclick="event.stopPropagation()">
+            ${options}
+        </select>
+    `;
+}
+
+/**
+ * Genera un string "fingerprint" de todos los campos que afectan el render de un contacto.
+ * Si el fingerprint no cambió, el elemento DOM no necesita ser reconstruido.
+ */
+function _getContactFingerprint(contact) {
+    const contactId = contact.contact_id || contact.id || '';
+    const phone = contact.phone || '';
+    const cacheKey = contactId || phone;
+    const cached = contactDealCache[cacheKey];
+    const dealId = contact.deal_id || (cached ? (cached.deal_id || cached) : '');
+    const currentStage = contact.current_stage || (cached?.current_stage) || '';
+    return [
+        contact.conversation_status || contact.status || '',
+        contact.is_active ? '1' : '0',
+        contact.display_name || '',
+        contact.canal_origen || '',
+        dealId,
+        currentStage,
+        contact.time_ago || '',
+        contact.ttl_display || '',
+        contact.handoff_reason || '',
+        contact.has_appointment ? '1' : '0',
+        contactId === currentContactId ? 'active' : '',
+    ].join('|');
+}
+
+/**
+ * Genera el HTML completo para un único elemento de contacto en la lista.
+ * Contiene la misma lógica que el antiguo .map() callback de renderContactsList.
+ */
+function _buildContactHTML(contact) {
+    const isActive = contact.is_active === true;
+    const status = contact.conversation_status || contact.status || '';
+    const isInConversation = status === 'IN_CONVERSATION';
+    const isHumanActive = status === 'HUMAN_ACTIVE' || status === 'PENDING_HANDOFF';
+    const contactId = contact.contact_id || contact.id || '';
+    const phone = contact.phone || '';
+    const displayName = contact.display_name || 'Sin nombre';
+    const canalOrigen = contact.canal_origen || '';
+
+    let bgClass = '';
+    if (isInConversation) {
+        bgClass = 'bg-blue-50 border-l-4 border-blue-500';
+    } else if (isHumanActive || isActive) {
+        bgClass = 'bg-green-50 border-l-4 border-green-500';
+    }
+
+    const timeAgo = contact.time_ago || '';
+
+    const canalColors = {
+        'instagram': 'bg-pink-100 text-pink-700',
+        'facebook': 'bg-blue-100 text-blue-700',
+        'finca_raiz': 'bg-yellow-100 text-yellow-700',
+        'metrocuadrado': 'bg-orange-100 text-orange-700',
+        'pagina_web': 'bg-indigo-100 text-indigo-700',
+        'whatsapp_directo': 'bg-green-100 text-green-700',
+        'default': 'bg-gray-100 text-gray-600'
+    };
+    const canalColorClass = canalColors[canalOrigen] || canalColors['default'];
+    const canalBadge = canalOrigen && canalOrigen !== 'default'
+        ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded mr-1">${canalOrigen.replace('_', ' ')}</span>`
+        : '';
+
+    let dealId = contact.deal_id || '';
+    let currentStage = contact.current_stage || '';
+    const cacheKey = contactId || phone;
+
+    if (dealId && cacheKey) {
+        contactDealCache[cacheKey] = {
+            deal_id: dealId,
+            current_stage: currentStage || contactDealCache[cacheKey]?.current_stage || ''
+        };
+    } else if (cacheKey && contactDealCache[cacheKey]) {
+        dealId = contactDealCache[cacheKey].deal_id || contactDealCache[cacheKey];
+        if (!currentStage && contactDealCache[cacheKey].current_stage) {
+            currentStage = contactDealCache[cacheKey].current_stage;
+        }
+    }
+
+    let badge = '';
+    if (isInConversation || isHumanActive || isActive) {
+        const pipelineDropdown = _buildPipelineDropdown(contactId, dealId, currentStage);
+        if (pipelineDropdown) {
+            badge = `${canalBadge}${pipelineDropdown}
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                     ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+        } else if (isInConversation) {
+            badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
+        } else {
+            badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                     ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+        }
+    } else if (status === 'BOT_ACTIVE') {
+        badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Bot</span>`;
+    } else {
+        badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>`;
+    }
+
+    const bgColors = ['10B981', '3B82F6', 'F59E0B', 'EF4444', '8B5CF6', 'EC4899', '06B6D4'];
+    const colorIndex = (displayName || 'A').charCodeAt(0) % bgColors.length;
+    const bgColor = isInConversation ? '3B82F6' : (isHumanActive || isActive) ? '10B981' : bgColors[colorIndex];
+    const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || '?')}&background=${bgColor}&color=fff&size=40&rounded=true&bold=true`;
+
+    const unread = unreadCounts[phone] || 0;
+    const unreadBadge = (unread > 0 && phone !== currentPhone)
+        ? `<span class="unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none">${unread > 9 ? '9+' : unread}</span>`
+        : '';
+
+    const apptBadge = contact.has_appointment
+        ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
+        : '';
+
+    return `
+        <div class="contact-item p-3 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
+             data-phone="${phone}"
+             onclick="selectContact('${contactId}', '${phone}', '${displayName.replace(/'/g, "\\'")}', '${canalOrigen}')">
+            <div class="flex items-center gap-3">
+                <div class="relative flex-shrink-0">
+                    <img src="${avatarUrl}"
+                         class="w-10 h-10 rounded-full"
+                         alt="${displayName}"
+                         onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
+                    ${unreadBadge}
+                    ${apptBadge}
+                </div>
+                <div class="flex-1 min-w-0">
+                    <p class="font-medium text-gray-800 truncate">${displayName}</p>
+                    <p class="text-sm text-gray-500 truncate">${phone || contact.email || 'Sin contacto'}</p>
+                    ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate">${contact.handoff_reason}</p>` : ''}
+                </div>
+                <div class="text-right">
+                    ${badge}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// =========================================================================
+// RENDERIZADO DE LISTA DE CONTACTOS — Diferencial (sin innerHTML completo)
+// =========================================================================
+
+/**
+ * Renderiza la lista de contactos de forma diferencial:
+ * solo reconstruye los elementos cuyo fingerprint cambió,
+ * inserta los nuevos y elimina los que ya no están.
+ * Evita el parpadeo causado por reemplazar container.innerHTML completo.
+ */
 function renderContactsList(contacts) {
     const container = document.getElementById('contactsList');
 
@@ -743,152 +999,63 @@ function renderContactsList(contacts) {
                 <p class="text-sm mt-1">Los contactos apareceran automaticamente cuando Sofia haga handoff</p>
             </div>
         `;
+        _contactFingerprints.clear();
         return;
     }
 
-    container.innerHTML = contacts.map(contact => {
-        const isActive = contact.is_active === true;
-        const status = contact.conversation_status || contact.status || '';
-        const isInConversation = status === 'IN_CONVERSATION';
-        const isHumanActive = status === 'HUMAN_ACTIVE' || status === 'PENDING_HANDOFF';
-        const contactId = contact.contact_id || contact.id || '';
+    // Construir mapa de elementos existentes en el DOM indexados por phone
+    const existingMap = new Map();
+    for (const el of container.querySelectorAll('.contact-item[data-phone]')) {
+        existingMap.set(el.dataset.phone, el);
+    }
+
+    const newPhones = new Set(contacts.map(c => c.phone || ''));
+
+    // Eliminar contactos que ya no están en la lista nueva
+    for (const [phone, el] of existingMap) {
+        if (!newPhones.has(phone)) {
+            el.remove();
+            existingMap.delete(phone);
+            _contactFingerprints.delete(phone);
+        }
+    }
+
+    // Actualizar o insertar cada contacto en el orden correcto
+    for (let i = 0; i < contacts.length; i++) {
+        const contact = contacts[i];
         const phone = contact.phone || '';
-        const displayName = contact.display_name || 'Sin nombre';
-        const canalOrigen = contact.canal_origen || '';  // Para segregacion por canal
+        const fingerprint = _getContactFingerprint(contact);
+        const existing = existingMap.get(phone);
 
-        // Determinar colores segun estado
-        let bgClass = '';
-        let avatarClass = 'bg-gray-300';
-        if (isInConversation) {
-            bgClass = 'bg-blue-50 border-l-4 border-blue-500';
-            avatarClass = 'bg-blue-500';
-        } else if (isHumanActive || isActive) {
-            bgClass = 'bg-green-50 border-l-4 border-green-500';
-            avatarClass = 'bg-green-500';
-        }
-
-        // Determinar badge segun estado
-        // Tiempo de llegada del contacto
-        const timeAgo = contact.time_ago || '';
-
-        // Badge del canal de origen (si existe)
-        const canalColors = {
-            'instagram': 'bg-pink-100 text-pink-700',
-            'facebook': 'bg-blue-100 text-blue-700',
-            'finca_raiz': 'bg-yellow-100 text-yellow-700',
-            'metrocuadrado': 'bg-orange-100 text-orange-700',
-            'pagina_web': 'bg-indigo-100 text-indigo-700',
-            'whatsapp_directo': 'bg-green-100 text-green-700',
-            'default': 'bg-gray-100 text-gray-600'
-        };
-        const canalColorClass = canalColors[canalOrigen] || canalColors['default'];
-        const canalBadge = canalOrigen && canalOrigen !== 'default'
-            ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded mr-1">${canalOrigen.replace('_', ' ')}</span>`
-            : '';
-
-        // Generar dropdown de pipeline si hay deal_id
-        // FIX FLICKERING: Cachear deal_id Y current_stage para evitar que el UI oscile
-        // cuando HubSpot devuelve datos intermitentemente por rate limiting
-        let dealId = contact.deal_id || '';
-        let currentStage = contact.current_stage || '';
-        const cacheKey = contactId || phone;
-
-        if (dealId && cacheKey) {
-            // Si tenemos deal_id, guardarlo en cache junto con current_stage
-            contactDealCache[cacheKey] = {
-                deal_id: dealId,
-                current_stage: currentStage || contactDealCache[cacheKey]?.current_stage || ''
-            };
-        } else if (cacheKey && contactDealCache[cacheKey]) {
-            // Si no viene deal_id pero lo tenemos en cache, usarlo
-            dealId = contactDealCache[cacheKey].deal_id || contactDealCache[cacheKey];
-            // También recuperar current_stage del caché si no viene
-            if (!currentStage && contactDealCache[cacheKey].current_stage) {
-                currentStage = contactDealCache[cacheKey].current_stage;
-            }
-        }
-
-        function buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {
-            if (!dealIdForDropdown) return '';
-            const options = PIPELINE_STAGES.map(stage =>
-                `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
-            ).join('');
-            return `
-                <select class="text-xs border rounded px-1 py-0.5 bg-white cursor-pointer hover:border-blue-400 focus:ring-1 focus:ring-blue-400"
-                        data-contact-id="${contactIdForDropdown}"
-                        onchange="updateDealStage('${contactIdForDropdown}', '${dealIdForDropdown}', this.value)"
-                        onclick="event.stopPropagation()">
-                    ${options}
-                </select>
-            `;
-        }
-
-        let badge = '';
-        if (isInConversation || isHumanActive || isActive) {
-            // Mostrar dropdown de pipeline si hay deal, sino mostrar badge de estado
-            const pipelineDropdown = buildPipelineDropdown(contactId, dealId, currentStage);
-            if (pipelineDropdown) {
-                badge = `${canalBadge}${pipelineDropdown}
-                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
-                         ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
-            } else if (isInConversation) {
-                badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
-                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
+        let el;
+        if (existing) {
+            if (_contactFingerprints.get(phone) !== fingerprint) {
+                // Los datos cambiaron — reconstruir solo este elemento
+                const wrapper = document.createElement('div');
+                wrapper.innerHTML = _buildContactHTML(contact).trim();
+                const newEl = wrapper.firstElementChild;
+                existing.replaceWith(newEl);
+                existingMap.set(phone, newEl);
+                el = newEl;
             } else {
-                badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
-                         ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
-                         ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
+                el = existing; // Sin cambios, reutilizar
             }
-        } else if (status === 'BOT_ACTIVE') {
-            badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Bot</span>`;
+            _contactFingerprints.set(phone, fingerprint);
         } else {
-            badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>`;
+            // Contacto nuevo — crear e insertar
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = _buildContactHTML(contact).trim();
+            el = wrapper.firstElementChild;
+            existingMap.set(phone, el);
+            _contactFingerprints.set(phone, fingerprint);
         }
 
-        // Generar color de fondo basado en el nombre (consistente)
-        const bgColors = ['10B981', '3B82F6', 'F59E0B', 'EF4444', '8B5CF6', 'EC4899', '06B6D4'];
-        const colorIndex = (displayName || 'A').charCodeAt(0) % bgColors.length;
-        const bgColor = isInConversation ? '3B82F6' : (isHumanActive || isActive) ? '10B981' : bgColors[colorIndex];
-
-        // URL de UI Avatars (servicio gratuito de avatares)
-        const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || '?')}&background=${bgColor}&color=fff&size=40&rounded=true&bold=true`;
-
-        // Badge de mensajes no leídos (solo si no es el contacto activo)
-        const unread = unreadCounts[phone] || 0;
-        const unreadBadge = (unread > 0 && phone !== currentPhone)
-            ? `<span class="unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none">${unread > 9 ? '9+' : unread}</span>`
-            : '';
-
-        // Badge de cita programada (📅)
-        const apptBadge = contact.has_appointment
-            ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
-            : '';
-
-        return `
-            <div class="contact-item p-3 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
-                 data-phone="${phone}"
-                 onclick="selectContact('${contactId}', '${phone}', '${displayName.replace(/'/g, "\\'")}', '${canalOrigen}')">
-                <div class="flex items-center gap-3">
-                    <div class="relative flex-shrink-0">
-                        <img src="${avatarUrl}"
-                             class="w-10 h-10 rounded-full"
-                             alt="${displayName}"
-                             onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
-                        ${unreadBadge}
-                        ${apptBadge}
-                    </div>
-                    <div class="flex-1 min-w-0">
-                        <p class="font-medium text-gray-800 truncate">${displayName}</p>
-                        <p class="text-sm text-gray-500 truncate">${phone || contact.email || 'Sin contacto'}</p>
-                        ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate">${contact.handoff_reason}</p>` : ''}
-                    </div>
-                    <div class="text-right">
-                        ${badge}
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
+        // Garantizar posición correcta en el contenedor (orden del servidor)
+        const currentAtPosition = container.children[i];
+        if (currentAtPosition !== el) {
+            container.insertBefore(el, currentAtPosition || null);
+        }
+    }
 }
 
 // Variable para tracking de primera carga
@@ -1789,11 +1956,13 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }
     })();
 
-    const loadHistoryPromise = loadChatHistory(contactId);
-    const checkWindowPromise = phone ? checkWindowStatus(phone) : Promise.resolve();
+    // Endpoint combinado: historial + window-status en 1 solo round-trip
+    const loadDetailPromise = phone
+        ? loadContactDetail(phone, contactId, canal)
+        : loadChatHistory(contactId);
 
     // Esperar a que todas las operaciones completen
-    await Promise.all([takeControlPromise, loadHistoryPromise, checkWindowPromise]);
+    await Promise.all([takeControlPromise, loadDetailPromise]);
 
     // Remover overlay de carga
     if (chatContainer) {
@@ -2048,8 +2217,9 @@ function startPolling() {
         // Actualizar lista de contactos
         await loadContacts();
 
-        // Actualizar chat si hay contacto seleccionado (polling mas frecuente)
-        if (currentContactId) {
+        // Actualizar historial solo si WS no está activo (evita doble carga)
+        const wsActive = ws && ws.readyState === WebSocket.OPEN;
+        if (!wsActive && currentContactId) {
             await loadChatHistory(currentContactId);
         }
     }, interval);
@@ -2067,6 +2237,20 @@ function stopPolling() {
         clearInterval(pollingInterval);
         pollingInterval = null;
     }
+}
+
+/**
+ * Polling de respaldo cuando el WebSocket está activo.
+ * Solo refresca la lista de contactos (sin historial de chat) cada 10s.
+ * El historial lo maneja el WS via contact_updated.
+ */
+function startFallbackPolling() {
+    if (pollingInterval) clearInterval(pollingInterval);
+    pollingInterval = setInterval(async () => {
+        if (!isTabVisible) return;
+        await loadContacts();
+    }, POLLING_INTERVAL_IDLE);
+    console.log('[Panel] Fallback polling activo (WS conectado): 10s');
 }
 
 /**
@@ -2171,7 +2355,9 @@ document.addEventListener('visibilitychange', handleVisibilityChange);
 let ws = null;
 let wsReconnectAttempts = 0;
 const WS_MAX_RECONNECT_ATTEMPTS = 5;
-const WS_RECONNECT_DELAY = 3000;  // 3 segundos
+const WS_RECONNECT_DELAY = 3000;  // 3 segundos (legacy — ahora se usa backoff exponencial)
+const WS_BASE_RECONNECT_DELAY = 1000;  // 1s base para backoff exponencial
+let wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
 
 /**
  * Conecta al WebSocket para recibir notificaciones en tiempo real.
@@ -2193,6 +2379,10 @@ function connectWebSocket() {
         ws.onopen = () => {
             console.log('[Panel] WebSocket conectado');
             wsReconnectAttempts = 0;
+            wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
+
+            // Cambiar a fallback polling (10s, sin historial) — el WS maneja eventos en tiempo real
+            startFallbackPolling();
 
             // Notificar que contacto actual esta siendo observado
             if (currentPhone) {
@@ -2216,11 +2406,15 @@ function connectWebSocket() {
             console.log('[Panel] WebSocket desconectado:', event.code, event.reason);
             ws = null;
 
-            // Reconectar si no fue cierre intencional
+            // Retomar polling activo como fallback (WS no disponible)
+            startPolling();
+
+            // Reconectar con backoff exponencial
             if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
                 wsReconnectAttempts++;
-                console.log(`[Panel] Reintentando conexion WS (${wsReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS})...`);
-                setTimeout(connectWebSocket, WS_RECONNECT_DELAY);
+                wsCurrentDelay = Math.min(WS_BASE_RECONNECT_DELAY * Math.pow(2, wsReconnectAttempts - 1), 30000);
+                console.log(`[Panel] Reintentando conexion WS (${wsReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS}) en ${wsCurrentDelay}ms...`);
+                setTimeout(connectWebSocket, wsCurrentDelay);
             } else {
                 console.warn('[Panel] Max reintentos WS alcanzado. Usando solo polling.');
             }
@@ -2236,6 +2430,43 @@ function connectWebSocket() {
 }
 
 /**
+ * Actualiza el badge de no-leídos de un contacto directamente en el DOM,
+ * sin necesidad de re-renderizar la lista completa.
+ * @param {string} phone - Teléfono del contacto
+ * @param {number} count - Cantidad de mensajes no leídos
+ */
+function updateUnreadBadge(phone, count) {
+    const contactEl = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"]`);
+    if (!contactEl) return;
+    const avatarWrap = contactEl.querySelector('.relative.flex-shrink-0');
+    if (!avatarWrap) return;
+    let badge = contactEl.querySelector('.unread-badge');
+    if (count > 0) {
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none';
+            avatarWrap.appendChild(badge);
+        }
+        badge.textContent = count > 9 ? '9+' : String(count);
+    } else if (badge) {
+        badge.remove();
+    }
+}
+
+/**
+ * Programa un refresco de la lista de contactos con debounce de 500ms.
+ * Agrupa múltiples eventos WS rápidos en una sola llamada a loadContacts().
+ */
+let _contactsRefreshTimer = null;
+function scheduleContactsRefresh() {
+    if (_contactsRefreshTimer) return;  // Ya hay uno pendiente, no acumular
+    _contactsRefreshTimer = setTimeout(async () => {
+        _contactsRefreshTimer = null;
+        await loadContacts();
+    }, 500);
+}
+
+/**
  * Maneja mensajes recibidos del WebSocket.
  * @param {Object} data - Mensaje parseado
  */
@@ -2247,18 +2478,19 @@ function handleWebSocketMessage(data) {
             // Nuevo mensaje o actividad → reordenar lista INMEDIATAMENTE
             console.log('[Panel] contact_updated recibido, action:', data.action, 'phone:', data.phone);
 
-            // Si action es 'new_message', también incrementar contador de no leídos y notificar
-            // (El backend envía contact_updated con action='new_message' cuando el estado no es HUMAN_ACTIVE)
+            // Si action es 'new_message', actualizar badge directamente sin re-render
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
                 console.log('[Panel] Incrementando unreadCounts para', data.phone);
                 unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+                updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
                 playNotificationSound();
                 if (document.hidden) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }
             }
 
-            loadContacts();
+            // Refresco debounced: agrupa eventos rápidos en una sola carga
+            scheduleContactsRefresh();
             // Si el chat activo es el que recibió el mensaje, refrescar historial
             if (currentPhone && data.phone && data.phone === currentPhone) {
                 loadChatHistory(currentContactId);
@@ -2341,6 +2573,11 @@ function handleContactTransferred(data) {
 
     // Refrescar lista
     loadContacts();
+    // Actualizar badge de no leídos instantáneamente si aplica
+    if (data.phone) {
+        unreadCounts[data.phone] = 0;
+        updateUnreadBadge(data.phone, 0);
+    }
 }
 
 /**
@@ -2351,6 +2588,11 @@ function handleStatusChange(data) {
 
     // Refrescar lista para actualizar badges
     loadContacts();
+    // Resetear badge de no leídos si el estado es "cerrado" o similar
+    if (data.phone && ['cerrado', 'cerrado ganado', 'cerrado vendido'].includes((data.new_status || '').toLowerCase())) {
+        unreadCounts[data.phone] = 0;
+        updateUnreadBadge(data.phone, 0);
+    }
 }
 
 /**
@@ -2511,6 +2753,9 @@ async function createManualContact(event) {
 
                 // Seleccionar el nuevo contacto automaticamente
                 if (data.contact_id && data.phone) {
+                    // Inicializar badge de no leídos en 0
+                    unreadCounts[data.phone] = 0;
+                    updateUnreadBadge(data.phone, 0);
                     selectContact(data.contact_id, data.phone, data.display_name, 'whatsapp_directo');
                 }
             }, 1500);
@@ -2592,7 +2837,9 @@ async function takeControlOfExisting(contactId, phone) {
 // FUNCIONES DE TRANSFERENCIA DE CONTACTOS
 // =========================================================================
 
-let advisorsList = [];  // Cache de asesores
+let advisorsList = [];       // Cache de asesores
+let _advisorsCacheTime = 0;  // Timestamp de última carga (ms)
+const ADVISORS_CACHE_TTL = 5 * 60 * 1000;  // 5 minutos
 
 /**
  * Abre el modal de transferencia de contacto.
@@ -2639,6 +2886,14 @@ async function loadAdvisorsList() {
     const select = document.getElementById('transferToOwner');
     if (!select) return;
 
+    // Usar caché si está fresca (< 5 min) y hay datos
+    const now = Date.now();
+    if (advisorsList.length > 0 && (now - _advisorsCacheTime) < ADVISORS_CACHE_TTL) {
+        console.log('[Panel] Asesores desde caché:', advisorsList.length);
+        _populateAdvisorsSelect(select, advisorsList);
+        return;
+    }
+
     // Mostrar cargando
     select.innerHTML = '<option value="">Cargando asesores...</option>';
 
@@ -2664,18 +2919,10 @@ async function loadAdvisorsList() {
 
             const data = await response.json();
             advisorsList = data.advisors || [];
+            _advisorsCacheTime = Date.now();
 
-            // Limpiar y rellenar select
-            select.innerHTML = '<option value="">-- Seleccionar asesora --</option>';
-
-            for (const advisor of advisorsList) {
-                const option = document.createElement('option');
-                option.value = advisor.id;
-                option.textContent = advisor.name;
-                select.appendChild(option);
-            }
-
-            console.log('[Panel] Asesores cargados:', advisorsList.length);
+            _populateAdvisorsSelect(select, advisorsList);
+            console.log('[Panel] Asesores cargados y cacheados:', advisorsList.length);
             return; // Éxito, salir
 
         } catch (error) {
@@ -2683,7 +2930,6 @@ async function loadAdvisorsList() {
             console.warn(`[Panel] Intento ${attempt}/${maxRetries} fallido:`, error.message);
 
             if (attempt < maxRetries) {
-                // Esperar 1 segundo antes de reintentar
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
@@ -2692,6 +2938,22 @@ async function loadAdvisorsList() {
     // Todos los intentos fallaron
     console.error('[Panel] Error cargando asesores después de', maxRetries, 'intentos:', lastError);
     select.innerHTML = '<option value="">Error - Reintentar más tarde</option>';
+}
+
+function _populateAdvisorsSelect(select, advisors) {
+    select.innerHTML = '<option value="">-- Seleccionar asesora --</option>';
+    for (const advisor of advisors) {
+        const option = document.createElement('option');
+        option.value = advisor.id;
+        option.textContent = advisor.name;
+        select.appendChild(option);
+    }
+}
+
+/** Invalida el caché de asesores (llamar tras crear/eliminar una asesora). */
+function invalidateAdvisorsCache() {
+    advisorsList = [];
+    _advisorsCacheTime = 0;
 }
 
 /**
@@ -2780,7 +3042,9 @@ function showTransferResult(type, message) {
 // WORKERS — Gestión del equipo de campo
 // =========================================================================
 
-let workersCache = [];  // Cache local de workers para el selector del modal de citas
+let workersCache = [];       // Cache local de workers para el selector del modal de citas
+let _workersCacheTime = 0;  // Timestamp de última carga (ms)
+const WORKERS_CACHE_TTL = 5 * 60 * 1000;  // 5 minutos
 
 async function openWorkersModal() {
     document.getElementById('workersModal').classList.remove('hidden');
@@ -2860,13 +3124,22 @@ async function saveAdvisorName() {
     }
 }
 
-async function loadWorkers() {
+async function loadWorkers(forceRefresh = false) {
+    // Usar caché si está fresca (< 5 min) y hay datos
+    const now = Date.now();
+    if (!forceRefresh && workersCache.length > 0 && (now - _workersCacheTime) < WORKERS_CACHE_TTL) {
+        console.log('[Panel] Workers desde caché:', workersCache.length);
+        renderWorkersList(workersCache);
+        return;
+    }
+
     try {
         const response = await fetch(`${BASE_URL}/workers`, {
             headers: { 'X-API-Key': API_KEY }
         });
         const data = await response.json();
         workersCache = data.workers || [];
+        _workersCacheTime = Date.now();
         renderWorkersList(workersCache);
     } catch (err) {
         console.error('[Panel] Error cargando workers:', err);
@@ -2922,7 +3195,7 @@ async function saveEditWorker(workerId) {
             body: JSON.stringify({ name: newName })
         });
         if (response.ok) {
-            await loadWorkers();
+            await loadWorkers(true); // forceRefresh: invalidar caché tras editar
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo actualizar'));
@@ -2945,7 +3218,7 @@ async function createWorker() {
         });
         if (response.ok) {
             input.value = '';
-            await loadWorkers();
+            await loadWorkers(true); // forceRefresh: invalidar caché tras crear
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo crear el encargado'));
@@ -2963,7 +3236,7 @@ async function deleteWorker(workerId, workerName) {
             headers: { 'X-API-Key': API_KEY }
         });
         if (response.ok) {
-            await loadWorkers();
+            await loadWorkers(true); // forceRefresh: invalidar caché tras eliminar
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo eliminar'));

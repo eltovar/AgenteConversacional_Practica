@@ -171,6 +171,13 @@ class MongoDBManager:
                 name="appointment_dt_idx"
             )
 
+            # Índice para panel_advisors — evita table scan en lookups por advisor_id
+            await self.db.panel_advisors.create_index(
+                "advisor_id",
+                name="panel_advisor_id_idx",
+                unique=True
+            )
+
             self._indexes_created = True
             logger.info("[MongoDB] Índices creados/verificados")
 

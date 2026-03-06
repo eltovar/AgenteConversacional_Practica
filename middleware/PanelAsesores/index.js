@@ -615,23 +615,26 @@ async function loadContacts() {
         const data = await response.json();
         allContacts = data.contacts || [];  // Guardar en cache para el buscador
 
-        // Detección de mensajes nuevos por polling
-        // Se ejecuta siempre (independiente del estado del WS) para garantizar
-        // badge + sonido incluso cuando el WS está "conectado" pero no entrega mensajes.
-        // Deduplicación natural: el timestamp se actualiza antes de la notificación,
-        // por lo que si el WS ya disparó un loadContacts() previo, oldTime === newTime.
+        // Detección de mensajes nuevos por polling.
+        // Solo actualiza el timestamp si es mayor (upgrade-only, nunca downgrade).
+        // Esto evita falsos positivos cuando el backend devuelve el mismo contacto
+        // duplicado con timestamps distintos (la entrada menor sobreescribiría la mayor,
+        // causando que el próximo poll detecte un "nuevo mensaje" eternamente).
         for (const contact of allContacts) {
             const phone = contact.phone || '';
             const newTime = contact.last_activity || '';
-            const oldTime = _lastContactTimestamps[phone];
-            if (newTime) _lastContactTimestamps[phone] = newTime;  // actualizar primero
-            if (oldTime && newTime > oldTime) {
-                console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
-                if (phone !== currentPhone) {
-                    unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
-                    updateUnreadBadge(phone, unreadCounts[phone]);
+            const oldTime = _lastContactTimestamps[phone] || '';
+            if (newTime > oldTime) {
+                const isNewMessage = oldTime !== '';  // no notificar en la carga inicial
+                _lastContactTimestamps[phone] = newTime;
+                if (isNewMessage) {
+                    console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
+                    if (phone !== currentPhone) {
+                        unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
+                        updateUnreadBadge(phone, unreadCounts[phone]);
+                    }
+                    playNotificationSound();
                 }
-                playNotificationSound();
             }
         }
 

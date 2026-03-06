@@ -3600,7 +3600,8 @@ async function submitAppointment(event) {
                     worker_name: workerName,
                     appointment_dt: datetimeVal,
                     notes: notes,
-                    advisor_id: ADVISOR_ID || null
+                    advisor_id: ADVISOR_ID || null,
+                    canal: currentCanal || 'whatsapp'
                 })
             });
         }

@@ -3546,6 +3546,7 @@ class AppointmentCreateRequest(BaseModel):
     appointment_dt: str = Field(..., description="Fecha y hora en ISO 8601 (ej. 2026-03-10T10:00:00)")
     notes: str = Field("", description="Observaciones de la cita")
     advisor_id: Optional[str] = Field(None, description="HubSpot owner ID de la asesora")
+    canal: str = Field("whatsapp", description="Canal de origen del contacto (whatsapp, instagram, etc.)")
 
 
 @router.post("/contacts/{contact_id}/appointments", status_code=201)
@@ -3633,6 +3634,33 @@ async def create_appointment(
 
     if not appointment_id:
         raise HTTPException(status_code=500, detail="Error guardando la cita en base de datos")
+
+    # Sincronizar cita a Redis para que el scheduler de recordatorios la detecte
+    if phone:
+        try:
+            from middleware.appointment_manager import AppointmentManager
+            redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+            normalizer = PhoneNormalizer()
+            phone_norm_result = normalizer.normalize(phone)
+            phone_normalized = phone_norm_result.normalized if phone_norm_result.is_valid else phone
+
+            apt_manager = AppointmentManager(redis_url)
+            await apt_manager.create_appointment(
+                phone_normalized=phone_normalized,
+                canal=body.canal,
+                scheduled_datetime=appt_dt_bogota,
+                contact_name=None,  # Se enriquece si se obtiene del contacto
+                contact_id=contact_id,
+                notes=body.notes or None,
+            )
+            await apt_manager.close()
+            logger.info(
+                f"[Panel] Cita sincronizada a Redis: phone={phone_normalized}, canal={body.canal}, "
+                f"dt={appt_dt_bogota.isoformat()}"
+            )
+        except Exception as redis_err:
+            # No falla el endpoint — MongoDB ya tiene la cita
+            logger.warning(f"[Panel] No se pudo sincronizar cita a Redis (recordatorios pueden no funcionar): {redis_err}")
 
     logger.info(
         f"[Panel] Cita agendada: contact={contact_id}, worker={body.worker_name}, "
@@ -4089,23 +4117,36 @@ async def get_social_media_metrics(
             "sorts": [{"propertyName": "createdate", "direction": "DESCENDING"}]
         }
 
+        contacts = []
+        after = None
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {hubspot_api_key}"},
-                json=payload,
-                timeout=15.0
-            )
+            while True:
+                page_payload = dict(payload)
+                if after:
+                    page_payload["after"] = after
 
-            if response.status_code != 200:
-                logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {hubspot_api_key}"},
+                    json=page_payload,
+                    timeout=15.0
                 )
 
-            data = response.json()
-            contacts = data.get("results", [])
+                if response.status_code != 200:
+                    logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
+                    )
+
+                data = response.json()
+                contacts.extend(data.get("results", []))
+
+                after = data.get("paging", {}).get("next", {}).get("after")
+                if not after:
+                    break
+
+        logger.info(f"[Metrics] Total contactos obtenidos de HubSpot: {len(contacts)}")
 
         # Procesar métricas
         leads_by_channel = defaultdict(int)

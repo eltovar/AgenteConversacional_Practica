@@ -632,6 +632,15 @@ async def check_appointment_followups():
 
         for apt in appointments:
             try:
+                # Solo enviar si el bot está activo — no interrumpir conversación con asesor
+                status = await state_manager.get_status(apt.phone_normalized, apt.canal)
+                if status != ConversationStatus.BOT_ACTIVE:
+                    logger.info(
+                        "[Scheduler] Omitiendo seguimiento post-cita %s — estado actual: %s",
+                        apt.phone_normalized, status.value if status else "None"
+                    )
+                    continue
+
                 contact_name = apt.contact_name or "cliente"
                 apt_dt = apt.scheduled_dt
                 minutes_since = (now - apt_dt).total_seconds() / 60

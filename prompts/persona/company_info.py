@@ -13,7 +13,7 @@ Dirección  : Calle 36 sur #41-37, Primer piso, Envigado, Antioquia
 Teléfono   : 57 321 817 5110 | Fijo: 604 444 63 64
 Gerencia   : gerencia.inmproteger@gmail.com
 Web        : www.inmobiliariaproteger.com
-Horarios   : Lunes a viernes 8:30 a.m. – 5:30 p.m. | Sábados 8:30 a.m. – 12:00 p.m."""
+Horarios   : Lunes a viernes 8:30 a.m. – 5:00 p.m. | Sábados 8:30 a.m. – 12:00 p.m."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COBERTURA GEOGRÁFICA

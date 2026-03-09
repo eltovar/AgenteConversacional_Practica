@@ -590,9 +590,11 @@ async def update_last_client_message(phone_normalized: str) -> None:
 
 async def _init_default_templates():
     """
-    Inicializa templates predefinidos en Redis si no existen.
-    Usa un flag de proceso para ejecutarse una sola vez — evita N×EXISTS
-    Redis calls en cada request de envío de template.
+    Sincroniza los templates predefinidos a Redis.
+    Siempre sobreescribe los defaults para que cambios en templates.py
+    (ej. nuevos content_sid aprobados) se propaguen sin necesidad de
+    limpiar Redis manualmente.
+    Los templates personalizados (por asesor) no se tocan.
     """
     global _TEMPLATES_INITIALIZED
     if _TEMPLATES_INITIALIZED:
@@ -601,11 +603,10 @@ async def _init_default_templates():
         r = await _get_redis_client()
         for template_id, template_data in DEFAULT_TEMPLATES.items():
             key = f"{DEFAULT_TEMPLATE_PREFIX}{template_id}"
-            if not await r.exists(key):
-                await r.set(key, json.dumps(template_data))
-                logger.debug(f"[Templates] Template predefinido creado: {template_id}")
+            await r.set(key, json.dumps(template_data))
+            logger.debug(f"[Templates] Template predefinido sincronizado: {template_id}")
         _TEMPLATES_INITIALIZED = True
-        logger.info("[Templates] Templates predefinidos inicializados")
+        logger.info("[Templates] Templates predefinidos sincronizados (%d)", len(DEFAULT_TEMPLATES))
     except Exception as e:
         logger.error(f"[Templates] Error inicializando templates: {e}")
 

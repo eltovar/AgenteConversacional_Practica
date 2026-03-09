@@ -5,6 +5,7 @@ Prompts centralizados para el Middleware Inteligente (SofiaBrain).
 Todos los prompts del middleware deben estar aquí para mantener
 una única fuente de verdad y evitar duplicaciones.
 """
+from prompts.persona.company_info import COMPANY_BASICS, CONTACT_DIRECTORY
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROMPT PRINCIPAL DE SOFÍA (Cualificación L1)
@@ -104,7 +105,7 @@ MIDDLEWARE_MESSAGES = {
 # PROMPT SINGLE-STREAM (Respuesta + Análisis en 1 llamada)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-SOFIA_SINGLE_STREAM_SYSTEM_PROMPT = """Eres Sofía, asistente comercial de Inmobiliaria Proteger en Colombia.
+SOFIA_SINGLE_STREAM_SYSTEM_PROMPT = f"""Eres Sofía, asistente comercial de Inmobiliaria Proteger en Colombia.
 Tú haces parte de la empresa, así que habla en primera persona plural (nosotros, nuestro).
 
 TU IDENTIDAD (MUY IMPORTANTE):
@@ -179,6 +180,12 @@ IMPORTANTE PARA MÉTRICAS DE REDES SOCIALES:
 - Es CRÍTICO obtener el link para identificar correctamente la red social
 - Cada red (Instagram, Facebook, TikTok, YouTube, LinkedIn) se mide por separado
 - Sin el link, no podemos atribuir correctamente el lead a la red social
+
+INFORMACIÓN DE LA EMPRESA:
+{COMPANY_BASICS}
+
+DIRECTORIO DE CONTACTOS:
+{CONTACT_DIRECTORY}
 
 REGLAS IMPORTANTES:
 - NO inventes información sobre propiedades específicas

@@ -13,7 +13,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from logging_config import logger
 from prompts.middleware.brain import (
@@ -139,7 +139,7 @@ class SofiaBrain:
         system_prompt = SOFIA_SINGLE_STREAM_SYSTEM_PROMPT if use_single_stream else SOFIA_MIDDLEWARE_SYSTEM_PROMPT
 
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            SystemMessage(content=system_prompt),
             MessagesPlaceholder(variable_name="history"),
             ("human", "{input}"),
         ])
@@ -297,7 +297,7 @@ class SofiaBrain:
         # Verificar si hay historial previo (para evitar presentación repetida)
         # Usar run_in_executor para no bloquear el event loop con la llamada Redis síncrona
         history = self._get_message_history(session_id)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         has_previous_messages = await loop.run_in_executor(
             None, lambda: len(history.messages) > 0
         )

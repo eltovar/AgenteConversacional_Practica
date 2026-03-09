@@ -383,7 +383,7 @@ async def _process_message_deferred(
                 "code_context": property_code_result.context
             })
         elif link_result.tiene_link and link_result.portal in [
-            PortalOrigen.INSTAGRAM, PortalOrigen.FACEBOOK, 
+            PortalOrigen.INSTAGRAM, PortalOrigen.FACEBOOK,
             PortalOrigen.TIKTOK, PortalOrigen.YOUTUBE, PortalOrigen.LINKEDIN
         ]:
             lead_context.update({
@@ -393,7 +393,24 @@ async def _process_message_deferred(
                 "es_inmueble": link_result.es_inmueble,
                 "high_intent": True
             })
-        
+        elif link_result.tiene_link and link_result.portal in [
+            PortalOrigen.FINCA_RAIZ, PortalOrigen.METRO_CUADRADO,
+            PortalOrigen.MERCADO_LIBRE, PortalOrigen.CIENCUADRAS,
+            PortalOrigen.PAGINA_WEB
+        ]:
+            portal_display = get_link_detector().obtener_nombre_portal(link_result.portal)
+            lead_context.update({
+                "portal_link": True,
+                "portal_id": link_result.portal.value,   # "finca_raiz", "ciencuadras", etc.
+                "portal_name": portal_display,
+                "portal_url": link_result.url_original,
+                "high_intent": True
+            })
+            logger.info(
+                f"[DeferredProcess] Link de portal inmobiliario: {portal_display} "
+                f"({link_result.url_original[:80]})"
+            )
+
         # Procesar mensaje con Sofia
         result = await sofia.process_message_with_analysis(
             session_id=phone_normalized,
@@ -472,7 +489,8 @@ async def _process_message_deferred(
                     analysis,
                     final_channel,
                     media_result,
-                    client_mongo_id
+                    client_mongo_id,
+                    lead_context=lead_context,
                 )
             
             if out_of_hours_msg:
@@ -518,7 +536,8 @@ async def _process_message_deferred(
                 analysis,
                 final_channel,
                 media_result,
-                client_mongo_id
+                client_mongo_id,
+                lead_context=lead_context,
             )
         
         logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {phone_normalized}")
@@ -1833,7 +1852,8 @@ async def _sync_conversation_with_analysis_to_hubspot(
     analysis,
     channel: str = "whatsapp",
     media_result: Optional[dict] = None,
-    existing_client_mongo_id: Optional[str] = None
+    existing_client_mongo_id: Optional[str] = None,
+    lead_context: Optional[dict] = None,
 ) -> None:
     """
     Sincroniza una interacción completa con análisis.
@@ -1985,6 +2005,12 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 portal = analysis.social_media_info.get("portal", "desconocido")
                 optional_properties["chatbot_canal_origen"] = portal
 
+        # Registrar si el cliente envió link de portal inmobiliario
+        if lead_context and lead_context.get("portal_link"):
+            optional_properties["canal_origen"] = lead_context.get("portal_id", "portal")
+            if lead_context.get("portal_url"):
+                optional_properties["chatbot_portal_url"] = lead_context["portal_url"][:500]
+
         # Registrar indicadores sospechosos si existen
         if analysis.suspicious_indicators and len(analysis.suspicious_indicators) > 0:
             optional_properties["chatbot_suspicious_indicators"] = ", ".join(analysis.suspicious_indicators)
@@ -2032,6 +2058,25 @@ async def _sync_conversation_with_analysis_to_hubspot(
         logger.error("[HubSpot Sync] Error procesando análisis: %s", e)
     except Exception as e:
         logger.error("[HubSpot Sync] Error sincronizando conversación con análisis: %s", e)
+
+    # Escribir chatbot_portal_url en el Deal (independiente del bloque principal)
+    if lead_context and lead_context.get("portal_url"):
+        try:
+            hubspot = get_hubspot_client()
+            deals = await hubspot.get_contact_deals(contact_id)
+            if deals:
+                deal_id = deals[0]["id"]
+                await hubspot.update_deal(deal_id, {
+                    "chatbot_portal_url": lead_context["portal_url"][:500]
+                })
+                logger.info(
+                    f"[HubSpot Sync] chatbot_portal_url escrito en deal {deal_id} "
+                    f"(contacto {contact_id})"
+                )
+        except Exception as deal_err:
+            logger.warning(
+                f"[HubSpot Sync] No se pudo escribir portal_url en deal: {deal_err}"
+            )
 
 
 async def _notify_high_priority_lead(

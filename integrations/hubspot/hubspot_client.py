@@ -48,6 +48,9 @@ class HubSpotPropertyValidator:
 
         # Propiedad de deep link al panel de Sofía
         "url_chat",
+
+        # Portal inmobiliario (Finca Raíz, Ciencuadras, Metrocuadrado, etc.)
+        "chatbot_portal_url",
     }
     
     # Propiedades que sabemos que NO existen

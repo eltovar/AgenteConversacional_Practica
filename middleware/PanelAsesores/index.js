@@ -661,19 +661,6 @@ async function loadContacts() {
             }
         }
 
-        // Actualizar contador: distingue "en espera" (sin responder) de "en conversacion"
-        const activeCounter = document.getElementById('activeCounter');
-        const inConversationCount = allContacts.filter(
-            c => c.conversation_status === 'IN_CONVERSATION'
-        ).length;
-        const parts = [];
-        if (data.active_count > 0) {
-            parts.push(`<span class="inline-block w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse"></span>${data.active_count} en espera`);
-        }
-        if (inConversationCount > 0) {
-            parts.push(`<span class="inline-block w-2 h-2 bg-blue-500 rounded-full mr-1"></span>${inConversationCount} en conversacion`);
-        }
-        activeCounter.innerHTML = parts.length ? parts.join(' &nbsp;·&nbsp; ') : '';
 
     } catch (error) {
         console.error('Error cargando contactos:', error);

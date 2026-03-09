@@ -5,6 +5,7 @@ Cerebro de Sofía - Motor de IA con Memoria.
 
 import os
 import json
+import asyncio
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field, asdict
 
@@ -129,8 +130,8 @@ class SofiaBrain:
         self.llm = ChatOpenAI(
             model=model,
             temperature=temperature,
-            # Aumentado de 800 a 1200 para evitar truncamiento del JSON con análisis
-            max_tokens=1200,
+            # Aumentado de 1200 a 2000 para evitar truncamiento del JSON con análisis completo
+            max_tokens=2000,
         )
 
         # Configurar prompt usando el prompt centralizado
@@ -254,8 +255,8 @@ class SofiaBrain:
         config = {"configurable": {"session_id": session_id}}
 
         try:
-            # Invocar cadena
-            response = with_message_history.invoke(input_data, config=config)
+            # Invocar cadena de forma async (evita bloquear el event loop)
+            response = await with_message_history.ainvoke(input_data, config=config)
 
             # Extraer contenido de la respuesta
             if hasattr(response, "content"):
@@ -294,8 +295,12 @@ class SofiaBrain:
         )
 
         # Verificar si hay historial previo (para evitar presentación repetida)
+        # Usar run_in_executor para no bloquear el event loop con la llamada Redis síncrona
         history = self._get_message_history(session_id)
-        has_previous_messages = len(history.messages) > 0
+        loop = asyncio.get_event_loop()
+        has_previous_messages = await loop.run_in_executor(
+            None, lambda: len(history.messages) > 0
+        )
 
         # Preparar input
         input_data = {"input": user_message}
@@ -319,8 +324,8 @@ class SofiaBrain:
         config = {"configurable": {"session_id": session_id}}
 
         try:
-            # Invocar cadena
-            response = with_message_history.invoke(input_data, config=config)
+            # Invocar cadena de forma async (evita bloquear el event loop)
+            response = await with_message_history.ainvoke(input_data, config=config)
 
             # Extraer contenido de la respuesta
             if hasattr(response, "content"):
@@ -416,11 +421,16 @@ class SofiaBrain:
         """
         Formatea el contexto del lead para incluir en el prompt.
 
+        Maneja tres tipos de contexto especial mutuamente excluyentes:
+        1. Código de inmueble (property_code)
+        2. Link de red social (social_media_link)
+        3. Link de portal inmobiliario (portal_link)
+
         Args:
-            lead_context: Datos del lead desde HubSpot
+            lead_context: Datos del lead desde HubSpot + detección de links/códigos
 
         Returns:
-            String formateado con el contexto
+            String formateado con el contexto para el LLM
         """
         parts = ["[Contexto del cliente - NO menciones esto directamente:]"]
 
@@ -439,16 +449,47 @@ class SofiaBrain:
         if lead_context.get("chatbot_budget"):
             parts.append(f"- Presupuesto: {lead_context['chatbot_budget']}")
 
-        # Contexto especial para links de redes sociales
-        canal_origen = lead_context.get("canal_origen", "")
-        if canal_origen in ["instagram", "facebook", "tiktok"]:
-            parts.append("")
-            parts.append("[INSTRUCCIÓN ESPECIAL - LINK DE RED SOCIAL]:")
-            parts.append("El cliente llegó enviando un link de un inmueble desde redes sociales.")
-            parts.append("YA tienes la información del inmueble del link.")
-            parts.append("Solo necesitas pedirle su NOMBRE para conectarlo con un asesor.")
-            parts.append("NO preguntes por tipo de inmueble, zona, presupuesto ni características.")
-            parts.append("NO le pidas más información sobre el inmueble.")
+        # ── Contextos especiales (mutuamente excluyentes) ──────────────────────
+        if lead_context.get("property_code"):
+            code = lead_context["property_code"]
+            code_ctx = lead_context.get("code_context", "referencia directa")
+            parts += [
+                "",
+                "[INSTRUCCIÓN ESPECIAL - CÓDIGO DE INMUEBLE]:",
+                f"El cliente mencionó el código de inmueble: {code} (contexto: {code_ctx}).",
+                "El cliente tiene interés en una propiedad específica que ya identificó.",
+                "Solo necesitas pedirle su NOMBRE para conectarlo con un asesor que revisará ese inmueble.",
+                "NO preguntes por tipo de inmueble, zona, presupuesto ni características.",
+                "Puedes mencionar que puede buscar el código en www.inmobiliariaproteger.com.",
+            ]
+
+        elif lead_context.get("social_media_link"):
+            portal = lead_context.get("social_media_portal", "red social")
+            url = lead_context.get("social_media_url", "")
+            parts += [
+                "",
+                "[INSTRUCCIÓN ESPECIAL - LINK DE RED SOCIAL]:",
+                f"El cliente envió un link de {portal}: {url}",
+                "El cliente vio un inmueble publicado en esa red social y está interesado.",
+                "YA tienes la referencia del inmueble del link.",
+                "Solo necesitas pedirle su NOMBRE para conectarlo con un asesor.",
+                "NO preguntes por tipo de inmueble, zona, presupuesto ni características.",
+                "NO le pidas más información sobre el inmueble.",
+            ]
+
+        elif lead_context.get("portal_link"):
+            portal_name = lead_context.get("portal_name", "un portal inmobiliario")
+            url = lead_context.get("portal_url", "")
+            parts += [
+                "",
+                "[INSTRUCCIÓN ESPECIAL - LINK DE PORTAL INMOBILIARIO]:",
+                f"El cliente envió un link de {portal_name}: {url}",
+                "El cliente encontró un inmueble específico en ese portal y quiere más información.",
+                "YA tienes la referencia del inmueble del link.",
+                "Solo necesitas pedirle su NOMBRE para conectarlo con un asesor que revisará ese inmueble.",
+                "NO preguntes por tipo de inmueble, zona, presupuesto ni características.",
+                "NO le pidas más información sobre el inmueble.",
+            ]
 
         return "\n".join(parts)
 

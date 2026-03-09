@@ -3004,27 +3004,54 @@ async def get_active_contacts(
                             contact["current_stage"] = deal_info.get("current_stage")
                         else:
                             # AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
+                            # Evitar reintentos para contactos cuya creación de deal ya falló
+                            _deal_fail_key = f"deal_failed:{cid}"
                             try:
-                                created_deal = await contact_manager._create_deal_for_new_lead(
-                                    contact_id=cid,
-                                    phone_normalized=phone,
-                                    source_channel="panel_auto"
-                                )
-                                if created_deal:
-                                    contact["deal_id"] = created_deal.get("deal_id")
-                                    contact["current_stage"] = created_deal.get("current_stage")
+                                _rc = await _get_redis_client()
+                                _already_failed = await _rc.exists(_deal_fail_key)
+                            except Exception:
+                                _rc = None
+                                _already_failed = False
+                            if _already_failed:
+                                logger.debug(f"[Panel] Skipping deal auto-create para {cid} (marcado como fallido)")
+                            else:
+                                try:
+                                    created_deal = await contact_manager._create_deal_for_new_lead(
+                                        contact_id=cid,
+                                        phone_normalized=phone,
+                                        source_channel="panel_auto"
+                                    )
+                                    if created_deal:
+                                        contact["deal_id"] = created_deal.get("deal_id")
+                                        contact["current_stage"] = created_deal.get("current_stage")
+                                        try:
+                                            if _rc is None:
+                                                _rc = await _get_redis_client()
+                                            _cache_data = json.dumps({
+                                                "deal_id": created_deal.get("deal_id"),
+                                                "current_stage": created_deal.get("current_stage")
+                                            })
+                                            await _rc.setex(f"{DEAL_CACHE_KEY_PREFIX}{cid}", DEAL_CACHE_TTL_SECONDS, _cache_data)
+                                        except Exception:
+                                            pass
+                                        logger.info(f"[Panel] Deal auto-creado para contacto {cid}: {created_deal.get('deal_id')}")
+                                    else:
+                                        # Falló (None) → marcar para no reintentar durante 1h
+                                        try:
+                                            if _rc is None:
+                                                _rc = await _get_redis_client()
+                                            await _rc.setex(_deal_fail_key, 3600, "1")
+                                        except Exception:
+                                            pass
+                                        logger.warning(f"[Panel] Deal auto-create fallido para {cid}, marcado 1h")
+                                except Exception as create_err:
                                     try:
-                                        _rc = await _get_redis_client()
-                                        _cache_data = json.dumps({
-                                            "deal_id": created_deal.get("deal_id"),
-                                            "current_stage": created_deal.get("current_stage")
-                                        })
-                                        await _rc.setex(f"{DEAL_CACHE_KEY_PREFIX}{cid}", DEAL_CACHE_TTL_SECONDS, _cache_data)
+                                        if _rc is None:
+                                            _rc = await _get_redis_client()
+                                        await _rc.setex(_deal_fail_key, 3600, "1")
                                     except Exception:
                                         pass
-                                    logger.info(f"[Panel] Deal auto-creado para contacto {cid}: {created_deal.get('deal_id')}")
-                            except Exception as create_err:
-                                logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
+                                    logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
                     except Exception as e:
                         logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
 

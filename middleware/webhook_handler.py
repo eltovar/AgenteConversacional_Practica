@@ -2032,6 +2032,23 @@ async def _sync_conversation_with_analysis_to_hubspot(
                     f"[HubSpot Sync] ✅ Nombre del cliente actualizado: {analysis.nombre_detectado} "
                     f"(contact_id: {contact_id})"
                 )
+                # Actualizar nombre del deal al obtener el nombre del cliente
+                try:
+                    hubspot = get_hubspot_client()
+                    deals = await hubspot.get_contact_deals(contact_id)
+                    if deals:
+                        deal_id = deals[0]["id"]
+                        await hubspot.update_deal(deal_id, {
+                            "dealname": f"Lead - {analysis.nombre_detectado}"
+                        })
+                        logger.info(
+                            f"[HubSpot Sync] Deal name actualizado a "
+                            f"'Lead - {analysis.nombre_detectado}' (deal {deal_id})"
+                        )
+                except Exception as deal_name_err:
+                    logger.warning(
+                        f"[HubSpot Sync] No se pudo actualizar nombre del deal: {deal_name_err}"
+                    )
             except Exception as name_err:
                 logger.error(f"[HubSpot Sync] Error actualizando nombre: {name_err}")
 

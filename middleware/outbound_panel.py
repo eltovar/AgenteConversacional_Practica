@@ -519,7 +519,11 @@ async def check_24h_window(phone_normalized: str) -> WindowStatus:
                 message="No hay registro de mensaje reciente del cliente. Se requiere Template de WhatsApp."
             )
 
-        last_msg_time = datetime.fromisoformat(last_msg_str)
+        # Normalizar formato antes de parsear (+00:00Z es inválido en Python < 3.11)
+        _ts = last_msg_str.replace('+00:00Z', '+00:00')
+        if 'Z' in _ts:
+            _ts = _ts.replace('Z', '+00:00')
+        last_msg_time = datetime.fromisoformat(_ts)
         now = datetime.now(timezone.utc)
 
         # Asegurar que last_msg_time tenga timezone
@@ -3123,7 +3127,7 @@ async def get_active_contacts(
                     if ref_time:
                         try:
                             if isinstance(ref_time, str):
-                                ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
+                                ref_dt = datetime.fromisoformat(ref_time.replace('+00:00Z', '+00:00').replace("Z", "+00:00"))
                             else:
                                 ref_dt = ref_time
                             if ref_dt.tzinfo is None:

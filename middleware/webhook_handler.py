@@ -435,16 +435,25 @@ async def _process_message_deferred(
                 canal=final_channel
             )
         elif analysis.handoff_priority == "high":
-            reason_parts = []
-            if analysis.intencion_visita:
-                reason_parts.append("Intención de visita")
-            reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
-            await state_manager.request_handoff(
-                phone_normalized,
-                reason=reason,
-                contact_id=contact_id,
-                canal=final_channel
-            )
+            # Solo activar handoff si ya tenemos el nombre del cliente.
+            # Si no, el bot sigue activo para capturarlo en el siguiente mensaje.
+            has_name = bool(analysis.nombre_detectado or lead_context.get("firstname"))
+            if has_name:
+                reason_parts = []
+                if analysis.intencion_visita:
+                    reason_parts.append("Intención de visita")
+                reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
+                await state_manager.request_handoff(
+                    phone_normalized,
+                    reason=reason,
+                    contact_id=contact_id,
+                    canal=final_channel
+                )
+            else:
+                logger.info(
+                    f"[DeferredProcess] Handoff diferido para {phone_normalized}: "
+                    f"esperando nombre antes de activar PENDING_HANDOFF"
+                )
         
         await state_manager.update_activity(phone_normalized)
         

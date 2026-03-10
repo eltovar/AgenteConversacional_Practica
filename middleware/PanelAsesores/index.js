@@ -465,7 +465,7 @@ async function saveTemplate(event) {
 
         if (response.ok) {
             alert('Template creado exitosamente');
-            await loadTemplates();
+            await loadTemplates(true);
             renderTemplateList();
         } else {
             // Mensajes claros según código
@@ -551,7 +551,7 @@ async function updateTemplate(event, templateId) {
 
         if (response.ok) {
             alert('Template actualizado');
-            await loadTemplates();
+            await loadTemplates(true);
             renderTemplateList();
         } else {
             throw new Error(data.detail || 'Error actualizando template');
@@ -574,7 +574,7 @@ async function deleteTemplate(templateId) {
 
         if (response.ok) {
             alert('Template eliminado');
-            await loadTemplates();
+            await loadTemplates(true);
             renderTemplateList();
         } else {
             throw new Error(data.detail || 'Error eliminando template');

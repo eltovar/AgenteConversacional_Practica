@@ -61,14 +61,11 @@ from utils.message_aggregator import message_aggregator
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESPUESTA DIFERIDA PARA EVITAR TIMEOUT DE TWILIO (15 segundos)
-# ═══════════════════════════════════════════════════════════════════════════════
-#
+# ══════════════════════════════════════════════════════════════════════════════
 # Twilio cierra la conexión del webhook después de 15 segundos y envía un retry.
 # El retry causa errores 422 porque el body ya fue consumido en la primera request.
-#
 # SOLUCIÓN: Responder inmediatamente con 200 OK (TwiML vacío) y procesar
 # el mensaje en background, enviando la respuesta de Sofia via REST API.
-#
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -87,14 +84,6 @@ async def _get_historical_channel(
     
     Esto asegura que un lead de metrocuadrado siempre vaya al asesor de portales,
     incluso si sus mensajes posteriores no tienen links.
-    
-    Args:
-        phone_normalized: Teléfono en formato E.164
-        detected_channel: Canal detectado del mensaje actual (puede ser "whatsapp")
-        hubspot_client: Cliente HubSpot (opcional, para evitar import circular)
-        
-    Returns:
-        Canal histórico o detectado si es contacto nuevo
     """
     state_manager = get_state_manager()
     

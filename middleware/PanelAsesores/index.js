@@ -1462,16 +1462,19 @@ async function saveNameChange(event) {
         const data = await response.json();
 
         if (response.ok) {
-            // Actualizar nombre en la UI
             const displayName = data.display_name || `${firstname} ${lastname}`.trim();
+            // Actualizar header inmediatamente
             document.getElementById('contactName').textContent = displayName;
-
-            // Cerrar modal
+            // Actualizar allContacts en memoria → re-render inmediato del sidebar
+            const idx = allContacts.findIndex(
+                c => (c.contact_id || c.id) === currentContactId
+            );
+            if (idx !== -1) {
+                allContacts[idx].display_name = displayName;
+                renderContactsList(allContacts);
+            }
             closeEditNameModal();
-
-            // Recargar lista de contactos
-            loadContacts();
-
+            loadContacts();  // sync adicional con backend en background
             alert('Nombre actualizado correctamente');
         } else {
             throw new Error(data.detail || 'Error actualizando nombre');

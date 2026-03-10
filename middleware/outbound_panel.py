@@ -2003,6 +2003,29 @@ async def update_contact_name(
 
             if response.status_code == 200:
                 logger.info(f"[Panel] Nombre actualizado para contacto {contact_id}: {firstname} {lastname}")
+                # Sincronizar display_name en Redis para todos los canales del contacto
+                try:
+                    _rc = await _get_redis_client()
+                    _phone = await _rc.get(f"phone_cache:{contact_id}")
+                    if _phone:
+                        _display = f"{firstname} {lastname}".strip()
+                        _meta_keys = await _rc.keys(f"conv_meta:{_phone}:*")
+                        for _meta_key in _meta_keys:
+                            _raw = await _rc.get(_meta_key)
+                            if _raw:
+                                try:
+                                    _meta = json.loads(_raw)
+                                    _meta["display_name"] = _display
+                                    _ttl = await _rc.ttl(_meta_key)
+                                    if _ttl > 0:
+                                        await _rc.setex(_meta_key, _ttl, json.dumps(_meta))
+                                    else:
+                                        await _rc.set(_meta_key, json.dumps(_meta))
+                                except (json.JSONDecodeError, Exception):
+                                    pass
+                        logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
+                except Exception as redis_err:
+                    logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
                 return {
                     "status": "success",
                     "message": "Nombre actualizado correctamente",

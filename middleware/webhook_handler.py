@@ -2085,23 +2085,35 @@ async def _sync_conversation_with_analysis_to_hubspot(
     except Exception as e:
         logger.error("[HubSpot Sync] Error sincronizando conversación con análisis: %s", e)
 
-    # Escribir chatbot_portal_url en el Deal (independiente del bloque principal)
-    if lead_context and lead_context.get("portal_url"):
+    # Sincronizar propiedades CRM + portal al Deal
+    _CRM_DEAL_PROPS = [
+        "chatbot_property_type", "chatbot_operation_type",
+        "chatbot_location", "chatbot_rooms", "chatbot_score",
+        "chatbot_budget", "canal_origen",
+    ]
+    deal_sync = {}
+    if lead_context:
+        for _p in _CRM_DEAL_PROPS:
+            if lead_context.get(_p):
+                deal_sync[_p] = lead_context[_p]
+        if lead_context.get("portal_url"):
+            deal_sync["chatbot_portal_url"] = lead_context["portal_url"][:500]
+        if lead_context.get("portal_link") and lead_context.get("portal_id"):
+            deal_sync["canal_origen"] = lead_context["portal_id"]
+
+    if deal_sync:
         try:
             hubspot = get_hubspot_client()
             deals = await hubspot.get_contact_deals(contact_id)
             if deals:
                 deal_id = deals[0]["id"]
-                await hubspot.update_deal(deal_id, {
-                    "chatbot_portal_url": lead_context["portal_url"][:500]
-                })
+                await hubspot.update_deal(deal_id, deal_sync)
                 logger.info(
-                    f"[HubSpot Sync] chatbot_portal_url escrito en deal {deal_id} "
-                    f"(contacto {contact_id})"
+                    f"[HubSpot Sync] Deal {deal_id} actualizado con {list(deal_sync.keys())}"
                 )
         except Exception as deal_err:
             logger.warning(
-                f"[HubSpot Sync] No se pudo escribir portal_url en deal: {deal_err}"
+                f"[HubSpot Sync] No se pudo actualizar deal con propiedades CRM: {deal_err}"
             )
 
 

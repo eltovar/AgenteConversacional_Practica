@@ -401,7 +401,7 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
         client = get_httpx_client()
         response = await _hubspot_post(client, url, payload, HUBSPOT_API_KEY, max_retries=2)
         
-        if response.status_code == 200:
+        if response.status_code in (200, 207):
             data = response.json()
             results = {}
             for contact in data.get("results", []):
@@ -413,7 +413,10 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
                     "email": props.get("email"),
                     "phone": props.get("phone")
                 }
-            logger.info(f"[Panel] Batch HubSpot: obtenidos {len(results)}/{len(contact_ids)} contactos")
+            if response.status_code == 207:
+                logger.info(f"[Panel] Batch HubSpot 207 (parcial): {len(results)}/{len(contact_ids)} contactos válidos")
+            else:
+                logger.info(f"[Panel] Batch HubSpot: obtenidos {len(results)}/{len(contact_ids)} contactos")
             return results
         else:
             logger.warning(f"[Panel] Batch HubSpot falló: {response.status_code}")
@@ -2978,9 +2981,8 @@ async def get_active_contacts(
         # ── PASO 2.1: Batch request para obtener nombres de TODOS los contactos en 1 llamada ──
         # Esto reduce drásticamente los 429 (de N llamadas a 1)
         contact_ids_to_fetch = [
-            c.get("contact_id") for c in active_contacts 
-            if c.get("contact_id") and not c.get("display_name") 
-            or c.get("display_name") in ("Cliente Nuevo", "Sin nombre", "")
+            c.get("contact_id") for c in active_contacts
+            if c.get("contact_id")
         ]
         
         batch_contact_data = {}
@@ -3005,18 +3007,16 @@ async def get_active_contacts(
             if contact.get("contact_id"):
                 cid = contact["contact_id"]
                 
-                # ✅ OPTIMIZADO: Usar datos del batch en lugar de llamada individual
-                existing_name = contact.get("display_name", "").strip()
-                if not existing_name or existing_name in ("Cliente Nuevo", "Sin nombre"):
-                    # Primero intentar desde batch cache (SIN llamada HTTP)
-                    if cid in batch_contact_data:
-                        hs_info = batch_contact_data[cid]
-                        firstname = hs_info.get("firstname", "")
-                        lastname = hs_info.get("lastname", "")
-                        contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
-                        contact["email"] = hs_info.get("email")
-                    # Si no estaba en batch (raro), no llamar HubSpot - usar teléfono
-                    # Esto evita llamadas individuales que causan 429
+                # ✅ HubSpot es source of truth para nombres cuando está disponible en batch
+                if cid in batch_contact_data:
+                    hs_info = batch_contact_data[cid]
+                    hs_name = f"{hs_info.get('firstname', '')} {hs_info.get('lastname', '')}".strip()
+                    if hs_name:
+                        contact["display_name"] = hs_name
+                    elif not contact.get("display_name") or contact.get("display_name") in ("Cliente Nuevo", "Sin nombre"):
+                        contact["display_name"] = "Sin nombre"
+                    contact["email"] = hs_info.get("email")
+                # Si no estaba en batch, conservar display_name de Redis
 
                 # Buscar deal asociado para el dropdown de pipeline.
                 # Si Redis meta ya tiene deal_id (contactos migrados via patch_redis_deal_ids.py),

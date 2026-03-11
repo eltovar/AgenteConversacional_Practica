@@ -23,13 +23,13 @@ class LeadAssigner:
         # === ASESOR PORTALES INMOBILIARIOS ===
         # Portales: MetroCuadrado, Finca Raíz, Mercado Libre, LinkedIn
         "equipo_portales": [
-            {"name": "Asesor Portales", "id": "89096380", "active": True},
+            {"name": "Asesor Portales", "id": "89096378", "active": True},
         ],
 
         # === ASESOR DIRECTO + REDES SOCIALES ===
         # Directo + Redes: Página Web, WhatsApp, Facebook, Instagram, Ciencuadras, YouTube, TikTok
         "equipo_directo": [
-            {"name": "Asesor Directo", "id": "89096378", "active": True},
+            {"name": "Asesor Directo", "id": "89096380", "active": True},
         ],
 
         # === EQUIPO DE MARKETING (Solo métricas - NO responde) ===
@@ -46,8 +46,8 @@ class LeadAssigner:
 
         # Equipo default (fallback - round robin entre portales y directo)
         "default": [
-            {"name": "Asesor Portales", "id": "89096380", "active": True},
-            {"name": "Asesor Directo", "id": "89096378", "active": True},
+            {"name": "Asesor Portales", "id": "89096378", "active": True},
+            {"name": "Asesor Directo", "id": "89096380", "active": True},
         ],
     }
 
@@ -55,13 +55,13 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        # === PORTALES INMOBILIARIOS (ID: 89096380) ===
+        # === PORTALES INMOBILIARIOS (ID: 89096378) ===
         "metrocuadrado": "equipo_portales",
         "finca_raiz": "equipo_portales",
         "mercado_libre": "equipo_portales",
         "linkedin": "equipo_portales",
 
-        # === DIRECTO + REDES SOCIALES (ID: 89096378) ===
+        # === DIRECTO + REDES SOCIALES (ID: 89096380) ===
         "pagina_web": "equipo_directo",
         "whatsapp_directo": "equipo_directo",
         "whatsapp": "equipo_directo",  # Alias para compatibilidad con webhook
@@ -81,21 +81,21 @@ class LeadAssigner:
     # MAPEO DIRECTO CANAL → OWNER ID (para filtro del panel)
     # ═══════════════════════════════════════════════════════════════════════════
     CHANNEL_TO_OWNER = {
-        # Asesor Portales (89096380)
-        "metrocuadrado": "89096380",
-        "finca_raiz": "89096380",
-        "mercado_libre": "89096380",
-        "linkedin": "89096380",
+        # Asesor Portales (89096378)
+        "metrocuadrado": "89096378",
+        "finca_raiz": "89096378",
+        "mercado_libre": "89096378",
+        "linkedin": "89096378",
 
-        # Asesor Directo (89096378)
-        "pagina_web": "89096378",
-        "whatsapp_directo": "89096378",
-        "whatsapp": "89096378",  # Alias para compatibilidad
-        "facebook": "89096378",
-        "instagram": "89096378",
-        "ciencuadras": "89096378",
-        "youtube": "89096378",
-        "tiktok": "89096378",
+        # Asesor Directo (89096380)
+        "pagina_web": "89096380",
+        "whatsapp_directo": "89096380",
+        "whatsapp": "89096380",  # Alias para compatibilidad
+        "facebook": "89096380",
+        "instagram": "89096380",
+        "ciencuadras": "89096380",
+        "youtube": "89096380",
+        "tiktok": "89096380",
     }
 
     # Canales para métricas de analista de redes sociales

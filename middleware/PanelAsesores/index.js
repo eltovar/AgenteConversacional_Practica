@@ -1012,7 +1012,7 @@ function _buildContactHTML(contact) {
                      ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
         }
     } else if (status === 'BOT_ACTIVE') {
-        badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Bot</span>`;
+        badge = `${canalBadge}`;
     } else {
         badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>`;
     }
@@ -1031,6 +1031,12 @@ function _buildContactHTML(contact) {
         ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
         : '';
 
+    const stateBadge = (isInConversation || isHumanActive || isActive)
+        ? `<span class="absolute -top-1 -left-1 bg-blue-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Asesora atendiendo">👤</span>`
+        : status === 'BOT_ACTIVE'
+        ? `<span class="absolute -top-1 -left-1 bg-gray-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Sofía está manejando">🤖</span>`
+        : '';
+
     return `
         <div class="contact-item p-3 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
              data-phone="${phone}"
@@ -1041,6 +1047,7 @@ function _buildContactHTML(contact) {
                          class="w-10 h-10 rounded-full"
                          alt="${displayName}"
                          onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
+                    ${stateBadge}
                     ${unreadBadge}
                     ${apptBadge}
                 </div>

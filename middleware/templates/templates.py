@@ -20,8 +20,8 @@ DEFAULT_TEMPLATES = {
             "¿Cómo has estado?"
         ),
         "variables": ["nombre", "asesor"],
-        # Twilio: reactivacion_saludo — pendiente aprobación Meta
-        "content_sid": "HXd9f7d3d851e542015b2b9f5aa1fab784",
+        # Twilio: saludo_reactivador — aprobado Meta (business + user initiated)
+        "content_sid": "HXde8ba7ccf0dd1092f695952fa7f612a4",
         "content_variables_map": ["nombre", "asesor"],  # {{1}}=nombre, {{2}}=asesor
         "is_default": True,
     },

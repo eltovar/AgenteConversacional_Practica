@@ -667,6 +667,16 @@ class ContactManager:
                 deal_id, contact_id, source_channel
             )
 
+            # Cachear deal_id en Redis para que el CRM Agent pueda hacer sync parcial
+            # sin necesidad de buscar en HubSpot. TTL 72h (mismo ciclo que conv_meta).
+            try:
+                r = await self._get_redis()
+                await r.setex(f"deal_id_cache:{phone_normalized}", 72 * 3600, deal_id)
+            except Exception as redis_err:
+                logger.warning(
+                    "[ContactManager] No se pudo cachear deal_id en Redis: %s", redis_err
+                )
+
             # Escribir url_chat en el negocio si está disponible
             if url_chat and deal_id:
                 try:

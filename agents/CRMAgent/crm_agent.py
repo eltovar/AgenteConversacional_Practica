@@ -33,6 +33,7 @@ from llm_client import llama_client
 
 # Importación para activar HUMAN_ACTIVE en el panel
 import os
+import asyncio
 import redis.asyncio as aioredis
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from logging_config import logger
@@ -79,6 +80,14 @@ class CRMAgent:
 
             state.lead_data['metadata'] = metadata
             logger.info(f"[CRMAgent] Metadata acumulada: {metadata}")
+
+            # Sync parcial a HubSpot en background si hay entidades nuevas y no va a ocurrir
+            # handoff completo en este mismo turno (process_lead_handoff ya hace sync completo).
+            if new_entities:
+                lead_name_check = state.lead_data.get('name')
+                will_handoff = bool(lead_name_check) and not is_first_turn
+                if not will_handoff:
+                    asyncio.create_task(self._partial_hubspot_sync(state, dict(metadata)))
 
             # 2. En el primer turno, SIEMPRE generar respuesta conversacional
             # No intentamos extraer nombre ni enviar al CRM en el primer turno
@@ -772,6 +781,83 @@ class CRMAgent:
             logger.warning(f"[CRMAgent] No se pudo parsear presupuesto a número '{budget_str}': {e}")
             return 0
 
+
+    async def _partial_hubspot_sync(self, state: ConversationState, metadata: dict) -> None:
+        """
+        Sincroniza parcialmente las propiedades recopiladas hasta el momento con HubSpot.
+        Se ejecuta en background (asyncio.create_task) — nunca bloquea la conversación.
+
+        Escribe en el Contact y en el Deal (si deal_id está en Redis) las propiedades
+        disponibles en `metadata` sin esperar al handoff completo con nombre.
+        Esto permite que el Deal no quede vacío si el cliente no da su nombre.
+        """
+        try:
+            import re as _re
+            phone = normalize_phone_e164(state.session_id)
+
+            # Obtener URL de Redis (mismo patrón que _activate_human_in_panel)
+            is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+            redis_url = os.getenv("REDIS_URL") if is_railway else (
+                os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+            )
+
+            r = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            contact_id = await r.get(f"phone_cache:{phone}")
+            deal_id = await r.get(f"deal_id_cache:{phone}")
+            await r.aclose()
+
+            if not contact_id:
+                logger.debug("[CRMAgent] Partial sync omitido: contact_id no disponible aún en Redis")
+                return
+
+            # Mapear campos disponibles a propiedades HubSpot
+            partial_props = {}
+            field_map = {
+                "tipo_propiedad":  "chatbot_property_type",
+                "tipo_operacion":  "chatbot_operation_type",
+                "ubicacion":       "chatbot_location",
+                "tiempo":          "chatbot_urgency",
+                "caracteristicas": "chatbot_rooms",
+            }
+            for src_key, hs_key in field_map.items():
+                val = metadata.get(src_key)
+                if val and str(val).strip():
+                    partial_props[hs_key] = str(val).strip()
+
+            # Presupuesto: intentar convertir a entero (campo numérico en HubSpot)
+            presupuesto_raw = metadata.get("presupuesto")
+            if presupuesto_raw:
+                try:
+                    digits = _re.sub(r"[^\d]", "", str(presupuesto_raw))
+                    if digits:
+                        numeric = int(digits)
+                        if numeric > 0:
+                            partial_props["chatbot_budget"] = numeric
+                except Exception:
+                    pass  # Si no se puede convertir, omitir sin error
+
+            if not partial_props:
+                logger.debug("[CRMAgent] Partial sync omitido: sin propiedades nuevas que escribir")
+                return
+
+            # Actualizar Contact
+            await self.hubspot.update_contact(contact_id, partial_props)
+            logger.info(
+                "[CRMAgent] Partial sync Contact %s: %s",
+                contact_id, list(partial_props.keys())
+            )
+
+            # Actualizar Deal si está disponible
+            if deal_id:
+                await self.hubspot.update_deal(deal_id, partial_props)
+                logger.info(
+                    "[CRMAgent] Partial sync Deal %s: %s",
+                    deal_id, list(partial_props.keys())
+                )
+
+        except Exception as e:
+            # Errores del sync parcial no deben afectar la conversación
+            logger.warning("[CRMAgent] Partial sync fallido (no crítico): %s", e)
 
     async def _activate_human_in_panel(
         self,

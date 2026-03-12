@@ -30,12 +30,20 @@ DEFAULT_TEMPLATES = {
         "name": "Confirmación de Cita",
         "category": "cita",
         "body": (
-            "Hola, {nombre}. Te confirmamos tu cita para el {fecha} a las {hora}. "
-            "Te esperamos en {direccion}. ¿Nos confirmas tu asistencia?"
+            "Inmobiliaria Proteger confirma la programación de su cita, "
+            "con los siguientes detalles:\n\n"
+            "📅 Fecha: {fecha}\n"
+            "🕒 Hora: {hora}\n"
+            "📍 Lugar: {lugar}\n"
+            "👤 Asesor asignado: {asesor}\n"
+            "📲 Contacto: {contacto}\n\n"
+            "Le agradecemos su puntualidad. En caso de requerir una reprogramación "
+            "o mayor información, no dude en comunicarse con nosotros.\n"
+            "Quedamos atentos a su asistencia."
         ),
-        "variables": ["nombre", "fecha", "hora", "direccion"],
+        "variables": ["fecha", "hora", "lugar", "asesor", "contacto"],
         "content_sid": None,
-        "content_variables_map": ["nombre", "fecha", "hora", "direccion"],
+        "content_variables_map": ["fecha", "hora", "lugar", "asesor", "contacto"],
         "is_default": True,
     },
     "cita_recordatorio": {

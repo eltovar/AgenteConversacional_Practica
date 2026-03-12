@@ -58,6 +58,9 @@ from utils.twilio_client import twilio_client
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
 
+# Gestor de citas (para confirmar automáticamente cuando el cliente responde)
+from .appointment_manager import get_appointment_manager
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESPUESTA DIFERIDA PARA EVITAR TIMEOUT DE TWILIO (15 segundos)
@@ -1356,6 +1359,32 @@ async def _whatsapp_webhook_original_DISABLED(
                 contact_id=contact_info.contact_id if contact_info else None,
                 canal=final_channel
             )
+
+        # ── Confirmación automática de cita ──────────────────────────────────
+        # Si Sofía detectó que el cliente confirmó una cita ("Sí, ahí estaré",
+        # "Confirmado", etc.), actualizar el estado de la cita PENDING → CONFIRMED
+        # sin intervención manual de la asesora.
+        if getattr(analysis, 'cita_confirmada', False):
+            try:
+                appt_manager = get_appointment_manager()
+                confirmed = await appt_manager.confirm_appointment(
+                    phone_normalized, final_channel
+                )
+                if confirmed:
+                    logger.info(
+                        "[Webhook] ✅ Cita confirmada automáticamente: %s:%s",
+                        phone_normalized, final_channel
+                    )
+                else:
+                    logger.debug(
+                        "[Webhook] cita_confirmada=True pero sin cita pendiente para %s:%s",
+                        phone_normalized, final_channel
+                    )
+            except Exception as appt_err:
+                logger.warning(
+                    "[Webhook] Error en confirmación automática de cita (no crítico): %s",
+                    appt_err
+                )
 
         # Actualizar actividad
         await state_manager.update_activity(phone_normalized)

@@ -46,13 +46,13 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": ["fecha", "hora", "lugar", "asesor", "contacto"],
         "is_default": True,
     },
-    "cita_recordatorio": {
-        "id": "cita_recordatorio",
-        "name": "Recordatorio de Cita",
+    "cita_cancelacion": {
+        "id": "cita_cancelacion",
+        "name": "Cancelación de Cita",
         "category": "cita",
         "body": (
-            "Hola, {nombre}. Te recordamos que mañana {fecha} tienes cita a las {hora}. "
-            "Te esperamos."
+            "Hola, {nombre}. Lamentamos informarte que la cita del {fecha} a las {hora} "
+            "ha sido cancelada. ¿Te gustaría reagendarla para otro momento?"
         ),
         "variables": ["nombre", "fecha", "hora"],
         "content_sid": None,
@@ -87,56 +87,21 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": ["nombre", "asesor"],
         "is_default": True,
     },
-    "cita_cancelacion": {
-        "id": "cita_cancelacion",
-        "name": "Cancelación de Cita",
-        "category": "cita",
+    "experiencia_post_cita": {
+        "id": "experiencia_post_cita",
+        "name": "Experiencia después de la cita",
+        "category": "agradecimiento",
         "body": (
-            "Hola, {nombre}. Lamentamos informarte que la cita del {fecha} a las {hora} "
-            "ha sido cancelada. ¿Te gustaría reagendarla para otro momento?"
+            "Para nosotros es muy importante conocer tu experiencia para seguir "
+            "mejorando la calidad de nuestro servicio. 📈\n"
+            "¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
+            "Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
+            "únicamente para optimizar nuestros procesos de atención. 💪\n\n"
+            "¡Gracias por confiar en Inmobiliaria Proteger! 💛"
         ),
-        "variables": ["nombre", "fecha", "hora"],
+        "variables": [],
         "content_sid": None,
-        "content_variables_map": ["nombre", "fecha", "hora"],
-        "is_default": True,
-    },
-    "cita_reagendar": {
-        "id": "cita_reagendar",
-        "name": "Reagendar Cita",
-        "category": "cita",
-        "body": (
-            "Hola, {nombre}. ¿Te gustaría reagendar tu cita? "
-            "Tenemos disponibilidad el {fecha} a las {hora}. ¿Te funciona?"
-        ),
-        "variables": ["nombre", "fecha", "hora"],
-        "content_sid": None,
-        "content_variables_map": ["nombre", "fecha", "hora"],
-        "is_default": True,
-    },
-    "promocion_general": {
-        "id": "promocion_general",
-        "name": "Promoción General",
-        "category": "promocion",
-        "body": (
-            "Hola, {nombre}. Te habla {asesor} de Inmobiliaria Proteger. "
-            "Tenemos una promoción especial para ti. ¿Te gustaría conocer los detalles?"
-        ),
-        "variables": ["nombre", "asesor"],
-        "content_sid": None,
-        "content_variables_map": ["nombre", "asesor"],
-        "is_default": True,
-    },
-    "agradecimiento": {
-        "id": "agradecimiento",
-        "name": "Agradecimiento",
-        "category": "seguimiento",
-        "body": (
-            "Hola, {nombre}. Gracias por confiar en Inmobiliaria Proteger. "
-            "Fue un placer atenderte. Si necesitas algo más, aquí estamos para ayudarte."
-        ),
-        "variables": ["nombre"],
-        "content_sid": None,
-        "content_variables_map": ["nombre"],
+        "content_variables_map": [],
         "is_default": True,
     },
 }

@@ -601,6 +601,8 @@ async def _init_default_templates():
     Siempre sobreescribe los defaults para que cambios en templates.py
     (ej. nuevos content_sid aprobados) se propaguen sin necesidad de
     limpiar Redis manualmente.
+    Además elimina claves de templates predefinidos que ya no existen en
+    DEFAULT_TEMPLATES (por ejemplo, plantillas eliminadas del código).
     Los templates personalizados (por asesor) no se tocan.
     """
     global _TEMPLATES_INITIALIZED
@@ -608,10 +610,19 @@ async def _init_default_templates():
         return
     try:
         r = await _get_redis_client()
+        # Escribir/actualizar los templates actuales
         for template_id, template_data in DEFAULT_TEMPLATES.items():
             key = f"{DEFAULT_TEMPLATE_PREFIX}{template_id}"
             await r.set(key, json.dumps(template_data))
             logger.debug(f"[Templates] Template predefinido sincronizado: {template_id}")
+        # Eliminar claves huérfanas (templates eliminados del código)
+        existing_keys = await r.keys(f"{DEFAULT_TEMPLATE_PREFIX}*")
+        for key in existing_keys:
+            key_str = key if isinstance(key, str) else key.decode()
+            template_id = key_str.replace(DEFAULT_TEMPLATE_PREFIX, "")
+            if template_id not in DEFAULT_TEMPLATES:
+                await r.delete(key_str)
+                logger.info(f"[Templates] Template huérfano eliminado de Redis: {template_id}")
         _TEMPLATES_INITIALIZED = True
         logger.info("[Templates] Templates predefinidos sincronizados (%d)", len(DEFAULT_TEMPLATES))
     except Exception as e:

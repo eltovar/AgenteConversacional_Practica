@@ -672,6 +672,10 @@ class ContactManager:
             try:
                 r = await self._get_redis()
                 await r.setex(f"deal_id_cache:{phone_normalized}", 72 * 3600, deal_id)
+                logger.info(
+                    "[ContactManager] deal_id_cache guardado: deal=%s, phone=%s",
+                    deal_id, phone_normalized
+                )
             except Exception as redis_err:
                 logger.warning(
                     "[ContactManager] No se pudo cachear deal_id en Redis: %s", redis_err

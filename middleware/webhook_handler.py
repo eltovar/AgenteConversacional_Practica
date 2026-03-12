@@ -419,13 +419,15 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         state_manager = get_state_manager()
         
+        # Capturar intención de handoff sin ejecutarlo todavía.
+        # El handoff se ejecutará DESPUÉS de enviar el mensaje al cliente,
+        # para que el cliente reciba la notificación antes de que el bot se bloquee.
+        pending_handoff = False
+        handoff_reason = ""
+
         if analysis.handoff_priority == "immediate":
-            await state_manager.request_handoff(
-                phone_normalized,
-                reason=f"Cliente urgente - Emoción: {analysis.emocion}",
-                contact_id=contact_id,
-                canal=final_channel
-            )
+            pending_handoff = True
+            handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
         elif analysis.handoff_priority == "high":
             # Solo activar handoff si ya tenemos el nombre del cliente.
             # Si no, el bot sigue activo para capturarlo en el siguiente mensaje.
@@ -434,13 +436,8 @@ async def _process_message_deferred(
                 reason_parts = []
                 if analysis.intencion_visita:
                     reason_parts.append("Intención de visita")
-                reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
-                await state_manager.request_handoff(
-                    phone_normalized,
-                    reason=reason,
-                    contact_id=contact_id,
-                    canal=final_channel
-                )
+                pending_handoff = True
+                handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
             else:
                 logger.info(
                     f"[DeferredProcess] Handoff diferido para {phone_normalized}: "
@@ -517,7 +514,17 @@ async def _process_message_deferred(
             logger.error(f"[DeferredProcess] Error enviando respuesta: {send_result}")
         else:
             logger.info(f"[DeferredProcess] ✅ Respuesta enviada: {send_result.get('message_sid', 'OK')}")
-        
+            # Ejecutar handoff DESPUÉS de confirmar envío, para que el cliente
+            # reciba el mensaje antes de que el bot quede bloqueado.
+            if pending_handoff:
+                await state_manager.request_handoff(
+                    phone_normalized,
+                    reason=handoff_reason,
+                    contact_id=contact_id,
+                    canal=final_channel
+                )
+                logger.info(f"[DeferredProcess] ✅ Handoff solicitado: {handoff_reason}")
+
         # Guardar respuesta de Sofia en MongoDB
         await mongo_manager.save_message(
             phone=phone_normalized,

@@ -59,34 +59,6 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": ["nombre", "fecha", "hora"],
         "is_default": True,
     },
-    "seguimiento_visita": {
-        "id": "seguimiento_visita",
-        "name": "Seguimiento Post-Visita",
-        "category": "seguimiento",
-        "body": (
-            "Hola, {nombre}. Te habla {asesor} de Inmobiliaria Proteger. "
-            "Esperamos que la visita al inmueble haya sido de tu agrado. "
-            "¿Te gustaría agendar otra visita o tienes alguna pregunta?"
-        ),
-        "variables": ["nombre", "asesor"],
-        "content_sid": None,
-        "content_variables_map": ["nombre", "asesor"],
-        "is_default": True,
-    },
-    "seguimiento_24h": {
-        "id": "seguimiento_24h",
-        "name": "Seguimiento 24 horas",
-        "category": "seguimiento",
-        "body": (
-            "Hola, {nombre}. Te habla {asesor} de Inmobiliaria Proteger. "
-            "¿Pudiste revisar la información que te enviamos? "
-            "Estamos aquí para resolver cualquier duda."
-        ),
-        "variables": ["nombre", "asesor"],
-        "content_sid": None,
-        "content_variables_map": ["nombre", "asesor"],
-        "is_default": True,
-    },
     "experiencia_post_cita": {
         "id": "experiencia_post_cita",
         "name": "Experiencia después de la cita",

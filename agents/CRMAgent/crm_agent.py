@@ -81,9 +81,10 @@ class CRMAgent:
             state.lead_data['metadata'] = metadata
             logger.info(f"[CRMAgent] Metadata acumulada: {metadata}")
 
-            # Sync parcial a HubSpot en background si hay entidades nuevas y no va a ocurrir
-            # handoff completo en este mismo turno (process_lead_handoff ya hace sync completo).
-            if new_entities:
+            # Sync parcial a HubSpot en background si hay entidades con valor real y no va a
+            # ocurrir handoff completo en este mismo turno (process_lead_handoff ya hace sync completo).
+            has_real_entities = any(v for v in new_entities.values() if v and str(v).strip())
+            if has_real_entities:
                 lead_name_check = state.lead_data.get('name')
                 will_handoff = bool(lead_name_check) and not is_first_turn
                 if not will_handoff:
@@ -147,7 +148,7 @@ class CRMAgent:
         llegada_por_link = state.metadata.get("llegada_por_link", False)
         crm_history = state.lead_data.get('crm_history', [])
         
-        should_include_intro = is_first_message and not llegada_por_link and len(crm_history) == 0
+        should_include_intro = len(crm_history) == 0 and not llegada_por_link
 
         if should_include_intro:
             logger.info("[CRMAgent] Primer mensaje detectado - incluirá presentación")
@@ -794,6 +795,9 @@ class CRMAgent:
         try:
             import re as _re
             phone = normalize_phone_e164(state.session_id)
+
+            meta_keys_con_valor = [k for k, v in metadata.items() if v and str(v).strip()]
+            logger.info("[CRMAgent] Partial sync iniciado. metadata keys con valor: %s", meta_keys_con_valor)
 
             # Obtener URL de Redis (mismo patrón que _activate_human_in_panel)
             is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None

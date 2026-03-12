@@ -16,12 +16,12 @@ DEFAULT_TEMPLATES = {
         "name": "Reactivación General",
         "category": "reactivacion",
         "body": (
-            "Hola, {nombre}. Te habla la asesora {asesor} de Inmobiliaria Proteger. "
-            "¿Cómo has estado?"
+            "¡Hola, {nombre}! Te habla la asesora {asesor} del Area comercial "
+            "Inmobiliaria Proteger ¿Cómo te encuentras el día de hoy?"
         ),
         "variables": ["nombre", "asesor"],
         # Twilio: saludo_reactivador — aprobado Meta (business + user initiated)
-        "content_sid": "HXde8ba7ccf0dd1092f695952fa7f612a4",
+        "content_sid": "HXb8ecec6e492b6820ce67d54a6e709a97",
         "content_variables_map": ["nombre", "asesor"],  # {{1}}=nombre, {{2}}=asesor
         "is_default": True,
     },

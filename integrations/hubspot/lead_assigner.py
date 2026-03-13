@@ -61,15 +61,17 @@ class LeadAssigner:
         "mercado_libre": "equipo_portales",
         "linkedin": "equipo_portales",
 
-        # === DIRECTO + REDES SOCIALES (ID: 89096380) ===
+        # === DIRECTO (ID: 89096380) ===
         "pagina_web": "equipo_directo",
         "whatsapp_directo": "equipo_directo",
         "whatsapp": "equipo_directo",  # Alias para compatibilidad con webhook
-        "facebook": "equipo_directo",
-        "instagram": "equipo_directo",
-        "ciencuadras": "equipo_directo",
         "youtube": "equipo_directo",
-        "tiktok": "equipo_directo",
+
+        # === REDES SOCIALES + CIENCUADRAS (ID: 89096378) ===
+        "facebook": "equipo_portales",
+        "instagram": "equipo_portales",
+        "ciencuadras": "equipo_portales",
+        "tiktok": "equipo_portales",
 
         # === FALLBACK (Round robin entre portales y directo) ===
         "desconocido": "default",
@@ -91,11 +93,13 @@ class LeadAssigner:
         "pagina_web": "89096380",
         "whatsapp_directo": "89096380",
         "whatsapp": "89096380",  # Alias para compatibilidad
-        "facebook": "89096380",
-        "instagram": "89096380",
-        "ciencuadras": "89096380",
         "youtube": "89096380",
-        "tiktok": "89096380",
+
+        # Redes Sociales + Ciencuadras (89096378)
+        "facebook": "89096378",
+        "instagram": "89096378",
+        "ciencuadras": "89096378",
+        "tiktok": "89096378",
     }
 
     # Canales para métricas de analista de redes sociales

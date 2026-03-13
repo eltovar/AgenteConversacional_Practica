@@ -2415,16 +2415,17 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('[Panel] ERROR: No se encontro el formulario sendForm');
     }
 
-    // Enviar con Ctrl+Enter
+    // Enviar con Enter (Shift+Enter inserta nueva línea)
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
         messageInput.addEventListener('keydown', function (e) {
-            if (e.ctrlKey && e.key === 'Enter') {
-                console.log('[Panel] Ctrl+Enter presionado');
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                console.log('[Panel] Enter presionado - enviando mensaje');
                 sendMessage(e);
             }
         });
-        console.log('[Panel] Event listener de Ctrl+Enter configurado');
+        console.log('[Panel] Event listener de Enter configurado');
     }
 
     console.log('[Panel] Inicializacion completada');

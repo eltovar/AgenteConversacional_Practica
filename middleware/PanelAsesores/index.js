@@ -283,12 +283,22 @@ function closeTemplatePicker() {
     // Si el input solo tiene "/" lo limpiamos
     const inp = document.getElementById('messageInput');
     if (inp && inp.value === '/') inp.value = '';
-    // Si la ventana sigue cerrada y no hay template activo (el asesor canceló), re-deshabilitar
-    if (!currentWindowOpen && !activeTemplateId) {
-        if (inp) {
-            inp.disabled = true;
-            inp.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
-            inp.classList.add('bg-gray-200', 'cursor-not-allowed');
+    if (!currentWindowOpen) {
+        if (!activeTemplateId) {
+            // Asesor canceló sin elegir template: re-deshabilitar input
+            if (inp) {
+                inp.disabled = true;
+                inp.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
+                inp.classList.add('bg-gray-200', 'cursor-not-allowed');
+            }
+        } else {
+            // Template seleccionado con ventana cerrada: habilitar input y sendBtn
+            if (inp) {
+                inp.disabled = false;
+                inp.classList.remove('bg-gray-200', 'cursor-not-allowed');
+            }
+            const sendBtn = document.getElementById('sendBtn');
+            if (sendBtn) sendBtn.disabled = false;
         }
     }
 }
@@ -353,11 +363,13 @@ function selectTemplate(templateId) {
     const template = templatesData.find(t => t.id === templateId);
     if (!template) return;
 
-    closeTemplatePicker();
-
+    // Asignar estado ANTES de cerrar el picker para que closeTemplatePicker
+    // vea activeTemplateId ya establecido (evita re-deshabilitar el input)
     activeTemplateId = templateId;
     activeTemplateBody = template.body;
     activeTemplateVars = template.variables || [];
+
+    closeTemplatePicker();
 
     const inp = document.getElementById('messageInput');
     if (!inp) return;

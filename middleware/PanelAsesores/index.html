@@ -81,6 +81,14 @@
                     <input type="date" id="dateTo" class="text-sm border rounded px-2 py-1 flex-1">
                     <button id="applyDatesBtn" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">OK</button>
                 </div>
+                <!-- Filtro por encargado de cita -->
+                <div class="mt-2">
+                    <select id="workerFilter"
+                            class="w-full text-sm border rounded px-2 py-1 bg-white"
+                            onchange="onWorkerFilterChange(this.value)">
+                        <option value="">&#128197; Todas las conversaciones</option>
+                    </select>
+                </div>
                 <!-- Buscador de contactos -->
                 <div class="mt-2">
                     <input type="text"

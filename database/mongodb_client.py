@@ -908,6 +908,40 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error buscando citas activas: {e}")
             return set()
 
+    async def get_contacts_by_worker(self, worker_id: str) -> List[Dict[str, Any]]:
+        """
+        Retorna la lista de contactos que tienen una cita futura activa con un worker específico.
+        Usado por el filtro de worker en el panel.
+
+        Returns:
+            Lista de dicts con {contact_id, phone, appointment_dt (ISO str), worker_name}
+        """
+        if not await self.connect() or not worker_id:
+            return []
+        try:
+            now = datetime.now(TIMEZONE)
+            cursor = self.db.appointments.find(
+                {
+                    "worker_id": worker_id,
+                    "status": "scheduled",
+                    "appointment_dt": {"$gte": now}
+                },
+                {"contact_id": 1, "phone": 1, "appointment_dt": 1, "worker_name": 1}
+            ).sort("appointment_dt", 1)  # ASC: más próxima primero
+            docs = await cursor.to_list(length=200)
+            result = []
+            for d in docs:
+                result.append({
+                    "contact_id": d.get("contact_id", ""),
+                    "phone": d.get("phone", ""),
+                    "appointment_dt": d["appointment_dt"].isoformat() if d.get("appointment_dt") else None,
+                    "worker_name": d.get("worker_name", ""),
+                })
+            return result
+        except Exception as e:
+            logger.error(f"[MongoDB] Error buscando contactos por worker {worker_id}: {e}")
+            return []
+
     async def cancel_appointment(self, appointment_id: str) -> bool:
         """Cancela una cita (status → cancelled)."""
         if not await self.connect():

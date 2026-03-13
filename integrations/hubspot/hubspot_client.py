@@ -130,7 +130,7 @@ class HubSpotClient:
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        wait=wait_exponential(multiplier=1, min=2, max=15),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError))
     )
     async def _request(self, method: str, endpoint: str, json_data: Optional[dict] = None) -> Dict[str, Any]:

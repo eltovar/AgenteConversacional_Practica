@@ -777,17 +777,58 @@ async function deleteTemplate(templateId) {
 // FUNCIONES DE CARGA DE DATOS
 // =========================================================================
 
+// Variable global para el worker filter activo
+let activeWorkerFilter = '';
+
+async function loadWorkerFilterOptions() {
+    const sel = document.getElementById('workerFilter');
+    if (!sel) return;
+    try {
+        const resp = await fetch(`${BASE_URL}/workers`, { headers: { 'X-API-Key': API_KEY } });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const workers = data.workers || [];
+        // Conservar la opción "Todas las conversaciones" y agregar workers
+        sel.innerHTML = '<option value="">&#128197; Todas las conversaciones</option>';
+        workers.forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w._id || w.id || w.worker_id || w.name;
+            opt.textContent = `👤 Citas de ${w.name}`;
+            sel.appendChild(opt);
+        });
+        // Restaurar selección activa si había una
+        if (activeWorkerFilter) sel.value = activeWorkerFilter;
+    } catch (err) {
+        console.warn('[Panel] No se pudieron cargar workers para filtro:', err);
+    }
+}
+
+function onWorkerFilterChange(workerId) {
+    activeWorkerFilter = workerId;
+    const timeFilter = document.getElementById('timeFilter');
+    if (timeFilter) timeFilter.disabled = !!workerId;
+    loadContacts();
+}
+
 async function loadContacts() {
+    const workerSel = document.getElementById('workerFilter');
+    const workerIdParam = workerSel ? workerSel.value : '';
+
+    // Si hay filtro worker activo, ignorar filtro de tiempo
     const filter = document.getElementById('timeFilter').value;
     let url = `${BASE_URL}/contacts?filter_time=${filter}`;
+
+    if (workerIdParam) {
+        url = `${BASE_URL}/contacts?worker_id=${encodeURIComponent(workerIdParam)}`;
+    }
 
     // Agregar filtro por advisor si esta presente en la URL
     if (ADVISOR_ID) {
         url += `&advisor=${ADVISOR_ID}`;
     }
 
-    // Agregar fechas si es filtro custom
-    if (filter === 'custom') {
+    // Agregar fechas si es filtro custom (solo cuando no hay worker filter)
+    if (!workerIdParam && filter === 'custom') {
         const dateFrom = document.getElementById('dateFrom').value;
         const dateTo = document.getElementById('dateTo').value;
         if (dateFrom) url += `&date_from=${dateFrom}T00:00:00`;
@@ -2652,6 +2693,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Cargar templates disponibles
     loadTemplates();
+
+    // Cargar workers para el filtro de citas
+    loadWorkerFilterOptions();
 
     // Inicializar listeners del template picker (slash command)
     _initTemplatePickerListeners();

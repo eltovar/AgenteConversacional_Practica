@@ -368,6 +368,32 @@ async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_
     return await client.get(url, headers=headers, params=params)
 
 
+async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int = 3):
+    """
+    PATCH a HubSpot con retry automático en 429 (rate limit).
+    Espera 12 segundos entre intentos — cubre la ventana de 10s de HubSpot.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    for attempt in range(1, max_retries + 1):
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.patch(url, headers=headers, json=payload)
+        if response.status_code == 429:
+            wait = 12 * attempt
+            logger.warning(
+                f"[Panel] HubSpot 429 rate limit PATCH (intento {attempt}/{max_retries}), "
+                f"esperando {wait}s..."
+            )
+            await asyncio.sleep(wait)
+            continue
+        return response
+    # Último intento (sin catch — deja propagar el error)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        return await client.patch(url, headers=headers, json=payload)
+
+
 # ============================================================================
 # BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
 # ============================================================================
@@ -1985,8 +2011,6 @@ async def update_contact_name(
         logger.error(f"[Panel] contact_id no es numérico: {contact_id}")
         raise HTTPException(status_code=400, detail="ID de contacto debe ser numérico")
 
-    import httpx
-
     hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
     if not hubspot_api_key:
         logger.error("[Panel] HUBSPOT_API_KEY no configurada")
@@ -2003,63 +2027,55 @@ async def update_contact_name(
     logger.debug(f"[Panel] Enviando PATCH a HubSpot: {url}")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.patch(
-                url,
-                headers={
-                    "Authorization": f"Bearer {hubspot_api_key}",
-                    "Content-Type": "application/json"
-                },
-                json=payload
+        response = await _hubspot_patch(url, payload, hubspot_api_key)
+
+        logger.info(f"[Panel] Respuesta HubSpot: {response.status_code}")
+
+        if response.status_code == 200:
+            logger.info(f"[Panel] Nombre actualizado para contacto {contact_id}: {firstname} {lastname}")
+            # Sincronizar display_name en Redis para todos los canales del contacto
+            try:
+                _rc = await _get_redis_client()
+                _phone = await _rc.get(f"phone_cache:{contact_id}")
+                if _phone:
+                    _display = f"{firstname} {lastname}".strip()
+                    _meta_keys = await _rc.keys(f"conv_meta:{_phone}:*")
+                    for _meta_key in _meta_keys:
+                        _raw = await _rc.get(_meta_key)
+                        if _raw:
+                            try:
+                                _meta = json.loads(_raw)
+                                _meta["display_name"] = _display
+                                _ttl = await _rc.ttl(_meta_key)
+                                if _ttl > 0:
+                                    await _rc.setex(_meta_key, _ttl, json.dumps(_meta))
+                                else:
+                                    await _rc.set(_meta_key, json.dumps(_meta))
+                            except (json.JSONDecodeError, Exception):
+                                pass
+                    logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
+            except Exception as redis_err:
+                logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
+            return {
+                "status": "success",
+                "message": "Nombre actualizado correctamente",
+                "contact_id": contact_id,
+                "firstname": firstname,
+                "lastname": lastname,
+                "display_name": f"{firstname} {lastname}".strip()
+            }
+        elif response.status_code == 404:
+            logger.warning(f"[Panel] Contacto no encontrado en HubSpot: {contact_id}")
+            raise HTTPException(
+                status_code=404,
+                detail="Contacto no encontrado en HubSpot"
             )
-
-            logger.info(f"[Panel] Respuesta HubSpot: {response.status_code}")
-
-            if response.status_code == 200:
-                logger.info(f"[Panel] Nombre actualizado para contacto {contact_id}: {firstname} {lastname}")
-                # Sincronizar display_name en Redis para todos los canales del contacto
-                try:
-                    _rc = await _get_redis_client()
-                    _phone = await _rc.get(f"phone_cache:{contact_id}")
-                    if _phone:
-                        _display = f"{firstname} {lastname}".strip()
-                        _meta_keys = await _rc.keys(f"conv_meta:{_phone}:*")
-                        for _meta_key in _meta_keys:
-                            _raw = await _rc.get(_meta_key)
-                            if _raw:
-                                try:
-                                    _meta = json.loads(_raw)
-                                    _meta["display_name"] = _display
-                                    _ttl = await _rc.ttl(_meta_key)
-                                    if _ttl > 0:
-                                        await _rc.setex(_meta_key, _ttl, json.dumps(_meta))
-                                    else:
-                                        await _rc.set(_meta_key, json.dumps(_meta))
-                                except (json.JSONDecodeError, Exception):
-                                    pass
-                        logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
-                except Exception as redis_err:
-                    logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
-                return {
-                    "status": "success",
-                    "message": "Nombre actualizado correctamente",
-                    "contact_id": contact_id,
-                    "firstname": firstname,
-                    "lastname": lastname,
-                    "display_name": f"{firstname} {lastname}".strip()
-                }
-            elif response.status_code == 404:
-                logger.warning(f"[Panel] Contacto no encontrado en HubSpot: {contact_id}")
-                raise HTTPException(
-                    status_code=404,
-                    detail="Contacto no encontrado en HubSpot"
-                )
-            else:
-                logger.error(f"[Panel] Error actualizando nombre: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Error de HubSpot: {response.text[:200]}"
-                )
+        else:
+            logger.error(f"[Panel] Error actualizando nombre: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Error de HubSpot: {response.text[:200]}"
+            )
 
     except httpx.TimeoutException:
         logger.error(f"[Panel] Timeout actualizando nombre para {contact_id}")
@@ -2918,6 +2934,139 @@ async def search_contacts_by_keyword(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _get_contacts_by_worker_filter(
+    worker_id: str,
+    advisor: Optional[str],
+    limit: int,
+) -> dict:
+    """
+    Branch del pipeline de contactos activado cuando se filtra por worker_id.
+
+    Lógica:
+    1. MongoDB: citas futuras activas del worker → contact_ids + phones
+    2. HubSpot batch: obtener nombre/email de los contactos (1 llamada)
+    3. Por cada contacto: obtener deal info (stage) desde _get_contact_deal_info (usa caché Redis)
+    4. Filtrar: solo etapa "1275156341" (Visita agendada)
+    5. Redis: añadir estado de conversación si está activo
+    6. Retornar ordenado por appointment_dt ASC
+    """
+    STAGE_CITA_AGENDADA = "1275156341"
+
+    mongo_mgr = get_mongo_manager()
+    appointment_records = await mongo_mgr.get_contacts_by_worker(worker_id)
+
+    if not appointment_records:
+        return {
+            "contacts": [],
+            "filter": "worker",
+            "worker_id": worker_id,
+            "advisor": advisor,
+            "active_count": 0,
+            "historical_count": 0,
+            "total_count": 0,
+            "page": 1,
+            "limit": limit,
+        }
+
+    # Deduplicar por contact_id (un contacto puede tener varias citas con el mismo worker)
+    seen_ids: set = set()
+    unique_records = []
+    for rec in appointment_records:
+        cid = rec.get("contact_id", "")
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            unique_records.append(rec)
+
+    contact_ids = [r["contact_id"] for r in unique_records if r.get("contact_id")]
+    appt_by_contact = {r["contact_id"]: r for r in unique_records}
+
+    # Batch: nombres y emails desde HubSpot (1 llamada)
+    batch_names = {}
+    if contact_ids:
+        batch_names = await _hubspot_batch_get_contacts(contact_ids)
+
+    # Redis: estado de conversación
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    redis_url = os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+    state_manager = ConversationStateManager(redis_url)
+
+    contacts_out = []
+    for rec in unique_records[:limit]:
+        cid = rec.get("contact_id", "")
+        if not cid:
+            continue
+
+        # Deal info con caché Redis (evita rate limit)
+        try:
+            deal_info = await _get_contact_deal_info(cid)
+        except Exception:
+            deal_info = None
+
+        current_stage = deal_info.get("current_stage") if deal_info else None
+
+        # Filtrar: solo etapa "Visita agendada"
+        if current_stage != STAGE_CITA_AGENDADA:
+            continue
+
+        deal_id = deal_info.get("deal_id") if deal_info else None
+
+        # Nombre desde HubSpot batch
+        hs_info = batch_names.get(cid, {})
+        display_name = f"{hs_info.get('firstname', '')} {hs_info.get('lastname', '')}".strip() or "Sin nombre"
+        phone = hs_info.get("phone") or rec.get("phone", "")
+        email = hs_info.get("email")
+
+        # Filtro opcional por advisor (owner)
+        owner_id = deal_info.get("owner_id") if deal_info else None
+        if advisor and owner_id != advisor:
+            continue
+
+        # Estado de conversación desde Redis
+        redis_meta = None
+        try:
+            if phone:
+                redis_meta = await state_manager.get_meta(phone)
+        except Exception:
+            pass
+
+        conversation_status = redis_meta.status if redis_meta else "historical"
+        last_activity = redis_meta.last_activity.isoformat() if (redis_meta and redis_meta.last_activity) else None
+
+        contacts_out.append({
+            "contact_id": cid,
+            "phone": phone,
+            "display_name": display_name,
+            "email": email,
+            "owner_id": owner_id,
+            "deal_id": deal_id,
+            "current_stage": current_stage,
+            "has_appointment": True,
+            "appointment_dt": rec.get("appointment_dt"),
+            "worker_name": rec.get("worker_name", ""),
+            "conversation_status": conversation_status,
+            "last_activity": last_activity,
+            "is_active": conversation_status in ("HUMAN_ACTIVE", "IN_CONVERSATION", "BOT_ACTIVE"),
+            "canal_origen": rec.get("canal", "whatsapp"),
+            "time_ago": "",
+            "ttl_display": "",
+        })
+
+    active_count = sum(1 for c in contacts_out if c.get("is_active"))
+    return {
+        "contacts": contacts_out,
+        "filter": "worker",
+        "worker_id": worker_id,
+        "advisor": advisor,
+        "active_count": active_count,
+        "historical_count": len(contacts_out) - active_count,
+        "total_count": len(contacts_out),
+        "page": 1,
+        "limit": limit,
+    }
+
+
 @router.get("/contacts")
 async def get_active_contacts(
     filter_time: str = Query("24h", description="Filtro de tiempo: 24h, 48h, 1week, custom"),
@@ -2926,6 +3075,7 @@ async def get_active_contacts(
     advisor: Optional[str] = Query(None, description="Owner ID para filtrar contactos por asesora"),
     limit: int = Query(30, ge=1, le=100),
     page: int = Query(1, ge=1, description="Página (1-based) para paginación del ZSET"),
+    worker_id: Optional[str] = Query(None, description="Worker ID para filtrar contactos por encargado de cita"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -2939,6 +3089,16 @@ async def get_active_contacts(
         TIMEZONE = ZoneInfo("America/Bogota")
 
         now = datetime.now(TIMEZONE)
+
+        # === BRANCH: Filtro por worker_id (citas) ===
+        # Cuando worker_id está activo, el pipeline normal se omite.
+        # Se buscan contactos desde MongoDB appointments y se filtran por etapa HubSpot.
+        if worker_id:
+            return await _get_contacts_by_worker_filter(
+                worker_id=worker_id,
+                advisor=advisor,
+                limit=limit,
+            )
 
         # === PASO 1: Obtener contactos ACTIVOS de Redis ===
         # Redis URL unificado (Railway interna, local pública)
@@ -3721,6 +3881,26 @@ async def create_appointment(
 
     if not appointment_id:
         raise HTTPException(status_code=500, detail="Error guardando la cita en base de datos")
+
+    # Insertar nota de cita en el historial de la conversación (colección messages)
+    if phone:
+        try:
+            await mongo_mgr.save_message(
+                phone=phone,
+                content=note_body,
+                sender="system",
+                channel=body.canal,
+                hubspot_contact_id=contact_id,
+                metadata={
+                    "type": "appointment_created",
+                    "appointment_id": appointment_id,
+                    "worker_name": body.worker_name,
+                    "fecha_display": fecha_str,
+                }
+            )
+            logger.info(f"[Panel] Nota de cita guardada en historial: contact={contact_id}")
+        except Exception as msg_err:
+            logger.warning(f"[Panel] No se pudo guardar nota de cita en historial: {msg_err}")
 
     # Sincronizar cita a Redis para que el scheduler de recordatorios la detecte
     if phone:

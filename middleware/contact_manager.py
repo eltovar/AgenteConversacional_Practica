@@ -906,7 +906,8 @@ class ContactManager:
     async def update_contact_info(
         self,
         contact_id: str,
-        properties: Dict[str, Any]
+        properties: Dict[str, Any],
+        attempt: int = 0
     ) -> bool:
         """
         Actualiza información adicional de un contacto.
@@ -942,14 +943,22 @@ class ContactManager:
                 )
                 raise
 
-            # Si es rate limit, loguear pero no fallar
+            # Si es rate limit, reintentar con backoff exponencial
             if "429" in str(e) or "rate limit" in error_str:
+                if attempt >= MAX_RATE_LIMIT_RETRIES:
+                    logger.error(
+                        "[ContactManager] Rate limit: máximo de reintentos al actualizar %s",
+                        contact_id
+                    )
+                    return False
+                wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
                 logger.warning(
-                    "[ContactManager] Rate limit al actualizar %s. "
-                    "Se reintentará después.",
-                    contact_id
+                    "[ContactManager] Rate limit (429) al actualizar %s. "
+                    "Reintento %d/%d en %ds",
+                    contact_id, attempt + 1, MAX_RATE_LIMIT_RETRIES, wait_time
                 )
-                return False
+                await asyncio.sleep(wait_time)
+                return await self.update_contact_info(contact_id, properties, attempt + 1)
 
             logger.error(
                 "[ContactManager] Error actualizando contacto %s: %s",

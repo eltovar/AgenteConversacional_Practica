@@ -64,6 +64,13 @@ let _lastContactTimestamps = {};
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
+// Template picker (slash command)
+let activeTemplateId = null;
+let activeTemplateBody = '';
+let activeTemplateVars = [];
+let pickerSelectedIndex = -1;
+let pickerVisibleItems = [];
+
 // =========================================================================
 // LOADER GLOBAL (UX)
 // =========================================================================
@@ -227,80 +234,262 @@ async function loadTemplates(forceRefresh = false) {
     }
 }
 
+// =========================================================================
+// TEMPLATE PICKER (slash command)
+// =========================================================================
+
 function populateTemplateSelector() {
-    const selector = document.getElementById('templateSelector');
-    if (!selector) return;
-
-    // Agrupar por categoria
-    const categories = {};
-    templatesData.forEach(t => {
-        const cat = t.category || 'otros';
-        if (!categories[cat]) categories[cat] = [];
-        categories[cat].push(t);
-    });
-
-    // Iconos por categoria
-    const categoryIcons = {
-        'reactivacion': '&#128236;',
-        'cita': '&#128197;',
-        'seguimiento': '&#128260;',
-        'recordatorio': '&#9200;',
-        'promocion': '&#127919;',
-        'otros': '&#128221;'
-    };
-
-    // Construir opciones agrupadas
-    let html = '<option value="">-- Seleccionar template --</option>';
-
-    Object.keys(categories).sort().forEach(cat => {
-        const icon = categoryIcons[cat] || '&#128221;';
-        const catName = cat.charAt(0).toUpperCase() + cat.slice(1);
-        html += `<optgroup label="${icon} ${catName}">`;
-
-        categories[cat].forEach(t => {
-            html += `<option value="${t.id}">${t.name}</option>`;
-        });
-
-        html += '</optgroup>';
-    });
-
-    selector.innerHTML = html;
-
-    // Listener para mostrar preview
-    selector.onchange = showTemplatePreview;
+    // Compatibilidad: no hace nada si el selector antiguo ya no existe
+    // Los templates se cargan via renderTemplatePicker() ahora
 }
 
-function showTemplatePreview() {
-    const selector = document.getElementById('templateSelector');
-    const preview = document.getElementById('templatePreview');
-    const sendBtn = document.getElementById('sendTemplateBtn');
-    const templateId = selector.value;
+function openTemplatePicker() {
+    if (!currentContactId) return;
+    const picker = document.getElementById('templatePicker');
+    if (!picker) return;
+    picker.classList.remove('hidden');
+    renderTemplatePicker('');
+    const search = document.getElementById('templateSearch');
+    if (search) search.value = '';
+}
 
-    if (!templateId) {
-        preview.classList.add('hidden');
-        // Deshabilitar boton si no hay template seleccionado
-        if (sendBtn) sendBtn.disabled = true;
+function closeTemplatePicker() {
+    const picker = document.getElementById('templatePicker');
+    if (picker) picker.classList.add('hidden');
+    pickerSelectedIndex = -1;
+    pickerVisibleItems = [];
+    // Si el input solo tiene "/" lo limpiamos
+    const inp = document.getElementById('messageInput');
+    if (inp && inp.value === '/') inp.value = '';
+}
+
+function renderTemplatePicker(filter) {
+    const list = document.getElementById('templateList');
+    if (!list) return;
+
+    const f = (filter || '').toLowerCase();
+    const categoryIcons = {
+        cita: '📅', reactivacion: '📨', seguimiento: '🔄',
+        recordatorio: '⏰', promocion: '🎯', agradecimiento: '🙏', otros: '📝'
+    };
+
+    const categories = {};
+    templatesData
+        .filter(t => !f
+            || t.name.toLowerCase().includes(f)
+            || (t.category || '').toLowerCase().includes(f)
+            || (t.id || '').toLowerCase().includes(f))
+        .forEach(t => {
+            const cat = t.category || 'otros';
+            if (!categories[cat]) categories[cat] = [];
+            categories[cat].push(t);
+        });
+
+    pickerVisibleItems = [];
+    let html = '';
+    let idx = 0;
+
+    if (Object.keys(categories).length === 0) {
+        html = '<p class="text-sm text-gray-400 text-center py-5">Sin resultados para "' + filter + '"</p>';
+        list.innerHTML = html;
+        pickerSelectedIndex = -1;
         return;
     }
 
-    const template = templatesData.find(t => t.id === templateId);
-    if (template) {
-        // Reemplazar variables con placeholders visuales
-        let body = template.body;
-        (template.variables || []).forEach(v => {
-            body = body.replace(
-                new RegExp(`\\{${v}\\}`, 'g'),
-                `<span class="bg-yellow-200 px-1 rounded">${v}</span>`
-            );
+    Object.keys(categories).sort().forEach(cat => {
+        const icon = categoryIcons[cat] || '📝';
+        const catLabel = cat.charAt(0).toUpperCase() + cat.slice(1);
+        html += `<div class="px-4 py-1.5 bg-gray-50 border-b border-gray-100 sticky top-0">
+            <span class="text-xs font-semibold text-gray-400 uppercase tracking-wide">${icon} ${catLabel}</span>
+        </div>`;
+        categories[cat].forEach(t => {
+            const preview = (t.body || '').replace(/\n/g, ' ').substring(0, 90);
+            const escapedId = t.id.replace(/'/g, "\\'");
+            html += `<div class="template-picker-item flex items-baseline gap-2 px-4 py-2.5 cursor-pointer border-b border-gray-50 hover:bg-blue-50 transition-colors"
+                         data-idx="${idx}" onclick="selectTemplate('${escapedId}')">
+                <span class="font-semibold text-gray-800 text-sm whitespace-nowrap shrink-0">/${t.name}</span>
+                <span class="text-gray-500 text-sm truncate">${preview}</span>
+            </div>`;
+            pickerVisibleItems.push(t.id);
+            idx++;
         });
+    });
 
-        preview.innerHTML = body;
-        preview.classList.remove('hidden');
+    list.innerHTML = html;
+    pickerSelectedIndex = -1;
+}
 
-        // Habilitar boton solo si hay contacto seleccionado
-        if (sendBtn && currentContactId) {
-            sendBtn.disabled = false;
+function selectTemplate(templateId) {
+    const template = templatesData.find(t => t.id === templateId);
+    if (!template) return;
+
+    closeTemplatePicker();
+
+    activeTemplateId = templateId;
+    activeTemplateBody = template.body;
+    activeTemplateVars = template.variables || [];
+
+    const inp = document.getElementById('messageInput');
+    if (!inp) return;
+    inp.value = template.body;
+    inp.focus();
+
+    // Auto-seleccionar primer {variable}
+    jumpToNextVariable(inp, 1, true);
+
+    // Mostrar hint si hay variables
+    const hint = document.getElementById('templateHint');
+    if (hint) {
+        if (activeTemplateVars.length > 0) {
+            hint.classList.remove('hidden');
+        } else {
+            hint.classList.add('hidden');
         }
+    }
+}
+
+function jumpToNextVariable(textarea, direction, fromStart) {
+    const text = textarea.value;
+    const cursor = fromStart ? 0 : textarea.selectionEnd;
+    const regex = /\{(\w+)\}/g;
+    let match;
+    const matches = [];
+    while ((match = regex.exec(text)) !== null) {
+        matches.push({ start: match.index, end: match.index + match[0].length });
+    }
+    if (matches.length === 0) {
+        const hint = document.getElementById('templateHint');
+        if (hint) hint.classList.add('hidden');
+        return false;
+    }
+    let target;
+    if (direction === 1) {
+        target = matches.find(m => m.start >= (fromStart ? 0 : cursor)) || matches[0];
+    } else {
+        const before = matches.filter(m => m.end <= cursor - 1);
+        target = before.length > 0 ? before[before.length - 1] : matches[matches.length - 1];
+    }
+    textarea.setSelectionRange(target.start, target.end);
+    return true;
+}
+
+function extractVariableValues(originalBody, editedText, variables) {
+    if (!variables || variables.length === 0) return {};
+    // Escapar caracteres especiales de regex en el template original
+    let pattern = originalBody.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&');
+    // Reemplazar cada \{varname\} con un grupo de captura
+    variables.forEach(v => {
+        pattern = pattern.replace(`\\{${v}\\}`, '([\\s\\S]+?)');
+    });
+    // El último grupo debe ser greedy para capturar hasta el final
+    pattern = pattern.replace(/\(\[\\s\\S\]\+\?\)(?=[^(]*$)/, '([\\s\\S]+)');
+    try {
+        const match = editedText.match(new RegExp('^' + pattern + '$'));
+        if (!match) return {};
+        const result = {};
+        variables.forEach((v, i) => { result[v] = match[i + 1] || ''; });
+        return result;
+    } catch (e) {
+        // Si el regex falla, devolver objeto vacío (backend usa SafeDict)
+        return {};
+    }
+}
+
+function movePickerSelection(direction) {
+    if (pickerVisibleItems.length === 0) return;
+    const items = document.querySelectorAll('.template-picker-item');
+    items.forEach(i => i.classList.remove('bg-blue-100'));
+    pickerSelectedIndex = Math.max(0, Math.min(pickerVisibleItems.length - 1, pickerSelectedIndex + direction));
+    const selected = items[pickerSelectedIndex];
+    if (selected) {
+        selected.classList.add('bg-blue-100');
+        selected.scrollIntoView({ block: 'nearest' });
+    }
+}
+
+function confirmPickerSelection() {
+    if (pickerSelectedIndex >= 0 && pickerVisibleItems[pickerSelectedIndex]) {
+        selectTemplate(pickerVisibleItems[pickerSelectedIndex]);
+    } else if (pickerVisibleItems.length > 0) {
+        // Si no hay selección por teclado, seleccionar el primero
+        selectTemplate(pickerVisibleItems[0]);
+    }
+}
+
+function _initTemplatePickerListeners() {
+    const inp = document.getElementById('messageInput');
+    if (!inp || inp._templateListenerAdded) return;
+    inp._templateListenerAdded = true;
+
+    // Detectar "/" para abrir picker
+    inp.addEventListener('input', function() {
+        const val = this.value;
+        const pickerEl = document.getElementById('templatePicker');
+        const pickerOpen = pickerEl && !pickerEl.classList.contains('hidden');
+
+        if (val === '/') {
+            // Abrir picker al escribir solo "/"
+            if (templatesData.length === 0) {
+                loadTemplates().then(() => openTemplatePicker());
+            } else {
+                openTemplatePicker();
+            }
+        } else if (val.startsWith('/') && pickerOpen) {
+            // Filtrar mientras se escribe despues del slash
+            const filter = val.slice(1);
+            const search = document.getElementById('templateSearch');
+            if (search) search.value = filter;
+            renderTemplatePicker(filter);
+        } else if (!val.startsWith('/') && pickerOpen) {
+            // Borro el slash → cerrar picker
+            const pickerEl2 = document.getElementById('templatePicker');
+            if (pickerEl2) pickerEl2.classList.add('hidden');
+            pickerSelectedIndex = -1;
+            pickerVisibleItems = [];
+        }
+
+        // Si el usuario edita el template activo y ya no quedan {variables}
+        if (activeTemplateId && !/\{\w+\}/.test(val)) {
+            const hint = document.getElementById('templateHint');
+            if (hint) hint.classList.add('hidden');
+        }
+    });
+
+    // Teclado: navegación en picker + Tab entre variables
+    inp.addEventListener('keydown', function(e) {
+        const pickerEl = document.getElementById('templatePicker');
+        const pickerOpen = pickerEl && !pickerEl.classList.contains('hidden');
+
+        if (pickerOpen) {
+            if (e.key === 'ArrowDown')  { e.preventDefault(); movePickerSelection(1); return; }
+            if (e.key === 'ArrowUp')    { e.preventDefault(); movePickerSelection(-1); return; }
+            if (e.key === 'Enter')      { e.preventDefault(); confirmPickerSelection(); return; }
+            if (e.key === 'Escape')     { e.preventDefault(); closeTemplatePicker(); return; }
+            // Mientras el picker está abierto no enviamos con Enter
+            return;
+        }
+
+        // Tab para saltar entre {variables} del template activo
+        if (e.key === 'Tab' && activeTemplateId) {
+            e.preventDefault();
+            jumpToNextVariable(this, e.shiftKey ? -1 : 1, false);
+        }
+    });
+
+    // Buscador interno del picker sincroniza con el input principal
+    const search = document.getElementById('templateSearch');
+    if (search) {
+        search.addEventListener('input', function() {
+            renderTemplatePicker(this.value);
+            // Sincronizar con messageInput
+            inp.value = '/' + this.value;
+        });
+        search.addEventListener('keydown', function(e) {
+            if (e.key === 'ArrowDown') { e.preventDefault(); inp.focus(); movePickerSelection(1); }
+            if (e.key === 'ArrowUp')   { e.preventDefault(); inp.focus(); movePickerSelection(-1); }
+            if (e.key === 'Escape')    { e.preventDefault(); closeTemplatePicker(); inp.focus(); }
+            if (e.key === 'Enter')     { e.preventDefault(); confirmPickerSelection(); }
+        });
     }
 }
 
@@ -1960,6 +2149,12 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     currentCanal = canal;  // Guardar canal para segregacion
     currentName = displayName || null;
 
+    // Limpiar estado del template picker al cambiar de contacto
+    activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
+    closeTemplatePicker();
+    const hint = document.getElementById('templateHint');
+    if (hint) hint.classList.add('hidden');
+
     // Reiniciar polling con intervalo mas rapido para chat activo
     restartPollingForChat();
 
@@ -2068,6 +2263,28 @@ async function sendMessage(e) {
     const resultDiv = document.getElementById('sendResult');
 
     console.log('[Panel] Datos de envio:', { phone, contactId, messageLength: message.length, hasMedia: !!selectedMediaFile });
+
+    // --- TEMPLATE ACTIVO: interceptar y enviar como template ---
+    if (activeTemplateId && message && !selectedMediaFile) {
+        if (/\{\w+\}/.test(message)) {
+            // Quedan variables sin rellenar
+            resultDiv.className = 'mt-2 text-sm text-red-600';
+            resultDiv.textContent = 'Reemplaza todos los campos {variable} antes de enviar';
+            resultDiv.classList.remove('hidden');
+            const inp = document.getElementById('messageInput');
+            if (inp) jumpToNextVariable(inp, 1, true);
+            setTimeout(() => resultDiv.classList.add('hidden'), 4000);
+            return;
+        }
+        const vars = extractVariableValues(activeTemplateBody, message, activeTemplateVars) || {};
+        const tplId = activeTemplateId;
+        // Limpiar estado del template antes de enviar
+        activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
+        const hint = document.getElementById('templateHint');
+        if (hint) hint.classList.add('hidden');
+        await sendTemplateFromInput(tplId, vars);
+        return;
+    }
 
     // Validar que haya contenido (texto o archivo)
     if (!phone || (!message && !selectedMediaFile)) {
@@ -2219,10 +2436,9 @@ async function sendTemplateMessage() {
         return;
     }
 
-    // Deshabilitar boton mientras envia
+    // Deshabilitar boton mientras envia (si existe)
     const templateBtn = document.getElementById('sendTemplateBtn');
-    templateBtn.disabled = true;
-    templateBtn.textContent = 'Enviando...';
+    if (templateBtn) { templateBtn.disabled = true; templateBtn.textContent = 'Enviando...'; }
 
     try {
         const formData = new FormData();
@@ -2272,10 +2488,61 @@ async function sendTemplateMessage() {
         resultDiv.textContent = `Error: ${error.message}`;
         resultDiv.classList.remove('hidden');
     } finally {
-        templateBtn.disabled = false;
-        templateBtn.textContent = 'Enviar Template';
+        if (templateBtn) { templateBtn.disabled = false; templateBtn.textContent = 'Enviar Template'; }
 
         // Ocultar mensaje despues de 5 segundos
+        setTimeout(() => resultDiv.classList.add('hidden'), 5000);
+    }
+}
+
+// Envío de template desde el messageInput (slash command flow)
+async function sendTemplateFromInput(templateId, variables) {
+    const phone = document.getElementById('selectedPhone').value;
+    const contactId = document.getElementById('selectedContactId').value;
+    const resultDiv = document.getElementById('sendResult');
+    const template = templatesData.find(t => t.id === templateId);
+
+    if (!template || !phone) return;
+
+    document.getElementById('sendBtn').disabled = true;
+    document.getElementById('messageInput').disabled = true;
+    document.getElementById('attachBtn').disabled = true;
+
+    try {
+        const formData = new FormData();
+        formData.append('to', phone);
+        formData.append('contact_id', contactId);
+        formData.append('template_id', templateId);
+        formData.append('variables', JSON.stringify(variables));
+        if (ADVISOR_ID) formData.append('advisor_id', ADVISOR_ID);
+        if (currentCanal) formData.append('canal', currentCanal);
+
+        const response = await fetch(`${BASE_URL}/send-template`, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY },
+            body: formData
+        });
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            resultDiv.className = 'mt-2 text-sm text-green-600';
+            resultDiv.textContent = `Plantilla "${template.name}" enviada correctamente.`;
+            resultDiv.classList.remove('hidden');
+            document.getElementById('messageInput').value = '';
+            document.getElementById('windowWarning')?.classList.add('hidden');
+            loadChatHistory(contactId);
+        } else {
+            throw new Error(data.detail || data.message || 'Error enviando plantilla');
+        }
+    } catch (err) {
+        console.error('[Panel] Error en sendTemplateFromInput:', err);
+        resultDiv.className = 'mt-2 text-sm text-red-600';
+        resultDiv.textContent = `Error: ${err.message}`;
+        resultDiv.classList.remove('hidden');
+    } finally {
+        document.getElementById('sendBtn').disabled = false;
+        document.getElementById('messageInput').disabled = false;
+        document.getElementById('attachBtn').disabled = false;
         setTimeout(() => resultDiv.classList.add('hidden'), 5000);
     }
 }
@@ -2385,6 +2652,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Cargar templates disponibles
     loadTemplates();
+
+    // Inicializar listeners del template picker (slash command)
+    _initTemplatePickerListeners();
 
     // Iniciar polling
     startPolling();

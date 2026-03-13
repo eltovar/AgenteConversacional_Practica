@@ -46,6 +46,12 @@ class MessageAnalysis:
     cita_confirmada: bool = False  # True si el cliente confirma una cita propuesta
     # Campo para extracción de nombre del cliente
     nombre_detectado: Optional[str] = None  # Nombre del cliente cuando lo menciona
+    # Campos CRM extraídos de la conversación (Single-Stream)
+    tipo_propiedad: Optional[str] = None
+    tipo_operacion: Optional[str] = None
+    ubicacion: Optional[str] = None
+    presupuesto: Optional[str] = None
+    caracteristicas: Optional[list] = None
 
     def __post_init__(self):
         if self.suspicious_indicators is None:
@@ -69,7 +75,12 @@ class MessageAnalysis:
             fecha_cita_mencionada=data.get("fecha_cita_mencionada"),
             hora_cita_mencionada=data.get("hora_cita_mencionada"),
             cita_confirmada=data.get("cita_confirmada", False),
-            nombre_detectado=data.get("nombre_detectado")
+            nombre_detectado=data.get("nombre_detectado"),
+            tipo_propiedad=data.get("tipo_propiedad"),
+            tipo_operacion=data.get("tipo_operacion"),
+            ubicacion=data.get("ubicacion"),
+            presupuesto=data.get("presupuesto"),
+            caracteristicas=data.get("caracteristicas"),
         )
 
 

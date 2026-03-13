@@ -234,7 +234,12 @@ Debes responder SIEMPRE en formato JSON con la siguiente estructura:
         "nombre_detectado": "Nombre del cliente si lo menciona (o null)",
         "fecha_cita_mencionada": null,
         "hora_cita_mencionada": null,
-        "cita_confirmada": false
+        "cita_confirmada": false,
+        "tipo_propiedad": null,
+        "tipo_operacion": null,
+        "ubicacion": null,
+        "presupuesto": null,
+        "caracteristicas": null
     }}
 }}
 
@@ -337,7 +342,22 @@ GUÍA PARA EL ANÁLISIS:
   - Solo está preguntando disponibilidad
   - Está negociando horarios
   - Dice "tal vez", "quizás", "lo pienso"
-  - Es la primera mención de una posible cita"""
+  - Es la primera mención de una posible cita
+
+- tipo_propiedad: Tipo de inmueble que busca el cliente. Valores permitidos:
+  "apartamento", "casa", "local", "oficina", "bodega", "lote". null si no lo menciona.
+
+- tipo_operacion: Operación que busca el cliente. Valores: "arriendo", "compra", "venta".
+  null si no lo menciona.
+
+- ubicacion: Barrio, zona o ciudad de interés mencionada por el cliente. String libre o null.
+
+- presupuesto: Presupuesto mencionado por el cliente, tal como lo dice
+  (ej: "200 millones", "1.5 millones al mes", "500 millones"). null si no lo menciona.
+
+- caracteristicas: Lista de características del inmueble buscado que menciona el cliente.
+  Array de strings o null. Ejemplo: ["3 habitaciones", "2 baños", "parqueadero"]
+  Solo incluir lo que el cliente mencione explícitamente."""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

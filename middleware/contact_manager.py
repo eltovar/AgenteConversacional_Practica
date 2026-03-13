@@ -653,7 +653,12 @@ class ContactManager:
 
         try:
             deal_name = f"Lead WA {phone_normalized}"
-            deal_properties = {"dealname": deal_name}
+            # Misma conversión que en _create_basic_lead: "whatsapp" → "whatsapp_directo"
+            hs_canal = "whatsapp_directo" if source_channel == "whatsapp" else source_channel
+            deal_properties = {
+                "dealname": deal_name,
+                "canal_origen": hs_canal,
+            }
             if owner_id:
                 deal_properties["hubspot_owner_id"] = owner_id
             deal_id = await self.hubspot.create_deal(

@@ -117,6 +117,46 @@ def calculate_lead_score(lead_data: Dict[str, Any]) -> int:
     return min(score, 100)  # Cap en 100
 
 
+def parse_budget_to_number(budget_str: str) -> int:
+    """
+    Convierte un string de presupuesto a número entero para HubSpot.
+    Ejemplos: "200 millones" → 200000000, "500 mil" → 500000, "200.000.000" → 200000000
+    """
+    import re
+
+    if not budget_str:
+        return 0
+
+    try:
+        text = str(budget_str).lower().strip()
+        text = text.replace('$', '').replace('cop', '').strip()
+
+        millon_match = re.search(r'(\d+(?:[.,]\d+)?)\s*mill[oó]n(?:es)?', text)
+        if millon_match:
+            num_str = millon_match.group(1).replace(',', '.')
+            return int(float(num_str) * 1_000_000)
+
+        mil_match = re.search(r'(\d+(?:[.,]\d+)?)\s*mil\b', text)
+        if mil_match:
+            num_str = mil_match.group(1).replace(',', '.')
+            return int(float(num_str) * 1_000)
+
+        cleaned = re.sub(r'[^\d.,]', '', text)
+        if cleaned:
+            if '.' in cleaned and ',' not in cleaned:
+                cleaned = cleaned.replace('.', '')
+            elif ',' in cleaned and '.' not in cleaned:
+                cleaned = cleaned.replace(',', '')
+            elif ',' in cleaned and '.' in cleaned:
+                cleaned = cleaned.replace('.', '').replace(',', '.')
+            return int(float(cleaned)) if cleaned else 0
+
+        return 0
+
+    except Exception:
+        return 0
+
+
 def split_full_name(full_name: str) -> Dict[str, str]:
     """
     Divide un nombre completo en firstname y lastname.

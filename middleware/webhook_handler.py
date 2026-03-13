@@ -365,6 +365,8 @@ async def _process_message_deferred(
                     lead_context["chatbot_rooms"] = props["chatbot_rooms"]
                 if props.get("chatbot_score"):
                     lead_context["chatbot_score"] = props["chatbot_score"]
+                if props.get("canal_origen"):
+                    lead_context["canal_origen"] = props["canal_origen"]
                 logger.info(f"[DeferredProcess] Propiedades HubSpot cargadas: {list(lead_context.keys())}")
         
         # Agregar contexto de código de propiedad si existe
@@ -1896,6 +1898,8 @@ async def _sync_conversation_with_analysis_to_hubspot(
     mongo_bot_id = None
     media_url = media_result.get("permanent_url") if media_result else None
     media_type = media_result.get("media_type") if media_result else None
+    # Inicializar base_properties antes del try para acceso seguro en sección Deal
+    base_properties = {}
 
     # =========================================================================
     # PASO 1: MongoDB - Fuente de verdad para el panel en tiempo real
@@ -2110,36 +2114,94 @@ async def _sync_conversation_with_analysis_to_hubspot(
     except Exception as e:
         logger.error("[HubSpot Sync] Error sincronizando conversación con análisis: %s", e)
 
-    # Sincronizar propiedades CRM + portal al Deal
-    _CRM_DEAL_PROPS = [
+    # ═══════════════════════════════════════════════════════════════════
+    # DATOS SOFIA — escritura progresiva en Contacto (Single-Stream)
+    # Solo cuando el LLM extrajo campos CRM del mensaje actual.
+    # ═══════════════════════════════════════════════════════════════════
+    crm_contact_props = {}
+    if getattr(analysis, "tipo_propiedad", None):
+        crm_contact_props["chatbot_property_type"] = analysis.tipo_propiedad
+    if getattr(analysis, "tipo_operacion", None):
+        crm_contact_props["chatbot_operation_type"] = analysis.tipo_operacion
+    if getattr(analysis, "ubicacion", None):
+        crm_contact_props["chatbot_location"] = analysis.ubicacion
+    if getattr(analysis, "presupuesto", None):
+        from integrations.hubspot.hubspot_utils import parse_budget_to_number
+        _b = parse_budget_to_number(analysis.presupuesto)
+        if _b > 0:
+            crm_contact_props["chatbot_budget"] = _b
+    if getattr(analysis, "caracteristicas", None) and isinstance(analysis.caracteristicas, list):
+        crm_contact_props["chatbot_rooms"] = "\n".join(
+            f"• {c}" for c in analysis.caracteristicas if c
+        )
+
+    if crm_contact_props:
+        from integrations.hubspot.hubspot_utils import calculate_lead_score
+        _score_data = {
+            "firstname": lead_context.get("firstname", ""),
+            "phone": phone,
+            "canal_origen": lead_context.get("canal_origen", "whatsapp"),
+            "metadata": {
+                "tipo_propiedad": analysis.tipo_propiedad or lead_context.get("chatbot_property_type", ""),
+                "ubicacion": analysis.ubicacion or lead_context.get("chatbot_location", ""),
+                "presupuesto": analysis.presupuesto or "",
+                "caracteristicas": analysis.caracteristicas or [],
+            },
+        }
+        _new_score = calculate_lead_score(_score_data)
+        if _new_score > 0:
+            crm_contact_props["chatbot_score"] = str(_new_score)
+
+        try:
+            _cm = get_contact_manager()
+            await _cm.update_contact_info(contact_id, crm_contact_props)
+            logger.info(
+                "[HubSpot Sync] ✅ Datos Sofia → Contacto %s: %s",
+                contact_id, list(crm_contact_props.keys())
+            )
+        except Exception as _crm_err:
+            logger.warning("[HubSpot Sync] Error escribiendo Datos Sofia en Contacto: %s", _crm_err)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SYNC DEAL — una sola llamada con TODAS las props del Deal:
+    # chatbot_conversation, canal_origen, Datos Sofia, props CRM legacy
+    # ═══════════════════════════════════════════════════════════════════
+    deal_all_props = {}
+
+    # 1. chatbot_conversation + chatbot_timestamp (siempre)
+    deal_all_props.update(base_properties)
+
+    # 2. Props CRM existentes en lead_context (mensajes anteriores)
+    for _p in [
         "chatbot_property_type", "chatbot_operation_type",
         "chatbot_location", "chatbot_rooms", "chatbot_score",
         "chatbot_budget", "canal_origen",
-    ]
-    deal_sync = {}
-    if lead_context:
-        for _p in _CRM_DEAL_PROPS:
-            if lead_context.get(_p):
-                deal_sync[_p] = lead_context[_p]
-        if lead_context.get("portal_url"):
-            deal_sync["chatbot_portal_url"] = lead_context["portal_url"][:500]
-        if lead_context.get("portal_link") and lead_context.get("portal_id"):
-            deal_sync["canal_origen"] = lead_context["portal_id"]
+    ]:
+        if lead_context and lead_context.get(_p):
+            deal_all_props[_p] = lead_context[_p]
 
-    if deal_sync:
+    # 3. Datos Sofia recién extraídos (prioridad sobre lead_context)
+    deal_all_props.update(crm_contact_props)
+
+    # 4. Portal link si aplica
+    if lead_context and lead_context.get("portal_url"):
+        deal_all_props["chatbot_portal_url"] = lead_context["portal_url"][:500]
+    if lead_context and lead_context.get("portal_link") and lead_context.get("portal_id"):
+        deal_all_props["canal_origen"] = lead_context["portal_id"]
+
+    if deal_all_props:
         try:
             hubspot = get_hubspot_client()
             deals = await hubspot.get_contact_deals(contact_id)
             if deals:
-                deal_id = deals[0]["id"]
-                await hubspot.update_deal(deal_id, deal_sync)
+                _deal_id = deals[0]["id"]
+                await hubspot.update_deal(_deal_id, deal_all_props)
                 logger.info(
-                    f"[HubSpot Sync] Deal {deal_id} actualizado con {list(deal_sync.keys())}"
+                    "[HubSpot Sync] ✅ Deal %s sincronizado: %s",
+                    _deal_id, list(deal_all_props.keys())
                 )
-        except Exception as deal_err:
-            logger.warning(
-                f"[HubSpot Sync] No se pudo actualizar deal con propiedades CRM: {deal_err}"
-            )
+        except Exception as _deal_err:
+            logger.warning("[HubSpot Sync] Error sync Deal: %s", _deal_err)
 
 
 async def _notify_high_priority_lead(

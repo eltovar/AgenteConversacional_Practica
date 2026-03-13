@@ -71,6 +71,28 @@ let activeTemplateVars = [];
 let pickerSelectedIndex = -1;
 let pickerVisibleItems = [];
 
+// Estado de ventana 24h
+let currentWindowOpen = true;
+
+// =========================================================================
+// HELPER: UI según estado de ventana 24h
+// =========================================================================
+function _applyWindowClosedUI(isClosed) {
+    const triggerBtn = document.getElementById('templateTriggerBtn');
+    const attachBtn  = document.getElementById('attachBtn');
+    const recordBtn  = document.getElementById('recordBtn');
+    currentWindowOpen = !isClosed;
+    if (isClosed) {
+        if (triggerBtn) triggerBtn.classList.remove('hidden');
+        if (attachBtn)  attachBtn.classList.add('hidden');
+        if (recordBtn)  recordBtn.classList.add('hidden');
+    } else {
+        if (triggerBtn) triggerBtn.classList.add('hidden');
+        if (attachBtn)  attachBtn.classList.remove('hidden');
+        if (recordBtn)  recordBtn.classList.remove('hidden');
+    }
+}
+
 // =========================================================================
 // LOADER GLOBAL (UX)
 // =========================================================================
@@ -261,6 +283,14 @@ function closeTemplatePicker() {
     // Si el input solo tiene "/" lo limpiamos
     const inp = document.getElementById('messageInput');
     if (inp && inp.value === '/') inp.value = '';
+    // Si la ventana sigue cerrada y no hay template activo (el asesor canceló), re-deshabilitar
+    if (!currentWindowOpen && !activeTemplateId) {
+        if (inp) {
+            inp.disabled = true;
+            inp.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
+            inp.classList.add('bg-gray-200', 'cursor-not-allowed');
+        }
+    }
 }
 
 function renderTemplatePicker(filter) {
@@ -489,6 +519,25 @@ function _initTemplatePickerListeners() {
             if (e.key === 'ArrowUp')   { e.preventDefault(); inp.focus(); movePickerSelection(-1); }
             if (e.key === 'Escape')    { e.preventDefault(); closeTemplatePicker(); inp.focus(); }
             if (e.key === 'Enter')     { e.preventDefault(); confirmPickerSelection(); }
+        });
+    }
+
+    // Botón "/" para ventana cerrada: habilita input temporalmente y abre picker
+    const triggerBtn = document.getElementById('templateTriggerBtn');
+    if (triggerBtn && !triggerBtn._listenerAdded) {
+        triggerBtn._listenerAdded = true;
+        triggerBtn.addEventListener('click', () => {
+            // Habilitar input temporalmente para que el asesor pueda editar variables
+            if (inp) {
+                inp.disabled = false;
+                inp.placeholder = 'Edita los campos del template y presiona Enviar';
+                inp.classList.remove('bg-gray-200', 'cursor-not-allowed');
+            }
+            if (templatesData.length === 0) {
+                loadTemplates().then(() => openTemplatePicker());
+            } else {
+                openTemplatePicker();
+            }
         });
     }
 }
@@ -1008,6 +1057,8 @@ async function checkWindowStatus(phone) {
 
             // Templates siguen disponibles como opcion
             if (templateSection) templateSection.classList.remove('border-red-300', 'bg-red-50');
+
+            _applyWindowClosedUI(false);
         } else {
             // VENTANA CERRADA: Solo templates
             statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
@@ -1030,6 +1081,7 @@ async function checkWindowStatus(phone) {
                 templateSection.classList.add('bg-yellow-50', 'border-yellow-300');
             }
 
+            _applyWindowClosedUI(true);
             console.warn('[Panel] Ventana de 24h cerrada. Ultimo mensaje:', data.last_message_time);
         }
     } catch (error) {
@@ -1091,6 +1143,7 @@ async function loadContactDetail(phone, contactId, canal) {
             if (sendBtn) sendBtn.disabled = false;
             windowWarning.classList.add('hidden');
             if (templateSection) templateSection.classList.remove('border-red-300', 'bg-red-50');
+            _applyWindowClosedUI(false);
         } else {
             statusDiv.className = 'text-sm bg-orange-100 text-orange-700 px-3 py-1 rounded-full';
             statusDiv.textContent = 'Ventana cerrada (>24h) - Usa template';
@@ -1105,6 +1158,7 @@ async function loadContactDetail(phone, contactId, canal) {
                 templateSection.classList.remove('bg-blue-50', 'border-blue-200');
                 templateSection.classList.add('bg-yellow-50', 'border-yellow-300');
             }
+            _applyWindowClosedUI(true);
         }
 
     } catch (error) {
@@ -2232,11 +2286,16 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     const transferBtn = document.getElementById('transferContactBtn');
     if (transferBtn) transferBtn.classList.remove('hidden');
 
-    // Habilitar inputs
+    // Habilitar inputs (loadContactDetail ajustará si la ventana está cerrada)
     document.getElementById('messageInput').disabled = false;
     document.getElementById('sendBtn').disabled = false;
     document.getElementById('attachBtn').disabled = false;
-    document.getElementById('recordBtn').disabled = false;  // Habilitar grabacion de audio
+    document.getElementById('recordBtn').disabled = false;
+    // Resetear estado de ventana cerrada (se actualizará en loadContactDetail)
+    document.getElementById('templateTriggerBtn')?.classList.add('hidden');
+    document.getElementById('attachBtn')?.classList.remove('hidden');
+    document.getElementById('recordBtn')?.classList.remove('hidden');
+    currentWindowOpen = true;
     document.getElementById('selectedPhone').value = phone;
     document.getElementById('selectedContactId').value = contactId;
 
@@ -2572,6 +2631,9 @@ async function sendTemplateFromInput(templateId, variables) {
             document.getElementById('messageInput').value = '';
             document.getElementById('windowWarning')?.classList.add('hidden');
             loadChatHistory(contactId);
+            // Re-verificar ventana: el template de reactivación puede haberla abierto
+            const _phone = document.getElementById('selectedPhone')?.value;
+            if (_phone) setTimeout(() => checkWindowStatus(_phone), 1500);
         } else {
             throw new Error(data.detail || data.message || 'Error enviando plantilla');
         }
@@ -2582,8 +2644,20 @@ async function sendTemplateFromInput(templateId, variables) {
         resultDiv.classList.remove('hidden');
     } finally {
         document.getElementById('sendBtn').disabled = false;
-        document.getElementById('messageInput').disabled = false;
-        document.getElementById('attachBtn').disabled = false;
+        // Solo re-habilitar messageInput si la ventana está abierta
+        if (currentWindowOpen) {
+            document.getElementById('messageInput').disabled = false;
+            document.getElementById('attachBtn').disabled = false;
+        } else {
+            // Ventana sigue cerrada: re-deshabilitar y mostrar botón "/"
+            const inp = document.getElementById('messageInput');
+            if (inp) {
+                inp.disabled = true;
+                inp.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
+                inp.classList.add('bg-gray-200', 'cursor-not-allowed');
+            }
+            _applyWindowClosedUI(true);
+        }
         setTimeout(() => resultDiv.classList.add('hidden'), 5000);
     }
 }

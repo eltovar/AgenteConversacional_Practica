@@ -377,9 +377,9 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    client = get_httpx_client()  # cliente global con pool persistente
     for attempt in range(1, max_retries + 1):
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.patch(url, headers=headers, json=payload)
+        response = await client.patch(url, headers=headers, json=payload)
         if response.status_code == 429:
             wait = 12 * attempt
             logger.warning(
@@ -390,8 +390,7 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
             continue
         return response
     # Último intento (sin catch — deja propagar el error)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        return await client.patch(url, headers=headers, json=payload)
+    return await client.patch(url, headers=headers, json=payload)
 
 
 # ============================================================================

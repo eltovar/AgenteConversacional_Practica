@@ -1,5 +1,6 @@
 # info_agent.py (Refactorizado con bind_tools y tool_choice="auto")
 import re
+import asyncio
 from llm_client import llama_client
 from rag.rag_service import rag_service
 from agents.InfoAgent.info_tool import ALL_TOOLS
@@ -91,7 +92,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
             logger.warning(f"[InfoAgent] No se encontró contexto relevante para query: '{query}'")
             return f"No se encontró información específica sobre '{query}' en los documentos disponibles."
         
-    def process_info_query(self, user_input: str, state: Optional[ConversationState] = None) -> str:
+    async def process_info_query(self, user_input: str, state: Optional[ConversationState] = None) -> str:
         """
         Procesa la consulta del usuario usando el flujo Tool Call (RAG) o LLM Base.
         Este método reemplaza la lógica de _determine_tool_call().
@@ -144,7 +145,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 ALL_TOOLS, 
                 tool_choice="auto"
             )
-            response_llm = llm_with_tools.invoke(messages)
+            response_llm = await llm_with_tools.ainvoke(messages)
             
             # 2. Análisis del resultado de la decisión (RAG Flow)
             if hasattr(response_llm, 'tool_calls') and response_llm.tool_calls:
@@ -156,8 +157,8 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
                 logger.info(f"[InfoAgent] Tool '{tool_name}' invocada. Ejecutando RAG...")
 
-                # Ejecutar RAG y obtener el contexto (Resultado de la Tool)
-                context = self._run_tool(tool_name, tool_input) 
+                # Ejecutar RAG en thread pool (rag_service.search_knowledge es síncrono)
+                context = await asyncio.to_thread(self._run_tool, tool_name, tool_input)
 
                 # 3. Generación de Respuesta Final con Contexto
                 # Crear las instrucciones RAG con el contexto recuperado
@@ -181,7 +182,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 messages_rag.append(HumanMessage(content=user_input))
 
                 logger.info("[InfoAgent] Generando respuesta final con contexto RAG...")
-                final_response = llama_client.invoke(messages_rag).content
+                final_response = (await llama_client.ainvoke(messages_rag)).content
                 logger.info(f"[InfoAgent] Respuesta generada ({len(final_response) if final_response else 0} caracteres)")
 
                 return final_response

@@ -126,6 +126,12 @@ class HubSpotClient:
             "Content-Type": "application/json"
         }
 
+        # Cliente HTTP persistente con connection pooling (evita TCP/TLS overhead por request)
+        self._http_client = httpx.AsyncClient(
+            timeout=15.0,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10, keepalive_expiry=30.0)
+        )
+
         logger.info("[HubSpotClient] Inicializado correctamente")
 
     @retry(
@@ -137,32 +143,32 @@ class HubSpotClient:
         """
         Wrapper interno para requests HTTP con retry logic.
         """
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            url = f"{self.base_url}{endpoint}"
-            try:
-                response = await client.request(method, url, headers=self.headers, json=json_data)
-                response.raise_for_status()
+        url = f"{self.base_url}{endpoint}"
+        client = self._http_client
+        try:
+            response = await client.request(method, url, headers=self.headers, json=json_data)
+            response.raise_for_status()
 
-                # Si es 204 No Content, retornar vacío
-                if response.status_code == 204:
-                    return {}
+            # Si es 204 No Content, retornar vacío
+            if response.status_code == 204:
+                return {}
 
-                return response.json()
+            return response.json()
 
-            except httpx.HTTPStatusError as e:
-                # Rate limit (429): Convertir a NetworkError para forzar retry
-                if e.response.status_code == 429:
-                    logger.warning("[HubSpotClient] Rate limit alcanzado (429), reintentando...")
-                    raise httpx.NetworkError("Rate Limit Exceeded", request=e.request)
+        except httpx.HTTPStatusError as e:
+            # Rate limit (429): Convertir a NetworkError para forzar retry
+            if e.response.status_code == 429:
+                logger.warning("[HubSpotClient] Rate limit alcanzado (429), reintentando...")
+                raise httpx.NetworkError("Rate Limit Exceeded", request=e.request)
 
-                # Errores de cliente (4xx): NO reintentar
-                if 400 <= e.response.status_code < 500:
-                    logger.error(f"[HubSpotClient] Client Error {e.response.status_code}: {e.response.text}")
-                    raise e  # Romper el retry
+            # Errores de cliente (4xx): NO reintentar
+            if 400 <= e.response.status_code < 500:
+                logger.error(f"[HubSpotClient] Client Error {e.response.status_code}: {e.response.text}")
+                raise e  # Romper el retry
 
-                # Errores de servidor (5xx): Reintentar
-                logger.error(f"[HubSpotClient] Server Error {e.response.status_code}: {e.response.text}")
-                raise e
+            # Errores de servidor (5xx): Reintentar
+            logger.error(f"[HubSpotClient] Server Error {e.response.status_code}: {e.response.text}")
+            raise e
 
     async def search_contact_by_phone(self, phone: str) -> Optional[str]:
         """

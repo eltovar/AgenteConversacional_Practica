@@ -23,7 +23,7 @@ class ReceptionAgent:
         self.tools = {tool.name: tool for tool in RECEPTION_TOOLS}
         self.link_detector = LinkDetector()
 
-    def process_message(self, message: str, state: ConversationState) -> Dict[str, Any]:
+    async def process_message(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Procesa un mensaje del usuario según el estado actual de la conversación.
         """
@@ -59,10 +59,10 @@ class ReceptionAgent:
 
         # Router basado en el estado
         if state.status == ConversationStatus.RECEPTION_START:
-            return self._handle_reception_start(message, state)
+            return await self._handle_reception_start(message, state)
 
         elif state.status == ConversationStatus.AWAITING_CLARIFICATION:
-            return self._handle_awaiting_clarification(message, state)
+            return await self._handle_awaiting_clarification(message, state)
 
         else:
             # Estado no manejado por ReceptionAgent
@@ -72,7 +72,7 @@ class ReceptionAgent:
                 "new_state": state
             }
 
-    def _handle_reception_start(self, message: str, state: ConversationState) -> Dict[str, Any]:
+    async def _handle_reception_start(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja el estado inicial: clasifica la intención del usuario con retry logic.
         """
@@ -106,7 +106,7 @@ class ReceptionAgent:
                 logger.warning(f"[ReceptionAgent] Fallo en intento {attempt}. Reintentando clasificación...")
 
             try:
-                response = llm_with_tools.invoke(messages)
+                response = await llm_with_tools.ainvoke(messages)
 
                 # Extraer tool call del LLM
                 if hasattr(response, 'tool_calls') and response.tool_calls:
@@ -124,7 +124,7 @@ class ReceptionAgent:
 
                     elif intent == "crm":
                         # Extraer entidades iniciales del mensaje
-                        property_data = self._extract_property_entities(message)
+                        property_data = await self._extract_property_entities(message)
                         if property_data:
                             state.lead_data['metadata'] = property_data
                             logger.info(f"[ReceptionAgent] Metadata inicial extraída: {property_data}")
@@ -178,15 +178,15 @@ class ReceptionAgent:
             "new_state": state
         }
 
-    def _handle_awaiting_clarification(self, message: str, state: ConversationState) -> Dict[str, Any]:
+    async def _handle_awaiting_clarification(self, message: str, state: ConversationState) -> Dict[str, Any]:
         """
         Maneja el estado de espera de aclaración: re-clasifica la intención.
         """
         logger.info("[ReceptionAgent] Re-clasificando después de aclaración...")
         state.status = ConversationStatus.RECEPTION_START
-        return self._handle_reception_start(message, state)
+        return await self._handle_reception_start(message, state)
 
-    def _extract_property_entities(self, message: str) -> Dict[str, Any]:
+    async def _extract_property_entities(self, message: str) -> Dict[str, Any]:
         """
         Extrae entidades de propiedad del mensaje del usuario usando LLM.
         """
@@ -196,7 +196,7 @@ class ReceptionAgent:
             extraction_prompt = PROPERTY_EXTRACTION_PROMPT.format(user_message=message)
             messages = [SystemMessage(content=extraction_prompt)]
 
-            response = llama_client.invoke(messages)
+            response = await llama_client.ainvoke(messages)
             response_text = response.content.strip()
 
             start_idx = response_text.find('{')

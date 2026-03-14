@@ -13,8 +13,7 @@ import os
 from dotenv import load_dotenv
 from state_manager import StateManager, ConversationState, ConversationStatus
 
-# IMPORTANTE: Asegúrate de que tus agentes expongan métodos async
-# Si Reception e Info siguen siendo síncronos, funcionarán, pero lo ideal es migrarlos a async.
+# Todos los agentes son ahora async: Reception, Info y CRM.
 from agents.ReceptionAgent.reception_agent import reception_agent
 from agents.InfoAgent.info_agent import agent as info_agent
 from agents.CRMAgent.crm_agent import crm_agent
@@ -96,8 +95,7 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         # B. Si estamos en flujo de Info (RAG)
         elif state.status == ConversationStatus.TRANSFERRED_INFO:
             logger.info("[ORCHESTRATOR] Enrutando a InfoAgent...")
-            # Nota: Si info_agent es síncrono, esto bloquea un poco. Idealmente hazlo async también.
-            response_text = info_agent.process_info_query(user_message, state)
+            response_text = await info_agent.process_info_query(user_message, state)
             state.status = ConversationStatus.RECEPTION_START
 
         # C. Flujo Normal (Reception Agent)
@@ -106,8 +104,7 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
                 state.status = ConversationStatus.RECEPTION_START
 
             logger.info("[ORCHESTRATOR] Enrutando a ReceptionAgent...")
-            # Llamada a Reception (Asumimos síncrona por ahora, si la haces async ponle await)
-            result = reception_agent.process_message(user_message, state)
+            result = await reception_agent.process_message(user_message, state)
 
             initial_response = result["response"]
             state = result["new_state"]  # Actualizamos el estado con lo que decidió Reception
@@ -118,7 +115,7 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 
             if state.status == ConversationStatus.TRANSFERRED_INFO:
                 logger.info("[ORCHESTRATOR] Auto-enrutando a InfoAgent...")
-                rag_response = info_agent.process_info_query(user_message, state)
+                rag_response = await info_agent.process_info_query(user_message, state)
                 response_text = rag_response
                 state.status = ConversationStatus.RECEPTION_START
 

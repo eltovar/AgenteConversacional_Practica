@@ -28,6 +28,16 @@ class LLMClient:
 
         return self.client.invoke(messages, **kwargs)
 
+    async def ainvoke(self, messages, tools=None, tool_choice=None):
+        """Versión async de invoke para no bloquear el event loop."""
+        kwargs = {}
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+
+        return await self.client.ainvoke(messages, **kwargs)
+
 # Instancia global LLM
 llama_client = LLMClient()
 

@@ -37,7 +37,17 @@ const PIPELINE_STAGES = [
     { id: "1275312311", name: "Propuesta" },
     { id: "1279054636", name: "En estudio" },
     { id: "1275156342", name: "Cerrado ganado" },
-    { id: "1279054637", name: "Cerrado vendido" }
+    { id: "1279054637", name: "Cerrado vendido" },
+    { id: "1323394565", name: "No responde" },
+    { id: "1323394566", name: "Hasta 1.5M" },
+    { id: "1323394567", name: "Hasta 2M" },
+    { id: "1323394568", name: "Hasta 2.5M" },
+    { id: "1323394569", name: "Mayor de 3M" },
+    { id: "1323394570", name: "Local o Bodega" },
+    { id: "1323393830", name: "Ana Contratos" },
+    { id: "1323393831", name: "Propietarios" },
+    { id: "1323393832", name: "Pagos y Servicios Publicos" },
+    { id: "1323393833", name: "Ya encontro" }
 ];
 
 // Leer parametro advisor de la URL

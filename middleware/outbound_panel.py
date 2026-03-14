@@ -140,7 +140,17 @@ PIPELINE_STAGES = {
     "1275312311": "Propuesta",
     "1279054636": "En estudio",
     "1275156342": "Cerrado ganado",
-    "1279054637": "Cerrado vendido"
+    "1279054637": "Cerrado vendido",
+    "1323394565": "No responde",
+    "1323394566": "Hasta 1.5M",
+    "1323394567": "Hasta 2M",
+    "1323394568": "Hasta 2.5M",
+    "1323394569": "Mayor de 3M",
+    "1323394570": "Local o Bodega",
+    "1323393830": "Ana Contratos",
+    "1323393831": "Propietarios",
+    "1323393832": "Pagos y Servicios Publicos",
+    "1323393833": "Ya encontro"
 }
 
 # Lista ordenada de etapas para el frontend
@@ -152,7 +162,17 @@ PIPELINE_STAGES_LIST = [
     {"id": "1275312311", "name": "Propuesta"},
     {"id": "1279054636", "name": "En estudio"},
     {"id": "1275156342", "name": "Cerrado ganado"},
-    {"id": "1279054637", "name": "Cerrado vendido"}
+    {"id": "1279054637", "name": "Cerrado vendido"},
+    {"id": "1323394565", "name": "No responde"},
+    {"id": "1323394566", "name": "Hasta 1.5M"},
+    {"id": "1323394567", "name": "Hasta 2M"},
+    {"id": "1323394568", "name": "Hasta 2.5M"},
+    {"id": "1323394569", "name": "Mayor de 3M"},
+    {"id": "1323394570", "name": "Local o Bodega"},
+    {"id": "1323393830", "name": "Ana Contratos"},
+    {"id": "1323393831", "name": "Propietarios"},
+    {"id": "1323393832", "name": "Pagos y Servicios Publicos"},
+    {"id": "1323393833", "name": "Ya encontro"}
 ]
 
 @dataclass

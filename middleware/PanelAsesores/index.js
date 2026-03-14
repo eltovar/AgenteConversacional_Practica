@@ -3073,7 +3073,7 @@ function handleStatusChange(data) {
     // Refrescar lista para actualizar badges
     loadContacts();
     // Resetear badge de no leídos si el estado es "cerrado" o similar
-    if (data.phone && ['cerrado', 'cerrado ganado', 'cerrado vendido'].includes((data.new_status || '').toLowerCase())) {
+    if (data.phone && ['cerrado', 'cerrado ganado', 'cerrado perdido'].includes((data.new_status || '').toLowerCase())) {
         unreadCounts[data.phone] = 0;
         updateUnreadBadge(data.phone, 0);
     }

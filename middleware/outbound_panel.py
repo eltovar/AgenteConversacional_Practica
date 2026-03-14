@@ -2096,6 +2096,18 @@ async def update_contact_name(
                     logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
             except Exception as redis_err:
                 logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
+            # Notificar a todos los paneles para que actualicen el nombre sin esperar poll
+            try:
+                _phone_ws = await _get_redis_client()
+                _phone_ws = await _phone_ws.get(f"phone_cache:{contact_id}")
+                await ws_manager.broadcast({
+                    "type": "contact_updated",
+                    "phone": str(_phone_ws or ""),
+                    "action": "name_updated",
+                    "display_name": f"{firstname} {lastname}".strip()
+                })
+            except Exception:
+                pass
             return {
                 "status": "success",
                 "message": "Nombre actualizado correctamente",

@@ -921,8 +921,13 @@ async function loadContacts() {
                 if (isNewMessage) {
                     console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
                     if (phone !== currentPhone) {
-                        unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
-                        updateUnreadBadge(phone, unreadCounts[phone]);
+                        const wsActive = ws && ws.readyState === WebSocket.OPEN;
+                        if (!wsActive) {
+                            // WS inactivo: el polling es la única fuente, incrementar normalmente
+                            unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
+                        }
+                        // Siempre actualizar el badge con el contador actual (evita desfase visual)
+                        updateUnreadBadge(phone, unreadCounts[phone] || 0);
                     }
                 }
             }
@@ -3030,10 +3035,11 @@ function handleNewMessageNotification(data) {
     // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
     if (data.phone && data.phone !== currentPhone) {
         unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+        updateUnreadBadge(data.phone, unreadCounts[data.phone]); // badge inmediato, sin esperar HTTP
     }
 
-    // Refrescar lista de contactos para actualizar orden (y badge de no leídos)
-    loadContacts();
+    // Refresco debounced: consistente con el path contact_updated, evita doble carga
+    scheduleContactsRefresh();
 
     // Si el contacto actual es el que envio mensaje, refrescar chat
     if (currentPhone === data.phone) {

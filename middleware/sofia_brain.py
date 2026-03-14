@@ -418,13 +418,18 @@ class SofiaBrain:
             )
 
         except json.JSONDecodeError as e:
-            logger.warning(
-                f"[SofiaBrain] Error parseando JSON Single-Stream: {e}. "
-                f"Usando respuesta raw."
-            )
-            # Si falla el parseo, usar el contenido como respuesta simple
+            logger.warning(f"[SofiaBrain] Error parseando JSON Single-Stream: {e}")
+            # Intentar extraer solo el campo "respuesta" con regex antes de fallar
+            import re as _re
+            _match = _re.search(r'"respuesta"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_content)
+            if _match:
+                _respuesta = _match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                logger.info(f"[SofiaBrain] Respuesta extraída por regex: {_respuesta[:80]}...")
+                return SingleStreamResponse(respuesta=_respuesta, analisis=MessageAnalysis())
+            # Fallback final: mensaje genérico (nunca enviar JSON crudo al usuario)
+            logger.error(f"[SofiaBrain] No se pudo parsear ni extraer respuesta. raw[:200]: {raw_content[:200]}")
             return SingleStreamResponse(
-                respuesta=raw_content,
+                respuesta="Entendido, déjame verificar eso y te respondo en un momento.",
                 analisis=MessageAnalysis()
             )
 

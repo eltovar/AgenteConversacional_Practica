@@ -924,7 +924,6 @@ async function loadContacts() {
                         unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
                         updateUnreadBadge(phone, unreadCounts[phone]);
                     }
-                    playNotificationSound();
                 }
             }
         }
@@ -2466,6 +2465,7 @@ async function sendMessage(e) {
             // El mensaje ya esta disponible en MongoDB (~5ms), no necesitamos
             // polling incremental complejo. Un refresh inmediato es suficiente.
             loadChatHistory(contactId);
+            scheduleContactsRefresh(); // Reordenar la lista inmediatamente
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -2952,7 +2952,7 @@ function scheduleContactsRefresh() {
     _contactsRefreshTimer = setTimeout(async () => {
         _contactsRefreshTimer = null;
         await loadContacts();
-    }, 500);
+    }, 50);
 }
 
 /**
@@ -2972,7 +2972,6 @@ function handleWebSocketMessage(data) {
                 console.log('[Panel] Incrementando unreadCounts para', data.phone);
                 unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
                 updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
-                playNotificationSound();
                 if (document.hidden) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }
@@ -3020,9 +3019,6 @@ function handleWebSocketMessage(data) {
 function handleNewMessageNotification(data) {
     console.log('[Panel] Nuevo mensaje de', data.phone, ':', data.preview);
 
-    // Reproducir sonido de notificacion
-    playNotificationSound();
-
     // Mostrar notificacion del navegador si la pestana esta oculta
     if (document.hidden) {
         showBrowserNotification(
@@ -3053,7 +3049,6 @@ function handleContactTransferred(data) {
 
     // Notificacion visual
     if (data.direction === 'incoming') {
-        playNotificationSound();
         showBrowserNotification(
             'Nuevo contacto',
             `${data.contact_name || data.phone} ha sido transferido a tu panel`
@@ -3084,24 +3079,6 @@ function handleStatusChange(data) {
     }
 }
 
-/**
- * Reproduce sonido de notificacion.
- */
-function playNotificationSound() {
-    try {
-        const audio = document.getElementById('notificationSound');
-        if (audio) {
-            audio.currentTime = 0;
-            audio.volume = 0.5;
-            audio.play().catch(e => {
-                // El navegador puede bloquear autoplay hasta interaccion del usuario
-                console.log('[Panel] Audio bloqueado por navegador');
-            });
-        }
-    } catch (e) {
-        console.warn('[Panel] Error reproduciendo audio:', e);
-    }
-}
 
 /**
  * Muestra notificacion del navegador.

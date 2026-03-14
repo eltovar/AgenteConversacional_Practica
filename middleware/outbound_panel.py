@@ -1040,6 +1040,26 @@ async def send_message(
             canal_final
         )
 
+        # Mover contacto al top de la lista (actualizar score ZSET)
+        try:
+            _rc = await _get_redis_client()
+            _now_ts = datetime.now(timezone.utc).timestamp()
+            await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
+            logger.info(f"[Panel] ZSET actualizado para {phone_normalized}:{canal_final}")
+        except Exception as _ze:
+            logger.warning(f"[Panel] No se pudo actualizar ZSET en send_message: {_ze}")
+
+        # Notificar a todos los asesores via WS para que refresquen la lista
+        try:
+            await ws_manager.broadcast({
+                "type": "contact_updated",
+                "phone": phone_normalized,
+                "action": "new_message",
+                "canal": canal_final
+            })
+        except Exception as _we:
+            logger.warning(f"[Panel] Error broadcast WS en send_message: {_we}")
+
         return JSONResponse(
             status_code=200,
             content={
@@ -1219,6 +1239,26 @@ async def send_message_json(
                 "Panel JSON API",
                 mongo_message_id
             )
+
+        # Mover contacto al top de la lista (actualizar score ZSET)
+        try:
+            _rc = await _get_redis_client()
+            _now_ts = datetime.now(timezone.utc).timestamp()
+            await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
+            logger.info(f"[Panel-JSON] ZSET actualizado para {phone_normalized}:{canal_final}")
+        except Exception as _ze:
+            logger.warning(f"[Panel-JSON] No se pudo actualizar ZSET: {_ze}")
+
+        # Notificar a todos los asesores via WS
+        try:
+            await ws_manager.broadcast({
+                "type": "contact_updated",
+                "phone": phone_normalized,
+                "action": "new_message",
+                "canal": canal_final
+            })
+        except Exception as _we:
+            logger.warning(f"[Panel-JSON] Error broadcast WS: {_we}")
 
         return JSONResponse(
             status_code=200,

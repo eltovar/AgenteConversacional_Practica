@@ -468,7 +468,7 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
             return {}
             
     except Exception as e:
-        logger.error(f"[Panel] Error en batch HubSpot: {e}")
+        logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {e}", exc_info=True)
         return {}
 
 
@@ -4941,3 +4941,129 @@ async def websocket_stats(x_api_key: str = Header(None, alias="X-API-Key")):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     return ws_manager.get_stats()
+
+
+# ============================================================================
+# ENDPOINT RECOVERY: Restaurar contactos desaparecidos desde HubSpot
+# ============================================================================
+
+@router.post("/admin/restore-panel")
+async def restore_panel_from_hubspot(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Recupera contactos cuyo meta Redis expiró.
+    Busca contactos en HubSpot que tengan owner asignado + conversación de chatbot.
+    Ejecutar una vez para restaurar contactos desaparecidos del panel.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    try:
+        # 1. Buscar contactos asignados que tuvieron interacción con el chatbot
+        search_url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+        payload = {
+            "filterGroups": [{
+                "filters": [
+                    {"propertyName": "hubspot_owner_id", "operator": "HAS_PROPERTY"}
+                ]
+            }],
+            "properties": [
+                "phone", "firstname", "hubspot_owner_id",
+                "canal_origen", "whatsapp_id"
+            ],
+            "sorts": [{"propertyName": "lastmodifieddate", "direction": "DESCENDING"}],
+            "limit": 100
+        }
+        client = get_httpx_client()
+        response = await _hubspot_post(client, search_url, payload, HUBSPOT_API_KEY, max_retries=2)
+
+        if response.status_code not in (200, 207):
+            raise HTTPException(status_code=502,
+                detail=f"HubSpot devolvió {response.status_code}")
+
+        contacts = response.json().get("results", [])
+        logger.info(f"[RestorePanel] HubSpot devolvió {len(contacts)} contactos candidatos")
+
+        if not contacts:
+            return {
+                "restored": 0, "already_active": 0,
+                "message": "No se encontraron contactos asignados en HubSpot"
+            }
+
+        # 2. Restaurar metas Redis
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        state_manager = ConversationStateManager(redis_url)
+
+        restored = 0
+        already_active = 0
+        skipped_no_phone = 0
+        errors = []
+        now_ts = datetime.now(timezone.utc).timestamp()
+        now_iso = datetime.now(timezone.utc).isoformat() + "Z"
+
+        for contact in contacts:
+            try:
+                props = contact.get("properties", {})
+                # whatsapp_id es el identificador canónico; fallback a phone
+                raw_phone = props.get("whatsapp_id") or props.get("phone", "")
+                if not raw_phone:
+                    skipped_no_phone += 1
+                    continue
+                phone_norm = PhoneNormalizer.normalize(raw_phone)
+                if not phone_norm:
+                    skipped_no_phone += 1
+                    continue
+
+                canal_raw = props.get("canal_origen") or "whatsapp_directo"
+                canal_safe = canal_raw.lower().replace(" ", "_").strip()
+                meta_key = f"{state_manager.META_PREFIX}{phone_norm}:{canal_safe}"
+
+                # Si ya existe meta activo no sobreescribir
+                existing = await state_manager.redis.get(meta_key)
+                if existing:
+                    already_active += 1
+                    continue
+
+                # Crear meta restaurado con TTL permanente
+                meta = {
+                    "phone_normalized": phone_norm,
+                    "contact_id": contact.get("id"),
+                    "status": ConversationStatus.HUMAN_ACTIVE.value,
+                    "last_activity": now_iso,
+                    "canal_origen": canal_safe,
+                    "display_name": props.get("firstname", ""),
+                    "assigned_owner_id": props.get("hubspot_owner_id"),
+                    "in_panel": True,
+                    "restored": True,
+                }
+                # state_key es CRÍTICO: get_active_contacts() lo lee primero para el status.
+                # Sin él → fuerza BOT_ACTIVE → contacto queda excluido del panel.
+                state_key = f"conv_state:{phone_norm}:{canal_safe}"
+                pipe = state_manager.redis.pipeline(transaction=False)
+                pipe.set(meta_key, json.dumps(meta), ex=state_manager.PANEL_TTL_SECONDS)
+                pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=state_manager.PANEL_TTL_SECONDS)
+                pipe.zadd(state_manager.ACTIVE_CONTACTS_ZSET, {f"{phone_norm}:{canal_safe}": now_ts})
+                await pipe.execute()
+                restored += 1
+                logger.info(f"[RestorePanel] Contacto restaurado: {phone_norm} ({canal_safe})")
+
+            except Exception as ce:
+                errors.append(str(ce))
+
+        return {
+            "restored": restored,
+            "already_active": already_active,
+            "skipped_no_phone": skipped_no_phone,
+            "total_from_hubspot": len(contacts),
+            "errors": errors[:10]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[RestorePanel] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

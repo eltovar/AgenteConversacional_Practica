@@ -28,7 +28,7 @@ from .sofia_brain import SofiaBrain
 from .websocket_manager import ws_manager
 
 # Importaciones para integración con HubSpot Timeline
-from integrations.hubspot import get_timeline_logger
+from integrations.hubspot import get_timeline_logger, hubspot_client
 
 # MongoDB para almacenamiento en tiempo real
 from database.mongodb_client import get_mongo_manager
@@ -2098,7 +2098,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 )
                 # Actualizar nombre del deal al obtener el nombre del cliente
                 try:
-                    hubspot = get_hubspot_client()
+                    hubspot = hubspot_client
                     deals = await hubspot.get_contact_deals(contact_id)
                     if deals:
                         deal_id = deals[0]["id"]
@@ -2217,7 +2217,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
 
     if deal_all_props:
         try:
-            hubspot = get_hubspot_client()
+            hubspot = hubspot_client
             deals = await hubspot.get_contact_deals(contact_id)
             if deals:
                 _deal_id = deals[0]["id"]

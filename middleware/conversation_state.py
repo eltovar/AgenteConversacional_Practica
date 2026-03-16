@@ -108,6 +108,7 @@ class ConversationStateManager:
     HANDOFF_TTL_SECONDS = 172800  # Default 48h
     HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
     INACTIVITY_THRESHOLD = 172800  # 48h — umbral para mover BOT_ACTIVE del ZSET a BOT_CONTROLLED_SET
+    PANEL_TTL_SECONDS = 365 * 86400  # 1 año — meta_key de contactos que tuvieron handoff no expira en la práctica
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -549,7 +550,11 @@ class ConversationStateManager:
             }
 
             meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
-            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+            # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
+            await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
+            # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días
+            marker_key = f"conv_was_panel:{phone_num}:{canal_safe}"
+            await self.redis.set(marker_key, "1", ex=self.PANEL_TTL_SECONDS)
 
             # 3. Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
@@ -595,7 +600,11 @@ class ConversationStateManager:
                 "created_at": now_iso
             }
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
-            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+            # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
+            await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
+            # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días
+            marker_key = f"conv_was_panel:{phone}:{canal_safe}"
+            await self.redis.set(marker_key, "1", ex=self.PANEL_TTL_SECONDS)
 
             # Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
@@ -625,7 +634,10 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_activity"] = get_bogota_now_iso()
-                ttl = self._calculate_dynamic_ttl()
+                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                ttl = await self.redis.ttl(meta_key)
+                if not ttl or ttl <= 0:
+                    ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Actualizar score en ZSET para reordenamiento
@@ -735,7 +747,15 @@ class ConversationStateManager:
                     "in_panel": add_to_zset,
                 }
 
-                ttl = self._calculate_dynamic_ttl()
+                # Respetar marcador permanente: contacto que tuvo handoff siempre re-aparece
+                marker_key = f"conv_was_panel:{phone}:{canal_safe}"
+                had_panel_before = await self.redis.exists(marker_key)
+                if had_panel_before:
+                    add_to_zset = True
+                    meta["in_panel"] = True
+                    logger.info(f"[ConversationState] ↩ Re-entrada al panel (fue handoff antes): {phone}")
+
+                ttl = self.PANEL_TTL_SECONDS if had_panel_before else self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Agregar al ZSET solo si tiene intención comercial (add_to_zset=True)
@@ -819,8 +839,10 @@ class ConversationStateManager:
                 meta["assigned_owner_ids"] = owners
                 meta["primary_owner_id"] = to_owner_id  # El nuevo es el principal
 
-            # Guardar metadata actualizada
-            ttl = self._calculate_dynamic_ttl()
+            # Guardar metadata actualizada preservando TTL existente
+            ttl = await self.redis.ttl(meta_key)
+            if not ttl or ttl <= 0:
+                ttl = self._calculate_dynamic_ttl()
             await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             logger.info(
@@ -854,9 +876,12 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_client_message"] = get_bogota_now_iso()
-                ttl = self._calculate_dynamic_ttl()
+                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                ttl = await self.redis.ttl(meta_key)
+                if not ttl or ttl <= 0:
+                    ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
-                
+
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
                 # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
                 if meta.get("in_panel", True):
@@ -883,7 +908,10 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_advisor_message"] = get_bogota_now_iso()
-                ttl = self._calculate_dynamic_ttl()
+                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                ttl = await self.redis.ttl(meta_key)
+                if not ttl or ttl <= 0:
+                    ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
                 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba

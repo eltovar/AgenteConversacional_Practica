@@ -59,6 +59,22 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": ["nombre", "fecha", "hora"],
         "is_default": True,
     },
+    "saludo_reactivador_inmueble": {
+        "id": "saludo_reactivador_inmueble",
+        "name": "Saludo Reactivador Inmueble",
+        "category": "reactivacion",
+        "body": (
+            "Cordial saludo,\n"
+            "Le escribe Yubeny Ocampo de Inmobiliaria Proteger.\n"
+            "Espero que se encuentre muy bien.\n"
+            "Lo contacto porque me informan que se encuentra en búsqueda de inmueble para arriendo."
+        ),
+        "variables": [],
+        # Twilio: saludo_reactivador_inmueble — aprobado Meta
+        "content_sid": "HX3a6e93c829bb7704476d398dc9639f21",
+        "content_variables_map": [],
+        "is_default": True,
+    },
     "experiencia_post_cita": {
         "id": "experiencia_post_cita",
         "name": "Experiencia después de la cita",

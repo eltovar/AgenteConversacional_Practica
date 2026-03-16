@@ -1813,6 +1813,7 @@ async def create_manual_contact(
             "dealname": f"Lead: {firstname} {lastname}".strip(),
             "pipeline": HUBSPOT_PIPELINE_ID,          # 854756009
             "dealstage": HUBSPOT_STAGE_NUEVO_LEAD,    # 1275156339
+            "canal_origen": canal,
         }
 
         # Agregar descripción si hay características

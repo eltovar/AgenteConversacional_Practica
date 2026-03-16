@@ -50,6 +50,23 @@ const PIPELINE_STAGES = [
     { id: "1323393833", name: "Ya encontro" }
 ];
 
+// Portales disponibles por equipo (advisor ID → portales)
+const ADVISOR_PORTALS = {
+    "89096378": [  // equipo_portales
+        { value: "metrocuadrado",  label: "MetroCuadrado" },
+        { value: "finca_raiz",     label: "Finca Raíz" },
+        { value: "facebook",       label: "Facebook" },
+        { value: "instagram",      label: "Instagram" },
+        { value: "ciencuadras",    label: "Ciencuadras" },
+        { value: "tiktok",         label: "TikTok" },
+    ],
+    "89096380": [  // equipo_directo
+        { value: "pagina_web",       label: "Página Web" },
+        { value: "whatsapp_directo", label: "WhatsApp Directo" },
+        { value: "youtube",          label: "YouTube" },
+    ],
+};
+
 // Leer parametro advisor de la URL
 const urlParams = new URLSearchParams(window.location.search);
 const ADVISOR_ID = urlParams.get('advisor');
@@ -3161,6 +3178,14 @@ function openCreateContactModal() {
         // Limpiar formulario
         const form = document.getElementById('createContactForm');
         if (form) form.reset();
+        // Poblar portales según el asesor activo
+        const sel = document.getElementById('portalOrigenSelect');
+        if (sel) {
+            const portals = ADVISOR_PORTALS[ADVISOR_ID]
+                || [...ADVISOR_PORTALS["89096378"], ...ADVISOR_PORTALS["89096380"]];
+            sel.innerHTML = '<option value="">-- Seleccionar --</option>'
+                + portals.map(p => `<option value="${p.value}">${p.label}</option>`).join('');
+        }
         // Ocultar mensajes previos
         const resultDiv = document.getElementById('createContactResult');
         if (resultDiv) resultDiv.classList.add('hidden');
@@ -3238,7 +3263,8 @@ async function createManualContact(event) {
                     // Inicializar badge de no leídos en 0
                     unreadCounts[data.phone] = 0;
                     updateUnreadBadge(data.phone, 0);
-                    selectContact(data.contact_id, data.phone, data.display_name, 'whatsapp_directo');
+                    const selectedCanal = formData.get('canal') || 'whatsapp_directo';
+                    selectContact(data.contact_id, data.phone, data.display_name, selectedCanal);
                 }
             }, 1500);
         } else {

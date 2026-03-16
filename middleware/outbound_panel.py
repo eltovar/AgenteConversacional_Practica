@@ -5068,3 +5068,89 @@ async def restore_panel_from_hubspot(
     except Exception as e:
         logger.error(f"[RestorePanel] Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── ENDPOINT TEMPORAL DE DIAGNÓSTICO ── eliminar tras uso ──────────────────
+@router.post("/admin/check-contacts")
+async def check_contacts_status(
+    request: Request,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """TEMPORAL: verifica estado Redis + HubSpot para una lista de teléfonos."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    body = await request.json()
+    phones_input = body.get("phones", [])
+
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    redis_url = os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+    state_manager = ConversationStateManager(redis_url)
+    client = get_httpx_client()
+    search_url = "https://api.hubapi.com/crm/v3/objects/contacts/search"
+
+    results = []
+    for raw_phone in phones_input:
+        entry: dict = {"input": raw_phone}
+        validation = PhoneNormalizer().normalize(str(raw_phone))
+        if not validation.is_valid:
+            entry["error"] = "Teléfono inválido"
+            results.append(entry)
+            continue
+        phone_norm = validation.normalized
+        entry["normalized"] = phone_norm
+
+        # Redis
+        meta_keys = await state_manager.redis.keys(f"{state_manager.META_PREFIX}{phone_norm}:*")
+        redis_entries = []
+        prefix_len = len(f"{state_manager.META_PREFIX}{phone_norm}:")
+        for mk in meta_keys:
+            canal = mk[prefix_len:]
+            state_key = f"{state_manager.STATE_PREFIX}{phone_norm}:{canal}"
+            zset_member = f"{phone_norm}:{canal}"
+            pipe = state_manager.redis.pipeline(transaction=False)
+            pipe.get(mk)
+            pipe.get(state_key)
+            pipe.zscore(state_manager.ACTIVE_CONTACTS_ZSET, zset_member)
+            raw_meta, raw_state, zset_score = await pipe.execute()
+            meta_data = json.loads(raw_meta) if raw_meta else None
+            redis_entries.append({
+                "canal": canal,
+                "has_meta": raw_meta is not None,
+                "state": raw_state,
+                "in_zset": zset_score is not None,
+                "owner_id": meta_data.get("assigned_owner_id") if meta_data else None,
+            })
+        entry["redis"] = redis_entries
+
+        # HubSpot
+        hs_payload = {
+            "filterGroups": [
+                {"filters": [{"propertyName": "whatsapp_id", "operator": "EQ", "value": phone_norm}]},
+                {"filters": [{"propertyName": "phone", "operator": "CONTAINS_TOKEN", "value": raw_phone}]},
+            ],
+            "properties": ["phone", "firstname", "hubspot_owner_id", "canal_origen", "whatsapp_id"],
+            "limit": 3,
+        }
+        hs_resp = await _hubspot_post(client, search_url, hs_payload, HUBSPOT_API_KEY, max_retries=2)
+        if hs_resp.status_code == 200:
+            entry["hubspot"] = [
+                {
+                    "id": c.get("id"),
+                    "firstname": c.get("properties", {}).get("firstname"),
+                    "owner_id": c.get("properties", {}).get("hubspot_owner_id"),
+                    "canal_origen": c.get("properties", {}).get("canal_origen"),
+                    "whatsapp_id": c.get("properties", {}).get("whatsapp_id"),
+                    "phone": c.get("properties", {}).get("phone"),
+                }
+                for c in hs_resp.json().get("results", [])
+            ]
+        else:
+            entry["hubspot_error"] = hs_resp.status_code
+
+        results.append(entry)
+
+    return {"contacts": results}
+# ── FIN ENDPOINT TEMPORAL ───────────────────────────────────────────────────

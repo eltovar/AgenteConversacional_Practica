@@ -143,7 +143,8 @@ class ContactManager:
     async def identify_or_create_contact(
         self,
         phone_raw: str,
-        source_channel: str = "whatsapp_directo"
+        source_channel: str = "whatsapp_directo",
+        create_deal: bool = True
     ) -> ContactInfo:
         """
         Identifica un contacto existente o crea uno nuevo.
@@ -251,7 +252,7 @@ class ContactManager:
         remaining = max(1.0, _deadline - (_time.monotonic() - _t0))
         try:
             contact_id = await asyncio.wait_for(
-                self._create_basic_lead_with_lock(phone_normalized, source_channel),
+                self._create_basic_lead_with_lock(phone_normalized, source_channel, create_deal=create_deal),
                 timeout=remaining
             )
         except asyncio.TimeoutError:
@@ -467,7 +468,8 @@ class ContactManager:
     async def _create_basic_lead_with_lock(
         self,
         phone_normalized: str,
-        source_channel: str
+        source_channel: str,
+        create_deal: bool = True
     ) -> str:
         """
         Crea un lead básico con lock distribuido de Redis.
@@ -611,10 +613,11 @@ class ContactManager:
             if panel_base_url and owner_id and admin_api_key else ""
         )
 
-        # Crear deal asociado en background (le pasamos url_chat y owner_id para asignar a asesor)
-        asyncio.create_task(
-            self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat, owner_id)
-        )
+        # Crear deal asociado en background solo si corresponde (contacto con intención comercial)
+        if create_deal:
+            asyncio.create_task(
+                self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat, owner_id)
+            )
 
         # Escribir url_chat en el contacto (en background, independiente del deal)
         if url_chat:

@@ -203,13 +203,16 @@ async def _process_message_deferred(
         try:
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=phone_raw,
-                source_channel=historical_channel  # ← Usar canal histórico
+                source_channel=historical_channel,  # ← Usar canal histórico
+                create_deal=False  # El deal se crea DESPUÉS si hay intención comercial confirmada
             )
             contact_id = contact_info.contact_id if contact_info else None
-            logger.info(f"[DeferredProcess] Contacto: {contact_id}")
+            _contact_is_new = contact_info.is_new if contact_info else False
+            logger.info(f"[DeferredProcess] Contacto: {contact_id} (nuevo={_contact_is_new})")
         except Exception as e:
             logger.error(f"[DeferredProcess] Error con HubSpot: {e}")
             contact_id = None
+            _contact_is_new = False
         
         # ════════════════════════════════════════════════════════════
         # PASO 3: Verificar si Sofía debe responder
@@ -454,14 +457,37 @@ async def _process_message_deferred(
         hubspot_owner_id = None
         if contact_info and contact_info.properties:
             hubspot_owner_id = contact_info.properties.get("hubspot_owner_id")
-        
+
+        # Crear Deal en HubSpot solo si el contacto es nuevo Y tiene intención comercial.
+        # Para contactos de consulta general (handoff_priority none/low) no se crea deal.
+        if _contact_is_new and analysis and analysis.handoff_priority not in ("none", "low"):
+            asyncio.create_task(
+                contact_manager._create_deal_for_new_lead(
+                    contact_info.contact_id,
+                    phone_normalized,
+                    historical_channel,
+                    owner_id=hubspot_owner_id
+                )
+            )
+
+        # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
+        # Contactos que regresan (is_new=False): su meta ya existe, el bloque
+        # "else" de ensure_meta_with_channel no corre → add_to_zset no tiene efecto.
+        _is_new_contact = contact_info.is_new if contact_info else True
+        _add_to_panel = (
+            not _is_new_contact          # Contacto que regresa: sin cambio de comportamiento
+            or not analysis              # Sin análisis (error): safe default = mostrar en panel
+            or analysis.handoff_priority not in ("none", "low")  # Señal comercial confirmada
+        )
+
         await state_manager.ensure_meta_with_channel(
             phone=phone_normalized,
             canal=final_channel,
             canal_origen=historical_channel,
             contact_id=contact_id,
             display_name=contact_info.firstname if contact_info else None,
-            owner_id=hubspot_owner_id
+            owner_id=hubspot_owner_id,
+            add_to_zset=_add_to_panel
         )
         
         # ════════════════════════════════════════════════════════════

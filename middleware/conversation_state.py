@@ -629,9 +629,11 @@ class ConversationStateManager:
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Actualizar score en ZSET para reordenamiento
-                index_member = f"{phone}:{canal_safe}"
-                score = get_bogota_now().timestamp()
-                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
+                if meta.get("in_panel", True):
+                    index_member = f"{phone}:{canal_safe}"
+                    score = get_bogota_now().timestamp()
+                    await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
 
             return True
         except Exception as e:
@@ -645,7 +647,8 @@ class ConversationStateManager:
         canal_origen: str = None,
         contact_id: str = None,
         display_name: str = None,
-        owner_id: str = None
+        owner_id: str = None,
+        add_to_zset: bool = True
     ) -> bool:
         """
         Asegura que exista conv_meta y actualiza el canal_origen si es específico.
@@ -727,16 +730,20 @@ class ConversationStateManager:
                     "display_name": display_name,
                     "created_at": now_iso,
                     # ✅ FIX: Incluir assigned_owner_id para filtrado correcto en panel de asesores
-                    "assigned_owner_id": owner_id
+                    "assigned_owner_id": owner_id,
+                    # Flag que controla si este contacto debe aparecer en el panel de asesoras
+                    "in_panel": add_to_zset,
                 }
-                
+
                 ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
-                
-                # Agregar al ZSET para que aparezca en el panel
-                index_member = f"{phone}:{canal_safe}"
-                score = get_bogota_now().timestamp()
-                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+
+                # Agregar al ZSET solo si tiene intención comercial (add_to_zset=True)
+                # Contactos de consulta general (info) no deben aparecer en el panel
+                if add_to_zset:
+                    index_member = f"{phone}:{canal_safe}"
+                    score = get_bogota_now().timestamp()
+                    await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
 
                 logger.info(
                     f"[ConversationState] Meta creado con canal_origen={canal_origen or canal_safe}, "
@@ -851,10 +858,12 @@ class ConversationStateManager:
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
                 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
-                index_member = f"{phone}:{canal_safe}"
-                score = get_bogota_now().timestamp()
-                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje cliente)")
+                # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
+                if meta.get("in_panel", True):
+                    index_member = f"{phone}:{canal_safe}"
+                    score = get_bogota_now().timestamp()
+                    await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                    logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje cliente)")
                 
             return True
         except Exception as e:

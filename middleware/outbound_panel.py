@@ -5017,7 +5017,7 @@ async def restore_panel_from_hubspot(
                 if not validation.is_valid:
                     skipped_no_phone += 1
                     continue
-                phone_norm = validation.normalized_number
+                phone_norm = validation.normalized
 
                 canal_raw = props.get("canal_origen") or "whatsapp_directo"
                 canal_safe = canal_raw.lower().replace(" ", "_").strip()

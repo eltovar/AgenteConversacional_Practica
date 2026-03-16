@@ -5023,9 +5023,16 @@ async def restore_panel_from_hubspot(
                 canal_safe = canal_raw.lower().replace(" ", "_").strip()
                 meta_key = f"{state_manager.META_PREFIX}{phone_norm}:{canal_safe}"
 
-                # Si ya existe meta activo no sobreescribir
+                # Si ya existe meta activo: no sobreescribir meta, pero sí refrescar
+                # el ZSET score a now_ts para que no quede enterrado más allá del
+                # límite 100 de get_active_contacts() (zrevrange devuelve los más recientes).
                 existing = await state_manager.redis.get(meta_key)
                 if existing:
+                    zset_member = f"{phone_norm}:{canal_safe}"
+                    await state_manager.redis.zadd(
+                        state_manager.ACTIVE_CONTACTS_ZSET,
+                        {zset_member: now_ts}
+                    )
                     already_active += 1
                     continue
 

@@ -5029,10 +5029,17 @@ async def restore_panel_from_hubspot(
                 existing = await state_manager.redis.get(meta_key)
                 if existing:
                     zset_member = f"{phone_norm}:{canal_safe}"
-                    await state_manager.redis.zadd(
-                        state_manager.ACTIVE_CONTACTS_ZSET,
-                        {zset_member: now_ts}
-                    )
+                    state_key = f"conv_state:{phone_norm}:{canal_safe}"
+                    pipe = state_manager.redis.pipeline(transaction=False)
+                    # Refrescar ZSET score
+                    pipe.zadd(state_manager.ACTIVE_CONTACTS_ZSET, {zset_member: now_ts})
+                    # Recrear conv_state con TTL 365d (puede haber expirado si fue
+                    # creado antes del fix de TTL permanente)
+                    pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value,
+                             ex=state_manager.PANEL_TTL_SECONDS)
+                    # Refrescar TTL del meta también
+                    pipe.expire(meta_key, state_manager.PANEL_TTL_SECONDS)
+                    await pipe.execute()
                     already_active += 1
                     continue
 

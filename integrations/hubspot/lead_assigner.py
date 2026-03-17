@@ -72,6 +72,7 @@ class LeadAssigner:
         "instagram": "equipo_portales",
         "ciencuadras": "equipo_portales",
         "tiktok": "equipo_portales",
+        "charly": "equipo_portales",
 
         # === FALLBACK (Round robin entre portales y directo) ===
         "desconocido": "default",
@@ -100,6 +101,7 @@ class LeadAssigner:
         "instagram": "89096378",
         "ciencuadras": "89096378",
         "tiktok": "89096378",
+        "charly": "89096378",
     }
 
     # Canales para métricas de analista de redes sociales

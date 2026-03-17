@@ -59,6 +59,7 @@ const ADVISOR_PORTALS = {
         { value: "instagram",      label: "Instagram" },
         { value: "ciencuadras",    label: "Ciencuadras" },
         { value: "tiktok",         label: "TikTok" },
+        { value: "charly",         label: "Charly" },
     ],
     "89096380": [  // equipo_directo
         { value: "pagina_web",       label: "Página Web" },

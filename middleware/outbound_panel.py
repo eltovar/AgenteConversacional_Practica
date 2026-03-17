@@ -1706,22 +1706,56 @@ async def create_manual_contact(
             if response.status_code == 200:
                 results = response.json().get("results", [])
                 if results:
-                    # Contacto ya existe
+                    # Contacto ya existe — enriquecer respuesta con owner, historial y estado Redis
                     existing = results[0]
                     existing_id = existing.get("id")
-                    existing_name = f"{existing.get('properties', {}).get('firstname', '')} {existing.get('properties', {}).get('lastname', '')}".strip()
+                    existing_props = existing.get("properties", {})
+                    existing_name = f"{existing_props.get('firstname', '')} {existing_props.get('lastname', '')}".strip()
+                    existing_owner_id = existing_props.get("hubspot_owner_id") or ""
 
                     logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
+
+                    # Resolver nombre del asesor desde OWNERS_CONFIG (lookup local, sin IO)
+                    from integrations.hubspot.lead_assigner import LeadAssigner
+                    existing_owner_name = "Sin asignar"
+                    if existing_owner_id:
+                        for _team_members in LeadAssigner.OWNERS_CONFIG.values():
+                            for _m in _team_members:
+                                if str(_m.get("id")) == existing_owner_id:
+                                    existing_owner_name = _m.get("name", "Sin asignar")
+                                    break
+
+                    # Contar mensajes en MongoDB (sin bloquear si falla)
+                    try:
+                        message_count = await get_mongo_manager().get_message_count(phone_normalized)
+                    except Exception:
+                        message_count = 0
+
+                    # Detectar canal activo en Redis (si el contacto está en el panel)
+                    redis_canal = None
+                    try:
+                        _rc = await _get_redis_client()
+                        _meta_keys = await _rc.keys(f"conv_meta:{phone_normalized}:*")
+                        if _meta_keys:
+                            redis_canal = _meta_keys[0].split(":")[-1]
+                    except Exception:
+                        pass
+
+                    # Puede tomar control si NO tiene (asesor asignado Y mensajes previos)
+                    can_take_control = not (existing_owner_id and message_count > 0)
 
                     return JSONResponse(
                         status_code=409,
                         content={
                             "status": "exists",
-                            "message": f"El contacto ya existe: {existing_name or phone_normalized}",
                             "contact_id": existing_id,
                             "phone": phone_normalized,
                             "display_name": existing_name or "Sin nombre",
-                            "suggestion": "¿Deseas tomar control de este contacto?"
+                            "owner_id": existing_owner_id,
+                            "owner_name": existing_owner_name,
+                            "message_count": message_count,
+                            "redis_canal": redis_canal,
+                            "can_take_control": can_take_control,
                         }
                     )
     except Exception as e:

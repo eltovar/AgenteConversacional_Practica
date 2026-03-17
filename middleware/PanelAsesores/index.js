@@ -3190,9 +3190,9 @@ function openCreateContactModal() {
     const modal = document.getElementById('createContactModal');
     if (modal) {
         modal.classList.remove('hidden');
-        // Limpiar formulario
+        // Limpiar formulario y asegurar que sea visible (puede haberse ocultado por 409)
         const form = document.getElementById('createContactForm');
-        if (form) form.reset();
+        if (form) { form.reset(); form.classList.remove('hidden'); }
         // Poblar portales según el asesor activo
         const sel = document.getElementById('portalOrigenSelect');
         if (sel) {
@@ -3260,10 +3260,48 @@ async function createManualContact(event) {
         console.log('[Panel] Respuesta creacion:', data);
 
         if (response.status === 409) {
-            // Contacto ya existe
-            showCreateResult('warning',
-                `${data.message}. <button onclick="takeControlOfExisting('${data.contact_id}', '${data.phone}')" class="underline font-medium">Tomar control</button>`
-            );
+            // Contacto ya existe — ocultar formulario y mostrar panel de info
+            const createForm = document.getElementById('createContactForm');
+            if (createForm) createForm.classList.add('hidden');
+
+            const ownerLine = (data.owner_name && data.owner_name !== 'Sin asignar')
+                ? `<div class="flex justify-between"><span class="text-gray-500">Asesor asignado</span><span class="font-medium">${data.owner_name}</span></div>`
+                : `<div class="flex justify-between"><span class="text-gray-500">Asesor</span><span class="text-yellow-600 font-medium">Sin asignar</span></div>`;
+
+            const historyLine = `<div class="flex justify-between"><span class="text-gray-500">Mensajes</span><span class="font-medium">${data.message_count} mensaje${data.message_count !== 1 ? 's' : ''}</span></div>`;
+
+            const canalLine = data.redis_canal
+                ? `<div class="flex justify-between"><span class="text-gray-500">Activo en panel</span><span class="text-green-600 font-medium">Sí (${data.redis_canal})</span></div>`
+                : '';
+
+            // Canal a usar: activo en Redis → seleccionado en formulario → fallback
+            const canalParaTakeControl = data.redis_canal
+                || formData.get('canal')
+                || 'whatsapp_directo';
+
+            const actionBtn = data.can_take_control
+                ? `<button onclick="takeControlOfExisting('${data.contact_id}', '${data.phone}', '${canalParaTakeControl}')"
+                       class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium">
+                       Tomar Control
+                   </button>`
+                : `<span class="text-xs text-gray-400 italic">Tiene asesor y conversación — no se puede reasignar</span>`;
+
+            showCreateResult('warning', `
+                <div class="space-y-2 text-sm">
+                    <p class="font-semibold text-yellow-800">⚠ Contacto ya existe</p>
+                    <div class="bg-white rounded p-2 space-y-1 border border-yellow-200">
+                        <div class="flex justify-between"><span class="text-gray-500">Nombre</span><span class="font-medium">${data.display_name}</span></div>
+                        <div class="flex justify-between"><span class="text-gray-500">Teléfono</span><span class="font-mono text-xs">${data.phone}</span></div>
+                        ${ownerLine}
+                        ${historyLine}
+                        ${canalLine}
+                    </div>
+                    <div class="flex gap-2 pt-1">
+                        <button onclick="closeCreateContactModal()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 text-sm">Cancelar</button>
+                        ${actionBtn}
+                    </div>
+                </div>
+            `);
         } else if (response.ok && data.status === 'success') {
             // Exito
             showCreateResult('success', `Contacto "${data.display_name}" creado exitosamente`);
@@ -3322,13 +3360,14 @@ function showCreateResult(type, message) {
  * @param {string} contactId - ID del contacto en HubSpot
  * @param {string} phone - Telefono normalizado
  */
-async function takeControlOfExisting(contactId, phone) {
-    console.log('[Panel] Tomando control de contacto existente:', contactId, phone);
+async function takeControlOfExisting(contactId, phone, canal = 'whatsapp_directo') {
+    console.log('[Panel] Tomando control de contacto existente:', contactId, phone, canal);
 
     try {
         // Usar el endpoint de take-control existente
         const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
-            `canal=whatsapp_directo&contact_id=${encodeURIComponent(contactId)}`;
+            `canal=${encodeURIComponent(canal)}&contact_id=${encodeURIComponent(contactId)}` +
+            (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
 
         const response = await fetch(takeControlUrl, {
             method: 'POST',

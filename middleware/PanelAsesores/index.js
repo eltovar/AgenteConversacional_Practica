@@ -3298,9 +3298,9 @@ async function createManualContact(event) {
                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium">
                        Tomar Control
                    </button>`
-                : `<button onclick="requestTransfer('${data.contact_id}', '${data.phone}', '${data.owner_id}', '${data.display_name}')"
+                : `<button onclick="requestTransfer('${data.contact_id}', '${data.phone}', '${data.owner_id}', '${data.display_name}', '${canalParaTakeControl}')"
                        class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm font-medium">
-                       Solicitar Transferencia
+                       Tomar contacto
                    </button>`;
 
             showCreateResult('warning', `
@@ -3377,32 +3377,28 @@ function showCreateResult(type, message) {
 /**
  * Solicita la transferencia de un contacto al asesor propietario.
  */
-async function requestTransfer(contactId, phone, ownerAdvisorId, contactName) {
+async function requestTransfer(contactId, phone, ownerAdvisorId, contactName, canal = 'whatsapp_directo') {
     const url = `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/transfer-request?` +
         `phone=${encodeURIComponent(phone)}&` +
         `requesting_advisor_id=${encodeURIComponent(ADVISOR_ID || '')}&` +
         `owner_advisor_id=${encodeURIComponent(ownerAdvisorId)}&` +
+        `canal=${encodeURIComponent(canal)}&` +
         `contact_name=${encodeURIComponent(contactName || phone)}`;
 
     try {
         const resp = await fetch(url, { method: 'POST', headers: { 'X-API-Key': API_KEY } });
         const data = await resp.json();
-        if (data.status === 'pending') {
-            showCreateResult('info', `
-                <div class="space-y-1 text-sm">
-                    <p class="font-semibold text-blue-800">✉ Solicitud enviada</p>
-                    <p class="text-gray-600">${data.notified
-                        ? 'El asesor recibirá una notificación en su panel.'
-                        : 'El asesor no está conectado ahora — verá la solicitud al reconectarse.'
-                    }</p>
-                </div>
-            `);
+        if (data.status === 'transferred') {
+            // Transferencia inmediata — cerrar modal y refrescar panel
+            closeCreateContactModal();
+            scheduleContactsRefresh();
+            showToast(`Contacto transferido — aparecerá en tu panel`, 'success');
         } else {
-            showCreateResult('error', 'Error enviando solicitud');
+            showCreateResult('error', 'Error al tomar contacto');
         }
     } catch (e) {
         console.error('[Panel] Error en requestTransfer:', e);
-        showCreateResult('error', 'Error de conexión al enviar solicitud');
+        showCreateResult('error', 'Error de conexión');
     }
 }
 

@@ -1783,13 +1783,19 @@ async def create_manual_contact(
     from datetime import timezone as tz
     midnight_utc = datetime.now(tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # Mapeo de canales internos → valores permitidos por HubSpot (enum fijo)
+    _HUBSPOT_CANAL_MAP = {
+        "charly": "pagina_web",  # Chatling se registra como pagina_web en HubSpot
+    }
+    canal_hs = _HUBSPOT_CANAL_MAP.get(canal, canal)
+
     # Solo propiedades estándar de HubSpot (siempre existen)
     contact_properties = {
         "whatsapp_id": phone_normalized,
         "phone": phone_normalized,
         "firstname": firstname.strip(),
         "lastname": lastname.strip() if lastname else "",
-        "canal_origen": canal,
+        "canal_origen": canal_hs,
         "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
         "lifecyclestage": "lead",
     }
@@ -1850,7 +1856,7 @@ async def create_manual_contact(
             "dealname": f"Lead: {firstname} {lastname}".strip(),
             "pipeline": HUBSPOT_PIPELINE_ID,          # 854756009
             "dealstage": HUBSPOT_STAGE_NUEVO_LEAD,    # 1275156339
-            "canal_origen": canal,
+            "canal_origen": canal_hs,  # valor mapeado para HubSpot
         }
 
         # Agregar descripción si hay características
@@ -2144,42 +2150,67 @@ async def request_transfer(
     phone: str = Query(..., description="Teléfono normalizado del contacto"),
     requesting_advisor_id: str = Query(..., description="ID del asesor que solicita"),
     owner_advisor_id: str = Query(..., description="ID del asesor propietario actual"),
+    canal: str = Query("whatsapp_directo", description="Canal del contacto"),
     contact_name: str = Query("", description="Nombre del contacto para mostrar"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
-    Solicita la transferencia de un contacto al asesor propietario.
-    Guarda la solicitud en Redis y envía notificación WS al dueño.
+    Transfiere un contacto al asesor solicitante de forma inmediata.
+    El contacto aparece en el panel del solicitante al instante.
+    El ex-propietario recibe una notificación informativa (no de aprobación).
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    _rc = await _get_redis_client()
-    req_key = f"transfer_req:{contact_id}"
-    req_data = {
-        "requester_id": requesting_advisor_id,
-        "owner_id": owner_advisor_id,
-        "phone": phone,
-        "contact_id": contact_id,
-        "contact_name": contact_name or phone,
-        "created_at": datetime.now().isoformat()
-    }
-    await _rc.set(req_key, json.dumps(req_data), ex=1800)  # TTL 30 min
-
     requester_name = _get_advisor_name(requesting_advisor_id)
+    display = contact_name or phone
 
-    sent = await ws_manager.send_to_advisor(owner_advisor_id, {
-        "type": "transfer_request",
-        "contact_id": contact_id,
+    # 1. Activar contacto en el panel del solicitante inmediatamente
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    redis_url = os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+    state_manager = ConversationStateManager(redis_url)
+    try:
+        await state_manager.activate_human(
+            phone_normalized=phone,
+            canal_origen=canal,
+            owner_id=requesting_advisor_id,
+            contact_id=contact_id,
+            display_name=display,
+            reason=f"Transferencia directa desde modal de creación"
+        )
+    except Exception as e:
+        logger.warning(f"[Panel] activate_human en transfer-request falló: {e}")
+
+    # 2. Reasignar owner en HubSpot en background (no bloquear respuesta)
+    asyncio.create_task(_reassign_hubspot_owner(contact_id, to_owner_id=requesting_advisor_id))
+
+    # 3. Escribir phone_cache inverso para que edición de nombres funcione
+    try:
+        _rc = await _get_redis_client()
+        await _rc.set(f"phone_cache:{contact_id}", phone, ex=86400, nx=True)
+    except Exception:
+        pass
+
+    # 4. Notificar al ex-propietario (solo informativo)
+    await ws_manager.notify_contact_transferred(
+        phone=phone,
+        from_advisor=owner_advisor_id,
+        to_advisor=requesting_advisor_id,
+        contact_name=display,
+        mode="exclusive"
+    )
+
+    # 5. Broadcast para que todos los paneles refresquen
+    await ws_manager.broadcast({
+        "type": "contact_updated",
         "phone": phone,
-        "contact_name": contact_name or phone,
-        "requester_id": requesting_advisor_id,
-        "requester_name": requester_name,
-        "message": f"{requester_name} quiere atender este contacto"
+        "action": "transfer_completed"
     })
 
-    logger.info(f"[Panel] Transfer request: {requesting_advisor_id} -> {owner_advisor_id} para {contact_id} (notified={sent > 0})")
-    return {"status": "pending", "notified": sent > 0}
+    logger.info(f"[Panel] Transfer directo: {owner_advisor_id} -> {requesting_advisor_id} para {contact_id} ({canal})")
+    return {"status": "transferred", "phone": phone, "canal": canal}
 
 
 @router.post("/contacts/{contact_id}/transfer-accept")

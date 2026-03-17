@@ -3181,21 +3181,25 @@ async def get_active_contacts(
         logger.info(f"[Panel] Usando Redis URL: {redis_url}")
         state_manager = ConversationStateManager(redis_url)
 
-        zset_offset = (page - 1) * limit
-        active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)
-
-        logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
-
-        # ── Pre-filtrar por asesora ANTES del enriquecimiento con HubSpot.
-        # Sin esto, los 1,602 contactos migrados se enrichen todos a la vez,
-        # disparando ~3,204 llamadas HubSpot y colapsando el rate limit.
         if advisor:
-            active_contacts = [
-                c for c in active_contacts
+            # Cuando hay filtro de advisor: escanear todo el ZSET para no perder contactos
+            # del advisor en páginas posteriores (problema cuando todos tienen el mismo score,
+            # e.g. tras restore-panel — Redis ordena lex inverso y los del advisor quedan en p2+).
+            _all = await state_manager.get_all_human_active_contacts(limit=1000, offset=0)
+            advisor_contacts = [
+                c for c in _all
                 if c.get("owner_id") == advisor
                 or advisor in (c.get("assigned_owner_ids") or [])
             ]
-            logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(active_contacts)} contactos")
+            logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(advisor_contacts)} contactos")
+            zset_offset = (page - 1) * limit
+            active_contacts = advisor_contacts[zset_offset:zset_offset + limit]
+            total_for_advisor = len(advisor_contacts)
+        else:
+            zset_offset = (page - 1) * limit
+            active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)
+            total_for_advisor = None
+            logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
 
         # ── Pre-limitar ANTES del enriquecimiento con HubSpot.
         # Los contactos de prioridad (ZSET) siempre van; del resto solo los más recientes.
@@ -3708,7 +3712,7 @@ async def get_active_contacts(
             "advisor": advisor,
             "active_count": active_count,
             "historical_count": len(contacts_sorted) - active_count,
-            "total_count": len(contacts_sorted),
+            "total_count": total_for_advisor if total_for_advisor is not None else len(contacts_sorted),
             "page": page,
             "limit": limit,
             "since": since.isoformat(),

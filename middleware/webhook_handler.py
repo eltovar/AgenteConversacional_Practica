@@ -2194,14 +2194,14 @@ async def _sync_conversation_with_analysis_to_hubspot(
     # ═══════════════════════════════════════════════════════════════════
     deal_all_props = {}
 
-    # 1. chatbot_conversation + chatbot_timestamp (siempre)
-    deal_all_props.update(base_properties)
+    # 1. chatbot_conversation (siempre) — chatbot_timestamp excluido: solo existe en Contactos, no en Deals
+    deal_all_props.update({k: v for k, v in base_properties.items() if k != "chatbot_timestamp"})
 
     # 2. Props CRM existentes en lead_context (mensajes anteriores)
     for _p in [
         "chatbot_property_type", "chatbot_operation_type",
         "chatbot_location", "chatbot_rooms", "chatbot_score",
-        "chatbot_budget", "canal_origen",
+        "chatbot_budget", "canal_origen", "chatbot_urgency",
     ]:
         if lead_context and lead_context.get(_p):
             deal_all_props[_p] = lead_context[_p]

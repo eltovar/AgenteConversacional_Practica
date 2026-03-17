@@ -588,18 +588,34 @@ class ConversationStateManager:
             state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
             await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=ttl)
 
-            # Guardar metadata con la razón del handoff
+            # Guardar metadata con la razón del handoff.
+            # Se lee el meta existente para preservar assigned_owner_id, display_name
+            # y otros campos que se pierden si se sobrescribe con un dict vacío.
             now_iso = get_bogota_now_iso()
-            meta = {
-                "phone_normalized": phone,
-                "contact_id": contact_id,
-                "status": ConversationStatus.PENDING_HANDOFF.value,
-                "last_activity": now_iso,
-                "handoff_reason": reason,
-                "canal_origen": canal,
-                "created_at": now_iso
-            }
             meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            existing_raw = await self.redis.get(meta_key)
+            if existing_raw:
+                try:
+                    meta = json.loads(existing_raw)
+                except Exception:
+                    meta = {}
+                meta.update({
+                    "status": ConversationStatus.PENDING_HANDOFF.value,
+                    "last_activity": now_iso,
+                    "handoff_reason": reason,
+                })
+                if contact_id:
+                    meta["contact_id"] = contact_id
+            else:
+                meta = {
+                    "phone_normalized": phone,
+                    "contact_id": contact_id,
+                    "status": ConversationStatus.PENDING_HANDOFF.value,
+                    "last_activity": now_iso,
+                    "handoff_reason": reason,
+                    "canal_origen": canal,
+                    "created_at": now_iso,
+                }
             # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
             await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
             # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días

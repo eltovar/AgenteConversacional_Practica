@@ -531,7 +531,7 @@ class ContactManager:
 
         try:
             # Lock adquirido, crear el lead
-            return await self._create_basic_lead(phone_normalized, source_channel)
+            return await self._create_basic_lead(phone_normalized, source_channel, create_deal=create_deal)
         finally:
             # Siempre liberar el lock
             await r.delete(lock_key)
@@ -539,7 +539,8 @@ class ContactManager:
     async def _create_basic_lead(
         self,
         phone_normalized: str,
-        source_channel: str
+        source_channel: str,
+        create_deal: bool = True
     ) -> str:
         """
         Crea un lead básico con la información mínima.

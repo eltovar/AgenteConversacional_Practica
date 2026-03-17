@@ -3044,6 +3044,20 @@ function handleWebSocketMessage(data) {
             handleStatusChange(data);
             break;
 
+        case 'transfer_request':
+            showTransferRequestModal(data);
+            break;
+
+        case 'transfer_accepted':
+            showToast(`Transferencia aceptada — ${data.contact_name || data.phone} es tuyo`, 'success');
+            scheduleContactsRefresh();
+            closeCreateContactModal();
+            break;
+
+        case 'transfer_rejected':
+            showToast('El asesor rechazó la transferencia', 'warning');
+            break;
+
         case 'pong':
             // Respuesta a ping, ignorar
             break;
@@ -3284,7 +3298,10 @@ async function createManualContact(event) {
                        class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm font-medium">
                        Tomar Control
                    </button>`
-                : `<span class="text-xs text-gray-400 italic">Tiene asesor y conversación — no se puede reasignar</span>`;
+                : `<button onclick="requestTransfer('${data.contact_id}', '${data.phone}', '${data.owner_id}', '${data.display_name}')"
+                       class="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm font-medium">
+                       Solicitar Transferencia
+                   </button>`;
 
             showCreateResult('warning', `
                 <div class="space-y-2 text-sm">
@@ -3354,6 +3371,130 @@ function showCreateResult(type, message) {
     resultContent.innerHTML = message;
     resultDiv.classList.remove('hidden');
 }
+
+// ─── Sistema de Transferencia ────────────────────────────────────────────────
+
+/**
+ * Solicita la transferencia de un contacto al asesor propietario.
+ */
+async function requestTransfer(contactId, phone, ownerAdvisorId, contactName) {
+    const url = `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/transfer-request?` +
+        `phone=${encodeURIComponent(phone)}&` +
+        `requesting_advisor_id=${encodeURIComponent(ADVISOR_ID || '')}&` +
+        `owner_advisor_id=${encodeURIComponent(ownerAdvisorId)}&` +
+        `contact_name=${encodeURIComponent(contactName || phone)}`;
+
+    try {
+        const resp = await fetch(url, { method: 'POST', headers: { 'X-API-Key': API_KEY } });
+        const data = await resp.json();
+        if (data.status === 'pending') {
+            showCreateResult('info', `
+                <div class="space-y-1 text-sm">
+                    <p class="font-semibold text-blue-800">✉ Solicitud enviada</p>
+                    <p class="text-gray-600">${data.notified
+                        ? 'El asesor recibirá una notificación en su panel.'
+                        : 'El asesor no está conectado ahora — verá la solicitud al reconectarse.'
+                    }</p>
+                </div>
+            `);
+        } else {
+            showCreateResult('error', 'Error enviando solicitud');
+        }
+    } catch (e) {
+        console.error('[Panel] Error en requestTransfer:', e);
+        showCreateResult('error', 'Error de conexión al enviar solicitud');
+    }
+}
+
+/**
+ * Muestra modal flotante al asesor propietario cuando recibe una solicitud de transferencia.
+ */
+function showTransferRequestModal(msg) {
+    // Remover modal anterior si existe
+    document.getElementById('transferRequestModal')?.remove();
+
+    const div = document.createElement('div');
+    div.id = 'transferRequestModal';
+    div.className = 'fixed bottom-4 right-4 bg-white shadow-xl rounded-lg p-4 border border-yellow-300 z-50 max-w-sm';
+    div.innerHTML = `
+        <div class="flex items-start gap-2">
+            <span class="text-yellow-500 text-lg mt-0.5">📤</span>
+            <div class="flex-1">
+                <p class="font-semibold text-sm text-yellow-800">Solicitud de transferencia</p>
+                <p class="text-sm text-gray-700 mt-1">
+                    <strong>${msg.requester_name || 'Un asesor'}</strong> quiere atender a
+                    <strong>${msg.contact_name || msg.phone}</strong>
+                </p>
+                <div class="flex gap-2 mt-3">
+                    <button onclick="acceptTransfer('${msg.contact_id}')"
+                        class="px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700 font-medium">
+                        Aceptar
+                    </button>
+                    <button onclick="rejectTransfer('${msg.contact_id}')"
+                        class="px-3 py-1.5 bg-red-500 text-white text-xs rounded hover:bg-red-600 font-medium">
+                        Rechazar
+                    </button>
+                    <button onclick="document.getElementById('transferRequestModal')?.remove()"
+                        class="px-3 py-1.5 bg-gray-200 text-gray-600 text-xs rounded hover:bg-gray-300">
+                        Ignorar
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(div);
+}
+
+/**
+ * Acepta una solicitud de transferencia (llamado por el asesor propietario).
+ */
+async function acceptTransfer(contactId) {
+    document.getElementById('transferRequestModal')?.remove();
+    try {
+        await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/transfer-accept?by_advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`,
+            { method: 'POST', headers: { 'X-API-Key': API_KEY } }
+        );
+    } catch (e) {
+        console.error('[Panel] Error en acceptTransfer:', e);
+    }
+}
+
+/**
+ * Rechaza una solicitud de transferencia (llamado por el asesor propietario).
+ */
+async function rejectTransfer(contactId) {
+    document.getElementById('transferRequestModal')?.remove();
+    try {
+        await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/transfer-reject?by_advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`,
+            { method: 'POST', headers: { 'X-API-Key': API_KEY } }
+        );
+    } catch (e) {
+        console.error('[Panel] Error en rejectTransfer:', e);
+    }
+}
+
+/**
+ * Muestra una notificación tipo toast temporal.
+ * @param {string} message - Texto a mostrar
+ * @param {'success'|'warning'|'error'|'info'} type - Tipo de notificación
+ */
+function showToast(message, type = 'info') {
+    const colors = {
+        success: 'bg-green-600',
+        warning: 'bg-yellow-500',
+        error:   'bg-red-600',
+        info:    'bg-blue-600'
+    };
+    const div = document.createElement('div');
+    div.className = `fixed top-4 right-4 z-50 px-4 py-3 rounded shadow-lg text-white text-sm font-medium ${colors[type] || colors.info}`;
+    div.textContent = message;
+    document.body.appendChild(div);
+    setTimeout(() => div.remove(), 4000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Toma control de un contacto existente (cuando se detecta duplicado).

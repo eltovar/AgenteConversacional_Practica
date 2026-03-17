@@ -1710,7 +1710,9 @@ async def create_manual_contact(
                     existing = results[0]
                     existing_id = existing.get("id")
                     existing_props = existing.get("properties", {})
-                    existing_name = f"{existing_props.get('firstname', '')} {existing_props.get('lastname', '')}".strip()
+                    _fn = existing_props.get('firstname') or ''
+                    _ln = existing_props.get('lastname') or ''
+                    existing_name = f"{_fn} {_ln}".strip()
                     existing_owner_id = existing_props.get("hubspot_owner_id") or ""
 
                     logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
@@ -1741,8 +1743,9 @@ async def create_manual_contact(
                     except Exception:
                         pass
 
-                    # Puede tomar control si NO tiene (asesor asignado Y mensajes previos)
-                    can_take_control = not (existing_owner_id and message_count > 0)
+                    # "Tomar Control" directo si el contacto NO está activo en ningún panel (redis_canal=None).
+                    # Solo se pide permiso ("Solicitar Transferencia") si alguien lo tiene activo en el panel.
+                    can_take_control = not (existing_owner_id and message_count > 0 and redis_canal)
 
                     return JSONResponse(
                         status_code=409,
@@ -2083,6 +2086,197 @@ async def transfer_contact(
         "hubspot_updated": hubspot_updated,
         "transfer_history": result.get("transfer_history", [])
     }
+
+
+# ============================================================================
+# Helper para resolver nombre de asesor desde OWNERS_CONFIG
+# ============================================================================
+
+def _get_advisor_name(advisor_id: str) -> str:
+    """Busca el nombre de un asesor en OWNERS_CONFIG por su ID."""
+    if not advisor_id:
+        return "Asesor"
+    try:
+        from integrations.hubspot.lead_assigner import LeadAssigner
+        for _team_members in LeadAssigner.OWNERS_CONFIG.values():
+            for _m in _team_members:
+                if str(_m.get("id")) == str(advisor_id):
+                    return _m.get("name", "Asesor")
+    except Exception:
+        pass
+    return "Asesor"
+
+
+async def _reassign_hubspot_owner(contact_id: str, to_owner_id: str) -> bool:
+    """PATCH hubspot_owner_id de un contacto en HubSpot."""
+    try:
+        import httpx
+        hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+        if not hubspot_api_key or not contact_id:
+            return False
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.patch(
+                url,
+                json={"properties": {"hubspot_owner_id": to_owner_id}},
+                headers={
+                    "Authorization": f"Bearer {hubspot_api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+        if response.status_code == 200:
+            logger.info(f"[Panel] HubSpot owner reasignado: {contact_id} -> {to_owner_id}")
+            return True
+        logger.warning(f"[Panel] HubSpot reasignación falló: {response.status_code}")
+        return False
+    except Exception as e:
+        logger.warning(f"[Panel] Error reasignando HubSpot owner: {e}")
+        return False
+
+
+# ============================================================================
+# Endpoints de Solicitud de Transferencia
+# ============================================================================
+
+@router.post("/contacts/{contact_id}/transfer-request")
+async def request_transfer(
+    contact_id: str,
+    phone: str = Query(..., description="Teléfono normalizado del contacto"),
+    requesting_advisor_id: str = Query(..., description="ID del asesor que solicita"),
+    owner_advisor_id: str = Query(..., description="ID del asesor propietario actual"),
+    contact_name: str = Query("", description="Nombre del contacto para mostrar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Solicita la transferencia de un contacto al asesor propietario.
+    Guarda la solicitud en Redis y envía notificación WS al dueño.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    _rc = await _get_redis_client()
+    req_key = f"transfer_req:{contact_id}"
+    req_data = {
+        "requester_id": requesting_advisor_id,
+        "owner_id": owner_advisor_id,
+        "phone": phone,
+        "contact_id": contact_id,
+        "contact_name": contact_name or phone,
+        "created_at": datetime.now().isoformat()
+    }
+    await _rc.set(req_key, json.dumps(req_data), ex=1800)  # TTL 30 min
+
+    requester_name = _get_advisor_name(requesting_advisor_id)
+
+    sent = await ws_manager.send_to_advisor(owner_advisor_id, {
+        "type": "transfer_request",
+        "contact_id": contact_id,
+        "phone": phone,
+        "contact_name": contact_name or phone,
+        "requester_id": requesting_advisor_id,
+        "requester_name": requester_name,
+        "message": f"{requester_name} quiere atender este contacto"
+    })
+
+    logger.info(f"[Panel] Transfer request: {requesting_advisor_id} -> {owner_advisor_id} para {contact_id} (notified={sent > 0})")
+    return {"status": "pending", "notified": sent > 0}
+
+
+@router.post("/contacts/{contact_id}/transfer-accept")
+async def accept_transfer(
+    contact_id: str,
+    by_advisor_id: str = Query(..., description="ID del asesor que acepta (propietario actual)"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    El asesor propietario acepta la solicitud de transferencia.
+    Reasigna en HubSpot + Redis y notifica al solicitante.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    _rc = await _get_redis_client()
+    raw = await _rc.get(f"transfer_req:{contact_id}")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Solicitud expirada o no encontrada")
+
+    req_data = json.loads(raw)
+    requester_id = req_data["requester_id"]
+    phone = req_data["phone"]
+    contact_name = req_data.get("contact_name", phone)
+
+    # 1. Reasignar owner en HubSpot
+    await _reassign_hubspot_owner(contact_id, to_owner_id=requester_id)
+
+    # 2. Actualizar assigned_owner_id en Redis conv_meta si el contacto está activo
+    try:
+        _meta_keys = await _rc.keys(f"conv_meta:{phone}:*")
+        for mk in _meta_keys:
+            raw_meta = await _rc.get(mk)
+            if raw_meta:
+                meta = json.loads(raw_meta)
+                meta["assigned_owner_id"] = requester_id
+                ttl = await _rc.ttl(mk)
+                await _rc.set(mk, json.dumps(meta), ex=max(ttl, 1))
+    except Exception as e:
+        logger.warning(f"[Panel] Error actualizando conv_meta en transfer-accept: {e}")
+
+    # 3. Limpiar solicitud pendiente
+    await _rc.delete(f"transfer_req:{contact_id}")
+
+    # 4. Notificar al solicitante
+    await ws_manager.send_to_advisor(requester_id, {
+        "type": "transfer_accepted",
+        "contact_id": contact_id,
+        "phone": phone,
+        "contact_name": contact_name,
+        "message": "Transferencia aceptada — el contacto es tuyo"
+    })
+
+    # 5. Broadcast para refrescar el panel de todos
+    await ws_manager.broadcast({
+        "type": "contact_updated",
+        "phone": phone,
+        "action": "transfer_completed"
+    })
+
+    logger.info(f"[Panel] Transfer accept: {by_advisor_id} -> {requester_id} para {contact_id}")
+    return {"status": "accepted"}
+
+
+@router.post("/contacts/{contact_id}/transfer-reject")
+async def reject_transfer(
+    contact_id: str,
+    by_advisor_id: str = Query(..., description="ID del asesor que rechaza"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    El asesor propietario rechaza la solicitud de transferencia.
+    Notifica al solicitante y limpia Redis.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    _rc = await _get_redis_client()
+    raw = await _rc.get(f"transfer_req:{contact_id}")
+    req_data = json.loads(raw) if raw else {}
+    requester_id = req_data.get("requester_id", "")
+    phone = req_data.get("phone", "")
+    contact_name = req_data.get("contact_name", phone)
+
+    await _rc.delete(f"transfer_req:{contact_id}")
+
+    if requester_id:
+        await ws_manager.send_to_advisor(requester_id, {
+            "type": "transfer_rejected",
+            "contact_id": contact_id,
+            "phone": phone,
+            "contact_name": contact_name,
+            "message": "El asesor rechazó la transferencia"
+        })
+
+    logger.info(f"[Panel] Transfer reject: {by_advisor_id} para {contact_id}")
+    return {"status": "rejected"}
 
 
 # ============================================================================
@@ -4950,6 +5144,28 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
         ws://host/whatsapp/panel/ws/{advisor_id}
     """
     await ws_manager.connect(websocket, advisor_id)
+
+    # Enviar transfer_requests pendientes donde este asesor es el propietario
+    try:
+        _rc_ws = await _get_redis_client()
+        pending_keys = await _rc_ws.keys("transfer_req:*")
+        for pk in pending_keys:
+            raw_req = await _rc_ws.get(pk)
+            if raw_req:
+                req = json.loads(raw_req)
+                if req.get("owner_id") == advisor_id:
+                    requester_name = _get_advisor_name(req.get("requester_id", ""))
+                    await websocket.send_json({
+                        "type": "transfer_request",
+                        "contact_id": req.get("contact_id"),
+                        "phone": req.get("phone"),
+                        "contact_name": req.get("contact_name", req.get("phone")),
+                        "requester_id": req.get("requester_id"),
+                        "requester_name": requester_name,
+                        "message": f"{requester_name} quiere atender este contacto (solicitud pendiente)"
+                    })
+    except Exception:
+        pass
 
     # Keepalive: si no llega ningún mensaje del cliente en 20s el servidor envía
     # un ping para que Railway no cierre la conexión TCP por inactividad.

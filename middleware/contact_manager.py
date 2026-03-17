@@ -251,7 +251,7 @@ class ContactManager:
         )
         remaining = max(1.0, _deadline - (_time.monotonic() - _t0))
         try:
-            contact_id = await asyncio.wait_for(
+            contact_id, created_owner_id = await asyncio.wait_for(
                 self._create_basic_lead_with_lock(phone_normalized, source_channel, create_deal=create_deal),
                 timeout=remaining
             )
@@ -267,7 +267,8 @@ class ContactManager:
         return ContactInfo(
             contact_id=contact_id,
             phone_normalized=phone_normalized,
-            is_new=True
+            is_new=True,
+            properties={"hubspot_owner_id": created_owner_id} if created_owner_id else None
         )
 
     async def identify_or_create_contact_safe(
@@ -470,7 +471,7 @@ class ContactManager:
         phone_normalized: str,
         source_channel: str,
         create_deal: bool = True
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """
         Crea un lead básico con lock distribuido de Redis.
 
@@ -518,13 +519,13 @@ class ContactManager:
                     "[ContactManager] Contacto encontrado después de esperar lock: %s",
                     contact_id
                 )
-                return contact_id
+                return contact_id, None
 
             # Si aún no existe, esperar un poco más
             await asyncio.sleep(1.0)
             contact_id = await self._search_contact(phone_normalized)
             if contact_id:
-                return contact_id
+                return contact_id, None
 
             # Si después de esperar no existe, lanzar error
             raise LeadCreationLockError(phone_normalized)
@@ -541,7 +542,7 @@ class ContactManager:
         phone_normalized: str,
         source_channel: str,
         create_deal: bool = True
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """
         Crea un lead básico con la información mínima.
 
@@ -624,7 +625,7 @@ class ContactManager:
         if url_chat:
             asyncio.create_task(self._write_panel_url(contact_id, url_chat))
 
-        return contact_id
+        return contact_id, owner_id
 
     async def _create_deal_for_new_lead(
         self,

@@ -1906,8 +1906,14 @@ async def create_manual_contact(
         logger.info(f"[Panel] HUMAN_ACTIVE activado para {phone_normalized}")
 
     except Exception as e:
-        logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {e}")
-        # No falla la operación, el contacto ya está en HubSpot
+        logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Contacto creado en HubSpot (ID: {contact_id}) pero no se pudo registrar "
+                f"en el panel. Usa restore-panel o vuelve a intentarlo. Error: {e}"
+            )
+        )
 
     return {
         "status": "success",

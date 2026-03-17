@@ -1808,7 +1808,9 @@ async function saveNameChange(event) {
                 renderContactsList(allContacts);
             }
             closeEditNameModal();
-            loadContacts();  // sync adicional con backend en background
+            // NO llamar loadContacts() inmediatamente: HubSpot tarda ~1-3s en propagar
+            // el PATCH internamente. Si se llama ahora, el batch devuelve el nombre viejo
+            // y sobreescribe la actualización en memoria. El próximo poll (10s) sincroniza.
             alert('Nombre actualizado correctamente');
         } else {
             throw new Error(data.detail || 'Error actualizando nombre');
@@ -3007,6 +3009,18 @@ function handleWebSocketMessage(data) {
                 if (document.hidden) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }
+            }
+
+            // name_updated: actualizar memoria directamente sin recargar desde HubSpot.
+            // HubSpot tarda ~1-3s en propagar el PATCH; scheduleContactsRefresh() aquí
+            // devolvería el nombre viejo y revertería el cambio.
+            if (data.action === 'name_updated' && data.phone && data.display_name) {
+                const ni = allContacts.findIndex(c => c.phone === data.phone);
+                if (ni !== -1) {
+                    allContacts[ni].display_name = data.display_name;
+                    renderContactsList(allContacts);
+                }
+                break;
             }
 
             // Refresco debounced: agrupa eventos rápidos en una sola carga

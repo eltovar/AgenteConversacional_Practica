@@ -600,6 +600,7 @@ class ContactManager:
         try:
             r = await self._get_redis()
             await r.set(f"phone_cache:{phone_normalized}", contact_id, ex=86400)
+            await r.set(f"phone_cache:{contact_id}", phone_normalized, ex=86400)
             logger.info("[ContactManager] phone_cache guardado para %s", phone_normalized)
         except Exception:
             pass

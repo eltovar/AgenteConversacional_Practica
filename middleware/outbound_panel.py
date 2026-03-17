@@ -1905,6 +1905,14 @@ async def create_manual_contact(
 
         logger.info(f"[Panel] HUMAN_ACTIVE activado para {phone_normalized}")
 
+        # Escribir clave inversa phone_cache:{contact_id} → phone para que
+        # update_contact_name pueda resolver el teléfono desde el contact_id
+        try:
+            _rc = await _get_redis_client()
+            await _rc.set(f"phone_cache:{contact_id}", phone_normalized, ex=86400)
+        except Exception:
+            pass
+
     except Exception as e:
         logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {e}", exc_info=True)
         raise HTTPException(
@@ -3259,7 +3267,17 @@ async def get_active_contacts(
             # Si tenemos contact_id, obtener nombre de HubSpot y deal info
             if contact.get("contact_id"):
                 cid = contact["contact_id"]
-                
+
+                # Mantener clave inversa phone_cache:{contact_id} actualizada
+                # Esto arregla edición de nombres para contactos ya existentes que
+                # no tienen esa clave (creados antes del fix)
+                if phone:
+                    try:
+                        _rcf = await _get_redis_client()
+                        await _rcf.set(f"phone_cache:{cid}", phone, ex=86400)
+                    except Exception:
+                        pass
+
                 # ✅ HubSpot es source of truth para nombres cuando está disponible en batch
                 if cid in batch_contact_data:
                     hs_info = batch_contact_data[cid]

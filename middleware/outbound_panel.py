@@ -3302,16 +3302,6 @@ async def get_active_contacts(
             if contact.get("contact_id"):
                 cid = contact["contact_id"]
 
-                # Mantener clave inversa phone_cache:{contact_id} actualizada
-                # Esto arregla edición de nombres para contactos ya existentes que
-                # no tienen esa clave (creados antes del fix)
-                if phone:
-                    try:
-                        _rcf = await _get_redis_client()
-                        await _rcf.set(f"phone_cache:{cid}", phone, ex=86400)
-                    except Exception:
-                        pass
-
                 # ✅ HubSpot es source of truth para nombres cuando está disponible en batch
                 if cid in batch_contact_data:
                     hs_info = batch_contact_data[cid]
@@ -3419,6 +3409,19 @@ async def get_active_contacts(
                 if isinstance(c, dict)
             ]
             logger.info(f"[Panel] Enriquecimiento paralelo completado: {len(active_contacts)} contactos")
+
+            # Batch write phone_cache inverso en 1 pipeline (en lugar de 30 writes concurrentes)
+            try:
+                _rc_batch = await _get_redis_client()
+                _pipe = _rc_batch.pipeline(transaction=False)
+                for _c in active_contacts:
+                    _cid = _c.get("contact_id")
+                    _ph  = _c.get("phone")
+                    if _cid and _ph:
+                        _pipe.set(f"phone_cache:{_cid}", _ph, ex=86400, nx=True)
+                await _pipe.execute()
+            except Exception:
+                pass
 
         # === PASO 3: Calcular rango de tiempo para historial ===
         if filter_time == "24h":

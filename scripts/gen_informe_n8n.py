@@ -849,17 +849,298 @@ add_bullet(doc, '2. Configurar 4 credenciales: Twilio, HubSpot API, MongoDB, Red
 add_bullet(doc, '3. Implementar Workflow 1 (Post-Visit Followup) — 2-3 horas. Validar por 1 semana en paralelo con Python. Cortar Python. Repetir con los demás workflows.')
 
 spacer(doc)
+
+# ─────────────────────────────────────────────────────────────
+# XIV. PREGUNTAS ADICIONALES DEL EQUIPO
+# ─────────────────────────────────────────────────────────────
+
+add_heading(doc, 'XIV. Preguntas Adicionales del Equipo')
+
+# ── PREGUNTA 1 ──────────────────────────────────────────────
+add_heading(doc, 'P1. ¿Hay alguna plataforma del stack actual que ya reemplace a N8N?', level=2)
+
+add_p(doc,
+    'El stack actual incluye HubSpot, Twilio y Bunny.net. Analizando cada uno:')
+
+add_table(doc,
+    ['Plataforma actual', 'Tiene automatizacion de workflows?', 'Puede reemplazar n8n?', 'Veredicto'],
+    [
+        ['HubSpot CRM',
+         'SI — tiene "HubSpot Workflows" (automaciones internas): cambiar stage de deal, enviar email, actualizar propiedades, notificar al owner.',
+         'PARCIALMENTE — solo dentro del ecosistema HubSpot. No puede interactuar con Redis, MongoDB, ni ejecutar logica Python/JS personalizada.',
+         'Reemplaza el 25% de lo que haria n8n (solo automatizaciones CRM-internas)'],
+        ['Twilio',
+         'SI — tiene "Twilio Studio" (editor visual de flujos de mensajeria): IVR, chatbots SMS/WhatsApp, flujos de respuesta automatica.',
+         'PARCIALMENTE — solo para flujos de mensajeria. No puede interactuar con HubSpot, MongoDB ni Redis.',
+         'Reemplaza el 15% de lo que haria n8n (solo envio/recepcion de mensajes con logica simple)'],
+        ['Bunny.net CDN',
+         'NO — es un CDN de almacenamiento de archivos. Sin capacidad de automatizacion.',
+         'No aplica.',
+         'No reemplaza nada de n8n'],
+        ['Railway (deploy)',
+         'NO — es infraestructura. Sin automatizacion de negocio.',
+         'No aplica.',
+         'No reemplaza nada de n8n'],
+    ],
+    col_widths=[3, 5, 5, 4.5]
+)
+spacer(doc)
+
+add_heading(doc, 'Diagnostico: HubSpot Workflows vs N8N para este proyecto', level=3)
+add_p(doc,
+    'HubSpot tiene Workflows nativos (disponibles desde el plan Professional, $890/mes) que pueden hacer '
+    'parte de lo que propone n8n. Sin embargo, el proyecto actual usa HubSpot en el plan gratuito/basico, '
+    'que tiene Workflows muy limitados. Esta es la comparacion critica:')
+
+add_table(doc,
+    ['Capacidad', 'HubSpot Workflows', 'N8N'],
+    [
+        ['Cambiar stage de deal automaticamente', 'SI (nativo)', 'SI (nodo HubSpot)'],
+        ['Enviar WhatsApp automatico', 'NO (no tiene integracion Twilio nativa)', 'SI (nodo Twilio)'],
+        ['Leer/escribir en Redis', 'NO', 'SI (nodo Redis)'],
+        ['Consultar MongoDB', 'NO', 'SI (nodo MongoDB)'],
+        ['Ejecutar codigo JS/Python', 'NO', 'SI (nodo Code)'],
+        ['Trigger por cron schedule', 'SI (limitado)', 'SI (Schedule Trigger)'],
+        ['Trigger por evento externo (webhook)', 'SI (HubSpot interno)', 'SI (Webhook Trigger)'],
+        ['Workflows con logica condicional compleja', 'Limitado (if/then basico)', 'Completo (IF, Switch, Loop)'],
+        ['Self-hosted (sin costo adicional)', 'NO (requiere plan $890/mes+)', 'SI (Community Edition gratis)'],
+        ['Historial de ejecuciones', 'SI (limitado por plan)', 'SI (completo)'],
+    ],
+    col_widths=[6, 5, 5]
+)
+spacer(doc)
+
+add_p(doc,
+    'Conclusion: HubSpot Workflows podria reemplazar el Workflow 3 (Auto Deal Stage Updater) del plan n8n, '
+    'pero SOLO si se contrata HubSpot Professional ($890/mes). '
+    'N8N self-hosted en Railway cuesta $5-10/mes y hace lo mismo mas todo el resto. '
+    'No hay ninguna plataforma del stack actual que reemplace n8n de forma completa y economica.',
+    italic=True)
+
+# ── PREGUNTA 2 ──────────────────────────────────────────────
+add_heading(doc, 'P2. En que porcentaje mejoraria la estructura, velocidad y escalabilidad?', level=2)
+
+add_p(doc,
+    'La mejora no es uniforme entre las tres dimensiones. '
+    'Cada una se ve afectada de manera distinta por la adopcion hibrida de n8n:')
+
+add_table(doc,
+    ['Dimension', 'Mejora estimada', 'Detalle tecnico', 'Que cambia exactamente'],
+    [
+        ['ESTRUCTURA\ndel codigo',
+         '+45%',
+         'El backend Python pasa de tener logica mezclada (schedulers + AI + HTTP handlers) a tener una responsabilidad clara: solo el core (AI, estado, panel).',
+         'app.py pierde ~300 lineas de schedulers. integrations/hubspot/ pierde deal_tracker.py (300 lineas). El codigo que queda es mas cohesivo y facil de leer.'],
+        ['VELOCIDAD\nde respuesta al cliente',
+         '0% (sin cambio)',
+         'El path critico (Twilio → webhook_handler → SofiaBrain → respuesta) no toca n8n. La latencia de Sofía al cliente no cambia.',
+         'N8N solo maneja automatizaciones SALIENTES (schedulers, CRM). Nunca esta en el camino critico de una respuesta al cliente.'],
+        ['VELOCIDAD\nde los schedulers',
+         '+15-20%',
+         'APScheduler corre dentro del mismo proceso Gunicorn de FastAPI, compitiendo por CPU con los requests HTTP. N8N corre en proceso separado.',
+         'Los schedulers dejan de competir con el servidor AI por recursos. En momentos de alta carga de conversaciones, los followups ya no se retrasan.'],
+        ['VELOCIDAD\nde cambios de negocio',
+         '+400%',
+         'Hoy: cambiar un scheduler requiere editar Python + commit + push + redeploy (5-10 min). Con n8n: cambiar en UI, guardar, activo en segundos.',
+         'Ajustar el delay de followup de 24h a 48h: 10 segundos en n8n vs 10 minutos con redeploy. Nuevo workflow de reactivacion: horas vs dias.'],
+        ['ESCALABILIDAD\nhorizontal',
+         '+35%',
+         'Con APScheduler en Gunicorn, al escalar a 8 workers los schedulers se ejecutan 8 veces (necesita locks distribuidos). N8N tiene 1 instancia dedicada para schedulers.',
+         'Elimina la necesidad de distributed locks en los schedulers (followup_lock, etc.). La arquitectura es mas limpia al escalar Railway a mas instancias.'],
+        ['ESCALABILIDAD\nde funcionalidades',
+         '+80%',
+         'Nuevas automatizaciones de negocio pasan de necesitar un programador + redeploy a ser configurables por el equipo operativo directamente en n8n.',
+         'El equipo puede crear workflows de reactivacion, alertas, reportes y onboarding sin tocar el codigo Python.'],
+        ['MANTENIBILIDAD\na largo plazo',
+         '+50%',
+         'Menos codigo Python significa menos bugs potenciales, menos archivos para navegar, y documentacion visual automatica (el grafico del workflow ES la documentacion).',
+         'deal_tracker.py (300 lineas) se convierte en un workflow visual de 8 nodos que cualquier persona puede entender en 2 minutos.'],
+    ],
+    col_widths=[3, 2.5, 5.5, 6.5]
+)
+spacer(doc)
+
+add_p(doc,
+    'Resumen ejecutivo de mejoras: La ganancia no esta en hacer a Sofia mas rapida '
+    '(eso ya esta optimizado). Esta en hacer al EQUIPO mas agil: modificar, depurar y expandir '
+    'las automatizaciones del negocio sin depender de un ciclo de desarrollo completo.',
+    italic=True)
+
+# ── PREGUNTA 3 ──────────────────────────────────────────────
+add_heading(doc, 'P3. Cuando aumenta el precio al integrar N8N? (sin reemplazar plataformas)', level=2)
+
+add_p(doc,
+    'N8N no reemplaza ninguna plataforma actual del stack (HubSpot, Twilio, Bunny.net permanecen). '
+    'El costo adicional es unicamente infraestructura para correr n8n.')
+
+add_heading(doc, 'Escenario 1: Self-Hosted en Railway (Recomendado)', level=3)
+add_table(doc,
+    ['Servicio', 'Costo actual', 'Costo con N8N', 'Delta'],
+    [
+        ['OpenAI API', 'Variable (uso)', 'Sin cambio', '$0'],
+        ['HubSpot', 'Plan actual', 'Sin cambio', '$0'],
+        ['Twilio', 'Por mensaje', 'Sin cambio', '$0'],
+        ['Bunny.net CDN', 'Por GB', 'Sin cambio', '$0'],
+        ['Railway (FastAPI + Redis + MongoDB + PG)', 'Actual', 'Sin cambio', '$0'],
+        ['N8N Community (licencia)', 'No existe', '$0 (open source)', '$0'],
+        ['Railway servicio extra para N8N', 'No existe', '~$5-10/mes', '+$5-10/mes'],
+        ['TOTAL ADICIONAL', '', '', '+$5-10/mes'],
+    ],
+    col_widths=[6, 3, 3.5, 2]
+)
+spacer(doc)
+
+add_p(doc,
+    'El aumento de precio es MINIMO: $5-10/mes adicionales en Railway para correr '
+    'el contenedor de n8n (imagen n8nio/n8n, ~512MB RAM, CPU minima). '
+    'N8N Community Edition es completamente gratuita — no hay costo de licencia.',
+    bold=False)
+
+add_heading(doc, 'Escenario 2: N8N Cloud (Sin self-hosting)', level=3)
+add_table(doc,
+    ['Plan N8N Cloud', 'Costo mensual', 'Ejecuciones/mes', 'Aplica cuando...'],
+    [
+        ['Starter', '$20/mes', '2,500', 'Volumen bajo: <50 leads/dia, 4 schedulers basicos'],
+        ['Pro', '$50/mes', '10,000', 'Volumen medio: 50-200 leads/dia, 8-10 workflows activos'],
+        ['Business', '$800/mes', '40,000', 'No necesario para este proyecto en su estado actual'],
+    ],
+    col_widths=[3.5, 3, 3.5, 7.5]
+)
+spacer(doc)
+
+add_p(doc,
+    'Estimacion de ejecuciones mensuales para este proyecto (con 4 workflows propuestos):',
+    bold=True)
+add_table(doc,
+    ['Workflow', 'Frecuencia', 'Ejecuciones/mes estimadas'],
+    [
+        ['Post-Visit Followup', 'Cada 15 min', '~2,880 (la mayoria terminan rapido sin citas)'],
+        ['Lead 24h Follow-Up', 'Cada hora', '~720'],
+        ['Auto Deal Stage Updater', 'Por evento HubSpot', '~200-500 segun volumen de notas'],
+        ['Conversation Timeout Reset', 'Cada 2 horas', '~360'],
+        ['High Priority Lead Alert', 'Por evento (lead high priority)', '~100-300'],
+        ['TOTAL ESTIMADO', '', '~4,260 - 4,760 ejecuciones/mes'],
+    ],
+    col_widths=[5, 3.5, 9]
+)
+spacer(doc)
+
+add_p(doc,
+    'Con el volumen estimado (~4,500 ejecuciones/mes), el plan Starter de N8N Cloud ($20/mes) '
+    'seria suficiente. Sin embargo, self-hosted en Railway a $5-10/mes es mas economico '
+    'y sin limite de ejecuciones.',
+    italic=True)
+
+# ── PREGUNTA 4 ──────────────────────────────────────────────
+add_heading(doc, 'P4. Comparativa: Precio vs Efectividad y Funcionalidad', level=2)
+
+add_p(doc,
+    'Esta comparativa evalua las opciones disponibles para cubrir los mismos casos de uso '
+    'que n8n propone (automatizacion de workflows, schedulers, CRM automation, alertas):')
+
+add_heading(doc, 'Opcion A — Status Quo (Solo Python/APScheduler, sin n8n)', level=3)
+add_table(doc,
+    ['Dimension', 'Evaluacion'],
+    [
+        ['Costo adicional', '$0'],
+        ['Funcionalidades que cubre', 'Schedulers basicos, sin visibilidad, sin modificacion en caliente'],
+        ['Nuevas automatizaciones de negocio', 'Requieren desarrollo Python + redeploy (dias)'],
+        ['Visibilidad de errores', 'Solo logs de Railway (texto plano)'],
+        ['Modificar regla de negocio (ej: cambiar 24h a 48h)', 'Editar codigo + commit + push + redeploy (10 min minimo)'],
+        ['Escalabilidad', 'Schedulers compiten con la API por CPU en el mismo proceso'],
+        ['Efectividad para el negocio', '6/10 — funciona pero es opaco y lento de cambiar'],
+        ['Relacion precio/valor', 'Buena en costo, mala en agilidad operativa'],
+    ],
+    col_widths=[5.5, 12]
+)
+spacer(doc)
+
+add_heading(doc, 'Opcion B — N8N Self-Hosted en Railway (Recomendada)', level=3)
+add_table(doc,
+    ['Dimension', 'Evaluacion'],
+    [
+        ['Costo adicional', '+$5-10/mes (Railway infra)'],
+        ['Funcionalidades que cubre', 'Todos los schedulers + CRM automation + alertas + nuevos workflows sin codigo'],
+        ['Nuevas automatizaciones de negocio', 'No-code en UI n8n (horas, no dias)'],
+        ['Visibilidad de errores', 'Dashboard completo: cada ejecucion, cada nodo, input/output visible'],
+        ['Modificar regla de negocio (ej: cambiar 24h a 48h)', '10 segundos en la UI de n8n, sin redeploy'],
+        ['Escalabilidad', 'Proceso independiente del FastAPI, sin competencia por recursos'],
+        ['Efectividad para el negocio', '9/10 — visual, agil, auditable, extensible'],
+        ['Relacion precio/valor', 'Excelente: maxima funcionalidad al minimo costo adicional'],
+    ],
+    col_widths=[5.5, 12]
+)
+spacer(doc)
+
+add_heading(doc, 'Opcion C — N8N Cloud Starter ($20/mes)', level=3)
+add_table(doc,
+    ['Dimension', 'Evaluacion'],
+    [
+        ['Costo adicional', '+$20/mes'],
+        ['Funcionalidades que cubre', 'Igual que Opcion B + sin mantenimiento de infra'],
+        ['Nuevas automatizaciones de negocio', 'Igual que Opcion B'],
+        ['Visibilidad de errores', 'Igual que Opcion B'],
+        ['Modificar regla de negocio', 'Igual que Opcion B'],
+        ['Escalabilidad', 'Igual que Opcion B, gestionada por n8n.io'],
+        ['Efectividad para el negocio', '9/10'],
+        ['Relacion precio/valor', 'Buena: paga $10-15 extra por no tener que gestionar el servidor n8n'],
+    ],
+    col_widths=[5.5, 12]
+)
+spacer(doc)
+
+add_heading(doc, 'Opcion D — HubSpot Professional Workflows (en lugar de n8n)', level=3)
+add_table(doc,
+    ['Dimension', 'Evaluacion'],
+    [
+        ['Costo adicional', '+$890/mes (plan Professional de HubSpot)'],
+        ['Funcionalidades que cubre', 'Solo automatizaciones CRM internas (cambio de stages, emails). NO puede enviar WhatsApp, NO puede leer Redis/MongoDB.'],
+        ['Nuevas automatizaciones de negocio', 'Limitado al ecosistema HubSpot'],
+        ['Visibilidad de errores', 'Si, dentro de HubSpot'],
+        ['Modificar regla de negocio', 'Si, desde UI HubSpot'],
+        ['Escalabilidad', 'Limitada (no interopera con el stack Python)'],
+        ['Efectividad para el negocio', '5/10 — resuelve solo 1 de los 4 workflows propuestos'],
+        ['Relacion precio/valor', 'Muy mala: $890/mes para reemplazar funcionalidad que n8n da por $5-10/mes'],
+    ],
+    col_widths=[5.5, 12]
+)
+spacer(doc)
+
+add_heading(doc, 'Tabla resumen comparativa final', level=3)
+add_table(doc,
+    ['Opcion', 'Costo extra/mes', 'Workflows posibles', 'Sin redeploy', 'Visibilidad', 'Interop. Redis/Mongo', 'Puntuacion'],
+    [
+        ['A — Solo Python', '$0', '4 (existentes)', 'NO', 'Logs texto', 'SI (en codigo)', '5/10'],
+        ['B — N8N Self-Hosted', '+$5-10', '4 + infinitos nuevos', 'SI', 'Dashboard completo', 'SI (nodo nativo)', '9/10'],
+        ['C — N8N Cloud', '+$20', '4 + infinitos nuevos', 'SI', 'Dashboard completo', 'SI', '9/10'],
+        ['D — HubSpot Pro', '+$890', '1-2 (solo CRM)', 'SI', 'Dashboard HubSpot', 'NO', '4/10'],
+        ['E — Twilio Studio', '+$0-30', '1 (mensajeria)', 'SI', 'Limitada', 'NO', '3/10'],
+    ],
+    col_widths=[4, 3, 4.5, 3, 3.5, 3.5, 2.5]
+)
+spacer(doc)
+
+add_p(doc,
+    'Conclusion de la comparativa: N8N Self-Hosted en Railway (Opcion B) ofrece la mejor '
+    'relacion precio/valor por un margen amplio. Por $5-10/mes adicionales se obtiene '
+    'la capacidad de automatizacion que HubSpot Professional ofrece por $890/mes, '
+    'mas integracion con Redis y MongoDB que HubSpot Professional nunca podra hacer. '
+    'La alternativa de no hacer nada (Opcion A) es valida en costo pero limita '
+    'fuertemente la agilidad operativa del equipo a largo plazo.',
+    bold=False, size=10)
+
+spacer(doc)
 footer = doc.add_paragraph()
 footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
 rf = footer.add_run(
     'Informe generado el 18 de Marzo de 2026 — AgenteConversacional_Practica / Branch: FaseFinalDetalles\n'
-    'Fuentes: Análisis de código propio + n8n.io docs + n8n community forum + latenode.com analysis 2025')
+    'Fuentes: Analisis de codigo propio + n8n.io docs + n8n community forum + latenode.com analysis 2025')
 set_run_font(rf, italic=True, size=8, color='6B7280')
 
 # ─────────────────────────────────────────────────────────────
 # SAVE
 # ─────────────────────────────────────────────────────────────
 
-output_path = 'C:/Users/Salo/Desktop/Informe_N8N_AgenteConversacional.docx'
+output_path = 'C:/Users/Salo/Desktop/Informe_N8N_AgenteConversacional_v2.docx'
 doc.save(output_path)
 print(f'Documento guardado en: {output_path}')

@@ -249,8 +249,10 @@ async def _process_message_deferred(
 
         # Fix CR-1: actualizar ZSET antes de notificar via WS.
         # Garantiza que el contacto sea visible en GET /contacts cuando la asesora recibe el ping.
-        # update_activity() tiene su propio try-except interno → si Redis falla, continúa sin bloquear.
-        await state_manager.update_activity(phone_normalized)
+        # Se llama get_state_manager() inline (no se asigna a state_manager) para evitar
+        # UnboundLocalError: state_manager se asigna localmente en línea ~430, por lo que
+        # Python lo marca como variable local en todo el scope — no puede referenciarse antes.
+        await get_state_manager().update_activity(phone_normalized)
 
         # Notificar al panel vía WebSocket
         await ws_manager.notify_new_message(

@@ -89,6 +89,9 @@ const _contactFingerprints = new Map(); // Fingerprint del último render por ph
 let unreadCounts = {};
 // Timestamps del último last_activity conocido por phone (para detección de nuevos mensajes en polling)
 let _lastContactTimestamps = {};
+// Fix CR-4: timestamp del último evento WS recibido por phone.
+// Evita double-counting cuando el polling detecta el mismo mensaje que el WS ya notificó.
+const _lastWsNotifiedTimestamps = {};
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
@@ -949,9 +952,10 @@ async function loadContacts() {
                 if (isNewMessage) {
                     console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
                     if (phone !== currentPhone) {
-                        const wsActive = ws && ws.readyState === WebSocket.OPEN;
-                        if (!wsActive) {
-                            // WS inactivo: el polling es la única fuente, incrementar normalmente
+                        // Fix CR-4: no incrementar si el WS ya notificó este mensaje en los últimos 10s.
+                        // Ventana de 10s cubre servidores lentos (Railway bajo carga puede demorar 6-8s).
+                        const wsHandledRecently = (_lastWsNotifiedTimestamps[phone] || 0) > Date.now() - 10000;
+                        if (!wsHandledRecently) {
                             unreadCounts[phone] = (unreadCounts[phone] || 0) + 1;
                         }
                         // Siempre actualizar el badge con el contador actual (evita desfase visual)
@@ -1466,6 +1470,12 @@ function renderContactsList(contacts) {
         const currentAtPosition = container.children[i];
         if (currentAtPosition !== el) {
             container.insertBefore(el, currentAtPosition || null);
+        }
+
+        // Fix CR-3: re-aplicar badge si el contacto tiene no-leídos pendientes en memoria.
+        // updateUnreadBadge() hace early-return si el elemento no existe → es seguro llamarlo siempre.
+        if (unreadCounts[phone] > 0) {
+            updateUnreadBadge(phone, unreadCounts[phone]);
         }
     }
 }
@@ -2908,6 +2918,10 @@ function connectWebSocket() {
             // Cambiar a fallback polling (10s, sin historial) — el WS maneja eventos en tiempo real
             startFallbackPolling();
 
+            // Fix CR-2: resync inmediato al reconectar para recuperar mensajes llegados durante la desconexión.
+            // _lastContactTimestamps detectará actividad nueva → incrementará unreadCounts correctamente.
+            loadContacts();
+
             // Notificar que contacto actual esta siendo observado
             if (currentPhone) {
                 ws.send(JSON.stringify({
@@ -2933,15 +2947,16 @@ function connectWebSocket() {
             // Retomar polling activo como fallback (WS no disponible)
             startPolling();
 
-            // Reconectar con backoff exponencial
-            if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
-                wsReconnectAttempts++;
-                wsCurrentDelay = Math.min(WS_BASE_RECONNECT_DELAY * Math.pow(2, wsReconnectAttempts - 1), 30000);
-                console.log(`[Panel] Reintentando conexion WS (${wsReconnectAttempts}/${WS_MAX_RECONNECT_ATTEMPTS}) en ${wsCurrentDelay}ms...`);
-                setTimeout(connectWebSocket, wsCurrentDelay);
-            } else {
-                console.warn('[Panel] Max reintentos WS alcanzado. Usando solo polling.');
-            }
+            // Fix CR-2: reconexión infinita con backoff exponencial, sin hard limit.
+            // El exponente se cap en 5 para que el delay máximo sea ~30s (1000 * 2^5 = 32s → clamp 30s).
+            // Sin límite de intentos: si Railway hace un deploy, el panel reconecta solo sin recargar.
+            wsReconnectAttempts++;
+            wsCurrentDelay = Math.min(
+                WS_BASE_RECONNECT_DELAY * Math.pow(2, Math.min(wsReconnectAttempts - 1, 5)),
+                30000
+            );
+            console.log(`[Panel] Reintentando conexion WS (intento ${wsReconnectAttempts}) en ${wsCurrentDelay}ms...`);
+            setTimeout(connectWebSocket, wsCurrentDelay);
         };
 
         ws.onerror = (error) => {
@@ -2994,6 +3009,25 @@ function scheduleContactsRefresh() {
  * Maneja mensajes recibidos del WebSocket.
  * @param {Object} data - Mensaje parseado
  */
+/**
+ * Fix CR-2 (safety net para contactos nuevos): verifica que el contacto esté en la lista
+ * después de recibir un evento WS. Cubre el gap residual de ensure_meta_with_channel()
+ * que no puede ser movido antes del WS notify (depende de la respuesta de Sofia).
+ * @param {string} phone - Teléfono a buscar
+ * @param {number} retriesLeft - Máximo 3 intentos. No aumentar: si el contacto no llega
+ *   en 3×700ms=2.1s es un problema del servidor, no de timing.
+ */
+function ensureContactVisible(phone, retriesLeft = 3) {
+    if (retriesLeft <= 0) return;
+    const found = allContacts.some(c => (c.phone || '') === phone || (c.whatsapp || '') === phone);
+    if (!found) {
+        setTimeout(async () => {
+            await loadContacts();
+            ensureContactVisible(phone, retriesLeft - 1);
+        }, 700);
+    }
+}
+
 function handleWebSocketMessage(data) {
     console.log('[Panel] Mensaje WS recibido:', data.type, data);
 
@@ -3005,6 +3039,7 @@ function handleWebSocketMessage(data) {
             // Si action es 'new_message', actualizar badge directamente sin re-render
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
                 console.log('[Panel] Incrementando unreadCounts para', data.phone);
+                _lastWsNotifiedTimestamps[data.phone] = Date.now();  // Fix CR-4: marcar evento WS
                 unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
                 updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
                 if (document.hidden) {
@@ -3024,8 +3059,13 @@ function handleWebSocketMessage(data) {
                 break;
             }
 
-            // Refresco debounced: agrupa eventos rápidos en una sola carga
-            scheduleContactsRefresh();
+            // Fix CR-2: para new_message, forzar carga inmediata + retry si el contacto es nuevo.
+            // Para otros actions, mantener el debounce para no sobrecargar con eventos frecuentes.
+            if (data.action === 'new_message' && data.phone) {
+                loadContacts().then(() => ensureContactVisible(data.phone));
+            } else {
+                scheduleContactsRefresh();
+            }
             // Si el chat activo es el que recibió el mensaje, refrescar historial
             if (currentPhone && data.phone && data.phone === currentPhone) {
                 loadChatHistory(currentContactId);
@@ -3090,12 +3130,17 @@ function handleNewMessageNotification(data) {
 
     // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
     if (data.phone && data.phone !== currentPhone) {
+        _lastWsNotifiedTimestamps[data.phone] = Date.now();  // Fix CR-4: marcar evento WS
         unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
         updateUnreadBadge(data.phone, unreadCounts[data.phone]); // badge inmediato, sin esperar HTTP
     }
 
-    // Refresco debounced: consistente con el path contact_updated, evita doble carga
-    scheduleContactsRefresh();
+    // Fix CR-2: carga inmediata + retry compensatorio para garantizar que el contacto sea visible.
+    if (data.phone) {
+        loadContacts().then(() => ensureContactVisible(data.phone));
+    } else {
+        scheduleContactsRefresh();
+    }
 
     // Si el contacto actual es el que envio mensaje, refrescar chat
     if (currentPhone === data.phone) {
@@ -3143,9 +3188,33 @@ function handleStatusChange(data) {
 
 
 /**
+ * Fix CR-5: tono corto de notificación usando Web Audio API.
+ * No depende de permisos de notificación ni de archivos externos.
+ * Falla silenciosamente si el navegador no soporta AudioContext.
+ */
+function playNotificationBeep() {
+    try {
+        const ctx = new AudioContext();
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+        gainNode.gain.setValueAtTime(0.25, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        oscillator.start(ctx.currentTime);
+        oscillator.stop(ctx.currentTime + 0.3);
+    } catch(e) {}
+}
+
+/**
  * Muestra notificacion del navegador.
  */
 function showBrowserNotification(title, body) {
+    // Fix CR-5: reproducir tono independiente del permiso de notificaciones del browser
+    playNotificationBeep();
+
     // Verificar si las notificaciones estan soportadas y permitidas
     if (!('Notification' in window)) {
         return;

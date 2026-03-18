@@ -246,7 +246,12 @@ async def _process_message_deferred(
             media=media_dict
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
-        
+
+        # Fix CR-1: actualizar ZSET antes de notificar via WS.
+        # Garantiza que el contacto sea visible en GET /contacts cuando la asesora recibe el ping.
+        # update_activity() tiene su propio try-except interno → si Redis falla, continúa sin bloquear.
+        await state_manager.update_activity(phone_normalized)
+
         # Notificar al panel vía WebSocket
         await ws_manager.notify_new_message(
             phone=phone_normalized,
@@ -449,8 +454,8 @@ async def _process_message_deferred(
                     f"esperando nombre antes de activar PENDING_HANDOFF"
                 )
         
-        await state_manager.update_activity(phone_normalized)
-        
+        # update_activity() fue movido antes del WS notify (Fix CR-1 — ver líneas anteriores)
+
         # ✅ FIX: Persistir canal_origen y owner_id en Redis para asignación correcta de asesores
         # El canal histórico se preserva para futuros mensajes del mismo contacto
         # El owner_id es CRÍTICO para que el contacto aparezca en el panel del asesor correcto

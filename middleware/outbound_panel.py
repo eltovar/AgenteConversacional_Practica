@@ -282,7 +282,7 @@ async def _get_redis_client() -> redis.Redis:
             redis_url,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=10,
+            max_connections=5,
         )
         logger.info("[Panel] Redis connection pool inicializado")
     return _redis_pool
@@ -1816,7 +1816,6 @@ async def create_manual_contact(
         "status": "success",
         "message": f"Contacto '{firstname}' creado exitosamente",
         "contact_id": contact_id,
-        "deal_id": deal_id,
         "phone": phone_normalized,
         "display_name": f"{firstname} {lastname}".strip(),
         "owner_id": owner_id

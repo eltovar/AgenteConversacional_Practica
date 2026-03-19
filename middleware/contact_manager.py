@@ -41,6 +41,9 @@ LEAD_CREATION_LOCK_TTL = 2
 # Máximo de reintentos para rate limits
 MAX_RATE_LIMIT_RETRIES = 3
 
+# ID de etapa "Nuevo Lead" en HubSpot (Contact-centric, lifecyclestage del Contacto)
+STAGE_NUEVO_LEAD = "1326631578"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # EXCEPCIONES PERSONALIZADAS

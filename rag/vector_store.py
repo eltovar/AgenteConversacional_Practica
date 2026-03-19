@@ -8,6 +8,7 @@ import os
 from typing import Any, List, Optional, Dict
 from langchain_postgres import PGVector
 from langchain_core.documents import Document
+from sqlalchemy.exc import IntegrityError
 from llm_client import embeddings
 from logging_config import logger
 
@@ -52,15 +53,33 @@ class PgVectorStore:
                 logger.info("[VectorStore] Connection string normalizada: postgres:// → postgresql://")
 
             # Crear instancia REAL de PGVector de LangChain
-            self.vector_db = PGVector(
-                connection=normalized_connection,
-                collection_name=self.collection_name,
-                embeddings=self.embedding_function,
-                use_jsonb=True  # Usar JSONB para metadata (más eficiente)
-            )
+            # NOTA: Railway levanta múltiples workers simultáneamente. Todos intentan
+            # CREATE TABLE al mismo tiempo → race condition → IntegrityError en workers 2 y 3.
+            # El retry funciona porque para entonces el worker ganador ya creó la tabla,
+            # y checkfirst=True de SQLAlchemy la detecta correctamente en la segunda pasada.
+            try:
+                self.vector_db = PGVector(
+                    connection=normalized_connection,
+                    collection_name=self.collection_name,
+                    embeddings=self.embedding_function,
+                    use_jsonb=True
+                )
+            except IntegrityError as race_err:
+                if "already exists" not in str(race_err).lower() and "UniqueViolation" not in str(race_err):
+                    raise
+                logger.warning(
+                    "[VectorStore] ⚠️ Race condition en startup (múltiples workers). "
+                    "Las tablas ya fueron creadas por otro worker. Reintentando con conexión limpia..."
+                )
+                # Segundo intento: tablas ya existen → checkfirst=True las detecta → no recrea
+                self.vector_db = PGVector(
+                    connection=normalized_connection,
+                    collection_name=self.collection_name,
+                    embeddings=self.embedding_function,
+                    use_jsonb=True,
+                    pre_delete_collection=False
+                )
 
-            # Verificar conexión ejecutando una operación simple
-            # (PGVector crea las tablas automáticamente si no existen)
             logger.info("[VectorStore] PGVector inicializado. Verificando tablas...")
 
             # Marcar como inicializado

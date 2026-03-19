@@ -1859,17 +1859,26 @@ function handleFileSelect(input) {
     if (!file) return;
 
     // Validar tipo de archivo
-    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm'];
+    const validTypes = [
+        'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+        'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm',
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
     if (!validTypes.includes(file.type)) {
-        alert('Tipo de archivo no soportado. Solo imagenes y audios.');
+        alert('Tipo de archivo no soportado. Formatos permitidos: imágenes, audios, PDF, Word, Excel.');
         input.value = '';
         return;
     }
 
-    // Validar tamano (max 16MB para Bunny.net CDN)
-    const maxSize = 16 * 1024 * 1024;
+    // Validar tamaño: documentos max 10MB, otros max 16MB
+    const isDocument = file.type.includes('pdf') || file.type.includes('word') || file.type.includes('excel') || file.type.includes('spreadsheet');
+    const maxSize = isDocument ? 10 * 1024 * 1024 : 16 * 1024 * 1024;
     if (file.size > maxSize) {
-        alert('El archivo es demasiado grande. Maximo 16MB.');
+        alert(isDocument ? 'El documento es demasiado grande. Máximo 10MB.' : 'El archivo es demasiado grande. Máximo 16MB.');
         input.value = '';
         return;
     }

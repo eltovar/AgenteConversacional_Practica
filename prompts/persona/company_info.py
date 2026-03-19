@@ -61,6 +61,9 @@ Contabilidad (facturas, certificados tributarios, retenciones)
 Contratos (terminación, prórroga, documentación)
   WhatsApp: 604 444 63 64
 
+Cartera (cobros, mora, acuerdos de pago)
+  WhatsApp: 310 515 5781
+
 Jurídico (Data Crédito, demandas, codeudores)
   WhatsApp: 321 789 86 79
 

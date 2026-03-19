@@ -465,6 +465,12 @@ async def _process_message_deferred(
         if contact_info and contact_info.properties:
             hubspot_owner_id = contact_info.properties.get("hubspot_owner_id")
 
+        # Si se detectó código de inmueble, forzar handoff high (espejo del flujo principal).
+        # Protege contra el caso en que Sofia falle JSON parsing y retorne análisis vacío.
+        if property_code_result.has_code and analysis and analysis.handoff_priority not in ("immediate", "high"):
+            analysis.handoff_priority = "high"
+            analysis.intencion_visita = True
+
         # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
         # Contactos que regresan (is_new=False): su meta ya existe, el bloque
         # "else" de ensure_meta_with_channel no corre → add_to_zset no tiene efecto.
@@ -473,6 +479,7 @@ async def _process_message_deferred(
             not _is_new_contact          # Contacto que regresa: sin cambio de comportamiento
             or not analysis              # Sin análisis (error): safe default = mostrar en panel
             or analysis.handoff_priority not in ("none", "low")  # Señal comercial confirmada
+            or not is_business_hours()   # Fuera de horario → siempre visible para seguimiento
         )
 
         await state_manager.ensure_meta_with_channel(

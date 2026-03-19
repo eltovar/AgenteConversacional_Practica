@@ -257,6 +257,15 @@ async def _invalidate_contact_stage_cache(contact_id: str) -> None:
         logger.debug(f"[Panel] Error invalidando contact stage cache: {e}")
 
 
+async def _cache_contact_stage(contact_id: str, stage: str) -> None:
+    """Guarda lifecyclestage en Redis cache en background (sin bloquear el request)."""
+    try:
+        redis_client = await _get_redis_client()
+        await redis_client.setex(f"contact_stage:{contact_id}", CONTACT_STAGE_CACHE_TTL, stage)
+    except Exception:
+        pass
+
+
 async def _get_redis_client() -> redis.Redis:
     """
     Obtiene cliente Redis con connection pool reutilizable.
@@ -380,14 +389,14 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
     
     url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
     payload = {
-        "properties": ["firstname", "lastname", "email", "phone"],
+        "properties": ["firstname", "lastname", "email", "phone", "lifecyclestage", "hubspot_owner_id"],
         "inputs": [{"id": cid} for cid in contact_ids]
     }
-    
+
     try:
         client = get_httpx_client()
         response = await _hubspot_post(client, url, payload, HUBSPOT_API_KEY, max_retries=2)
-        
+
         if response.status_code in (200, 207):
             data = response.json()
             results = {}
@@ -398,7 +407,9 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
                     "firstname": props.get("firstname", ""),
                     "lastname": props.get("lastname", ""),
                     "email": props.get("email"),
-                    "phone": props.get("phone")
+                    "phone": props.get("phone"),
+                    "lifecyclestage": props.get("lifecyclestage") or "",
+                    "hubspot_owner_id": props.get("hubspot_owner_id") or "",
                 }
             if response.status_code == 207:
                 logger.info(f"[Panel] Batch HubSpot 207 (parcial): {len(results)}/{len(contact_ids)} contactos válidos")
@@ -3312,13 +3323,18 @@ async def get_active_contacts(
                     contact["email"] = hs_info.get("email")
                 # Si no estaba en batch, conservar display_name de Redis
 
-                # Leer lifecyclestage del Contact para el dropdown de pipeline.
+                # Leer lifecyclestage — preferir batch (0 llamadas extra) → fallback individual
                 if not contact.get("current_stage"):
-                    try:
-                        contact["current_stage"] = await _get_contact_lifecyclestage(cid)
-                    except Exception as e:
-                        logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {e}")
-                        contact["current_stage"] = HUBSPOT_STAGE_NUEVO_LEAD
+                    batch_stage = batch_contact_data.get(cid, {}).get("lifecyclestage")
+                    if batch_stage:
+                        contact["current_stage"] = batch_stage
+                        asyncio.create_task(_cache_contact_stage(cid, batch_stage))
+                    else:
+                        try:
+                            contact["current_stage"] = await _get_contact_lifecyclestage(cid)
+                        except Exception as e:
+                            logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {e}")
+                            contact["current_stage"] = HUBSPOT_STAGE_NUEVO_LEAD
 
             # Si aún no tenemos nombre, usar teléfono
             if not contact.get("display_name"):

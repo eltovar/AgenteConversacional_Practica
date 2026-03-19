@@ -74,6 +74,20 @@ def _get_bunny_pull_zone() -> str:
 
 BUNNY_PULL_ZONE = _get_bunny_pull_zone()
 
+# ============================================================================
+# DOCUMENTOS: CONSTANTES Y TIPOS SOPORTADOS
+# ============================================================================
+
+MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+DOCUMENT_MIME_TYPES = {
+    "application/pdf": ("pdf", "📄"),
+    "application/msword": ("doc", "📝"),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ("docx", "📝"),
+    "application/vnd.ms-excel": ("xls", "📊"),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ("xlsx", "📊"),
+}
+
 
 # ============================================================================
 # DETECCIÓN DE FORMATO POR MAGIC BYTES
@@ -186,6 +200,51 @@ def detect_audio_format_by_magic_bytes(file_bytes: bytes) -> str:
     return "ogg"
 
 
+def detect_document_format_by_magic_bytes(data: bytes, hint_filename: str = "") -> str:
+    """
+    Detecta el MIME type de un documento por magic bytes.
+
+    - PDF: empieza con %PDF
+    - DOCX/XLSX: formato ZIP (PK\\x03\\x04), se infiere del nombre de archivo
+    - DOC/XLS legacy: Compound Document Binary Format (D0 CF 11 E0)
+
+    Retorna MIME type string, o "application/octet-stream" si no reconoce.
+    """
+    if not data or len(data) < 4:
+        return "application/octet-stream"
+
+    magic = data[:8]
+
+    # PDF: empieza con %PDF
+    if magic[:4] == b"%PDF":
+        logger.debug("[MediaProcessor] Documento detectado: PDF")
+        return "application/pdf"
+
+    # Formatos ZIP (DOCX, XLSX son archivos ZIP)
+    if magic[:4] == b"PK\x03\x04":
+        if hint_filename and "." in hint_filename:
+            ext = hint_filename.rsplit(".", 1)[-1].lower()
+            if ext == "docx":
+                return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif ext == "xlsx":
+                return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            elif ext == "doc":
+                return "application/msword"
+            elif ext == "xls":
+                return "application/vnd.ms-excel"
+        return "application/zip"
+
+    # DOC/XLS legacy (Compound Binary Format)
+    if magic[:8] == b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1":
+        if hint_filename and "." in hint_filename:
+            ext = hint_filename.rsplit(".", 1)[-1].lower()
+            if ext == "xls":
+                return "application/vnd.ms-excel"
+        return "application/msword"
+
+    return "application/octet-stream"
+
+
 class MediaProcessor:
     """
     Procesador unificado de multimedia.
@@ -252,8 +311,12 @@ class MediaProcessor:
             # Video
             ".mp4": "video/mp4",
             ".mov": "video/quicktime",
-            # Documentos  
+            # Documentos
             ".pdf": "application/pdf",
+            ".doc": "application/msword",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xls": "application/vnd.ms-excel",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
         
         # Obtener extensión en minúsculas
@@ -521,7 +584,10 @@ class MediaProcessor:
             "transcription": "",
             "analysis": "",
             "media_type": "",
-            "body_for_ai": ""
+            "body_for_ai": "",
+            "doc_format": "",
+            "doc_icon": "",
+            "original_filename": "",
         }
 
         try:
@@ -529,19 +595,28 @@ class MediaProcessor:
             content_lower = content_type.lower()
             is_audio = "audio" in content_lower or "ogg" in content_lower
             is_image = "image" in content_lower
+            is_document = content_type in DOCUMENT_MIME_TYPES
 
             # 1. Descargar de Twilio primero (para todos los tipos)
             media_bytes = await self.download_twilio_media(media_url)
 
+            # Validar tamaño máximo para documentos
+            if is_document and len(media_bytes) > MAX_DOCUMENT_SIZE_BYTES:
+                logger.warning(
+                    f"[MediaProcessor] Documento excede 10MB: {len(media_bytes)} bytes"
+                )
+                result["body_for_ai"] = "[El cliente intentó enviar un documento pero excede el límite de 10MB]"
+                return result
+
             if is_audio:
                 result["media_type"] = "audio"
                 folder = "audios_clientes"
-                
+
                 # IMPORTANTE: Detectar formato REAL por magic bytes
                 actual_audio_format = detect_audio_format_by_magic_bytes(media_bytes)
                 logger.info(f"[MediaProcessor] Formato audio detectado por magic bytes: {actual_audio_format} (Content-Type reportaba: {content_type})")
                 extension = f".{actual_audio_format}"
-                
+
             elif is_image:
                 result["media_type"] = "image"
                 folder = "imagenes_clientes"
@@ -549,14 +624,27 @@ class MediaProcessor:
                 img_format, _ = detect_image_format_by_magic_bytes(media_bytes)
                 extension = f".{img_format}"
                 logger.info(f"[MediaProcessor] Imagen cliente detectada: formato={img_format}")
+
+            elif is_document:
+                doc_fmt, doc_icon = DOCUMENT_MIME_TYPES[content_type]
+                result["media_type"] = "document"
+                result["doc_format"] = doc_fmt
+                result["doc_icon"] = doc_icon
+                from datetime import datetime
+                month_folder = datetime.utcnow().strftime("%Y-%m")
+                folder = f"documents_clientes/{month_folder}"
+                extension = f".{doc_fmt}"
+                logger.info(f"[MediaProcessor] Documento cliente detectado: formato={doc_fmt}")
+
             else:
                 result["media_type"] = "file"
                 folder = "archivos_clientes"
                 extension = ".bin"
-            
+
             # 2. Generar nombre único y subir a Bunny.net
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
+            result["original_filename"] = filename
             result["permanent_url"] = await self.upload_to_bunny(media_bytes, folder, filename)
 
             # 3. Procesamiento específico por tipo
@@ -579,6 +667,12 @@ class MediaProcessor:
                     result["body_for_ai"] = f"[Imagen del cliente]: {analysis}"
                 else:
                     result["body_for_ai"] = "[El cliente envió una imagen]"
+
+            elif is_document:
+                result["body_for_ai"] = (
+                    f"[El cliente envió un documento {result['doc_format'].upper()}: "
+                    f"{filename}]"
+                )
 
             else:
                 result["body_for_ai"] = "[El cliente envió un archivo]"
@@ -766,6 +860,21 @@ class MediaProcessor:
 
         # Formatos de audio soportados (webm, ogg, wav, mp4 del panel de asesoras)
         is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower or "wav" in content_lower
+        is_document = content_type in DOCUMENT_MIME_TYPES
+
+        if is_document:
+            if len(file_bytes) > MAX_DOCUMENT_SIZE_BYTES:
+                raise ValueError(f"El archivo excede el límite de 10MB ({len(file_bytes)} bytes)")
+            doc_fmt, _ = DOCUMENT_MIME_TYPES[content_type]
+            from datetime import datetime
+            month_folder = datetime.utcnow().strftime("%Y-%m")
+            folder = f"documents_asesores/{month_folder}"
+            extension = f".{doc_fmt}"
+            final_content_type = content_type
+            clean_phone = phone.replace("+", "").replace(" ", "")
+            filename = f"{clean_phone}_{int(time.time())}{extension}"
+            logger.info(f"[MediaProcessor] Subiendo documento asesor: formato={doc_fmt}")
+            return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_audio:
             folder = "audios_asesores"

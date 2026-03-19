@@ -174,7 +174,9 @@ async def _process_message_deferred(
                         processed_body = f"{body}\n\n{media_result.get('body_for_ai', '')}"
                     else:
                         processed_body = media_result.get("body_for_ai", "[Imagen recibida]")
-                        
+                elif media_result.get("media_type") == "document":
+                    processed_body = media_result.get("body_for_ai", "[El cliente envió un documento]")
+
             except Exception as e:
                 logger.error(f"[DeferredProcess] Error procesando multimedia: {e}")
                 processed_body = body or "[El cliente envió un archivo]"
@@ -234,8 +236,11 @@ async def _process_message_deferred(
                 "type": media_result.get("media_type"),
                 "transcription": media_result.get("transcription"),
                 "analysis": media_result.get("analysis"),
+                "doc_format": media_result.get("doc_format") or None,
+                "doc_icon": media_result.get("doc_icon") or None,
+                "original_filename": media_result.get("original_filename") or None,
             }
-        
+
         client_mongo_id = await mongo_manager.save_message(
             phone=phone_normalized,
             content=processed_body,
@@ -246,6 +251,22 @@ async def _process_message_deferred(
             media=media_dict
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
+
+        # Nota automática en HubSpot cuando el cliente envía un documento
+        if (
+            media_result
+            and media_result.get("media_type") == "document"
+            and media_result.get("permanent_url")
+            and contact_id
+        ):
+            try:
+                doc_name = media_result.get("original_filename", "documento")
+                doc_url = media_result.get("permanent_url")
+                note_body = f"📄 Documento recibido: {doc_name} - {doc_url}"
+                await hubspot_client.create_note(contact_id=contact_id, body=note_body)
+                logger.info(f"[HubSpot] Nota de documento creada para contacto {contact_id}")
+            except Exception as e:
+                logger.warning(f"[HubSpot] Error creando nota de documento: {e}")
 
         # Fix CR-1: actualizar ZSET antes de notificar via WS.
         # Garantiza que el contacto sea visible en GET /contacts cuando la asesora recibe el ping.
@@ -1765,6 +1786,9 @@ async def _sync_message_to_hubspot(
                 "type": media_type,
                 "transcription": media_result.get("transcription"),
                 "analysis": media_result.get("analysis"),
+                "doc_format": media_result.get("doc_format") or None,
+                "doc_icon": media_result.get("doc_icon") or None,
+                "original_filename": media_result.get("original_filename") or None,
             }
 
         mongo_message_id = await mongo_manager.save_message(
@@ -1792,7 +1816,7 @@ async def _sync_message_to_hubspot(
         # Construir contenido para HubSpot incluyendo link multimedia si existe
         hubspot_content = message
         if media_url:
-            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
             hubspot_content = f"{message}\n\n{media_label}: {media_url}" if message else f"{media_label}: {media_url}"
 
         if direction == "incoming":
@@ -1943,6 +1967,9 @@ async def _sync_conversation_with_analysis_to_hubspot(
                 "type": media_type,
                 "transcription": media_result.get("transcription"),
                 "analysis": media_result.get("analysis"),
+                "doc_format": media_result.get("doc_format") or None,
+                "doc_icon": media_result.get("doc_icon") or None,
+                "original_filename": media_result.get("original_filename") or None,
             }
 
         # Guardar mensaje del cliente SOLO si no fue guardado previamente
@@ -1989,7 +2016,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
         # Construir contenido para HubSpot incluyendo link multimedia si existe
         hubspot_client_content = user_message
         if media_url:
-            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo"}.get(media_type, "📎 Archivo")
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
             hubspot_client_content = f"{user_message}\n\n{media_label}: {media_url}" if user_message else f"{media_label}: {media_url}"
 
         # 1. Registrar mensaje del cliente en Timeline (con link multimedia si existe)

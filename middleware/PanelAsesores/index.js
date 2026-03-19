@@ -1532,6 +1532,9 @@ function renderChatBubbles(messages) {
             const transcription = msg.media?.transcription;
             const analysis = msg.media?.analysis;
 
+            // Helper: detectar si la URL corresponde a un documento por extensión
+            const _isDocUrl = (url) => url && /\.(pdf|docx?|xlsx?)(\?|$)/i.test(url);
+
             if (mediaUrl) {
                 if (mediaType === 'image') {
                     mediaHtml = `
@@ -1569,6 +1572,33 @@ function renderChatBubbles(messages) {
                                 <span class="font-medium">Transcripcion:</span> ${escapeHtml(transcription)}
                             </div>`;
                     }
+                } else if (mediaType === 'document' || _isDocUrl(mediaUrl)) {
+                    // File Card para documentos (PDF, DOCX, XLSX)
+                    const docFormat = msg.media?.doc_format
+                        || (mediaUrl.match(/\.([a-z]+)(\?|$)/i) || [])[1]?.toLowerCase()
+                        || 'doc';
+                    const docIcon = msg.media?.doc_icon
+                        || (docFormat === 'pdf' ? '📄' : (docFormat.includes('xl') ? '📊' : '📝'));
+                    const fileName = msg.media?.original_filename
+                        || decodeURIComponent(mediaUrl.split('/').pop().split('?')[0])
+                        || 'Documento';
+
+                    mediaHtml = `
+                        <div class="mb-2 p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center gap-3"
+                             style="max-width: 280px;">
+                            <span style="font-size:1.5rem;line-height:1">${docIcon}</span>
+                            <div style="flex:1;min-width:0;">
+                                <p class="text-sm font-medium text-gray-800"
+                                   style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                                   title="${escapeHtml(fileName)}">${escapeHtml(fileName)}</p>
+                                <p class="text-xs text-gray-500" style="text-transform:uppercase;">${escapeHtml(docFormat)}</p>
+                            </div>
+                            <a href="${mediaUrl}" target="_blank" rel="noopener"
+                               class="flex-shrink-0 px-3 py-1 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700 transition-colors font-medium"
+                               style="white-space:nowrap;">
+                                Ver
+                            </a>
+                        </div>`;
                 } else {
                     // Archivo generico
                     mediaHtml = `

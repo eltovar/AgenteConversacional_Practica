@@ -579,8 +579,8 @@ class ContactManager:
             "canal_origen": hs_canal,
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
 
-            # Lifecycle stage inicial
-            "lifecyclestage": "lead",
+            # Lifecycle stage inicial (custom stage "Nuevo Lead")
+            "lifecyclestage": STAGE_NUEVO_LEAD,
         }
 
         # Asignar owner si está disponible
@@ -616,13 +616,7 @@ class ContactManager:
             if panel_base_url and owner_id and admin_api_key else ""
         )
 
-        # Crear deal asociado en background solo si corresponde (contacto con intención comercial)
-        if create_deal:
-            asyncio.create_task(
-                self._create_deal_for_new_lead(contact_id, phone_normalized, source_channel, url_chat, owner_id)
-            )
-
-        # Escribir url_chat en el contacto (en background, independiente del deal)
+        # Escribir url_chat en el contacto (en background)
         if url_chat:
             asyncio.create_task(self._write_panel_url(contact_id, url_chat))
 
@@ -642,8 +636,7 @@ class ContactManager:
         Se ejecuta en background (asyncio.create_task) para no bloquear
         el procesamiento del webhook. Usa el pipeline y etapa correctos.
 
-        Pipeline: 854756009
-        Etapa inicial: 1275156339 (Nuevo Lead)
+        Etapa inicial: 1326631578 (Nuevo Lead)
 
         Si se provee url_chat, también actualiza la propiedad url_chat del negocio
         para que el deep link esté disponible tanto en el Contacto como en el Negocio.
@@ -655,7 +648,7 @@ class ContactManager:
         """
         # IDs del pipeline definidos como constantes
         PIPELINE_ID = "854756009"
-        STAGE_NUEVO_LEAD = "1275156339"
+        STAGE_NUEVO_LEAD = "1326631578"
 
         try:
             deal_name = f"Lead WA {phone_normalized}"
@@ -786,28 +779,6 @@ class ContactManager:
                         "[ContactManager] No se pudo actualizar url_chat: %s", url_err
                     )
             
-            # 5. Verificar si ya tiene deal y crear uno si no
-            try:
-                has_deal = await self._check_contact_has_deal(contact_id)
-                if not has_deal:
-                    logger.info(
-                        "[ContactManager] Contacto %s sin deal. Creando...",
-                        contact_id
-                    )
-                    await self._create_deal_for_new_lead(
-                        contact_id, phone_normalized, source_channel, url_chat, owner_id
-                    )
-                else:
-                    logger.info(
-                        "[ContactManager] Contacto %s ya tiene deal. No se crea duplicado.",
-                        contact_id
-                    )
-            except Exception as deal_err:
-                logger.warning(
-                    "[ContactManager] Error verificando/creando deal para %s: %s",
-                    contact_id, deal_err
-                )
-                
         except Exception as e:
             logger.warning(
                 "[ContactManager] Error asignando owner a contacto %s: %s",

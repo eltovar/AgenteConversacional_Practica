@@ -87,8 +87,8 @@ DEFAULT_TEMPLATE_PREFIX = "whatsapp_template:default:"
 
 # IDs del Pipeline Comercial de HubSpot (actualizado)
 HUBSPOT_PIPELINE_ID = "854756009"
-HUBSPOT_STAGE_NUEVO_LEAD = "1275156339"
-HUBSPOT_STAGE_EN_CONVERSACION = "1275156340"
+HUBSPOT_STAGE_NUEVO_LEAD = "1326631578"
+HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
@@ -97,11 +97,9 @@ _redis_pool: Optional[redis.Redis] = None
 _httpx_client: Optional[httpx.AsyncClient] = None
 
 # ============================================================================
-# Caché de deal info en Redis (compartida entre workers Railway)
+# Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
 # ============================================================================
-# Key: deal_cache:{contact_id}  Value: JSON {"deal_id": str, "current_stage": str}  TTL: 3600s
-DEAL_CACHE_TTL_SECONDS = 3600  # TTL de 1 hora — deals no cambian frecuentemente; cubre propagación de HubSpot
-DEAL_CACHE_KEY_PREFIX = "deal_cache:"
+CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
 
 def get_httpx_client() -> httpx.AsyncClient:
     """
@@ -133,46 +131,44 @@ _TEMPLATES_INITIALIZED: bool = False
 # Etapas del Pipeline de HubSpot
 # ============================================================================
 PIPELINE_STAGES = {
-    "1275156339": "Nuevo Lead",
-    "1275156340": "En conversación",
-    "1275156341": "Visita agendada",
-    "1279054635": "Visita realizada",
-    "1275312311": "Propuesta",
-    "1279054636": "En estudio",
-    "1275156342": "Cerrado ganado",
-    "1279054637": "Cerrado vendido",
-    "1323394565": "No responde",
-    "1323394566": "Hasta 1.5M",
-    "1323394567": "Hasta 2M",
-    "1323394568": "Hasta 2.5M",
-    "1323394569": "Mayor de 3M",
-    "1323394570": "Local o Bodega",
-    "1323393830": "Ana Contratos",
-    "1323393831": "Propietarios",
-    "1323393832": "Pagos y Servicios Publicos",
-    "1323393833": "Ya encontro"
+    "1326631578": "Nuevo Lead",
+    "1326623075": "En conversación",
+    "marketingqualifiedlead": "Visita agendada",
+    "salesqualifiedlead": "Visita realizada",
+    "opportunity": "En estudio",
+    "customer": "Cerrado ganado",
+    "evangelist": "Cerrado perdido",
+    "other": "No responde",
+    "1326623067": "Hasta 1.5M",
+    "1326631573": "Hasta 2M",
+    "1326632625": "Hasta 2.5M",
+    "1326631574": "De 3M en adelante",
+    "1326623539": "Local o Bodega",
+    "1326632628": "Ana Contratos",
+    "1326623069": "Propietarios",
+    "1326632209": "Pagos y Servicios Publicos",
+    "1326623541": "Ya encontro"
 }
 
 # Lista ordenada de etapas para el frontend
 PIPELINE_STAGES_LIST = [
-    {"id": "1275156339", "name": "Nuevo Lead"},
-    {"id": "1275156340", "name": "En conversación"},
-    {"id": "1275156341", "name": "Visita agendada"},
-    {"id": "1279054635", "name": "Visita realizada"},
-    {"id": "1275312311", "name": "Propuesta"},
-    {"id": "1279054636", "name": "En estudio"},
-    {"id": "1275156342", "name": "Cerrado ganado"},
-    {"id": "1279054637", "name": "Cerrado vendido"},
-    {"id": "1323394565", "name": "No responde"},
-    {"id": "1323394566", "name": "Hasta 1.5M"},
-    {"id": "1323394567", "name": "Hasta 2M"},
-    {"id": "1323394568", "name": "Hasta 2.5M"},
-    {"id": "1323394569", "name": "Mayor de 3M"},
-    {"id": "1323394570", "name": "Local o Bodega"},
-    {"id": "1323393830", "name": "Ana Contratos"},
-    {"id": "1323393831", "name": "Propietarios"},
-    {"id": "1323393832", "name": "Pagos y Servicios Publicos"},
-    {"id": "1323393833", "name": "Ya encontro"}
+    {"id": "1326631578", "name": "Nuevo Lead"},
+    {"id": "1326623075", "name": "En conversación"},
+    {"id": "marketingqualifiedlead", "name": "Visita agendada"},
+    {"id": "salesqualifiedlead", "name": "Visita realizada"},
+    {"id": "opportunity", "name": "En estudio"},
+    {"id": "customer", "name": "Cerrado ganado"},
+    {"id": "evangelist", "name": "Cerrado perdido"},
+    {"id": "other", "name": "No responde"},
+    {"id": "1326623067", "name": "Hasta 1.5M"},
+    {"id": "1326631573", "name": "Hasta 2M"},
+    {"id": "1326632625", "name": "Hasta 2.5M"},
+    {"id": "1326631574", "name": "De 3M en adelante"},
+    {"id": "1326623539", "name": "Local o Bodega"},
+    {"id": "1326632628", "name": "Ana Contratos"},
+    {"id": "1326623069", "name": "Propietarios"},
+    {"id": "1326632209", "name": "Pagos y Servicios Publicos"},
+    {"id": "1326623541", "name": "Ya encontro"}
 ]
 
 @dataclass
@@ -217,102 +213,48 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
     return False
 
 
-async def _get_contact_deal_info(contact_id: str, skip_cache: bool = False) -> Optional[Dict[str, Any]]:
+async def _get_contact_lifecyclestage(contact_id: str) -> str:
     """
-    Busca el deal asociado a un contacto y retorna su información.
-    Usa caché en Redis (compartida entre workers Railway) para reducir llamadas a HubSpot.
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        skip_cache: Si True, ignora el caché y consulta HubSpot directamente
-
-    Returns:
-        dict con deal_id y current_stage, o None si no hay deal
+    Lee la propiedad lifecyclestage del Contact en HubSpot.
+    Usa caché en Redis (1h) para reducir llamadas a la API.
     """
     if not contact_id or not HUBSPOT_API_KEY:
-        return None
+        return HUBSPOT_STAGE_NUEVO_LEAD
 
-    redis_client = await _get_redis_client()
-    cache_key = f"{DEAL_CACHE_KEY_PREFIX}{contact_id}"
-
-    # Verificar caché Redis
-    if not skip_cache:
-        try:
-            cached_raw = await redis_client.get(cache_key)
-            if cached_raw:
-                cached = json.loads(cached_raw)
-                logger.debug(f"[Panel] Deal info de Redis cache para {contact_id}")
-                return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
-        except Exception as cache_err:
-            logger.debug(f"[Panel] Error leyendo deal cache Redis: {cache_err}")
-
-    try:
-        base_url = "https://api.hubapi.com"
-
-        # Buscar deals asociados al contacto (usa cliente global)
-        associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
-        response = await _hubspot_get(None, associations_url, HUBSPOT_API_KEY)
-
-        if response.status_code == 429:
-            logger.warning(f"[Panel] HubSpot 429 persistente al buscar deals de contacto {contact_id}")
-            # Si hay rate limiting, intentar devolver del caché aunque esté expirado
-            try:
-                cached_raw = await redis_client.get(cache_key)
-                if cached_raw:
-                    cached = json.loads(cached_raw)
-                    return {"deal_id": cached.get("deal_id"), "current_stage": cached.get("current_stage")}
-            except Exception:
-                pass
-            return None
-        if response.status_code != 200:
-            logger.debug(
-                f"[Panel] No se encontraron deals para contacto {contact_id} "
-                f"(status={response.status_code})"
-            )
-            return None
-
-        data = response.json()
-        results = data.get("results", [])
-
-        if not results:
-            return None
-
-        # Tomar el primer deal (más reciente)
-        deal_id = results[0].get("id")
-
-        # Obtener la etapa actual del deal (usa cliente global)
-        deal_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
-        deal_response = await _hubspot_get(
-            None, deal_url, HUBSPOT_API_KEY, params={"properties": "dealstage"}
-        )
-
-        result = {"deal_id": deal_id, "current_stage": None}
-        if deal_response.status_code == 200:
-            deal_data = deal_response.json()
-            result["current_stage"] = deal_data.get("properties", {}).get("dealstage")
-
-        # Guardar en Redis con TTL
-        try:
-            cache_data = json.dumps({"deal_id": result["deal_id"], "current_stage": result["current_stage"]})
-            await redis_client.setex(cache_key, DEAL_CACHE_TTL_SECONDS, cache_data)
-        except Exception as write_err:
-            logger.debug(f"[Panel] Error escribiendo deal cache Redis: {write_err}")
-
-        return result
-
-    except Exception as e:
-        logger.debug(f"[Panel] Error obteniendo deal info para {contact_id}: {e}")
-        return None
-
-
-async def _invalidate_deal_cache(contact_id: str) -> None:
-    """Invalida el caché de deal info en Redis para un contacto específico."""
+    cache_key = f"contact_stage:{contact_id}"
     try:
         redis_client = await _get_redis_client()
-        await redis_client.delete(f"{DEAL_CACHE_KEY_PREFIX}{contact_id}")
-        logger.debug(f"[Panel] Caché de deal invalidado en Redis para {contact_id}")
+        cached = await redis_client.get(cache_key)
+        if cached:
+            return cached.decode()
+    except Exception:
+        pass
+
+    try:
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}?properties=lifecyclestage"
+        response = await _hubspot_get(None, url, HUBSPOT_API_KEY)
+        if response.status_code == 200:
+            stage = response.json().get("properties", {}).get("lifecyclestage") or HUBSPOT_STAGE_NUEVO_LEAD
+            try:
+                redis_client = await _get_redis_client()
+                await redis_client.setex(cache_key, CONTACT_STAGE_CACHE_TTL, stage)
+            except Exception:
+                pass
+            return stage
     except Exception as e:
-        logger.debug(f"[Panel] Error invalidando deal cache: {e}")
+        logger.debug(f"[Panel] Error leyendo lifecyclestage de contacto {contact_id}: {e}")
+
+    return HUBSPOT_STAGE_NUEVO_LEAD
+
+
+async def _invalidate_contact_stage_cache(contact_id: str) -> None:
+    """Invalida el caché de lifecyclestage en Redis para un contacto específico."""
+    try:
+        redis_client = await _get_redis_client()
+        await redis_client.delete(f"contact_stage:{contact_id}")
+        logger.debug(f"[Panel] Caché de stage invalidado para {contact_id}")
+    except Exception as e:
+        logger.debug(f"[Panel] Error invalidando contact stage cache: {e}")
 
 
 async def _get_redis_client() -> redis.Redis:
@@ -476,71 +418,32 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 _batch_contact_cache: Dict[str, Dict[str, Any]] = {}
 
 
-async def _update_deal_to_en_conversacion(contact_id: str) -> None:
+async def _update_contact_to_en_conversacion(contact_id: str) -> None:
     """
-    Busca el deal activo del contacto y actualiza su stage a 'En conversación'
-    (1275156340) cuando la asesora inicia una conversación activa.
+    Actualiza lifecyclestage del Contact a 'En conversación' (1326623075)
+    cuando la asesora inicia una conversación. Solo avanza si está en 'Nuevo Lead'.
     Se ejecuta en background — no bloquea el envío del mensaje.
     """
     import httpx
-    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
-    if not hubspot_api_key or not contact_id:
+    if not HUBSPOT_API_KEY or not contact_id:
         return
     try:
-        # Buscar deals asociados al contacto
-        search_url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}/associations/deals"
-        headers = {"Authorization": f"Bearer {hubspot_api_key}"}
+        current_stage = await _get_contact_lifecyclestage(contact_id)
+        if current_stage and current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
+            logger.info(f"[Panel] Contacto {contact_id} ya en etapa '{current_stage}', no se sobreescribe")
+            return
 
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(search_url, headers=headers)
-            if r.status_code != 200:
-                logger.warning(f"[Panel] No se pudo obtener deals para contact {contact_id}: {r.status_code}")
-                return
-
-            results = r.json().get("results", [])
-            if not results:
-                logger.debug(f"[Panel] Sin deals asociados a contacto {contact_id}")
-                return
-
-            # Actualizar el primer deal encontrado
-            deal_id = results[0].get("id")
-            patch_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
-
-            # Solo avanzar si el deal está en "Nuevo Lead" — no sobreescribir etapas más avanzadas
-            stage_r = await client.get(
-                patch_url,
-                headers=headers,
-                params={"properties": "dealstage"}
-            )
-            if stage_r.status_code == 200:
-                current_stage = stage_r.json().get("properties", {}).get("dealstage", "")
-                if current_stage and current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
-                    logger.info(
-                        f"[Panel] Deal {deal_id} ya en etapa '{current_stage}', "
-                        f"no se sobreescribe con 'En conversación'"
-                    )
-                    return
-
-            patch_payload = {
-                "properties": {
-                    "dealstage": HUBSPOT_STAGE_EN_CONVERSACION,  # 1275156340
-                    "pipeline": HUBSPOT_PIPELINE_ID              # 854756009
-                }
-            }
-            pr = await client.patch(
-                patch_url,
-                json=patch_payload,
-                headers={**headers, "Content-Type": "application/json"}
-            )
-            if pr.status_code in [200, 201]:
-                logger.info(f"[Panel] Deal {deal_id} actualizado a 'En conversación' (contact={contact_id})")
-                # Invalidar caché de deal info para este contacto
-                await _invalidate_deal_cache(contact_id)
+            r = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}})
+            if r.status_code == 200:
+                logger.info(f"[Panel] Contacto {contact_id} actualizado a 'En conversación'")
+                await _invalidate_contact_stage_cache(contact_id)
             else:
-                logger.warning(f"[Panel] Error actualizando deal stage: {pr.status_code} - {pr.text}")
-
+                logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
     except Exception as e:
-        logger.error(f"[Panel] Error en _update_deal_to_en_conversacion: {e}")
+        logger.error(f"[Panel] Error en _update_contact_to_en_conversacion: {e}")
 
 
 async def check_24h_window(phone_normalized: str) -> WindowStatus:
@@ -917,9 +820,9 @@ async def send_message(
                 canal=canal_final
             )
             logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
-            # Sincronizar deal a "En conversación" en HubSpot (background)
+            # Sincronizar Contact a "En conversación" en HubSpot (background)
             if contact_id:
-                background_tasks.add_task(_update_deal_to_en_conversacion, contact_id)
+                background_tasks.add_task(_update_contact_to_en_conversacion, contact_id)
         elif current_status == ConversationStatus.IN_CONVERSATION:
             # Ya está en conversación, solo refrescar TTL
             await state_manager.set_status(
@@ -1797,7 +1700,7 @@ async def create_manual_contact(
         "lastname": lastname.strip() if lastname else "",
         "canal_origen": canal_hs,
         "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
-        "lifecyclestage": "lead",
+        "lifecyclestage": HUBSPOT_STAGE_NUEVO_LEAD,
     }
 
     # Agregar owner si está disponible
@@ -1838,64 +1741,7 @@ async def create_manual_contact(
         logger.error(f"[Panel] Error HTTP creando contacto: {e}")
         raise HTTPException(status_code=500, detail=f"Error de conexión: {str(e)}")
 
-    # === 5. Crear Deal asociado ===
-    deal_id = None
-    try:
-        # Construir descripción con las características del inmueble
-        description_parts = []
-        if property_type:
-            description_parts.append(f"Tipo inmueble: {property_type}")
-        if operation_type:
-            description_parts.append(f"Operación: {operation_type}")
-        if budget:
-            description_parts.append(f"Presupuesto: {budget}")
-        if characteristics:
-            description_parts.append(f"Características: {characteristics}")
-
-        deal_properties = {
-            "dealname": f"Lead: {firstname} {lastname}".strip(),
-            "pipeline": HUBSPOT_PIPELINE_ID,          # 854756009
-            "dealstage": HUBSPOT_STAGE_NUEVO_LEAD,    # 1275156339
-            "canal_origen": canal_hs,  # valor mapeado para HubSpot
-        }
-
-        # Agregar descripción si hay características
-        if description_parts:
-            deal_properties["description"] = "\n".join(description_parts)
-
-        if owner_id:
-            deal_properties["hubspot_owner_id"] = owner_id
-
-        deal_url = "https://api.hubapi.com/crm/v3/objects/deals"
-        deal_payload = {
-            "properties": deal_properties,
-            "associations": [
-                {
-                    "to": {"id": contact_id},
-                    "types": [
-                        {
-                            "associationCategory": "HUBSPOT_DEFINED",
-                            "associationTypeId": 3  # Deal to Contact
-                        }
-                    ]
-                }
-            ]
-        }
-
-        async with httpx.AsyncClient(timeout=40.0) as client:
-            response = await _hubspot_post(client, deal_url, deal_payload, hubspot_api_key)
-
-            if response.status_code in [200, 201]:
-                deal_data = response.json()
-                deal_id = deal_data.get("id")
-                logger.info(f"[Panel] Deal creado: {deal_id} para contacto {contact_id}")
-            else:
-                logger.warning(f"[Panel] No se pudo crear deal: {response.status_code} - {response.text}")
-
-    except Exception as e:
-        logger.warning(f"[Panel] Error creando deal (no crítico): {e}")
-
-    # === 5.5. Escribir url_chat en Contacto y Deal ===
+    # === 5.5. Escribir url_chat en Contacto ===
     try:
         panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
         admin_api_key = os.getenv("ADMIN_API_KEY", "")
@@ -1913,17 +1759,6 @@ async def create_manual_contact(
                     json={"properties": {"url_chat": url_chat}}
                 )
                 logger.info(f"[Panel] url_chat escrito en contacto {contact_id}")
-            
-            # Escribir en deal si existe
-            if deal_id:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    deal_patch_url = f"https://api.hubapi.com/crm/v3/objects/deals/{deal_id}"
-                    await client.patch(
-                        deal_patch_url,
-                        headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
-                        json={"properties": {"url_chat": url_chat}}
-                    )
-                    logger.info(f"[Panel] url_chat escrito en deal {deal_id}")
     except Exception as e:
         logger.warning(f"[Panel] Error escribiendo url_chat (no crítico): {e}")
 
@@ -2499,34 +2334,22 @@ async def close_conversation(
 
 
 # ============================================================================
-# Endpoint para actualizar etapa del deal en HubSpot
+# Endpoint para actualizar lifecyclestage del Contact en HubSpot
 # ============================================================================
 
 @router.patch("/contacts/{contact_id}/stage")
-async def update_deal_stage(
+async def update_contact_stage(
     contact_id: str,
     stage_id: str = Body(..., embed=True),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
-    Actualiza la etapa del deal en HubSpot desde el panel de asesores.
-
-    Este endpoint:
-    1. Busca el deal asociado al contacto
-    2. Actualiza la propiedad 'dealstage' del deal
-    3. Retorna confirmación del cambio
-
-    Args:
-        contact_id: ID del contacto en HubSpot
-        stage_id: ID de la nueva etapa del pipeline
-
-    Returns:
-        Confirmación del cambio con nombre de etapa
+    Actualiza la etapa (lifecyclestage) del Contact en HubSpot desde el panel de asesores.
+    Arquitectura Contact-Centric: no depende de objetos Deal.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Validar que el stage_id sea válido
     if stage_id not in PIPELINE_STAGES:
         raise HTTPException(
             status_code=400,
@@ -2539,76 +2362,32 @@ async def update_deal_stage(
 
     try:
         import httpx
-
-        headers = {
-            "Authorization": f"Bearer {hubspot_token}",
-            "Content-Type": "application/json"
-        }
-
-        base_url = "https://api.hubapi.com"
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        headers = {"Authorization": f"Bearer {hubspot_token}", "Content-Type": "application/json"}
+        payload = {"properties": {"lifecyclestage": stage_id}}
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            # 1. Buscar deals asociados al contacto
-            associations_url = f"{base_url}/crm/v3/objects/contacts/{contact_id}/associations/deals"
+            response = await client.patch(url, headers=headers, json=payload)
 
-            response = await client.get(associations_url, headers=headers)
-
-            if response.status_code != 200:
-                logger.error(f"[Panel] Error buscando deals: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Error buscando deals asociados: {response.text[:200]}"
-                )
-
-            associations = response.json()
-            results = associations.get("results", [])
-
-            if not results:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No se encontraron deals asociados a este contacto"
-                )
-
-            # 2. Tomar el primer deal (más reciente)
-            deal_id = results[0].get("id")
-
-            # 3. Actualizar la etapa del deal
-            update_url = f"{base_url}/crm/v3/objects/deals/{deal_id}"
-            payload = {
-                "properties": {
-                    "dealstage": stage_id
-                }
+        if response.status_code == 200:
+            stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
+            logger.info(f"[Panel] Contacto {contact_id} actualizado a etapa '{stage_name}'")
+            await _invalidate_contact_stage_cache(contact_id)
+            return {
+                "status": "success",
+                "message": f"Etapa actualizada a '{stage_name}'",
+                "contact_id": contact_id,
+                "stage_id": stage_id,
+                "stage_name": stage_name
             }
-
-            response = await client.patch(update_url, headers=headers, json=payload)
-
-            if response.status_code == 200:
-                stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
-                logger.info(
-                    f"[Panel] Deal {deal_id} actualizado a etapa '{stage_name}' "
-                    f"(contact_id: {contact_id})"
-                )
-                
-                # Invalidar caché de deal info para este contacto
-                await _invalidate_deal_cache(contact_id)
-
-                return {
-                    "status": "success",
-                    "message": f"Etapa actualizada a '{stage_name}'",
-                    "deal_id": deal_id,
-                    "contact_id": contact_id,
-                    "stage_id": stage_id,
-                    "stage_name": stage_name
-                }
-            else:
-                logger.error(f"[Panel] Error actualizando deal: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Error actualizando deal: {response.text[:200]}"
-                )
+        else:
+            logger.error(f"[Panel] Error actualizando lifecyclestage: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Error actualizando etapa: {response.text[:200]}"
+            )
 
     except httpx.TimeoutException:
-        logger.error(f"[Panel] Timeout actualizando etapa para contact_id={contact_id}")
         raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
     except HTTPException:
         raise
@@ -3290,12 +3069,12 @@ async def _get_contacts_by_worker_filter(
     Lógica:
     1. MongoDB: citas futuras activas del worker → contact_ids + phones
     2. HubSpot batch: obtener nombre/email de los contactos (1 llamada)
-    3. Por cada contacto: obtener deal info (stage) desde _get_contact_deal_info (usa caché Redis)
-    4. Filtrar: solo etapa "1275156341" (Visita agendada)
+    3. Por cada contacto: obtener lifecyclestage desde _get_contact_lifecyclestage (usa caché Redis)
+    4. Filtrar: solo etapa "marketingqualifiedlead" (Visita agendada)
     5. Redis: añadir estado de conversación si está activo
     6. Retornar ordenado por appointment_dt ASC
     """
-    STAGE_CITA_AGENDADA = "1275156341"
+    STAGE_CITA_AGENDADA = "marketingqualifiedlead"
 
     mongo_mgr = get_mongo_manager()
     appointment_records = await mongo_mgr.get_contacts_by_worker(worker_id)
@@ -3343,19 +3122,15 @@ async def _get_contacts_by_worker_filter(
         if not cid:
             continue
 
-        # Deal info con caché Redis (evita rate limit)
+        # Leer lifecyclestage del Contact (con caché Redis)
         try:
-            deal_info = await _get_contact_deal_info(cid)
+            current_stage = await _get_contact_lifecyclestage(cid)
         except Exception:
-            deal_info = None
-
-        current_stage = deal_info.get("current_stage") if deal_info else None
+            current_stage = None
 
         # Filtrar: solo etapa "Visita agendada"
         if current_stage != STAGE_CITA_AGENDADA:
             continue
-
-        deal_id = deal_info.get("deal_id") if deal_info else None
 
         # Nombre desde HubSpot batch
         hs_info = batch_names.get(cid, {})
@@ -3364,7 +3139,7 @@ async def _get_contacts_by_worker_filter(
         email = hs_info.get("email")
 
         # Filtro opcional por advisor (owner)
-        owner_id = deal_info.get("owner_id") if deal_info else None
+        owner_id = hs_info.get("hubspot_owner_id")
         if advisor and owner_id != advisor:
             continue
 
@@ -3385,7 +3160,6 @@ async def _get_contacts_by_worker_filter(
             "display_name": display_name,
             "email": email,
             "owner_id": owner_id,
-            "deal_id": deal_id,
             "current_stage": current_stage,
             "has_appointment": True,
             "appointment_dt": rec.get("appointment_dt"),
@@ -3538,69 +3312,13 @@ async def get_active_contacts(
                     contact["email"] = hs_info.get("email")
                 # Si no estaba en batch, conservar display_name de Redis
 
-                # Buscar deal asociado para el dropdown de pipeline.
-                # Si Redis meta ya tiene deal_id (contactos migrados via patch_redis_deal_ids.py),
-                # usarlo directamente sin llamar HubSpot → elimina los 429 en carga del panel.
-                if contact.get("deal_id"):
-                    contact.setdefault("current_stage", contact.get("deal_stage", "1275156339"))
-                else:
+                # Leer lifecyclestage del Contact para el dropdown de pipeline.
+                if not contact.get("current_stage"):
                     try:
-                        deal_info = await _get_contact_deal_info(cid)
-                        if deal_info:
-                            contact["deal_id"] = deal_info.get("deal_id")
-                            contact["current_stage"] = deal_info.get("current_stage")
-                        else:
-                            # AUTO-CREATE DEAL: Si el contacto no tiene deal, crear uno
-                            # Evitar reintentos para contactos cuya creación de deal ya falló
-                            _deal_fail_key = f"deal_failed:{cid}"
-                            try:
-                                _rc = await _get_redis_client()
-                                _already_failed = await _rc.exists(_deal_fail_key)
-                            except Exception:
-                                _rc = None
-                                _already_failed = False
-                            if _already_failed:
-                                logger.debug(f"[Panel] Skipping deal auto-create para {cid} (marcado como fallido)")
-                            else:
-                                try:
-                                    created_deal = await contact_manager._create_deal_for_new_lead(
-                                        contact_id=cid,
-                                        phone_normalized=phone,
-                                        source_channel="panel_auto"
-                                    )
-                                    if created_deal:
-                                        contact["deal_id"] = created_deal.get("deal_id")
-                                        contact["current_stage"] = created_deal.get("current_stage")
-                                        try:
-                                            if _rc is None:
-                                                _rc = await _get_redis_client()
-                                            _cache_data = json.dumps({
-                                                "deal_id": created_deal.get("deal_id"),
-                                                "current_stage": created_deal.get("current_stage")
-                                            })
-                                            await _rc.setex(f"{DEAL_CACHE_KEY_PREFIX}{cid}", DEAL_CACHE_TTL_SECONDS, _cache_data)
-                                        except Exception:
-                                            pass
-                                        logger.info(f"[Panel] Deal auto-creado para contacto {cid}: {created_deal.get('deal_id')}")
-                                    else:
-                                        # Falló (None) → marcar para no reintentar durante 1h
-                                        try:
-                                            if _rc is None:
-                                                _rc = await _get_redis_client()
-                                            await _rc.setex(_deal_fail_key, 3600, "1")
-                                        except Exception:
-                                            pass
-                                        logger.warning(f"[Panel] Deal auto-create fallido para {cid}, marcado 1h")
-                                except Exception as create_err:
-                                    try:
-                                        if _rc is None:
-                                            _rc = await _get_redis_client()
-                                        await _rc.setex(_deal_fail_key, 3600, "1")
-                                    except Exception:
-                                        pass
-                                    logger.warning(f"[Panel] No se pudo auto-crear deal: {create_err}")
+                        contact["current_stage"] = await _get_contact_lifecyclestage(cid)
                     except Exception as e:
-                        logger.debug(f"[Panel] No se pudo obtener deal info: {e}")
+                        logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {e}")
+                        contact["current_stage"] = HUBSPOT_STAGE_NUEVO_LEAD
 
             # Si aún no tenemos nombre, usar teléfono
             if not contact.get("display_name"):

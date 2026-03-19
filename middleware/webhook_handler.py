@@ -204,7 +204,7 @@ async def _process_message_deferred(
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=phone_raw,
                 source_channel=historical_channel,  # ← Usar canal histórico
-                create_deal=False  # El deal se crea DESPUÉS si hay intención comercial confirmada
+                create_deal=False
             )
             contact_id = contact_info.contact_id if contact_info else None
             _contact_is_new = contact_info.is_new if contact_info else False
@@ -464,18 +464,6 @@ async def _process_message_deferred(
         hubspot_owner_id = None
         if contact_info and contact_info.properties:
             hubspot_owner_id = contact_info.properties.get("hubspot_owner_id")
-
-        # Crear Deal en HubSpot solo si el contacto es nuevo Y tiene intención comercial.
-        # Para contactos de consulta general (handoff_priority none/low) no se crea deal.
-        if _contact_is_new and analysis and analysis.handoff_priority not in ("none", "low"):
-            asyncio.create_task(
-                contact_manager._create_deal_for_new_lead(
-                    contact_info.contact_id,
-                    phone_normalized,
-                    historical_channel,
-                    owner_id=hubspot_owner_id
-                )
-            )
 
         # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
         # Contactos que regresan (is_new=False): su meta ya existe, el bloque
@@ -2103,23 +2091,6 @@ async def _sync_conversation_with_analysis_to_hubspot(
                     f"[HubSpot Sync] ✅ Nombre del cliente actualizado: {analysis.nombre_detectado} "
                     f"(contact_id: {contact_id})"
                 )
-                # Actualizar nombre del deal al obtener el nombre del cliente
-                try:
-                    hubspot = hubspot_client
-                    deals = await hubspot.get_contact_deals(contact_id)
-                    if deals:
-                        deal_id = deals[0]["id"]
-                        await hubspot.update_deal(deal_id, {
-                            "dealname": f"Lead - {analysis.nombre_detectado}"
-                        })
-                        logger.info(
-                            f"[HubSpot Sync] Deal name actualizado a "
-                            f"'Lead - {analysis.nombre_detectado}' (deal {deal_id})"
-                        )
-                except Exception as deal_name_err:
-                    logger.warning(
-                        f"[HubSpot Sync] No se pudo actualizar nombre del deal: {deal_name_err}"
-                    )
             except Exception as name_err:
                 logger.error(f"[HubSpot Sync] Error actualizando nombre: {name_err}")
 
@@ -2195,46 +2166,6 @@ async def _sync_conversation_with_analysis_to_hubspot(
         except Exception as _crm_err:
             logger.warning("[HubSpot Sync] Error escribiendo Datos Sofia en Contacto: %s", _crm_err)
 
-    # ═══════════════════════════════════════════════════════════════════
-    # SYNC DEAL — una sola llamada con TODAS las props del Deal:
-    # chatbot_conversation, canal_origen, Datos Sofia, props CRM legacy
-    # ═══════════════════════════════════════════════════════════════════
-    deal_all_props = {}
-
-    # 1. chatbot_conversation (siempre) — chatbot_timestamp excluido: solo existe en Contactos, no en Deals
-    deal_all_props.update({k: v for k, v in base_properties.items() if k != "chatbot_timestamp"})
-
-    # 2. Props CRM existentes en lead_context (mensajes anteriores)
-    for _p in [
-        "chatbot_property_type", "chatbot_operation_type",
-        "chatbot_location", "chatbot_rooms", "chatbot_score",
-        "chatbot_budget", "canal_origen", "chatbot_urgency",
-    ]:
-        if lead_context and lead_context.get(_p):
-            deal_all_props[_p] = lead_context[_p]
-
-    # 3. Datos Sofia recién extraídos (prioridad sobre lead_context)
-    deal_all_props.update(crm_contact_props)
-
-    # 4. Portal link si aplica
-    if lead_context and lead_context.get("portal_url"):
-        deal_all_props["chatbot_portal_url"] = lead_context["portal_url"][:500]
-    if lead_context and lead_context.get("portal_link") and lead_context.get("portal_id"):
-        deal_all_props["canal_origen"] = lead_context["portal_id"]
-
-    if deal_all_props:
-        try:
-            hubspot = hubspot_client
-            deals = await hubspot.get_contact_deals(contact_id)
-            if deals:
-                _deal_id = deals[0]["id"]
-                await hubspot.update_deal(_deal_id, deal_all_props)
-                logger.info(
-                    "[HubSpot Sync] ✅ Deal %s sincronizado: %s",
-                    _deal_id, list(deal_all_props.keys())
-                )
-        except Exception as _deal_err:
-            logger.warning("[HubSpot Sync] Error sync Deal: %s", _deal_err)
 
 
 async def _notify_high_priority_lead(

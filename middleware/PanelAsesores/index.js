@@ -28,26 +28,25 @@ function formatBogotaTime(ts) {
 const POLLING_INTERVAL_IDLE = 10000;   // 10 segundos cuando no hay chat activo
 const POLLING_INTERVAL_ACTIVE = 3000;  // 3 segundos cuando hay chat abierto
 
-// Etapas del Pipeline de HubSpot
+// Etapas del Pipeline de HubSpot (Contact-based)
 const PIPELINE_STAGES = [
-    { id: "1275156339", name: "Nuevo Lead" },
-    { id: "1275156340", name: "En conversacion" },
-    { id: "1275156341", name: "Visita agendada" },
-    { id: "1279054635", name: "Visita realizada" },
-    { id: "1275312311", name: "Propuesta" },
-    { id: "1279054636", name: "En estudio" },
-    { id: "1275156342", name: "Cerrado ganado" },
-    { id: "1279054637", name: "Cerrado vendido" },
-    { id: "1323394565", name: "No responde" },
-    { id: "1323394566", name: "Hasta 1.5M" },
-    { id: "1323394567", name: "Hasta 2M" },
-    { id: "1323394568", name: "Hasta 2.5M" },
-    { id: "1323394569", name: "Mayor de 3M" },
-    { id: "1323394570", name: "Local o Bodega" },
-    { id: "1323393830", name: "Ana Contratos" },
-    { id: "1323393831", name: "Propietarios" },
-    { id: "1323393832", name: "Pagos y Servicios Publicos" },
-    { id: "1323393833", name: "Ya encontro" }
+    { id: "1326631578", name: "Nuevo Lead" },
+    { id: "1326623075", name: "En conversacion" },
+    { id: "marketingqualifiedlead", name: "Visita agendada" },
+    { id: "salesqualifiedlead", name: "Visita realizada" },
+    { id: "opportunity", name: "En estudio" },
+    { id: "customer", name: "Cerrado ganado" },
+    { id: "evangelist", name: "Cerrado perdido" },
+    { id: "other", name: "No responde" },
+    { id: "1326623067", name: "Hasta 1.5M" },
+    { id: "1326631573", name: "Hasta 2M" },
+    { id: "1326632625", name: "Hasta 2.5M" },
+    { id: "1326631574", name: "De 3M en adelante" },
+    { id: "1326623539", name: "Local o Bodega" },
+    { id: "1326632628", name: "Ana Contratos" },
+    { id: "1326623069", name: "Propietarios" },
+    { id: "1326632209", name: "Pagos y Servicios Publicos" },
+    { id: "1326623541", name: "Ya encontro" }
 ];
 
 // Portales disponibles por equipo (advisor ID → portales)
@@ -211,7 +210,7 @@ async function filterContacts(searchTerm) {
 // FUNCION DE ACTUALIZACION DE ETAPA DE PIPELINE
 // =========================================================================
 
-async function updateDealStage(contactId, dealId, stageId) {
+async function updateDealStage(contactId, stageId) {
     try {
         showLoader();
         const response = await fetch(`${BASE_URL}/contacts/${contactId}/stage`, {
@@ -231,10 +230,8 @@ async function updateDealStage(contactId, dealId, stageId) {
             console.log(`[Panel] Etapa actualizada: ${stageName}`);
 
             // ACTUALIZAR CACHÉ LOCAL para evitar flickering en próximo polling
-            if (contactId && contactDealCache[contactId]) {
-                contactDealCache[contactId].current_stage = stageId;
-            } else if (contactId) {
-                contactDealCache[contactId] = { deal_id: dealId, current_stage: stageId };
+            if (contactId) {
+                contactDealCache[contactId] = { current_stage: stageId };
             }
 
             // Notificacion visual temporal
@@ -1234,15 +1231,15 @@ async function loadContactDetail(phone, contactId, canal) {
  * Genera el HTML del dropdown de pipeline para un contacto.
  * Extraído de la función anidada original para poder usarse en _buildContactHTML.
  */
-function _buildPipelineDropdown(contactIdForDropdown, dealIdForDropdown, currentStageForDropdown) {
-    if (!dealIdForDropdown) return '';
+function _buildPipelineDropdown(contactIdForDropdown, currentStageForDropdown) {
+    if (!contactIdForDropdown) return '';
     const options = PIPELINE_STAGES.map(stage =>
         `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
     ).join('');
     return `
         <select class="text-xs border rounded px-1 py-0.5 bg-white cursor-pointer hover:border-blue-400 focus:ring-1 focus:ring-blue-400"
                 data-contact-id="${contactIdForDropdown}"
-                onchange="updateDealStage('${contactIdForDropdown}', '${dealIdForDropdown}', this.value)"
+                onchange="updateDealStage('${contactIdForDropdown}', this.value)"
                 onclick="event.stopPropagation()">
             ${options}
         </select>
@@ -1258,14 +1255,12 @@ function _getContactFingerprint(contact) {
     const phone = contact.phone || '';
     const cacheKey = contactId || phone;
     const cached = contactDealCache[cacheKey];
-    const dealId = contact.deal_id || (cached ? (cached.deal_id || cached) : '');
     const currentStage = contact.current_stage || (cached?.current_stage) || '';
     return [
         contact.conversation_status || contact.status || '',
         contact.is_active ? '1' : '0',
         contact.display_name || '',
         contact.canal_origen || '',
-        dealId,
         currentStage,
         contact.time_ago || '',
         contact.ttl_display || '',
@@ -1312,25 +1307,17 @@ function _buildContactHTML(contact) {
         ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded mr-1">${canalOrigen.replace('_', ' ')}</span>`
         : '';
 
-    let dealId = contact.deal_id || '';
-    let currentStage = contact.current_stage || '';
     const cacheKey = contactId || phone;
+    let currentStage = contact.current_stage || contactDealCache[cacheKey]?.current_stage || '';
 
-    if (dealId && cacheKey) {
-        contactDealCache[cacheKey] = {
-            deal_id: dealId,
-            current_stage: currentStage || contactDealCache[cacheKey]?.current_stage || ''
-        };
-    } else if (cacheKey && contactDealCache[cacheKey]) {
-        dealId = contactDealCache[cacheKey].deal_id || contactDealCache[cacheKey];
-        if (!currentStage && contactDealCache[cacheKey].current_stage) {
-            currentStage = contactDealCache[cacheKey].current_stage;
-        }
+    // Actualizar caché local de stage para evitar flickering en re-renders
+    if (cacheKey && contact.current_stage) {
+        contactDealCache[cacheKey] = { current_stage: contact.current_stage };
     }
 
     let badge = '';
     if (isInConversation || isHumanActive || isActive) {
-        const pipelineDropdown = _buildPipelineDropdown(contactId, dealId, currentStage);
+        const pipelineDropdown = _buildPipelineDropdown(contactId, currentStage);
         if (pipelineDropdown) {
             badge = `${canalBadge}${pipelineDropdown}
                      ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}

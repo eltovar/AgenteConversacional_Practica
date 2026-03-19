@@ -557,6 +557,7 @@ class CRMAgent:
                 "chatbot_timestamp": timestamp_ms,
                 "canal_origen": channel_origin,  # Canal de origen para workflows y reportes
                 "hs_analytics_source": analytics_source,  # Categoría macro para gráficos de HubSpot
+                "lifecyclestage": "1326631578",  # Nuevo Lead (Contact-Centric, sin Deal)
             }
 
             # Agregar email si fue proporcionado
@@ -598,37 +599,6 @@ class CRMAgent:
 
             logger.info(f"[CRMAgent] Contacto {action_type} exitosamente: {contact_id}")
 
-            # 4. CREAR DEAL (Oportunidad de Venta)
-            deal_name = f"Lead WhatsApp - {lead_name} - {metadata.get('tipo_propiedad', 'Propiedad')}"
-
-            deal_properties = {
-                "dealname": deal_name,
-                "amount": self._parse_amount(metadata.get("presupuesto", "0")),
-                "description": f"Lead capturado vía chatbot Sofía. Interesado en {metadata.get('ubicacion', 'propiedad')}.",
-                "chatbot_property_type": metadata.get("tipo_propiedad", ""),
-                "chatbot_operation_type": metadata.get("tipo_operacion", ""),  # NUEVO: Tipo de operación
-                "chatbot_location": metadata.get("ubicacion", ""),
-                "chatbot_budget": budget_numeric,  # Reutilizar el valor numérico calculado
-                "chatbot_rooms": features_formatted,  # Características formateadas
-                "chatbot_score": str(lead_score),
-                "chatbot_urgency": metadata.get("tiempo", ""),
-                "chatbot_conversation": conversation_text,  # Historial completo de la conversación
-                "canal_origen": channel_origin,  # Canal de origen del lead
-            }
-
-            # Asignar el mismo owner al Deal
-            if owner_id:
-                deal_properties["hubspot_owner_id"] = owner_id
-
-            # Crear deal con el pipeline correspondiente al canal de origen
-            deal_id = await self.hubspot.create_deal(
-                contact_id,
-                deal_properties,
-                pipeline_id=pipeline_config.get("pipeline_id"),
-                dealstage=pipeline_config.get("stage_id")
-            )
-            logger.info(f"[CRMAgent] Deal creado exitosamente: {deal_id}")
-
             # ═══════════════════════════════════════════════════════════════
             # ACTIVAR HUMAN_ACTIVE PARA QUE APAREZCA EN EL PANEL
             # ═══════════════════════════════════════════════════════════════
@@ -656,7 +626,6 @@ class CRMAgent:
                     metadata={
                         "lead_name": lead_name,
                         "channel_origin": channel_origin,
-                        "deal_id": deal_id
                     }
                 )
 
@@ -850,14 +819,6 @@ class CRMAgent:
                 "[CRMAgent] Partial sync Contact %s: %s",
                 contact_id, list(partial_props.keys())
             )
-
-            # Actualizar Deal si está disponible
-            if deal_id:
-                await self.hubspot.update_deal(deal_id, partial_props)
-                logger.info(
-                    "[CRMAgent] Partial sync Deal %s: %s",
-                    deal_id, list(partial_props.keys())
-                )
 
         except Exception as e:
             # Errores del sync parcial no deben afectar la conversación

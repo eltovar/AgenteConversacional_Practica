@@ -32,8 +32,8 @@ class HubSpotPropertyValidator:
         "chatbot_sentiment_alert",
         "chatbot_social_media_link",
         
-        # Propiedades estándar para operaciones
-        "pipeline", "dealstage", "hs_analytics_source", "canal_origen",
+        # Propiedades estándar para operaciones (pipeline/dealstage son de Deal, no de Contact)
+        "hs_analytics_source", "canal_origen",
         
         # Propiedades CRM Agent
         "chatbot_property_type",

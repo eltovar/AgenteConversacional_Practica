@@ -3,6 +3,7 @@
 Cliente MongoDB para almacenamiento en tiempo real de mensajes.
 """
 
+import asyncio
 import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -10,13 +11,23 @@ from zoneinfo import ZoneInfo
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo.errors import (
+    ConnectionFailure,
+    ServerSelectionTimeoutError,
+    DuplicateKeyError,
+    NetworkTimeout,
+    OperationFailure,
+)
 from bson import ObjectId
 
 from logging_config import logger
 
 # Timezone Colombia
 TIMEZONE = ZoneInfo("America/Bogota")
+
+# Retry config para save_message
+_MAX_SAVE_RETRIES = 3
+_SAVE_RETRY_DELAY = 0.5  # segundos (crece exponencialmente: 0.5s, 1s)
 
 
 class MongoDBManager:
@@ -68,7 +79,9 @@ class MongoDBManager:
                 serverSelectionTimeoutMS=5000,
                 connectTimeoutMS=5000,
                 maxPoolSize=10,
-                minPoolSize=1
+                minPoolSize=1,
+                w=1,     # acknowledged write (explícito)
+                j=True,  # journal flush antes de confirmar — garantiza durabilidad en disco
             )
 
             # Verificar conexión
@@ -230,48 +243,79 @@ class MongoDBManager:
             logger.warning("[MongoDB] No conectado - mensaje no guardado en MongoDB")
             return None
 
-        try:
-            # Deduplicación: si ya existe un mensaje con este MessageSid, no duplicar
-            if message_sid:
-                existing = await self.db.messages.find_one(
-                    {"message_sid": message_sid},
-                    {"_id": 1}
-                )
-                if existing:
-                    logger.debug(
-                        f"[MongoDB] Mensaje duplicado ignorado: message_sid={message_sid}"
-                    )
-                    return str(existing["_id"])
-
-            now = datetime.now(TIMEZONE)
-
-            message_doc = {
-                "phone": phone,
-                "content": content,
-                "sender": sender,
-                "channel": channel,
-                "hubspot_contact_id": hubspot_contact_id,
-                "message_sid": message_sid,
-                "timestamp": now,
-                "timestamp_utc": datetime.utcnow(),
-                "metadata": metadata or {},
-                "synced_to_hubspot": False,
-            }
-            if media:
-                message_doc["media"] = media
-
-            result = await self.db.messages.insert_one(message_doc)
-
-            logger.debug(
-                f"[MongoDB] Mensaje guardado: phone={phone}, sender={sender}, "
-                f"media={media}, id={result.inserted_id}"
+        # Deduplicación: si ya existe un mensaje con este MessageSid, no duplicar
+        if message_sid:
+            existing = await self.db.messages.find_one(
+                {"message_sid": message_sid},
+                {"_id": 1}
             )
+            if existing:
+                logger.debug(
+                    f"[MongoDB] Mensaje duplicado ignorado: message_sid={message_sid}"
+                )
+                return str(existing["_id"])
 
-            return str(result.inserted_id)
+        now = datetime.now(TIMEZONE)
 
-        except Exception as e:
-            logger.error(f"[MongoDB] Error guardando mensaje: {e}")
-            return None
+        message_doc = {
+            "phone": phone,
+            "content": content,
+            "sender": sender,
+            "channel": channel,
+            "hubspot_contact_id": hubspot_contact_id,
+            "message_sid": message_sid,
+            "timestamp": now,
+            "timestamp_utc": datetime.utcnow(),
+            "metadata": metadata or {},
+            "synced_to_hubspot": False,
+        }
+        if media:
+            message_doc["media"] = media
+
+        last_error = None
+        for attempt in range(1, _MAX_SAVE_RETRIES + 1):
+            try:
+                result = await self.db.messages.insert_one(message_doc)
+                if attempt > 1:
+                    logger.info(
+                        f"[MongoDB] Mensaje guardado en intento {attempt}: id={result.inserted_id}"
+                    )
+                else:
+                    logger.debug(
+                        f"[MongoDB] Mensaje guardado: phone={phone}, sender={sender}, "
+                        f"media={media}, id={result.inserted_id}"
+                    )
+                return str(result.inserted_id)
+
+            except DuplicateKeyError:
+                # El índice único de message_sid ya tiene este doc — retornar ID existente
+                if message_sid:
+                    existing = await self.db.messages.find_one(
+                        {"message_sid": message_sid}, {"_id": 1}
+                    )
+                    if existing:
+                        return str(existing["_id"])
+                return None
+
+            except (NetworkTimeout, OperationFailure) as e:
+                last_error = e
+                if attempt < _MAX_SAVE_RETRIES:
+                    delay = _SAVE_RETRY_DELAY * attempt
+                    logger.warning(
+                        f"[MongoDB] Error transitorio intento {attempt}/{_MAX_SAVE_RETRIES}: {e}. "
+                        f"Reintentando en {delay}s..."
+                    )
+                    self._connected = False  # forzar reconexión en siguiente intento
+                    await asyncio.sleep(delay)
+
+            except Exception as e:
+                logger.error(f"[MongoDB] Error no recuperable guardando mensaje: {e}")
+                return None
+
+        logger.error(
+            f"[MongoDB] Falló guardar mensaje después de {_MAX_SAVE_RETRIES} intentos: {last_error}"
+        )
+        return None
 
     async def get_history(
         self,

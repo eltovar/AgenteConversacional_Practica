@@ -100,6 +100,8 @@ _httpx_client: Optional[httpx.AsyncClient] = None
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
 # ============================================================================
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
+CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — nombres cambian raramente
+CONTACT_NAME_CACHE_PREFIX = "contact_name:"
 
 def get_httpx_client() -> httpx.AsyncClient:
     """
@@ -264,6 +266,35 @@ async def _cache_contact_stage(contact_id: str, stage: str) -> None:
         await redis_client.setex(f"contact_stage:{contact_id}", CONTACT_STAGE_CACHE_TTL, stage)
     except Exception:
         pass
+
+
+async def _cache_contact_name(contact_id: str, firstname: str, lastname: str) -> None:
+    """Guarda nombre del contacto en Redis cache (4h TTL). No bloquea el request."""
+    if not contact_id:
+        return
+    try:
+        r = await _get_redis_client()
+        await r.setex(
+            f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}",
+            CONTACT_NAME_CACHE_TTL,
+            json.dumps({"firstname": firstname or "", "lastname": lastname or ""})
+        )
+    except Exception:
+        pass
+
+
+async def _get_cached_contact_name(contact_id: str) -> Optional[Dict[str, Any]]:
+    """Lee nombre del contacto desde Redis cache. Retorna None si no está cacheado."""
+    if not contact_id:
+        return None
+    try:
+        r = await _get_redis_client()
+        raw = await r.get(f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return None
 
 
 async def _get_redis_client() -> redis.Redis:
@@ -2254,6 +2285,12 @@ async def update_contact_name(
                     logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
             except Exception as redis_err:
                 logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
+            # Invalidar cache de nombre para que el próximo poll traiga el dato fresco de HubSpot
+            try:
+                _rc_inv = await _get_redis_client()
+                await _rc_inv.delete(f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}")
+            except Exception:
+                pass
             # Notificar a todos los paneles para que actualicen el nombre sin esperar poll
             try:
                 _rc_ws = await _get_redis_client()
@@ -3302,17 +3339,43 @@ async def get_active_contacts(
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
         contact_manager = ContactManager()
         
-        # ── PASO 2.1: Batch request para obtener nombres de TODOS los contactos en 1 llamada ──
-        # Esto reduce drásticamente los 429 (de N llamadas a 1)
-        contact_ids_to_fetch = [
+        # ── PASO 2.1: Batch request para obtener nombres de contactos ──
+        # Pre-check Redis cache (4h TTL) antes de llamar HubSpot — reduce 429s aún más
+        all_contact_ids = [
             c.get("contact_id") for c in active_contacts
             if c.get("contact_id")
         ]
-        
+
+        redis_name_cache: Dict[str, Dict[str, Any]] = {}
+        ids_needing_fetch: list = []
+        for cid in all_contact_ids:
+            cached = await _get_cached_contact_name(cid)
+            if cached:
+                redis_name_cache[cid] = cached
+            else:
+                ids_needing_fetch.append(cid)
+
         batch_contact_data = {}
-        if contact_ids_to_fetch:
-            batch_contact_data = await _hubspot_batch_get_contacts(contact_ids_to_fetch)
-            logger.info(f"[Panel] Batch pre-fetch: {len(batch_contact_data)} contactos obtenidos")
+        if ids_needing_fetch:
+            batch_contact_data = await _hubspot_batch_get_contacts(ids_needing_fetch)
+            logger.info(
+                f"[Panel] Batch pre-fetch: {len(batch_contact_data)} contactos de HubSpot "
+                f"(cache hits: {len(redis_name_cache)})"
+            )
+        elif redis_name_cache:
+            logger.debug(f"[Panel] Todos los nombres desde cache Redis ({len(redis_name_cache)} contactos)")
+
+        # Merge cache en batch_contact_data para uso uniforme en _enrich_single_contact
+        for cid, nd in redis_name_cache.items():
+            if cid not in batch_contact_data:
+                batch_contact_data[cid] = {
+                    "firstname": nd.get("firstname", ""),
+                    "lastname": nd.get("lastname", ""),
+                    "email": None,
+                    "phone": None,
+                    "lifecyclestage": "",
+                    "hubspot_owner_id": "",
+                }
 
         async def _enrich_single_contact(contact: dict) -> dict:
             """Enriquece un contacto individual con datos de HubSpot."""
@@ -3337,6 +3400,11 @@ async def get_active_contacts(
                     hs_name = f"{hs_info.get('firstname', '')} {hs_info.get('lastname', '')}".strip()
                     if hs_name:
                         contact["display_name"] = hs_name
+                        # Solo cachear si vino de HubSpot (no del cache propio)
+                        if cid not in redis_name_cache:
+                            asyncio.create_task(_cache_contact_name(
+                                cid, hs_info.get("firstname", ""), hs_info.get("lastname", "")
+                            ))
                     elif not contact.get("display_name") or contact.get("display_name") in ("Cliente Nuevo", "Sin nombre"):
                         contact["display_name"] = "Sin nombre"
                     contact["email"] = hs_info.get("email")

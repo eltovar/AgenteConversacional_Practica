@@ -1506,6 +1506,9 @@ function renderChatBubbles(messages) {
         emptyMsg.remove();
     }
 
+    // Limpiar burbujas optimistas — serán reemplazadas por los datos reales de MongoDB
+    container.querySelectorAll('[data-optimistic="true"]').forEach(el => el.remove());
+
     messages.forEach(msg => {
         // Verificar si el mensaje ya existe en el DOM usando data-msg-id
         const existingMsg = container.querySelector(`[data-msg-id="${msg.id}"]`);
@@ -2531,6 +2534,41 @@ async function sendMessage(e) {
 
             // Limpiar seleccion de archivo
             clearMediaSelection();
+
+            // OPTIMISTIC UI: Mostrar burbuja inmediatamente sin esperar query a MongoDB
+            // Elimina el "efecto fantasma" (~500ms de chat vacío tras enviar).
+            // renderChatBubbles() limpiará esta burbuja y la reemplazará con el dato real.
+            const _chatContainer = document.getElementById('chatMessages');
+            if (_chatContainer && currentContactId === contactId) {
+                const _emptyMsg = _chatContainer.querySelector('[data-empty-msg]');
+                if (_emptyMsg) _emptyMsg.remove();
+
+                let _mediaHtml = '';
+                if (data.media_type === 'image' && data.media_url) {
+                    _mediaHtml = `<div class="mb-2"><img src="${data.media_url}" alt="Imagen" class="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity" style="max-height:300px;object-fit:contain;" onclick="window.open('${data.media_url}','_blank')"></div>`;
+                } else if (data.media_type === 'audio' && data.media_url) {
+                    _mediaHtml = `<div class="mb-2"><audio controls class="w-full" style="max-width:280px;"><source src="${data.media_url}">Tu navegador no soporta audio.</audio></div>`;
+                } else if (data.media_url) {
+                    _mediaHtml = `<div class="mb-2"><a href="${data.media_url}" target="_blank" class="text-blue-600 underline text-sm">Ver archivo</a></div>`;
+                }
+
+                const _senderName = ADVISOR_NAME || 'Asesor';
+                const _tempId = `temp-${Date.now()}`;
+                const _msgText = message; // capturado antes de limpiar el input
+
+                const _bubble = `
+                    <div class="flex justify-end mb-3 animate-fadeIn" data-msg-id="${_tempId}" data-optimistic="true">
+                        <div class="bubble-advisor p-3 shadow-sm">
+                            <p class="text-xs font-semibold text-gray-600 mb-1">${escapeHtml(_senderName)}</p>
+                            ${_mediaHtml}
+                            ${_msgText ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(_msgText)}</p>` : ''}
+                            <p class="text-xs text-gray-500 text-right mt-1">${formatBogotaTime(new Date().toISOString())}</p>
+                        </div>
+                    </div>`;
+
+                _chatContainer.insertAdjacentHTML('beforeend', _bubble);
+                _chatContainer.scrollTo({ top: _chatContainer.scrollHeight, behavior: 'smooth' });
+            }
 
             // ARQUITECTURA v2.0: MongoDB es la fuente de verdad en tiempo real
             // El mensaje ya esta disponible en MongoDB (~5ms), no necesitamos

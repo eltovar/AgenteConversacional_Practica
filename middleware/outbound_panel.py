@@ -103,6 +103,10 @@ CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
 CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — nombres cambian raramente
 CONTACT_NAME_CACHE_PREFIX = "contact_name:"
 
+# TTL para caché de resultados de batch HubSpot (5 minutos)
+HUBSPOT_BATCH_CACHE_TTL = 300  # 5 minutos
+HUBSPOT_BATCH_CACHE_PREFIX = "hubspot_batch_cache:"
+
 def get_httpx_client() -> httpx.AsyncClient:
     """
     Retorna cliente HTTP global con connection pooling.
@@ -399,25 +403,160 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
 # BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
 # ============================================================================
 
+
+def _batch_cache_key(contact_ids: list) -> str:
+    """Genera una clave Redis estable para un conjunto de contact_ids."""
+    import hashlib
+    sorted_ids = ",".join(sorted(contact_ids))
+    digest = hashlib.md5(sorted_ids.encode()).hexdigest()
+    return f"{HUBSPOT_BATCH_CACHE_PREFIX}{digest}"
+
+
+async def _invalidate_hubspot_batch_cache(contact_id: str) -> None:
+    """
+    Invalida todas las entradas de caché de batch que contengan este contact_id.
+
+    Dado que las claves de caché son hashes del conjunto de IDs, no podemos
+    invalidar selectivamente. En su lugar, eliminamos todas las claves del
+    prefijo de caché de batch para garantizar consistencia tras una actualización.
+    """
+    try:
+        r = await _get_redis_client()
+        keys = await r.keys(f"{HUBSPOT_BATCH_CACHE_PREFIX}*")
+        if keys:
+            await r.delete(*keys)
+            logger.debug(
+                f"[Panel] Caché de batch HubSpot invalidado ({len(keys)} entradas) "
+                f"por actualización de contacto {contact_id}"
+            )
+    except Exception as e:
+        logger.debug(f"[Panel] Error invalidando caché de batch: {e}")
+
+
+# ============================================================================
+# HubSpotRequestQueue — serializa y agrupa requests para evitar 429
+# ============================================================================
+
+class HubSpotRequestQueue:
+    """
+    Cola singleton que serializa las llamadas batch a HubSpot.
+
+    Problema: cuando múltiples asesoras cargan el panel simultáneamente,
+    cada una dispara un batch request en paralelo, superando el rate limit
+    de HubSpot (100 req/10s) y provocando errores 429 con esperas de 12s.
+
+    Solución:
+    1. Debouncing: espera 150ms para acumular IDs de requests concurrentes.
+    2. Deduplicación: fusiona todos los IDs en un único batch request.
+    3. Serialización: un asyncio.Lock garantiza que solo un batch viaja a
+       HubSpot a la vez; los demás esperan en cola.
+    4. Caché Redis (5 min): resultados compartidos entre workers de Railway.
+
+    Uso:
+        results = await hubspot_queue.enqueue(contact_ids)
+    """
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._pending_ids: set = set()
+        self._pending_futures: list = []
+        self._debounce_task: Optional[asyncio.Task] = None
+        self._debounce_delay: float = 0.15  # 150 ms
+
+    async def enqueue(self, contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Encola un conjunto de contact_ids y retorna los datos de HubSpot.
+
+        Si hay un batch en vuelo o en ventana de debounce, los IDs se fusionan
+        y el llamador espera el resultado compartido.
+        """
+        if not contact_ids:
+            return {}
+
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+
+        async with self._lock:
+            self._pending_ids.update(contact_ids)
+            self._pending_futures.append((set(contact_ids), future))
+
+            # Reiniciar (o crear) la tarea de debounce
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+            self._debounce_task = asyncio.create_task(self._flush_after_delay())
+
+        return await future
+
+    async def _flush_after_delay(self):
+        """Espera el período de debounce y luego ejecuta el batch."""
+        await asyncio.sleep(self._debounce_delay)
+        await self._execute_batch()
+
+    async def _execute_batch(self):
+        """Ejecuta el batch request y resuelve todos los futures pendientes."""
+        async with self._lock:
+            if not self._pending_futures:
+                return
+
+            # Capturar el estado actual y limpiar para el próximo ciclo
+            batch_ids = list(self._pending_ids)
+            futures_snapshot = list(self._pending_futures)
+            self._pending_ids.clear()
+            self._pending_futures.clear()
+            self._debounce_task = None
+
+        try:
+            results = await _hubspot_batch_get_contacts(batch_ids)
+        except Exception as e:
+            logger.error(f"[HubSpotQueue] Error ejecutando batch: {e}")
+            results = {}
+
+        # Resolver cada future con solo los IDs que le corresponden
+        for requested_ids, future in futures_snapshot:
+            if not future.done():
+                caller_result = {cid: results[cid] for cid in requested_ids if cid in results}
+                future.set_result(caller_result)
+
+
+# Instancia singleton de la cola
+hubspot_queue = HubSpotRequestQueue()
+
+
 async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
     """
     Obtiene información de múltiples contactos en UNA sola llamada batch.
-    
+
     Usa POST /crm/v3/objects/contacts/batch/read que permite hasta 100 IDs por llamada.
-    Esto reduce drásticamente los 429 rate limits al cargar el panel.
-    
+    Incluye caché Redis de 5 minutos para evitar llamadas repetidas cuando múltiples
+    asesoras cargan el panel con los mismos contactos.
+
     Args:
         contact_ids: Lista de IDs de contactos HubSpot (max 100)
-        
+
     Returns:
         Dict[contact_id, properties] con firstname, lastname, email, phone
     """
     if not contact_ids or not HUBSPOT_API_KEY:
         return {}
-    
+
     # HubSpot batch acepta máximo 100 IDs
     contact_ids = contact_ids[:100]
-    
+
+    # ── Caché Redis: evitar llamadas repetidas en ventana de 5 minutos ──
+    cache_key = _batch_cache_key(contact_ids)
+    try:
+        r = await _get_redis_client()
+        cached_raw = await r.get(cache_key)
+        if cached_raw:
+            cached_data = json.loads(cached_raw)
+            logger.debug(
+                f"[Panel] Batch HubSpot CACHE HIT ({len(cached_data)} contactos, "
+                f"key={cache_key[-8:]})"
+            )
+            return cached_data
+    except Exception as cache_err:
+        logger.debug(f"[Panel] Error leyendo caché de batch: {cache_err}")
+
     url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
     payload = {
         "properties": ["firstname", "lastname", "email", "phone", "lifecyclestage", "hubspot_owner_id"],
@@ -446,11 +585,20 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
                 logger.info(f"[Panel] Batch HubSpot 207 (parcial): {len(results)}/{len(contact_ids)} contactos válidos")
             else:
                 logger.info(f"[Panel] Batch HubSpot: obtenidos {len(results)}/{len(contact_ids)} contactos")
+
+            # ── Guardar en caché Redis (5 min TTL) ──
+            try:
+                r = await _get_redis_client()
+                await r.setex(cache_key, HUBSPOT_BATCH_CACHE_TTL, json.dumps(results))
+                logger.debug(f"[Panel] Batch HubSpot guardado en caché (TTL={HUBSPOT_BATCH_CACHE_TTL}s)")
+            except Exception as cache_write_err:
+                logger.debug(f"[Panel] Error escribiendo caché de batch: {cache_write_err}")
+
             return results
         else:
             logger.warning(f"[Panel] Batch HubSpot falló: {response.status_code}")
             return {}
-            
+
     except Exception as e:
         logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {e}", exc_info=True)
         return {}
@@ -482,6 +630,8 @@ async def _update_contact_to_en_conversacion(contact_id: str) -> None:
             if r.status_code == 200:
                 logger.info(f"[Panel] Contacto {contact_id} actualizado a 'En conversación'")
                 await _invalidate_contact_stage_cache(contact_id)
+                # Invalidar caché de batch para que el panel refleje el nuevo stage
+                await _invalidate_hubspot_batch_cache(contact_id)
             else:
                 logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
     except Exception as e:
@@ -3171,10 +3321,10 @@ async def _get_contacts_by_worker_filter(
     contact_ids = [r["contact_id"] for r in unique_records if r.get("contact_id")]
     appt_by_contact = {r["contact_id"]: r for r in unique_records}
 
-    # Batch: nombres y emails desde HubSpot (1 llamada)
+    # Batch: nombres y emails desde HubSpot (1 llamada, con cola anti-429)
     batch_names = {}
     if contact_ids:
-        batch_names = await _hubspot_batch_get_contacts(contact_ids)
+        batch_names = await hubspot_queue.enqueue(contact_ids)
 
     # Redis: estado de conversación
     is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
@@ -3357,7 +3507,7 @@ async def get_active_contacts(
 
         batch_contact_data = {}
         if ids_needing_fetch:
-            batch_contact_data = await _hubspot_batch_get_contacts(ids_needing_fetch)
+            batch_contact_data = await hubspot_queue.enqueue(ids_needing_fetch)
             logger.info(
                 f"[Panel] Batch pre-fetch: {len(batch_contact_data)} contactos de HubSpot "
                 f"(cache hits: {len(redis_name_cache)})"

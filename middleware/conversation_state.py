@@ -109,6 +109,7 @@ class ConversationStateManager:
     HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
     INACTIVITY_THRESHOLD = 172800  # 48h — umbral para mover BOT_ACTIVE del ZSET a BOT_CONTROLLED_SET
     PANEL_TTL_SECONDS = 365 * 86400  # 1 año — meta_key de contactos que tuvieron handoff no expira en la práctica
+    HUMAN_PANEL_STATE_TTL = 7 * 86400  # 7 días — state_key de HUMAN_ACTIVE/IN_CONVERSATION sobrevive el fin de semana
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -530,10 +531,9 @@ class ConversationStateManager:
         canal_safe = canal_origen.lower() if canal_origen else "whatsapp"
 
         try:
-            # 1. Guardar estado HUMAN_ACTIVE con TTL dinámico (fin de semana = 72h)
-            ttl = self._calculate_dynamic_ttl()
+            # 1. Guardar estado HUMAN_ACTIVE con TTL de 7 días — sobrevive fines de semana completos
             state_key = f"{self.STATE_PREFIX}{phone_num}:{canal_safe}"
-            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=ttl)
+            await self.redis.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=self.HUMAN_PANEL_STATE_TTL)
 
             # 2. Guardar metadata
             now_iso = get_bogota_now_iso()
@@ -582,11 +582,10 @@ class ConversationStateManager:
         Cambia el estado a PENDING_HANDOFF.
         """
         try:
-            # TTL dinámico: 24h días laborales, 72h fines de semana
-            ttl = self._calculate_dynamic_ttl()
+            # TTL de 7 días — PENDING_HANDOFF también debe sobrevivir el fin de semana
             canal_safe = canal.lower() if canal else "whatsapp"
             state_key = f"{self.STATE_PREFIX}{phone}:{canal_safe}"
-            await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=ttl)
+            await self.redis.set(state_key, ConversationStatus.PENDING_HANDOFF.value, ex=self.HUMAN_PANEL_STATE_TTL)
 
             # Guardar metadata con la razón del handoff.
             # Se lee el meta existente para preservar assigned_owner_id, display_name

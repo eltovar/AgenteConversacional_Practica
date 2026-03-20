@@ -550,19 +550,35 @@ class AppointmentManager:
                         )
                         continue
 
+                    # Auto-completar citas que ya pasaron su horario y siguen en PENDING/CONFIRMED
+                    if apt.status in (AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED):
+                        prev_status = apt.status.value
+                        apt.status = AppointmentStatus.COMPLETED
+                        await self.update_appointment(apt)
+                        logger.info(
+                            "[AppointmentManager] Cita auto-completada: %s (horario ya pasó, era %s)",
+                            phone, prev_status
+                        )
+
                     # Solo incluir si:
                     # - No se ha enviado followup
-                    # - Estado es completed (visita realizada)
-                    if (not apt.followup_sent and
-                            apt.status == AppointmentStatus.COMPLETED):
+                    # - Estado es completed (visita realizada o auto-completada)
+                    # - CANCELLED y NO_SHOW no generan followup
+                    if apt.status != AppointmentStatus.COMPLETED:
+                        logger.info(
+                            "[AppointmentManager] Skip followup %s — estado: %s",
+                            phone, apt.status.value
+                        )
+                        continue
 
+                    if not apt.followup_sent:
                         # Log detallado
                         apt_dt = apt.scheduled_dt
                         hours_since = (now - apt_dt).total_seconds() / 3600
 
                         logger.info(
-                            "[Scheduler] Verificando seguimiento %s: "
-                            "Diferencia de tiempo %.1f horas, Estado %s",
+                            "[AppointmentManager] Seguimiento incluido %s: "
+                            "%.1f horas después de la cita, Estado %s",
                             phone, hours_since, apt.status.value
                         )
 

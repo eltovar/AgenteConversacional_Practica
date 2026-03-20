@@ -345,79 +345,92 @@ async def check_appointment_reminders():
     state_manager = ConversationStateManager(redis_url)
     now = get_bogota_now()
 
-    logger.info("[Scheduler] Ejecutando verificación de recordatorios de citas...")
-    logger.info("[Scheduler] Hora actual (Bogotá): %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
+    logger.info("[Scheduler][Reminder] ▶ Ciclo iniciado — Hora Bogotá: %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
+
+    total, sent, skipped = 0, 0, 0
+    VALID_STATUSES = {ConversationStatus.BOT_ACTIVE, ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION}
 
     try:
         # Obtener citas pendientes usando método correcto
         upcoming_appointments = await apt_manager.get_appointments_needing_reminder()
 
-        logger.info("[Scheduler] Citas encontradas para recordatorio: %d", len(upcoming_appointments))
+        logger.info("[Scheduler][Reminder] Citas encontradas para recordatorio: %d", len(upcoming_appointments))
 
         for apt in upcoming_appointments:
+            total += 1
             scheduled_dt = apt.scheduled_dt  # Property que ya convierte a Bogotá
             diff = scheduled_dt - now
             diff_hours = diff.total_seconds() / 3600
 
             logger.info(
-                "[Scheduler] Verificando cita %s: Diferencia %.2f horas, Estado: %s",
+                "[Scheduler][Reminder] Verificando cita %s: Diferencia %.2f horas, Estado cita: %s",
                 apt.phone_normalized, diff_hours, apt.status.value
             )
 
-            # Verificar si el bot está activo para este cliente
+            # Verificar estado de conversación — enviar si bot o asesor activo
             status = await state_manager.get_status(apt.phone_normalized, apt.canal)
 
-            if status == ConversationStatus.BOT_ACTIVE:
-                logger.info("[Scheduler] Enviando recordatorio a %s", apt.phone_normalized)
+            if status not in VALID_STATUSES:
+                logger.info(
+                    "[Scheduler][Reminder] Skip %s — estado inactivo: %s",
+                    apt.phone_normalized, status.value if status else "None"
+                )
+                skipped += 1
+                continue
 
-                # Construir mensaje de recordatorio
-                contact_name = apt.contact_name or "cliente"
-                message = (
-                    f"¡Hola {contact_name}! 👋 Te recuerdo tu cita programada para hoy "
-                    f"a las {scheduled_dt.strftime('%H:%M')}. ¡Te esperamos!"
+            logger.info(
+                "[Scheduler][Reminder] Enviando recordatorio a %s (estado conv: %s)",
+                apt.phone_normalized, status.value if status else "N/A"
+            )
+
+            # Construir mensaje de recordatorio
+            contact_name = apt.contact_name or "cliente"
+            message = (
+                f"¡Hola {contact_name}! 👋 Te recuerdo tu cita programada para hoy "
+                f"a las {scheduled_dt.strftime('%H:%M')}. ¡Te esperamos!"
+            )
+
+            # Enviar vía Twilio
+            if twilio_client.is_available:
+                result = await twilio_client.send_whatsapp_message(
+                    to=apt.phone_normalized,
+                    body=message
                 )
 
-                # Enviar vía Twilio
-                if twilio_client.is_available:
-                    result = await twilio_client.send_whatsapp_message(
-                        to=apt.phone_normalized,
-                        body=message
-                    )
+                if result.get("status") == "success":
+                    # Marcar como enviado (método correcto de Sesión 1)
+                    await apt_manager.mark_reminder_sent(apt.phone_normalized, apt.canal)
 
-                    if result.get("status") == "success":
-                        # Marcar como enviado (método correcto de Sesión 1)
-                        await apt_manager.mark_reminder_sent(apt.phone_normalized, apt.canal)
+                    # Registrar nota en HubSpot
+                    if apt.contact_id:
+                        try:
+                            timeline = get_timeline_logger()
+                            await timeline.log_bot_message(
+                                contact_id=apt.contact_id,
+                                content="Recordatorio de cita enviado automáticamente por Sofía.",
+                                session_id=apt.phone_normalized
+                            )
+                        except Exception as hs_err:
+                            logger.error("[Scheduler][Reminder] Error registrando en HubSpot: %s", hs_err)
 
-                        # Registrar nota en HubSpot
-                        if apt.contact_id:
-                            try:
-                                timeline = get_timeline_logger()
-                                await timeline.log_bot_message(
-                                    contact_id=apt.contact_id,
-                                    content="Recordatorio de cita enviado automáticamente por Sofía.",
-                                    session_id=apt.phone_normalized
-                                )
-                            except Exception as hs_err:
-                                logger.error("[Scheduler] Error registrando en HubSpot: %s", hs_err)
-
-                        logger.info("[Scheduler] ✅ Recordatorio enviado a %s", apt.phone_normalized)
-                    else:
-                        logger.warning(
-                            "[Scheduler] ❌ Error enviando recordatorio a %s: %s",
-                            apt.phone_normalized, result.get("message")
-                        )
+                    sent += 1
+                    logger.info("[Scheduler][Reminder] ✅ Recordatorio enviado a %s", apt.phone_normalized)
                 else:
-                    logger.warning("[Scheduler] Twilio no disponible para recordatorios")
+                    logger.warning(
+                        "[Scheduler][Reminder] ❌ Error enviando recordatorio a %s: %s",
+                        apt.phone_normalized, result.get("message")
+                    )
             else:
-                logger.warning(
-                    "[Scheduler] Recordatorio omitido para %s: Estado %s (humano activo).",
-                    apt.phone_normalized, status.value
-                )
+                logger.warning("[Scheduler][Reminder] Twilio no disponible para recordatorios")
 
         await apt_manager.close()
+        logger.info(
+            "[Scheduler][Reminder] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
+            total, sent, skipped
+        )
 
     except Exception as e:
-        logger.error("[Scheduler] Error en check_appointment_reminders: %s", e, exc_info=True)
+        logger.error("[Scheduler][Reminder] Error en check_appointment_reminders: %s", e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -624,21 +637,26 @@ async def check_appointment_followups():
     state_manager = ConversationStateManager(redis_url)
     now = get_bogota_now()
 
-    logger.info("[Scheduler] Ejecutando verificación de seguimientos post-cita (ventana 1h30min)...")
+    logger.info("[Scheduler][Followup] ▶ Ciclo iniciado — Hora Bogotá: %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
+
+    total, sent, skipped = 0, 0, 0
+    VALID_STATUSES = {ConversationStatus.BOT_ACTIVE, ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION}
 
     try:
         appointments = await apt_manager.get_appointments_needing_followup()
-        logger.info("[Scheduler] Citas para seguimiento post-cita: %d", len(appointments))
+        logger.info("[Scheduler][Followup] Citas para seguimiento post-cita: %d", len(appointments))
 
         for apt in appointments:
+            total += 1
             try:
-                # Solo enviar si el bot está activo — no interrumpir conversación con asesor
+                # Enviar si bot o asesor activo — no omitir si hay conversación con asesor
                 status = await state_manager.get_status(apt.phone_normalized, apt.canal)
-                if status != ConversationStatus.BOT_ACTIVE:
+                if status not in VALID_STATUSES:
                     logger.info(
-                        "[Scheduler] Omitiendo seguimiento post-cita %s — estado actual: %s",
+                        "[Scheduler][Followup] Skip %s — estado inactivo: %s",
                         apt.phone_normalized, status.value if status else "None"
                     )
+                    skipped += 1
                     continue
 
                 contact_name = apt.contact_name or "cliente"
@@ -646,8 +664,8 @@ async def check_appointment_followups():
                 minutes_since = (now - apt_dt).total_seconds() / 60
 
                 logger.info(
-                    "[Scheduler] Seguimiento post-cita %s: %.0f min después de la cita",
-                    apt.phone_normalized, minutes_since
+                    "[Scheduler][Followup] Seguimiento post-cita %s: %.0f min después de la cita (estado conv: %s)",
+                    apt.phone_normalized, minutes_since, status.value if status else "N/A"
                 )
 
                 message = (
@@ -674,21 +692,26 @@ async def check_appointment_followups():
                                     session_id=apt.phone_normalized
                                 )
                             except Exception as hs_err:
-                                logger.error("[Scheduler] Error HubSpot followup: %s", hs_err)
+                                logger.error("[Scheduler][Followup] Error HubSpot followup: %s", hs_err)
 
-                        logger.info("[Scheduler] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
+                        sent += 1
+                        logger.info("[Scheduler][Followup] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
                     else:
-                        logger.warning("[Scheduler] ❌ Error enviando followup a %s", apt.phone_normalized)
+                        logger.warning("[Scheduler][Followup] ❌ Error enviando followup a %s", apt.phone_normalized)
                 else:
-                    logger.warning("[Scheduler] Twilio no disponible para followup post-cita")
+                    logger.warning("[Scheduler][Followup] Twilio no disponible para followup post-cita")
 
             except Exception as apt_err:
-                logger.error("[Scheduler] Error en followup post-cita %s: %s", apt.phone_normalized, apt_err)
+                logger.error("[Scheduler][Followup] Error en followup post-cita %s: %s", apt.phone_normalized, apt_err)
 
         await apt_manager.close()
+        logger.info(
+            "[Scheduler][Followup] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
+            total, sent, skipped
+        )
 
     except Exception as e:
-        logger.error("[Scheduler] Error en check_appointment_followups: %s", e, exc_info=True)
+        logger.error("[Scheduler][Followup] Error en check_appointment_followups: %s", e, exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

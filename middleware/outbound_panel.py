@@ -858,7 +858,7 @@ async def send_message(
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
-                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
             logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
@@ -870,7 +870,7 @@ async def send_message(
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
-                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
             logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {phone_normalized}{canal_info}")
@@ -880,7 +880,7 @@ async def send_message(
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
-                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
             logger.info(f"[Panel] Sofía pausada y estado IN_CONVERSATION para {phone_normalized}{canal_info}")
@@ -1160,7 +1160,7 @@ async def send_message_json(
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
-                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
             logger.info(f"[Panel-JSON] Estado: IN_CONVERSATION para {phone_normalized}:{canal_final}")
@@ -1169,7 +1169,7 @@ async def send_message_json(
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
-                ttl=state_manager.HANDOFF_TTL_SECONDS,
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
             logger.info(f"[Panel-JSON] Nuevo estado IN_CONVERSATION para {phone_normalized}:{canal_final}")
@@ -2950,7 +2950,7 @@ async def take_control_of_conversation(
                 phone_normalized,
                 current_status,
                 canal=canal or "whatsapp",
-                ttl=state_manager.HANDOFF_TTL_SECONDS
+                ttl=state_manager.HUMAN_PANEL_STATE_TTL
             )
             logger.info(
                 f"[Panel] Take Control: TTL refrescado para {phone_normalized}:{canal} "
@@ -4144,13 +4144,30 @@ async def cancel_appointment(
     appointment_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
 ):
-    """Cancela una cita existente."""
+    """Cancela una cita existente y sincroniza Redis para que el scheduler no la envíe."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
     mongo_mgr = get_mongo_manager()
+
+    # Leer antes de cancelar para obtener phone (canal no se guarda en MongoDB → default whatsapp)
+    apt_doc = await mongo_mgr.get_appointment_by_id(appointment_id)
+
     ok = await mongo_mgr.cancel_appointment(appointment_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    # Sincronizar Redis — evita que el scheduler envíe recordatorio de cita cancelada
+    if apt_doc and apt_doc.get("phone"):
+        try:
+            from middleware.appointment_manager import AppointmentManager
+            redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+            apt_mgr = AppointmentManager(redis_url)
+            await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
+            await apt_mgr.close()
+            logger.info("[Panel] Cita cancelada en Redis: %s", apt_doc["phone"])
+        except Exception as redis_err:
+            logger.error("[Panel] Error sincronizando cancelación en Redis: %s", redis_err)
+
     return {"ok": True}
 
 
@@ -4202,13 +4219,30 @@ async def delete_appointment(
     appointment_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
 ):
-    """Elimina una cita permanentemente."""
+    """Elimina una cita permanentemente y limpia Redis para que el scheduler no la envíe."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
     mongo_mgr = get_mongo_manager()
+
+    # Leer antes de borrar para obtener phone (canal no se guarda en MongoDB → default whatsapp)
+    apt_doc = await mongo_mgr.get_appointment_by_id(appointment_id)
+
     ok = await mongo_mgr.delete_appointment(appointment_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    # Limpiar Redis — evita que el scheduler envíe recordatorio de cita eliminada
+    if apt_doc and apt_doc.get("phone"):
+        try:
+            from middleware.appointment_manager import AppointmentManager
+            redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+            apt_mgr = AppointmentManager(redis_url)
+            await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
+            await apt_mgr.close()
+            logger.info("[Panel] Cita eliminada de Redis: %s", apt_doc["phone"])
+        except Exception as redis_err:
+            logger.error("[Panel] Error limpiando cita eliminada en Redis: %s", redis_err)
+
     return {"ok": True}
 
 

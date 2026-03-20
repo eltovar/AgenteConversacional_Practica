@@ -1044,6 +1044,19 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error eliminando cita {appointment_id}: {e}")
             return False
 
+    async def get_appointment_by_id(self, appointment_id: str) -> Optional[Dict[str, Any]]:
+        """Retorna un documento de cita por su _id."""
+        if not await self.connect():
+            return None
+        try:
+            doc = await self.db.appointments.find_one({"_id": ObjectId(appointment_id)})
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return doc
+        except Exception as e:
+            logger.error(f"[MongoDB] Error obteniendo cita {appointment_id}: {e}")
+            return None
+
     async def close(self):
         """Cierra la conexión."""
         if self.client:

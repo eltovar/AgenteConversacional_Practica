@@ -353,33 +353,67 @@ class ConnectionManager:
         logger.info("[WebSocket] Iniciando Redis Pub/Sub listener...")
         while True:
             pubsub = None
+            # Flag to track whether we exited the async-for loop cleanly.
+            # If False when we reach cleanup, the generator may still be
+            # "running" internally and calling aclose() on it would raise
+            # RuntimeError: aclose(): asynchronous generator is already running.
+            iterating = False
+            cancelled = False
             try:
                 redis = await get_redis_fn()
                 pubsub = redis.pubsub()  # conexión dedicada, no comparte pool
                 await pubsub.subscribe(self.PUBSUB_CHANNEL)
                 logger.info(f"[WebSocket] Suscrito al canal Redis '{self.PUBSUB_CHANNEL}'")
 
-                async for raw_msg in pubsub.listen():
-                    if raw_msg["type"] == "message":
-                        try:
-                            data = json.loads(raw_msg["data"])
-                            await self.broadcast(data)
-                        except Exception as e:
-                            logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+                iterating = True
+                try:
+                    async for raw_msg in pubsub.listen():
+                        if raw_msg["type"] == "message":
+                            try:
+                                data = json.loads(raw_msg["data"])
+                                await self.broadcast(data)
+                            except Exception as e:
+                                logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+                except asyncio.CancelledError:
+                    # Task is being shut down — exit the loop cleanly so the
+                    # generator is no longer mid-iteration before we close it.
+                    cancelled = True
+                    raise
+                except GeneratorExit:
+                    cancelled = True
+                    raise
+                finally:
+                    iterating = False
 
+            except asyncio.CancelledError:
+                # Propagate cancellation after cleanup so the task stops.
+                logger.info("[WebSocket] Redis listener cancelado, cerrando...")
+                if pubsub is not None and not iterating:
+                    try:
+                        await pubsub.unsubscribe()
+                    except Exception:
+                        pass
+                    try:
+                        await pubsub.aclose()
+                    except Exception:
+                        pass
+                raise
             except Exception as e:
                 logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
             finally:
-                # Cerrar el pubsub explícitamente para evitar
-                # RuntimeError('aclose(): asynchronous generator is already running')
-                if pubsub is not None:
+                # Only attempt cleanup when we are NOT mid-iteration to avoid
+                # RuntimeError: aclose(): asynchronous generator is already running
+                if pubsub is not None and not iterating and not cancelled:
                     try:
                         await pubsub.unsubscribe()
+                    except Exception:
+                        pass
+                    try:
                         await pubsub.aclose()
                     except Exception:
                         pass
 
-            await asyncio.sleep(2)  # fuera del try/except — siempre espera antes de reconectar
+            await asyncio.sleep(2)  # siempre espera antes de reconectar
 
 
 # Instancia global del manager

@@ -139,7 +139,8 @@ class ConnectionManager:
         canal: str,
         message_preview: str = "",
         sender: str = "client",
-        contact_name: str = ""
+        contact_name: str = "",
+        redis_client=None
     ) -> int:
         """
         Notifica a los asesores sobre un nuevo mensaje.
@@ -150,12 +151,15 @@ class ConnectionManager:
             message_preview: Primeros caracteres del mensaje
             sender: Quién envió (client/advisor/bot)
             contact_name: Nombre del contacto
+            redis_client: Cliente Redis para publish_broadcast cross-worker.
+                          Si se omite, usa broadcast local (solo este worker).
 
         Returns:
-            Número de notificaciones enviadas
+            Número de notificaciones enviadas (siempre 0 cuando usa Pub/Sub)
         """
         notification = {
-            "type": "new_message",
+            "type": "contact_updated",
+            "action": "new_message",
             "phone": phone,
             "canal": canal,
             "sender": sender,
@@ -164,9 +168,12 @@ class ConnectionManager:
             "timestamp": datetime.now(TIMEZONE_BOGOTA).isoformat()
         }
 
-        # Siempre broadcast a todos los asesores conectados
-        # El frontend filtra según reglas de segregación
-        logger.info(f"[WebSocket] notify_new_message broadcasting to all: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
+        logger.info(f"[WebSocket] notify_new_message: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
+
+        if redis_client is not None:
+            await self.publish_broadcast(redis_client, notification)
+            return 0  # Pub/Sub no retorna conteo local
+
         return await self.broadcast(notification)
 
     async def notify_contact_transferred(
@@ -313,6 +320,55 @@ class ConnectionManager:
                 for advisor_id, connections in self.active_connections.items()
             }
         }
+
+    # ------------------------------------------------------------------
+    # Redis Pub/Sub — broadcast cross-worker
+    # ------------------------------------------------------------------
+
+    PUBSUB_CHANNEL = "ws:broadcast"
+
+    async def publish_broadcast(self, redis_client, message: dict) -> None:
+        """
+        Publica un mensaje en el canal Redis para que TODOS los workers
+        lo reciban y hagan broadcast local a sus conexiones.
+
+        Reemplaza las llamadas directas a broadcast() en endpoints que
+        necesitan notificar a asesoras en cualquier worker.
+        """
+        await redis_client.publish(self.PUBSUB_CHANNEL, json.dumps(message))
+
+    async def start_redis_listener(self, get_redis_fn) -> None:
+        """
+        Background task que debe iniciarse una vez por worker.
+        Escucha el canal Redis ws:broadcast y reenvía cada mensaje
+        a las conexiones locales de este worker.
+
+        Incluye reconexión automática si Redis cae o el worker se reinicia.
+
+        Args:
+            get_redis_fn: Callable async que retorna un cliente Redis.
+                          Se llama de nuevo en cada reconexión para obtener
+                          una conexión fresca.
+        """
+        logger.info("[WebSocket] Iniciando Redis Pub/Sub listener...")
+        while True:
+            try:
+                redis = await get_redis_fn()
+                pubsub = redis.pubsub()  # conexión dedicada, no comparte pool
+                await pubsub.subscribe(self.PUBSUB_CHANNEL)
+                logger.info(f"[WebSocket] Suscrito al canal Redis '{self.PUBSUB_CHANNEL}'")
+
+                async for raw_msg in pubsub.listen():
+                    if raw_msg["type"] == "message":
+                        try:
+                            data = json.loads(raw_msg["data"])
+                            await self.broadcast(data)
+                        except Exception as e:
+                            logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+
+            except Exception as e:
+                logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
+                await asyncio.sleep(2)
 
 
 # Instancia global del manager

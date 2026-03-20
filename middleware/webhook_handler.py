@@ -275,13 +275,14 @@ async def _process_message_deferred(
         # Python lo marca como variable local en todo el scope — no puede referenciarse antes.
         await get_state_manager().update_activity(phone_normalized)
 
-        # Notificar al panel vía WebSocket
+        # Notificar al panel vía WebSocket (cross-worker via Redis Pub/Sub)
         await ws_manager.notify_new_message(
             phone=phone_normalized,
             canal=final_channel or "whatsapp",
             message_preview=processed_body[:100] if processed_body else "",
             sender="client",
-            contact_name=""
+            contact_name="",
+            redis_client=get_state_manager().redis
         )
         
         # ════════════════════════════════════════════════════════════
@@ -1189,14 +1190,15 @@ async def _whatsapp_webhook_original_DISABLED(
             # muestre el mensaje nuevo inmediatamente con sonido y badge
             try:
                 logger.info(f"[Webhook] Notificando panel (bot silenciado) - phone={phone_normalized}")
-                sent = await ws_manager.notify_new_message(
+                await ws_manager.notify_new_message(
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                     message_preview=Body[:100] if Body else "",
                     sender="client",
-                    contact_name=""
+                    contact_name="",
+                    redis_client=get_state_manager().redis
                 )
-                logger.info(f"[Webhook] notify_new_message enviado a {sent} conexiones (bot silenciado)")
+                logger.info(f"[Webhook] notify_new_message enviado (bot silenciado, cross-worker)")
             except Exception as ws_err:
                 logger.error(f"[Webhook] Error notificando WebSocket (bot silenciado): {ws_err}")
 
@@ -1461,23 +1463,24 @@ async def _whatsapp_webhook_original_DISABLED(
                 ConversationStatus.IN_CONVERSATION
             ]:
                 # Notificación rica con preview del mensaje
-                sent = await ws_manager.notify_new_message(
+                await ws_manager.notify_new_message(
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                     message_preview=Body[:100] if Body else "",
                     sender="client",
-                    contact_name=""  # El frontend usa el teléfono si no hay nombre
+                    contact_name="",
+                    redis_client=get_state_manager().redis
                 )
-                logger.info(f"[Webhook] notify_new_message enviado a {sent} conexiones")
+                logger.info(f"[Webhook] notify_new_message enviado (HUMAN_ACTIVE, cross-worker)")
             else:
                 # Notificación simple para refrescar la lista
-                sent = await ws_manager.broadcast({
+                await ws_manager.publish_broadcast(get_state_manager().redis, {
                     "type": "contact_updated",
                     "phone": phone_normalized,
                     "action": "new_message",
                     "canal": final_channel
                 })
-                logger.info(f"[Webhook] contact_updated broadcast enviado a {sent} conexiones")
+                logger.info(f"[Webhook] contact_updated publish_broadcast enviado (cross-worker)")
         except Exception as ws_err:
             logger.error(f"[Webhook] Error notificando WebSocket: {ws_err}")
 

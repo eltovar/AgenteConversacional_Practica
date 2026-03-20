@@ -788,6 +788,23 @@ async def startup_event():
     scheduler.start()
     logger.info("[STARTUP] Schedulers iniciados (Timezone: %s)", TIMEZONE_BOGOTA)
 
+    # Iniciar Redis Pub/Sub listener para broadcast WebSocket cross-worker
+    try:
+        import redis.asyncio as _redis_async
+        from middleware.websocket_manager import ws_manager as _ws_manager
+
+        async def _make_redis_for_pubsub():
+            return _redis_async.from_url(
+                get_redis_url(),
+                encoding="utf-8",
+                decode_responses=True
+            )
+
+        asyncio.create_task(_ws_manager.start_redis_listener(_make_redis_for_pubsub))
+        logger.info("[STARTUP] ✅ WebSocket Redis Pub/Sub listener iniciado (PID: %s)", pid)
+    except Exception as _ws_err:
+        logger.error("[STARTUP] ⚠️ Error iniciando WS Redis listener: %s", _ws_err)
+
     # Migrar SET legacy Redis → ZSET y eliminar la clave obsoleta (operación única)
     try:
         from middleware.conversation_state import state_manager

@@ -994,7 +994,7 @@ async def send_message(
 
         # Notificar a todos los asesores via WS para que refresquen la lista
         try:
-            await ws_manager.broadcast({
+            await ws_manager.publish_broadcast(_rc, {
                 "type": "contact_updated",
                 "phone": phone_normalized,
                 "action": "new_message",
@@ -1194,7 +1194,7 @@ async def send_message_json(
 
         # Notificar a todos los asesores via WS
         try:
-            await ws_manager.broadcast({
+            await ws_manager.publish_broadcast(_rc, {
                 "type": "contact_updated",
                 "phone": phone_normalized,
                 "action": "new_message",
@@ -1324,10 +1324,19 @@ async def send_template_message(
     variables_map = template.get("content_variables_map", [])
     content_variables = None
     if content_sid and variables_map:
-        content_variables = {
-            str(i + 1): vars_dict.get(var_name, "")
-            for i, var_name in enumerate(variables_map)
-        }
+        if isinstance(variables_map, dict):
+            # Numeración explícita: {"2": "link_inmueble"} → {"2": valor}
+            # Usado cuando el template Meta no empieza en {{1}}
+            content_variables = {
+                num: vars_dict.get(var_name, "")
+                for num, var_name in variables_map.items()
+            }
+        else:
+            # Numeración secuencial: ["nombre", "tema"] → {"1": nombre, "2": tema}
+            content_variables = {
+                str(i + 1): vars_dict.get(var_name, "")
+                for i, var_name in enumerate(variables_map)
+            }
         logger.info(
             f"[Panel] Usando ContentSid={content_sid} con variables={content_variables}"
         )
@@ -2058,7 +2067,8 @@ async def request_transfer(
     )
 
     # 5. Broadcast para que todos los paneles refresquen
-    await ws_manager.broadcast({
+    _rc_transfer = await _get_redis_client()
+    await ws_manager.publish_broadcast(_rc_transfer, {
         "type": "contact_updated",
         "phone": phone,
         "action": "transfer_completed"
@@ -2120,7 +2130,7 @@ async def accept_transfer(
     })
 
     # 5. Broadcast para refrescar el panel de todos
-    await ws_manager.broadcast({
+    await ws_manager.publish_broadcast(_rc, {
         "type": "contact_updated",
         "phone": phone,
         "action": "transfer_completed"
@@ -2246,9 +2256,9 @@ async def update_contact_name(
                 logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
             # Notificar a todos los paneles para que actualicen el nombre sin esperar poll
             try:
-                _phone_ws = await _get_redis_client()
-                _phone_ws = await _phone_ws.get(f"phone_cache:{contact_id}")
-                await ws_manager.broadcast({
+                _rc_ws = await _get_redis_client()
+                _phone_ws = await _rc_ws.get(f"phone_cache:{contact_id}")
+                await ws_manager.publish_broadcast(_rc_ws, {
                     "type": "contact_updated",
                     "phone": str(_phone_ws or ""),
                     "action": "name_updated",

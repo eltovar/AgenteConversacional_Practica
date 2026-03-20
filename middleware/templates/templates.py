@@ -92,4 +92,37 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": [],
         "is_default": True,
     },
+    "reactivacion_inmueble_link": {
+        "id": "reactivacion_inmueble_link",
+        "name": "Reactivación Inmueble con Link",
+        "category": "reactivacion",
+        "body": (
+            "Cordial saludo,\n"
+            "Le escribe Yubeny Ocampo de Inmobiliaria Proteger.\n"
+            "Espero que se encuentre muy bien.\n"
+            "Lo contacto porque me informan que se encuentra interesado en el inmueble "
+            "{link_inmueble} para arrendar."
+        ),
+        "variables": ["link_inmueble"],
+        # Template Meta aprobado con solo {{2}} (sin {{1}})
+        # content_variables_map como DICT para numeración explícita: {"2": "nombre_variable"}
+        "content_sid": "HXe222acf6c51c0663c4e61d784bd7f3af",
+        "content_variables_map": {"2": "link_inmueble"},
+        "is_default": True,
+    },
+    "seguimiento_personalizado": {
+        "id": "seguimiento_personalizado",
+        "name": "Seguimiento Personalizado",
+        "category": "seguimiento",
+        "body": (
+            "Hola {nombre}, espero que esté muy bien. "
+            "Le escribo para dar seguimiento a nuestra conversación anterior "
+            "respecto a {tema}. ¿Sigue interesado en avanzar?"
+        ),
+        "variables": ["nombre", "tema"],
+        # {{1}}=nombre, {{2}}=tema
+        "content_sid": "HX287a1c005459a6ceaec90a35108330c3",
+        "content_variables_map": ["nombre", "tema"],
+        "is_default": True,
+    },
 }

@@ -80,8 +80,8 @@ class MongoDBManager:
                 connectTimeoutMS=5000,
                 maxPoolSize=10,
                 minPoolSize=1,
-                w=1,     # acknowledged write (explícito)
-                j=True,  # journal flush antes de confirmar — garantiza durabilidad en disco
+                w=1,          # acknowledged write (explícito)
+                journal=True, # journal flush antes de confirmar — garantiza durabilidad en disco
             )
 
             # Verificar conexión

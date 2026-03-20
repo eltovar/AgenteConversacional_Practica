@@ -3106,6 +3106,8 @@ function handleWebSocketMessage(data) {
                 _lastWsNotifiedTimestamps[data.phone] = Date.now();  // Fix CR-4: marcar evento WS
                 unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
                 updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
+                // Sonido siempre que llegue mensaje de otro contacto (sin importar si la pestaña está visible)
+                playNotificationBeep();
                 if (document.hidden) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }

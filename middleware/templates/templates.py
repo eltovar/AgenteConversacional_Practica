@@ -98,16 +98,15 @@ DEFAULT_TEMPLATES = {
         "category": "reactivacion",
         "body": (
             "Cordial saludo,\n"
-            "Le escribe Yubeny Ocampo de Inmobiliaria Proteger.\n"
+            "Le escribe {asesor} de Inmobiliaria Proteger.\n"
             "Espero que se encuentre muy bien.\n"
             "Lo contacto porque me informan que se encuentra interesado en el inmueble "
             "{link_inmueble} para arrendar."
         ),
-        "variables": ["link_inmueble"],
-        # Template Meta aprobado con solo {{2}} (sin {{1}})
-        # content_variables_map como DICT para numeración explícita: {"2": "nombre_variable"}
-        "content_sid": "HXe222acf6c51c0663c4e61d784bd7f3af",
-        "content_variables_map": {"2": "link_inmueble"},
+        "variables": ["asesor", "link_inmueble"],
+        # {{1}}=asesor, {{2}}=link_inmueble
+        "content_sid": "HX9f029fe9e553c335c0a860ef40258b6b",
+        "content_variables_map": ["asesor", "link_inmueble"],
         "is_default": True,
     },
     "seguimiento_personalizado": {

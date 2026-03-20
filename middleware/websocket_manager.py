@@ -352,6 +352,7 @@ class ConnectionManager:
         """
         logger.info("[WebSocket] Iniciando Redis Pub/Sub listener...")
         while True:
+            pubsub = None
             try:
                 redis = await get_redis_fn()
                 pubsub = redis.pubsub()  # conexión dedicada, no comparte pool
@@ -368,7 +369,17 @@ class ConnectionManager:
 
             except Exception as e:
                 logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
-                await asyncio.sleep(2)
+            finally:
+                # Cerrar el pubsub explícitamente para evitar
+                # RuntimeError('aclose(): asynchronous generator is already running')
+                if pubsub is not None:
+                    try:
+                        await pubsub.unsubscribe()
+                        await pubsub.aclose()
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(2)  # fuera del try/except — siempre espera antes de reconectar
 
 
 # Instancia global del manager

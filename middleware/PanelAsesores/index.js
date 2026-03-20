@@ -3040,7 +3040,10 @@ function connectWebSocket() {
  */
 function updateUnreadBadge(phone, count) {
     const contactEl = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"]`);
-    if (!contactEl) return;
+    if (!contactEl) {
+        console.warn('[Panel][Badge] Elemento contacto no encontrado en DOM para phone:', phone);
+        return;
+    }
     const avatarWrap = contactEl.querySelector('.relative.flex-shrink-0');
     if (!avatarWrap) return;
     let badge = contactEl.querySelector('.unread-badge');
@@ -3051,6 +3054,7 @@ function updateUnreadBadge(phone, count) {
             avatarWrap.appendChild(badge);
         }
         badge.textContent = count > 9 ? '9+' : String(count);
+        console.log('[Panel][Badge] Badge actualizado →', phone, count, 'no leídos');
     } else if (badge) {
         badge.remove();
     }
@@ -3082,9 +3086,13 @@ function scheduleContactsRefresh() {
  *   en 3×700ms=2.1s es un problema del servidor, no de timing.
  */
 function ensureContactVisible(phone, retriesLeft = 3) {
-    if (retriesLeft <= 0) return;
+    if (retriesLeft <= 0) {
+        console.warn('[Panel][Scroll] ensureContactVisible agotó retries para:', phone);
+        return;
+    }
     const found = allContacts.some(c => (c.phone || '') === phone || (c.whatsapp || '') === phone);
     if (!found) {
+        console.log('[Panel][Scroll] Contacto no encontrado en lista, retry en 700ms. Intentos restantes:', retriesLeft - 1);
         setTimeout(async () => {
             await loadContacts();
             ensureContactVisible(phone, retriesLeft - 1);
@@ -3125,10 +3133,17 @@ function handleWebSocketMessage(data) {
                 break;
             }
 
-            // Fix CR-2: para new_message, forzar carga inmediata + retry si el contacto es nuevo.
+            // Fix CR-2 + Fix 2: para new_message, forzar carga inmediata + scroll al top para que índice 0 sea visible.
             // Para otros actions, mantener el debounce para no sobrecargar con eventos frecuentes.
             if (data.action === 'new_message' && data.phone) {
-                loadContacts().then(() => ensureContactVisible(data.phone));
+                loadContacts().then(() => {
+                    ensureContactVisible(data.phone);
+                    const contactsList = document.getElementById('contactsList');
+                    if (contactsList) {
+                        console.log('[Panel][Scroll] Scroll al top por contact_updated/new_message de', data.phone);
+                        contactsList.scrollTo({ top: 0, behavior: 'smooth' });
+                    }
+                });
             } else {
                 scheduleContactsRefresh();
             }
@@ -3186,6 +3201,10 @@ function handleWebSocketMessage(data) {
 function handleNewMessageNotification(data) {
     console.log('[Panel] Nuevo mensaje de', data.phone, ':', data.preview);
 
+    // Fix 1: sonido siempre, independiente de si la pestaña está visible o no
+    console.log('[Panel][Sound] Disparando beep para', data.phone);
+    playNotificationBeep();
+
     // Mostrar notificacion del navegador si la pestana esta oculta
     if (document.hidden) {
         showBrowserNotification(
@@ -3201,10 +3220,18 @@ function handleNewMessageNotification(data) {
         updateUnreadBadge(data.phone, unreadCounts[data.phone]); // badge inmediato, sin esperar HTTP
     }
 
-    // Fix CR-2: carga inmediata + retry compensatorio para garantizar que el contacto sea visible.
+    // Fix CR-2 + Fix 2: carga inmediata + scroll al top para que el contacto en índice 0 sea visible.
     if (data.phone) {
-        loadContacts().then(() => ensureContactVisible(data.phone));
+        loadContacts().then(() => {
+            ensureContactVisible(data.phone);
+            const contactsList = document.getElementById('contactsList');
+            if (contactsList) {
+                console.log('[Panel][Scroll] Scroll al top por nuevo mensaje de', data.phone);
+                contactsList.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+        });
     } else {
+        console.warn('[Panel] new_message sin phone — usando scheduleContactsRefresh');
         scheduleContactsRefresh();
     }
 
@@ -3220,8 +3247,10 @@ function handleNewMessageNotification(data) {
 function handleContactTransferred(data) {
     console.log('[Panel] Contacto transferido:', data);
 
-    // Notificacion visual
+    // Notificacion visual + sonido para transferencias entrantes
     if (data.direction === 'incoming') {
+        console.log('[Panel][Sound] Disparando beep por transferencia entrante de', data.phone);
+        playNotificationBeep();
         showBrowserNotification(
             'Nuevo contacto',
             `${data.contact_name || data.phone} ha sido transferido a tu panel`
@@ -3254,35 +3283,57 @@ function handleStatusChange(data) {
 
 
 /**
- * Fix CR-5: tono corto de notificación usando Web Audio API.
- * No depende de permisos de notificación ni de archivos externos.
- * Falla silenciosamente si el navegador no soporta AudioContext.
+ * Fix CR-5 + Fix 3: tono corto de notificación usando Web Audio API.
+ * AudioContext compartido (_sharedAudioCtx) para resistir autoplay policy de Chrome/Edge.
+ * Se desbloquea automáticamente en el primer click del usuario.
  */
+let _sharedAudioCtx = null;
+
+// Desbloquear AudioContext en la primera interacción del usuario
+document.addEventListener('click', () => {
+    if (!_sharedAudioCtx) {
+        try { _sharedAudioCtx = new AudioContext(); } catch(e) {}
+    } else if (_sharedAudioCtx.state === 'suspended') {
+        _sharedAudioCtx.resume().catch(() => {});
+    }
+}, { once: true });
+
 function playNotificationBeep() {
     try {
-        const ctx = new AudioContext();
-        const oscillator = ctx.createOscillator();
-        const gainNode = ctx.createGain();
+        if (!_sharedAudioCtx) {
+            _sharedAudioCtx = new AudioContext();
+            console.log('[Panel][Sound] AudioContext creado. Estado:', _sharedAudioCtx.state);
+        }
+        if (_sharedAudioCtx.state === 'suspended') {
+            console.warn('[Panel][Sound] AudioContext suspendido — intentando resume...');
+            _sharedAudioCtx.resume().catch(e => console.error('[Panel][Sound] resume() falló:', e));
+        }
+        const oscillator = _sharedAudioCtx.createOscillator();
+        const gainNode = _sharedAudioCtx.createGain();
         oscillator.connect(gainNode);
-        gainNode.connect(ctx.destination);
+        gainNode.connect(_sharedAudioCtx.destination);
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(880, ctx.currentTime);
-        gainNode.gain.setValueAtTime(0.25, ctx.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-        oscillator.start(ctx.currentTime);
-        oscillator.stop(ctx.currentTime + 0.3);
-    } catch(e) {}
+        oscillator.frequency.setValueAtTime(880, _sharedAudioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.25, _sharedAudioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, _sharedAudioCtx.currentTime + 0.3);
+        oscillator.start(_sharedAudioCtx.currentTime);
+        oscillator.stop(_sharedAudioCtx.currentTime + 0.3);
+        console.log('[Panel][Sound] Beep reproducido OK');
+    } catch(e) {
+        console.error('[Panel][Sound] Error al reproducir beep:', e);
+    }
 }
 
 /**
  * Muestra notificacion del navegador.
  */
 function showBrowserNotification(title, body) {
-    // Fix CR-5: reproducir tono independiente del permiso de notificaciones del browser
-    playNotificationBeep();
+    // Nota: playNotificationBeep() ya se llama en handleNewMessageNotification — no llamar aquí para evitar doble beep
+    console.log('[Panel][Notif] Permiso actual:', Notification.permission, '| título:', title);
 
     // Verificar si las notificaciones estan soportadas y permitidas
     if (!('Notification' in window)) {
+        console.warn('[Panel][Notif] Notification API no soportada en este browser');
         return;
     }
 
@@ -3292,7 +3343,10 @@ function showBrowserNotification(title, body) {
             icon: 'https://ui-avatars.com/api/?name=P&background=10B981&color=fff&size=64',
             tag: 'panel-notification'  // Evita multiples notificaciones
         });
-    } else if (Notification.permission !== 'denied') {
+        console.log('[Panel][Notif] Notificación mostrada para:', title);
+    } else if (Notification.permission === 'denied') {
+        console.warn('[Panel][Notif] Permiso denegado — notificación visual no mostrada');
+    } else {
         // Pedir permiso
         Notification.requestPermission().then(permission => {
             if (permission === 'granted') {

@@ -493,7 +493,7 @@ async def _process_message_deferred(
             analysis.handoff_priority = "high"
             analysis.intencion_visita = True
 
-        # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
+      # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
         # Contactos que regresan (is_new=False): su meta ya existe, el bloque
         # "else" de ensure_meta_with_channel no corre → add_to_zset no tiene efecto.
         _is_new_contact = contact_info.is_new if contact_info else True

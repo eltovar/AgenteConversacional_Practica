@@ -9,6 +9,7 @@ import json
 import re
 import html
 import asyncio
+import hashlib
 import httpx
 from io import BytesIO
 from typing import Optional, Dict, Any
@@ -399,25 +400,39 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
 # BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
 # ============================================================================
 
+HUBSPOT_BATCH_CACHE_TTL = 300  # 5 minutos — reduce llamadas repetidas al cargar panel
+
+
 async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
     """
     Obtiene información de múltiples contactos en UNA sola llamada batch.
-    
+
     Usa POST /crm/v3/objects/contacts/batch/read que permite hasta 100 IDs por llamada.
-    Esto reduce drásticamente los 429 rate limits al cargar el panel.
-    
+    Cachea resultados en Redis 5 min (compartido entre workers) para reducir 429s.
+
     Args:
         contact_ids: Lista de IDs de contactos HubSpot (max 100)
-        
+
     Returns:
         Dict[contact_id, properties] con firstname, lastname, email, phone
     """
     if not contact_ids or not HUBSPOT_API_KEY:
         return {}
-    
+
     # HubSpot batch acepta máximo 100 IDs
     contact_ids = contact_ids[:100]
-    
+
+    # Cache key basada en los IDs ordenados (invariante al orden de la lista)
+    cache_key = "hs_batch:" + hashlib.md5(",".join(sorted(contact_ids)).encode()).hexdigest()
+    try:
+        r = await _get_redis_client()
+        cached_raw = await r.get(cache_key)
+        if cached_raw:
+            logger.debug(f"[Panel] Batch HubSpot cache HIT ({len(contact_ids)} contactos)")
+            return json.loads(cached_raw)
+    except Exception:
+        pass
+
     url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
     payload = {
         "properties": ["firstname", "lastname", "email", "phone", "lifecyclestage", "hubspot_owner_id"],
@@ -446,11 +461,17 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
                 logger.info(f"[Panel] Batch HubSpot 207 (parcial): {len(results)}/{len(contact_ids)} contactos válidos")
             else:
                 logger.info(f"[Panel] Batch HubSpot: obtenidos {len(results)}/{len(contact_ids)} contactos")
+            # Guardar en Redis — compartido entre los 4 workers de Gunicorn
+            try:
+                r = await _get_redis_client()
+                await r.setex(cache_key, HUBSPOT_BATCH_CACHE_TTL, json.dumps(results))
+            except Exception:
+                pass
             return results
         else:
             logger.warning(f"[Panel] Batch HubSpot falló: {response.status_code}")
             return {}
-            
+
     except Exception as e:
         logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {e}", exc_info=True)
         return {}
@@ -2428,17 +2449,15 @@ async def update_contact_stage(
         raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
 
     try:
-        import httpx
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        headers = {"Authorization": f"Bearer {hubspot_token}", "Content-Type": "application/json"}
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # Two-step update: HubSpot lifecyclestage es unidireccional — solo permite avanzar.
-            # Limpiar primero elimina esa restricción y permite mover el stage en cualquier dirección.
-            # Step 1: Clear
-            await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": ""}})
-            # Step 2: Set
-            response = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": stage_id}})
+        # Two-step update: HubSpot lifecyclestage es unidireccional — solo permite avanzar.
+        # Limpiar primero elimina esa restricción y permite mover el stage en cualquier dirección.
+        # Ambos steps usan _hubspot_patch() que reintenta automáticamente en 429.
+        # Step 1: Clear
+        await _hubspot_patch(url, {"properties": {"lifecyclestage": ""}}, hubspot_token)
+        # Step 2: Set
+        response = await _hubspot_patch(url, {"properties": {"lifecyclestage": stage_id}}, hubspot_token)
 
         if response.status_code == 200:
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)

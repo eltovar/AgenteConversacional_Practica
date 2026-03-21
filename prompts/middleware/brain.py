@@ -245,7 +245,7 @@ NOTA: Sigue atendiendo normalmente, solo registra el indicador para análisis.
 Responde ÚNICAMENTE con el objeto JSON puro.
 - SIN bloques de código (sin ``` ni ```json)
 - SIN texto antes ni después del JSON
-- El primer carácter de tu respuesta debe ser { y el último }
+- El primer carácter de tu respuesta debe ser {{ y el último }}
 - Si no respetás esto, tu respuesta no podrá procesarse
 
 ESTRUCTURA OBLIGATORIA:

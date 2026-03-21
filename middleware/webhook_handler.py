@@ -151,7 +151,20 @@ async def _process_message_deferred(
     """
     try:
         logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {phone_normalized}")
-        
+
+        # ════════════════════════════════════════════════════════════
+        # IDEMPOTENCIA: Prevenir doble procesamiento por Twilio retry
+        # Twilio reintenta el webhook si no recibe ACK en ~15s (workers lentos, timeouts, etc.)
+        # Solución: Redis NX lock por message_sid — si ya existe, saltar silenciosamente.
+        # ════════════════════════════════════════════════════════════
+        if message_sid:
+            _idem_key = f"msg_processed:{message_sid}"
+            _redis = get_state_manager().redis
+            _is_new = await _redis.set(_idem_key, "1", nx=True, ex=120)  # TTL 2 min
+            if not _is_new:
+                logger.info(f"[DeferredProcess] Mensaje {message_sid} ya procesado — skip (Twilio retry)")
+                return
+
         # ════════════════════════════════════════════════════════════
         # PASO 1: Procesamiento de Multimedia (si existe)
         # ════════════════════════════════════════════════════════════

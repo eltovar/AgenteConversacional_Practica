@@ -1,4 +1,57 @@
 // =========================================================================
+// DATE UTILITIES — Separadores de fecha en el chat
+// =========================================================================
+
+const MESES_ES = ['enero','febrero','marzo','abril','mayo','junio',
+                  'julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const DIAS_ES  = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+
+/** Retorna "YYYY-MM-DD" del timestamp en zona Bogotá (para comparar días). */
+function formatBogotaDate(ts) {
+    try {
+        if (!ts) return '';
+        let safeTs = ts.trim();
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !safeTs.includes('+')) {
+            safeTs += 'Z';
+        }
+        return new Date(safeTs).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }); // "YYYY-MM-DD"
+    } catch (e) { return ''; }
+}
+
+/** Retorna etiqueta legible: "Hoy" | "Ayer" | "Lunes" | "21 de marzo" | "21 de marzo de 2024" */
+function getDateLabel(ts) {
+    const dateStr = formatBogotaDate(ts);
+    if (!dateStr) return '';
+    const today = formatBogotaDate(new Date().toISOString());
+    if (dateStr === today) return 'Hoy';
+    const yesterday = formatBogotaDate(new Date(Date.now() - 86400000).toISOString());
+    if (dateStr === yesterday) return 'Ayer';
+    const [year, month, day] = dateStr.split('-').map(Number);
+    // Construir fecha al mediodía Bogotá para evitar edge cases de timezone
+    const msgDate  = new Date(`${dateStr}T12:00:00`);
+    const todayDate = new Date(`${today}T12:00:00`);
+    const diffDays  = Math.round((todayDate - msgDate) / 86400000);
+    if (diffDays < 7) {
+        // Últimos 6 días → nombre del día
+        const nombreDia = DIAS_ES[msgDate.getDay()];
+        return nombreDia.charAt(0).toUpperCase() + nombreDia.slice(1);
+    }
+    const todayYear = new Date().getFullYear();
+    const mes = MESES_ES[month - 1];
+    return year === todayYear ? `${day} de ${mes}` : `${day} de ${mes} de ${year}`;
+}
+
+/** HTML del separador de fecha estilo WhatsApp. */
+function buildDateDivider(label, dateStr) {
+    const display = label.charAt(0).toUpperCase() + label.slice(1);
+    return `<div class="date-divider flex items-center py-2 px-2" data-date="${dateStr}" data-label="${display}">
+        <div class="flex-1 h-px bg-gray-400 opacity-30"></div>
+        <span class="mx-3 text-xs text-gray-500 font-medium whitespace-nowrap">${display}</span>
+        <div class="flex-1 h-px bg-gray-400 opacity-30"></div>
+    </div>`;
+}
+
+// =========================================================================
 // Formatea la hora en zona Bogotá y con AM/PM claro y robusto
 function formatBogotaTime(ts) {
     try {
@@ -1523,11 +1576,23 @@ function renderChatBubbles(messages) {
     // Limpiar burbujas optimistas — serán reemplazadas por los datos reales de MongoDB
     container.querySelectorAll('[data-optimistic="true"]').forEach(el => el.remove());
 
+    // DATE DIVIDERS: rastrear último día renderizado (soporta actualizaciones incrementales)
+    const _existingDividers = container.querySelectorAll('.date-divider');
+    let lastRenderedDate = _existingDividers.length > 0
+        ? _existingDividers[_existingDividers.length - 1].dataset.date
+        : null;
+
     messages.forEach(msg => {
         // Verificar si el mensaje ya existe en el DOM usando data-msg-id
         const existingMsg = container.querySelector(`[data-msg-id="${msg.id}"]`);
+        const msgDate = formatBogotaDate(msg.timestamp);
 
         if (!existingMsg) {
+            // Insertar separador de fecha si el día cambió
+            if (msgDate && msgDate !== lastRenderedDate) {
+                container.insertAdjacentHTML('beforeend', buildDateDivider(getDateLabel(msg.timestamp), msgDate));
+            }
+
             // Solo renderizar e insertar si no existe
             const isRight = msg.align === 'right';
             let bubbleClass = 'bubble-advisor';  // default
@@ -1646,6 +1711,9 @@ function renderChatBubbles(messages) {
             container.insertAdjacentHTML('beforeend', msgHtml);
             hasNewContent = true;
         }
+
+        // Actualizar lastRenderedDate para TODOS los mensajes (existentes y nuevos)
+        if (msgDate) lastRenderedDate = msgDate;
     });
 
     // Solo hacer scroll si hay contenido nuevo o es la primera carga

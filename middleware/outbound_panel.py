@@ -3280,6 +3280,29 @@ async def get_active_contacts(
 
         now = datetime.now(TIMEZONE)
 
+        # Helpers para time_ago en español (locale-agnostic)
+        _DIAS_CORTOS  = ['lun','mar','mié','jue','vie','sáb','dom']
+        _MESES_CORTOS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+
+        def _fmt_time(dt_local):
+            """'4:00 p.m.' en español sin depender del locale del sistema."""
+            h = dt_local.hour % 12 or 12
+            return f"{h}:{dt_local.strftime('%M')} {'a.m.' if dt_local.hour < 12 else 'p.m.'}"
+
+        def _fmt_time_ago(ref_dt, delta):
+            """Retorna string time_ago en español preciso."""
+            secs = delta.total_seconds()
+            local = ref_dt.astimezone(TIMEZONE)
+            if secs < 3600:
+                return f"hace {int(secs // 60)} min"
+            if secs < 86400:
+                return f"hoy {_fmt_time(local)}"
+            if secs < 172800:
+                return f"ayer {_fmt_time(local)}"
+            if delta.days < 7:
+                return f"{_DIAS_CORTOS[local.weekday()]} {_fmt_time(local)}"
+            return f"{local.day} {_MESES_CORTOS[local.month - 1]}"
+
         # === BRANCH: Filtro por worker_id (citas) ===
         # Cuando worker_id está activo, el pipeline normal se omite.
         # Se buscan contactos desde MongoDB appointments y se filtran por etapa HubSpot.
@@ -3514,12 +3537,7 @@ async def get_active_contacts(
                             if ref_dt.tzinfo is None:
                                 ref_dt = ref_dt.replace(tzinfo=TIMEZONE)
                             time_ago = now - ref_dt.astimezone(TIMEZONE)
-                            if time_ago.total_seconds() < 3600:
-                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
-                            elif time_ago.total_seconds() < 86400:
-                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
-                            else:
-                                contact["time_ago"] = f"hace {int(time_ago.days)} días"
+                            contact["time_ago"] = _fmt_time_ago(ref_dt, time_ago)
                         except (ValueError, TypeError):
                             contact["time_ago"] = "en espera"
                     else:
@@ -3544,12 +3562,7 @@ async def get_active_contacts(
 
                         if since <= ref_dt <= until:
                             time_ago = now - ref_dt.astimezone(TIMEZONE)
-                            if time_ago.total_seconds() < 3600:
-                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 60)} min"
-                            elif time_ago.total_seconds() < 86400:
-                                contact["time_ago"] = f"hace {int(time_ago.total_seconds() // 3600)} h"
-                            else:
-                                contact["time_ago"] = f"hace {int(time_ago.days)} días"
+                            contact["time_ago"] = _fmt_time_ago(ref_dt, time_ago)
                             filtered_active.append(contact)
                         else:
                             logger.debug(

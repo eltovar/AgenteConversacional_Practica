@@ -823,7 +823,7 @@ async def startup_event():
                 decode_responses=True
             )
 
-        asyncio.create_task(_ws_manager.start_redis_listener(_make_redis_for_pubsub))
+        await _ws_manager.start_redis_listener(_make_redis_for_pubsub)
         logger.info("[STARTUP] ✅ WebSocket Redis Pub/Sub listener iniciado (PID: %s)", pid)
     except Exception as _ws_err:
         logger.error("[STARTUP] ⚠️ Error iniciando WS Redis listener: %s", _ws_err)

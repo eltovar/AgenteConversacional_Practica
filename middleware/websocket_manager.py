@@ -38,6 +38,8 @@ class ConnectionManager:
         self.phone_to_advisor: Dict[str, str] = {}
         # Todas las conexiones activas (para broadcast global)
         self.all_connections: Set[WebSocket] = set()
+        # Referencia fuerte al task del Redis listener (evita GC silencioso)
+        self._redis_listener_task: Optional[asyncio.Task] = None
 
     async def connect(self, websocket: WebSocket, advisor_id: str) -> None:
         """
@@ -339,16 +341,36 @@ class ConnectionManager:
 
     async def start_redis_listener(self, get_redis_fn) -> None:
         """
-        Background task que debe iniciarse una vez por worker.
-        Escucha el canal Redis ws:broadcast y reenvía cada mensaje
-        a las conexiones locales de este worker.
+        Crea (o reemplaza) el background task del Redis Pub/Sub listener.
 
-        Incluye reconexión automática si Redis cae o el worker se reinicia.
+        Guarda referencia fuerte en self._redis_listener_task para evitar
+        que el GC destruya el task silenciosamente (Python asyncio warning:
+        "Task was destroyed but it is pending!").
+
+        Si ya existe un task anterior lo cancela limpiamente antes de crear uno nuevo.
 
         Args:
             get_redis_fn: Callable async que retorna un cliente Redis.
-                          Se llama de nuevo en cada reconexión para obtener
-                          una conexión fresca.
+        """
+        # Cancelar task anterior limpiamente si existe
+        if self._redis_listener_task and not self._redis_listener_task.done():
+            self._redis_listener_task.cancel()
+            try:
+                await self._redis_listener_task
+            except asyncio.CancelledError:
+                pass
+
+        # Crear nuevo task y guardar referencia fuerte
+        self._redis_listener_task = asyncio.create_task(
+            self._run_redis_listener(get_redis_fn)
+        )
+        logger.info("[WebSocket] Redis listener task creado y referencia guardada")
+
+    async def _run_redis_listener(self, get_redis_fn) -> None:
+        """
+        Loop interno del Redis Pub/Sub listener.
+        Escucha el canal ws:broadcast y hace broadcast local a las conexiones de este worker.
+        Incluye reconexión automática si Redis cae.
         """
         logger.info("[WebSocket] Iniciando Redis Pub/Sub listener...")
         while True:
@@ -367,6 +389,9 @@ class ConnectionManager:
                         except Exception as e:
                             logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
 
+            except asyncio.CancelledError:
+                logger.info("[WebSocket] Redis listener cancelado limpiamente")
+                raise
             except Exception as e:
                 logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
             finally:

@@ -2431,10 +2431,14 @@ async def update_contact_stage(
         import httpx
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
         headers = {"Authorization": f"Bearer {hubspot_token}", "Content-Type": "application/json"}
-        payload = {"properties": {"lifecyclestage": stage_id}}
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.patch(url, headers=headers, json=payload)
+            # Two-step update: HubSpot lifecyclestage es unidireccional — solo permite avanzar.
+            # Limpiar primero elimina esa restricción y permite mover el stage en cualquier dirección.
+            # Step 1: Clear
+            await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": ""}})
+            # Step 2: Set
+            response = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": stage_id}})
 
         if response.status_code == 200:
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)

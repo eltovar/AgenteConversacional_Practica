@@ -33,7 +33,7 @@ HERRAMIENTAS DISPONIBLES:
   * Contratos (terminación, prórroga, documentación, convivencia) → WhatsApp: 604 444 6364
   * Jurídico (abogado, Data Crédito, demandas, codeudores) → WhatsApp: 321 789 86 79
   * Servicios Públicos (factura EPM, financiación, revisión gas) → WhatsApp: 604 444 6364
-  * Reparaciones (daños en el inmueble) → WhatsApp: 604 444 6364
+  * Reparaciones y Mantenimiento (daños en el inmueble) → WhatsApp: 323 327 7132
   * Estudios de crédito El Libertador (requisitos para arriendo, proceso digital, link de solicitud)
 
 REGLAS IMPORTANTES:

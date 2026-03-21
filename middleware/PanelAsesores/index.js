@@ -234,8 +234,22 @@ async function updateDealStage(contactId, stageId) {
                 contactDealCache[contactId] = { current_stage: stageId };
             }
 
-            // Notificacion visual temporal
+            // Pre-actualizar fingerprint para evitar re-render en el próximo poll.
+            // Sin esto, el poll siguiente detecta que el stage cambió y reconstruye
+            // el elemento DOM completo → parpadeo visible.
             const dropdown = document.querySelector(`select[data-contact-id="${contactId}"]`);
+            const contactEl = dropdown?.closest('.contact-item[data-phone]');
+            if (contactEl) {
+                const phone = contactEl.dataset.phone;
+                const currentFP = _contactFingerprints.get(phone);
+                if (currentFP) {
+                    const parts = currentFP.split('|');
+                    parts[4] = stageId; // index 4 = stage en _getContactFingerprint
+                    _contactFingerprints.set(phone, parts.join('|'));
+                }
+            }
+
+            // Notificacion visual temporal
             if (dropdown) {
                 dropdown.classList.add('ring-2', 'ring-green-400');
                 setTimeout(() => {

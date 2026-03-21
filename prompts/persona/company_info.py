@@ -70,8 +70,9 @@ Jurídico (Data Crédito, demandas, codeudores)
 Servicios Públicos (EPM, financiación, revisión gas)
   WhatsApp: 604 444 63 64
 
-Reparaciones — Coordinación (daños y mantenimiento)
-  Mateo · Cel: 323 515 8007
+Reparaciones y Mantenimiento
+  WhatsApp: 323 327 7132
+  Coordinación — Mateo · Cel: 323 515 8007
   Email: reparaciones@inmobiliariaproteger.com
 
 Reparaciones — Oficiales (ejecución en campo)

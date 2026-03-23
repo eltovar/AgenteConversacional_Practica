@@ -4332,8 +4332,7 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     # Convertir lista a diccionario {id: name} para el template
     advisor_names = {a["id"]: a["name"] for a in advisors_list}
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "api_key": x_api_key,
         "base_url": "/whatsapp/panel",
         "advisor_names": advisor_names
@@ -5061,8 +5060,7 @@ async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, al
             status_code=401
         )
 
-    return templates.TemplateResponse("metrics.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "metrics.html", {
         "api_key": x_api_key,
         "base_url": "/whatsapp/panel"
     })

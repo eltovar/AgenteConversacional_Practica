@@ -2394,17 +2394,32 @@ async def close_conversation(
         )
         state_manager = ConversationStateManager(redis_url)
 
-        # Transicionar a BOT_ACTIVE en lugar de eliminar
-        # Esto permite que Sofía retome la conversación con contexto
+        # Transicionar a BOT_ACTIVE para que Sofía retome la conversación con contexto
         await state_manager.activate_bot(phone_normalized, canal=canal)
 
         # También intentar con el teléfono original si es diferente
         if phone != phone_normalized:
             await state_manager.activate_bot(phone, canal=canal)
 
+        # Remover del ZSET y BOT_CONTROLLED_SET para que desaparezca inmediatamente del panel.
+        # activate_bot() solo cambia el estado pero no elimina del índice; si el contacto
+        # tuvo actividad reciente (<24h) seguiría visible como BOT_ACTIVE en el panel.
+        try:
+            r = await _get_redis_client()
+            canal_safe = (canal or "whatsapp").lower()
+            member = f"{phone_normalized}:{canal_safe}"
+            await r.zrem("active_conversations_sorted", member)
+            await r.srem("bot_controlled_conversations", member)
+            if phone != phone_normalized:
+                member_orig = f"{phone}:{canal_safe}"
+                await r.zrem("active_conversations_sorted", member_orig)
+                await r.srem("bot_controlled_conversations", member_orig)
+        except Exception as e:
+            logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
+
         canal_info = f":{canal}" if canal else ""
         logger.info(
-            f"[Panel] Conversación cerrada y transicionada a BOT_ACTIVE: "
+            f"[Panel] Conversación cerrada — BOT_ACTIVE + removido del panel: "
             f"{phone_normalized}{canal_info}"
         )
 

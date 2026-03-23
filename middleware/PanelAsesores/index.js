@@ -136,6 +136,7 @@ let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
+const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos recién cerrados
 
 // Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
 let unreadCounts = {};
@@ -1029,6 +1030,11 @@ async function loadContacts() {
             }
         }
 
+        // Filtrar contactos recién cerrados antes de renderizar (guard contra polling stale)
+        if (recentlyClosedPhones.size > 0) {
+            allContacts = allContacts.filter(c => !recentlyClosedPhones.has(c.phone));
+        }
+
         renderContactsList(allContacts);
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
@@ -1845,6 +1851,9 @@ async function closeConversation() {
         const data = await response.json();
 
         if (response.ok) {
+            // Guardar phone antes de nullear — se usa para remoción optimista
+            const closedPhone = currentPhone;
+
             // Limpiar seleccion actual
             currentContactId = null;
             currentPhone = null;
@@ -1865,8 +1874,17 @@ async function closeConversation() {
             document.getElementById('closeConversationBtn').classList.add('hidden');
             document.getElementById('transferContactBtn').classList.add('hidden');
 
-            // Recargar lista de contactos
-            await loadContacts();
+            // Remoción optimista: quitar del cache local inmediatamente para que el
+            // próximo render (polling o WS) no lo vuelva a mostrar.
+            // Guard de 15s contra respuestas de polling en vuelo que lleguen tarde.
+            recentlyClosedPhones.add(closedPhone);
+            setTimeout(() => recentlyClosedPhones.delete(closedPhone), 15000);
+            allContacts = allContacts.filter(c => c.phone !== closedPhone);
+            _contactFingerprints.delete(closedPhone);
+            renderContactsList(allContacts);
+
+            // NO llamar loadContacts() aquí — el siguiente ciclo de polling se encarga.
+            // Llamarlo causaría race condition si hay una respuesta de polling en vuelo.
 
             alert('Conversacion cerrada correctamente');
         } else {

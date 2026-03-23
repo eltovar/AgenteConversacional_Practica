@@ -143,6 +143,7 @@ class SofiaBrain:
             temperature=temperature,
             # Aumentado de 1200 a 2000 para evitar truncamiento del JSON con análisis completo
             max_tokens=2000,
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
 
         # Configurar prompt usando el prompt centralizado

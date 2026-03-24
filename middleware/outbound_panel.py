@@ -3382,6 +3382,19 @@ async def get_active_contacts(
         priority_contacts = [c for c in active_contacts if c.get("in_priority_zset", True)]
         bot_contacts = [c for c in active_contacts if not c.get("in_priority_zset", True)]
 
+        # Fix: Ordenar priority_contacts con dos criterios estables:
+        #   1. Status: IN_CONVERSATION / HUMAN_ACTIVE / PENDING_HANDOFF siempre ANTES que BOT_ACTIVE
+        #      → evita que contactos atendidos activamente "bajen" cuando llegan leads nuevos
+        #   2. Dentro del mismo grupo: más reciente primero (ISO string es lexicográfico-correcto)
+        def _status_priority(c):
+            s = c.get("status") or c.get("conversation_status") or ""
+            return 0 if s in ("IN_CONVERSATION", "HUMAN_ACTIVE", "PENDING_HANDOFF") else 1
+
+        # Stable sort: primero por last_activity desc, luego por status asc
+        # (Python sort es estable → dentro del mismo status_order queda orden por actividad)
+        priority_contacts.sort(key=lambda c: c.get("last_activity") or "", reverse=True)
+        priority_contacts.sort(key=_status_priority)
+
         # Ordenar bot_contacts por última actividad (más reciente primero)
         def _sort_key(c):
             ts = c.get("last_activity") or ""
@@ -3879,6 +3892,115 @@ async def get_active_contacts(
 
     except Exception as e:
         logger.error(f"[Panel] Error obteniendo contactos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/diagnose")
+async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
+    """
+    Endpoint de diagnóstico: estado de Redis + estimación de carga HubSpot.
+    Solo para administradores. Llamar con:
+      curl -H "X-API-Key: <ADMIN_API_KEY>" https://<app>/whatsapp/panel/diagnose
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    import json as _json
+    from datetime import timezone as _tz
+
+    result = {}
+    try:
+        redis_client = await _get_redis_client()
+
+        # ── Contactos activos ──────────────────────────────────────
+        total_zset = await redis_client.zcard("active_conversations_sorted")
+        all_entries = await redis_client.zrange("active_conversations_sorted", 0, -1, withscores=True)
+
+        status_counts: dict = {}
+        with_contact_id = 0
+        without_contact_id = 0
+        for phone, score in all_entries:
+            meta_raw = await redis_client.get(f"conv_meta:{phone}")
+            if meta_raw:
+                try:
+                    meta = _json.loads(meta_raw)
+                    st = meta.get("status", "UNKNOWN")
+                    status_counts[st] = status_counts.get(st, 0) + 1
+                    if meta.get("contact_id"):
+                        with_contact_id += 1
+                    else:
+                        without_contact_id += 1
+                except Exception:
+                    status_counts["PARSE_ERROR"] = status_counts.get("PARSE_ERROR", 0) + 1
+            else:
+                status_counts["NO_META"] = status_counts.get("NO_META", 0) + 1
+
+        result["contacts"] = {
+            "total_zset": total_zset,
+            "by_status": status_counts,
+            "with_contact_id": with_contact_id,
+            "without_contact_id": without_contact_id,
+        }
+
+        # ── Caché HubSpot en Redis ─────────────────────────────────
+        stage_keys = sum(1 async for _ in redis_client.scan_iter("contact_stage:*"))
+        name_keys  = sum(1 async for _ in redis_client.scan_iter("contact_name:*"))
+        assoc_keys = sum(1 async for _ in redis_client.scan_iter("hs_assoc:*"))
+        idem_keys  = sum(1 async for _ in redis_client.scan_iter("hs_note_processed:*"))
+
+        result["hubspot_cache"] = {
+            "contact_stage_keys": stage_keys,
+            "contact_name_keys":  name_keys,
+            "hs_assoc_keys":      assoc_keys,
+            "note_idempotency_keys": idem_keys,
+        }
+
+        # ── Estimación de carga HubSpot ────────────────────────────
+        contacts_needing_stage = max(0, with_contact_id - stage_keys)
+        contacts_needing_assoc = max(0, total_zset - assoc_keys)
+        worst_case_calls = 1 + contacts_needing_stage + contacts_needing_assoc * 2
+        result["hubspot_load_estimate"] = {
+            "contacts_needing_stage_fetch": contacts_needing_stage,
+            "contacts_needing_assoc_fetch": contacts_needing_assoc,
+            "worst_case_calls_per_panel_load": worst_case_calls,
+            "hubspot_limit_per_10s": 50,
+            "exceeds_limit": worst_case_calls > 50,
+            "over_by": max(0, worst_case_calls - 50),
+        }
+
+        # ── Info Redis ─────────────────────────────────────────────
+        info_clients = await redis_client.info("clients")
+        info_stats   = await redis_client.info("stats")
+        info_mem     = await redis_client.info("memory")
+        result["redis"] = {
+            "connected_clients":   info_clients.get("connected_clients"),
+            "blocked_clients":     info_clients.get("blocked_clients"),
+            "rejected_connections_ever": info_stats.get("rejected_connections"),
+            "memory_used":         info_mem.get("used_memory_human"),
+        }
+
+        # ── Últimos 5 contactos activos ────────────────────────────
+        recent = await redis_client.zrange("active_conversations_sorted", -5, -1, withscores=True)
+        recent_out = []
+        for phone, score in reversed(recent):
+            meta_raw = await redis_client.get(f"conv_meta:{phone}")
+            status, cid = "?", "?"
+            if meta_raw:
+                try:
+                    m = _json.loads(meta_raw)
+                    status = m.get("status", "?")
+                    cid = m.get("contact_id", "sin_id")
+                except Exception:
+                    pass
+            ts = datetime.fromtimestamp(score, tz=_tz.utc).strftime("%m/%d %H:%M")
+            recent_out.append({"ts": ts, "phone_last10": phone[-10:], "status": status, "contact_id": cid})
+        result["recent_contacts"] = recent_out
+
+        result["timestamp"] = datetime.now().isoformat()
+        return result
+
+    except Exception as e:
+        logger.error(f"[Panel][Diagnose] Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

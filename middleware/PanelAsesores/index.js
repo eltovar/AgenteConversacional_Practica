@@ -1000,7 +1000,17 @@ async function loadContacts() {
         if (!response.ok) throw new Error('Error al cargar contactos');
 
         const data = await response.json();
-        allContacts = data.contacts || [];  // Guardar en cache para el buscador
+        const newContacts = data.contacts || [];
+
+        // Fix: guard contra error Redis transitorio — si el backend devuelve 0 contactos
+        // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
+        // connections). Mantener la lista anterior evita el blink total de la UI.
+        if (newContacts.length === 0 && allContacts.length > 0) {
+            console.warn('[Panel] Backend devolvió 0 contactos (posible error Redis transitorio) — manteniendo lista anterior');
+            return;
+        }
+
+        allContacts = newContacts;  // Guardar en cache para el buscador
 
         // Detección de mensajes nuevos por polling.
         // Solo actualiza el timestamp si es mayor (upgrade-only, nunca downgrade).
@@ -1329,18 +1339,32 @@ function _getContactFingerprint(contact) {
     const cacheKey = contactId || phone;
     const cached = contactDealCache[cacheKey];
     const currentStage = contact.current_stage || (cached?.current_stage) || '';
+    // Fix: time_ago se excluye del fingerprint — cambia cada minuto y forzaba reconstruir
+    // el elemento DOM completo (incluyendo re-descarga del avatar). Se actualiza in-place
+    // via _updateContactTimeAgo() al final de renderContactsList.
     return [
         contact.conversation_status || contact.status || '',
         contact.is_active ? '1' : '0',
         contact.display_name || '',
         contact.canal_origen || '',
         currentStage,
-        contact.time_ago || '',
         contact.ttl_display || '',
         contact.handoff_reason || '',
         contact.has_appointment ? '1' : '0',
         contactId === currentContactId ? 'active' : '',
     ].join('|');
+}
+
+/**
+ * Actualiza el texto "time_ago" de un contacto en el DOM sin reconstruir el elemento.
+ * Busca el span/p con data-time-ago dentro del contact-item del phone dado.
+ */
+function _updateContactTimeAgo(phone, timeAgo) {
+    if (!timeAgo) return;
+    const el = document.querySelector(`.contact-item[data-phone="${phone}"] [data-time-ago]`);
+    if (el && el.textContent !== `Llego ${timeAgo}`) {
+        el.textContent = `Llego ${timeAgo}`;
+    }
 }
 
 /**
@@ -1393,14 +1417,14 @@ function _buildContactHTML(contact) {
         const pipelineDropdown = _buildPipelineDropdown(contactId, currentStage);
         if (pipelineDropdown) {
             badge = `${canalBadge}${pipelineDropdown}
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}
                      ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
         } else if (isInConversation) {
             badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}`;
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}`;
         } else {
             badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1">Llego ${timeAgo}</p>` : ''}
+                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}
                      ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
         }
     } else if (status === 'BOT_ACTIVE') {
@@ -1536,6 +1560,11 @@ function renderContactsList(contacts) {
         // updateUnreadBadge() hace early-return si el elemento no existe → es seguro llamarlo siempre.
         if (unreadCounts[phone] > 0) {
             updateUnreadBadge(phone, unreadCounts[phone]);
+        }
+
+        // Fix time_ago: actualizar in-place sin reconstruir el elemento DOM
+        if (contact.time_ago) {
+            _updateContactTimeAgo(phone, contact.time_ago);
         }
     }
 }
@@ -3161,16 +3190,20 @@ function updateUnreadBadge(phone, count) {
 }
 
 /**
- * Programa un refresco de la lista de contactos con debounce de 500ms.
+ * Programa un refresco de la lista de contactos con trailing debounce de 150ms.
  * Agrupa múltiples eventos WS rápidos en una sola llamada a loadContacts().
+ * Fix: era leading-cooldown (50ms, dropeaba eventos posteriores).
+ *      Ahora es trailing debounce: resetea el timer en cada llamada, dispara
+ *      loadContacts() solo 150ms después del ÚLTIMO evento. Si llegan 10 mensajes
+ *      en 100ms, solo se hace 1 GET /contacts en lugar de 10.
  */
 let _contactsRefreshTimer = null;
 function scheduleContactsRefresh() {
-    if (_contactsRefreshTimer) return;  // Ya hay uno pendiente, no acumular
+    if (_contactsRefreshTimer) clearTimeout(_contactsRefreshTimer);  // Reset en cada llamada
     _contactsRefreshTimer = setTimeout(async () => {
         _contactsRefreshTimer = null;
         await loadContacts();
-    }, 50);
+    }, 150);
 }
 
 /**
@@ -3242,17 +3275,21 @@ function handleWebSocketMessage(data) {
                 break;
             }
 
-            // Fix CR-2 + Fix 2: para new_message, forzar carga inmediata + scroll al top para que índice 0 sea visible.
-            // Para otros actions, mantener el debounce para no sobrecargar con eventos frecuentes.
+            // Fix: para new_message usar scheduleContactsRefresh (trailing debounce 150ms) en
+            // lugar de loadContacts() directo. Si llegan 5 mensajes en 100ms, antes se hacían
+            // 5 GET /contacts concurrentes → 5× enriquecimiento HubSpot → más 429s.
+            // El scroll y ensureContactVisible se ejecutan 200ms después (>150ms debounce).
             if (data.action === 'new_message' && data.phone) {
-                loadContacts().then(() => {
-                    ensureContactVisible(data.phone);
+                const _scrollPhone = data.phone;
+                scheduleContactsRefresh();
+                setTimeout(() => {
+                    ensureContactVisible(_scrollPhone);
                     const contactsList = document.getElementById('contactsList');
                     if (contactsList) {
-                        console.log('[Panel][Scroll] Scroll al top por contact_updated/new_message de', data.phone);
+                        console.log('[Panel][Scroll] Scroll al top por new_message de', _scrollPhone);
                         contactsList.scrollTo({ top: 0, behavior: 'smooth' });
                     }
-                });
+                }, 200);
             } else {
                 scheduleContactsRefresh();
             }

@@ -762,9 +762,13 @@ class ConversationStateManager:
                 
                 meta["last_activity"] = now_iso
 
-                # Si add_to_zset=False y había una meta temporal (_temp_meta), limpiar
-                # la entrada del ZSET para no mostrar contactos sin señal comercial en el panel.
-                if not add_to_zset and meta.get("in_panel", True):
+                # Si add_to_zset=False y la meta fue creada temporalmente por update_activity
+                # (señal _temp_meta=True), limpiar el ZSET entry para no mostrar contactos
+                # sin señal comercial en el panel.
+                # CRÍTICO: solo limpiar si _temp_meta=True — nunca tocar metas de contactos
+                # existentes (in_panel=True sin _temp_meta), para no sacar del ZSET un
+                # contacto HUMAN_ACTIVE/IN_CONVERSATION que ya estaba en atención.
+                if not add_to_zset and meta.get("_temp_meta", False):
                     meta["in_panel"] = False
                     meta.pop("_temp_meta", None)
                     index_member = f"{phone}:{canal_safe}"

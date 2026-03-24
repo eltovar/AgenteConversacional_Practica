@@ -3943,10 +3943,10 @@ async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
         }
 
         # ── Caché HubSpot en Redis ─────────────────────────────────
-        stage_keys = sum(1 async for _ in redis_client.scan_iter("contact_stage:*"))
-        name_keys  = sum(1 async for _ in redis_client.scan_iter("contact_name:*"))
-        assoc_keys = sum(1 async for _ in redis_client.scan_iter("hs_assoc:*"))
-        idem_keys  = sum(1 async for _ in redis_client.scan_iter("hs_note_processed:*"))
+        stage_keys = len([k async for k in redis_client.scan_iter("contact_stage:*")])
+        name_keys  = len([k async for k in redis_client.scan_iter("contact_name:*")])
+        assoc_keys = len([k async for k in redis_client.scan_iter("hs_assoc:*")])
+        idem_keys  = len([k async for k in redis_client.scan_iter("hs_note_processed:*")])
 
         result["hubspot_cache"] = {
             "contact_stage_keys": stage_keys,

@@ -1,6 +1,7 @@
 # tests/middleware/test_phone_normalizer.py
 """
-Tests para el normalizador de números telefónicos de Colombia.
+Tests para el normalizador de números telefónicos.
+Soporta números colombianos e internacionales E.164.
 
 Ejecutar con: pytest tests/middleware/test_phone_normalizer.py -v
 """
@@ -15,7 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 # Importar directamente del módulo para evitar el __init__.py
 from middleware.phone_normalizer import (
     PhoneNormalizer,
+    normalize_phone,
     normalize_colombian_phone,
+    is_valid_phone,
     is_valid_colombian_phone,
     PhoneValidationResult,
 )
@@ -232,6 +235,114 @@ class TestEdgeCases:
         original = "whatsapp:+573001234567"
         result = self.normalizer.normalize(original)
         assert result.original == original
+
+
+class TestInternationalNumbers:
+    """Tests para números internacionales (no colombianos)."""
+
+    def setup_method(self):
+        self.normalizer = PhoneNormalizer()
+
+    def test_us_number_e164(self):
+        """Test: Número EE.UU. en formato E.164"""
+        result = self.normalizer.normalize("+12012573369")
+        assert result.is_valid
+        assert result.normalized == "+12012573369"
+
+    def test_us_number_twilio_format(self):
+        """Test: Número EE.UU. con prefijo Twilio"""
+        result = self.normalizer.normalize("whatsapp:+12012573369")
+        assert result.is_valid
+        assert result.normalized == "+12012573369"
+
+    def test_uk_number(self):
+        """Test: Número Reino Unido"""
+        result = self.normalizer.normalize("+447911123456")
+        assert result.is_valid
+        assert result.normalized == "+447911123456"
+
+    def test_spain_number(self):
+        """Test: Número España"""
+        result = self.normalizer.normalize("+34612345678")
+        assert result.is_valid
+        assert result.normalized == "+34612345678"
+
+    def test_mexico_number(self):
+        """Test: Número México"""
+        result = self.normalizer.normalize("+525512345678")
+        assert result.is_valid
+        assert result.normalized == "+525512345678"
+
+    def test_international_with_spaces(self):
+        """Test: Número internacional con espacios"""
+        result = self.normalizer.normalize("+1 201 257 3369")
+        assert result.is_valid
+        assert result.normalized == "+12012573369"
+
+    def test_international_with_dashes(self):
+        """Test: Número internacional con guiones"""
+        result = self.normalizer.normalize("+1-201-257-3369")
+        assert result.is_valid
+        assert result.normalized == "+12012573369"
+
+    def test_international_too_short(self):
+        """Test: Número internacional demasiado corto → inválido"""
+        result = self.normalizer.normalize("+12345")
+        assert not result.is_valid
+        assert "corto" in result.error_message.lower()
+
+    def test_international_too_long(self):
+        """Test: Número internacional demasiado largo → inválido"""
+        result = self.normalizer.normalize("+12345678901234567")
+        assert not result.is_valid
+        assert "largo" in result.error_message.lower()
+
+    def test_colombia_still_works_via_international_format(self):
+        """Test: Colombia con + sigue siendo colombiano"""
+        result = self.normalizer.normalize("+573001234567")
+        assert result.is_valid
+        assert result.normalized == "+573001234567"
+        assert result.country_code == "57"
+
+    def test_international_country_code_detected_us(self):
+        """Test: Código de país EE.UU. detectado correctamente"""
+        result = self.normalizer.normalize("+12012573369")
+        assert result.country_code == "1"
+
+    def test_without_plus_still_assumes_colombia(self):
+        """Test: Sin '+' sigue asumiendo Colombia aunque empiece por dígito distinto a 3"""
+        # Sin '+' y 10 dígitos → intenta Colombia → falla validación colombiana
+        result = self.normalizer.normalize("2012573369")
+        assert not result.is_valid  # No es móvil colombiano (no empieza con 3)
+
+
+class TestNormalizePhone:
+    """Tests para la función normalize_phone (nueva)."""
+
+    def test_colombian_number(self):
+        result = normalize_phone("3001234567")
+        assert result == "+573001234567"
+
+    def test_us_number(self):
+        result = normalize_phone("+12012573369")
+        assert result == "+12012573369"
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError):
+            normalize_phone("123")
+
+
+class TestIsValidPhone:
+    """Tests para is_valid_phone (nueva)."""
+
+    def test_colombian_valid(self):
+        assert is_valid_phone("+573001234567")
+
+    def test_us_valid(self):
+        assert is_valid_phone("+12012573369")
+
+    def test_invalid(self):
+        assert not is_valid_phone("123")
 
 
 # Ejecutar tests si se ejecuta directamente

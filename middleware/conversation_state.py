@@ -662,6 +662,26 @@ class ConversationStateManager:
                     score = get_bogota_now().timestamp()
                     await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
 
+            else:
+                # Contacto nuevo sin meta: crear entrada mínima temporal para que GET /contacts
+                # lo retorne inmediatamente cuando el panel llama tras recibir el WS.
+                # ensure_meta_with_channel() sobreescribirá con datos completos (~30s después).
+                minimal_meta = {
+                    "phone_normalized": phone,
+                    "canal_origen": canal_safe,
+                    "last_activity": get_bogota_now_iso(),
+                    "in_panel": True,
+                    "display_name": None,
+                    "_temp_meta": True,
+                }
+                await self.redis.set(meta_key, json.dumps(minimal_meta), ex=self._calculate_dynamic_ttl())
+                index_member = f"{phone}:{canal_safe}"
+                score = get_bogota_now().timestamp()
+                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                logger.debug(
+                    f"[ConversationState] Meta temporal creado para contacto nuevo {phone}:{canal_safe}"
+                )
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_activity: {e}")
@@ -741,7 +761,18 @@ class ConversationStateManager:
                     )
                 
                 meta["last_activity"] = now_iso
-                
+
+                # Si add_to_zset=False y había una meta temporal (_temp_meta), limpiar
+                # la entrada del ZSET para no mostrar contactos sin señal comercial en el panel.
+                if not add_to_zset and meta.get("in_panel", True):
+                    meta["in_panel"] = False
+                    meta.pop("_temp_meta", None)
+                    index_member = f"{phone}:{canal_safe}"
+                    await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
+                    logger.debug(
+                        f"[ConversationState] {phone} removido del ZSET (señal baja, sin intent comercial)"
+                    )
+
                 ttl = await self.redis.ttl(meta_key)
                 ex = ttl if ttl and ttl > 0 else self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ex)

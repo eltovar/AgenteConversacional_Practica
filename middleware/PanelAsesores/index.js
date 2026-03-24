@@ -3210,13 +3210,22 @@ function handleWebSocketMessage(data) {
 
             // Si action es 'new_message', actualizar badge directamente sin re-render
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
-                console.log('[Panel] Incrementando unreadCounts para', data.phone);
-                _lastWsNotifiedTimestamps[data.phone] = Date.now();  // Fix CR-4: marcar evento WS
-                unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+                // Fix dedup-WS: el backend puede disparar 2 notificaciones por el mismo mensaje
+                // (p.ej. bot silenciado + notificación temprana). Si el mismo phone ya incrementó
+                // badge por WS en los últimos 2s, solo actualizar el DOM sin volver a contar.
+                const _now = Date.now();
+                const _alreadyCounted = (_lastWsNotifiedTimestamps[data.phone] || 0) > _now - 2000;
+                _lastWsNotifiedTimestamps[data.phone] = _now;  // Fix CR-4: marcar evento WS
+                if (!_alreadyCounted) {
+                    unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+                    console.log('[Panel] Incrementando unreadCounts para', data.phone, '→', unreadCounts[data.phone]);
+                } else {
+                    console.log('[Panel][Badge] Dedup WS (<2s) — no incrementar para', data.phone);
+                }
                 updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
                 // Sonido siempre que llegue mensaje de otro contacto (sin importar si la pestaña está visible)
-                playNotificationBeep();
-                if (document.hidden) {
+                if (!_alreadyCounted) playNotificationBeep();
+                if (document.hidden && !_alreadyCounted) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }
             }
@@ -3315,8 +3324,14 @@ function handleNewMessageNotification(data) {
 
     // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
     if (data.phone && data.phone !== currentPhone) {
-        _lastWsNotifiedTimestamps[data.phone] = Date.now();  // Fix CR-4: marcar evento WS
-        unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+        const _now2 = Date.now();
+        const _alreadyCounted2 = (_lastWsNotifiedTimestamps[data.phone] || 0) > _now2 - 2000;
+        _lastWsNotifiedTimestamps[data.phone] = _now2;  // Fix CR-4: marcar evento WS
+        if (!_alreadyCounted2) {
+            unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
+        } else {
+            console.log('[Panel][Badge] Dedup WS (<2s) en new_message para', data.phone);
+        }
         updateUnreadBadge(data.phone, unreadCounts[data.phone]); // badge inmediato, sin esperar HTTP
     }
 

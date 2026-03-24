@@ -286,7 +286,9 @@ async def _process_message_deferred(
         # Se llama get_state_manager() inline (no se asigna a state_manager) para evitar
         # UnboundLocalError: state_manager se asigna localmente en línea ~430, por lo que
         # Python lo marca como variable local en todo el scope — no puede referenciarse antes.
-        await get_state_manager().update_activity(phone_normalized)
+        # canal=final_channel: evita que contactos no-whatsapp generen ZSET member duplicado
+        # (phone:whatsapp vs phone:instagram) cuando update_activity usa el default "whatsapp".
+        await get_state_manager().update_activity(phone_normalized, canal=final_channel or "whatsapp")
 
         # Notificar al panel vía WebSocket (cross-worker via Redis Pub/Sub)
         await ws_manager.notify_new_message(

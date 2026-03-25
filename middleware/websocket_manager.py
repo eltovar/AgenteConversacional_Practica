@@ -184,7 +184,8 @@ class ConnectionManager:
         from_advisor: str,
         to_advisor: str,
         contact_name: str = "",
-        mode: str = "exclusive"
+        mode: str = "exclusive",
+        redis_client=None
     ) -> None:
         """
         Notifica sobre una transferencia de contacto.
@@ -195,6 +196,8 @@ class ConnectionManager:
             to_advisor: ID del asesor destino
             contact_name: Nombre del contacto
             mode: Modo de transferencia (exclusive/collaborative)
+            redis_client: Si se provee, usa Redis Pub/Sub (cross-worker safe).
+                          Si es None, usa send_to_advisor directo (fallback local).
         """
         notification = {
             "type": "contact_transferred",
@@ -203,22 +206,21 @@ class ConnectionManager:
             "mode": mode,
             "timestamp": datetime.now(TIMEZONE_BOGOTA).isoformat()
         }
+        msg_out = {**notification, "direction": "outgoing",
+                   "message": f"Contacto {contact_name or phone} transferido"}
+        msg_in  = {**notification, "direction": "incoming",
+                   "message": f"Nuevo contacto recibido: {contact_name or phone}"}
 
-        # Notificar al asesor origen (el contacto salió de su panel)
-        await self.send_to_advisor(from_advisor, {
-            **notification,
-            "direction": "outgoing",
-            "message": f"Contacto {contact_name or phone} transferido"
-        })
+        if redis_client is not None:
+            await self.publish_to_advisor(redis_client, from_advisor, msg_out)
+            await self.publish_to_advisor(redis_client, to_advisor, msg_in)
+            # Sincronizar phone→advisor en todos los workers via Pub/Sub
+            await self.publish_broadcast(redis_client, {"_route": {"phone": phone, "advisor_id": to_advisor}})
+        else:
+            await self.send_to_advisor(from_advisor, msg_out)
+            await self.send_to_advisor(to_advisor, msg_in)
 
-        # Notificar al asesor destino (tiene nuevo contacto)
-        await self.send_to_advisor(to_advisor, {
-            **notification,
-            "direction": "incoming",
-            "message": f"Nuevo contacto recibido: {contact_name or phone}"
-        })
-
-        # Actualizar registro
+        # Actualizar registro local del worker actual
         self.register_phone_owner(phone, to_advisor)
 
     async def notify_status_change(
@@ -339,6 +341,15 @@ class ConnectionManager:
         """
         await redis_client.publish(self.PUBSUB_CHANNEL, json.dumps(message))
 
+    async def publish_to_advisor(self, redis_client, advisor_id: str, message: dict) -> None:
+        """
+        Envía un mensaje a un asesor específico via Redis Pub/Sub (cross-worker safe).
+        Añade _target al payload para que el listener de cada worker enrute
+        solo a las conexiones de ese asesor.
+        """
+        payload = {**message, "_target": advisor_id}
+        await self.publish_broadcast(redis_client, payload)
+
     async def start_redis_listener(self, get_redis_fn) -> None:
         """
         Crea (o reemplaza) el background task del Redis Pub/Sub listener.
@@ -371,40 +382,62 @@ class ConnectionManager:
         Loop interno del Redis Pub/Sub listener.
         Escucha el canal ws:broadcast y hace broadcast local a las conexiones de este worker.
         Incluye reconexión automática si Redis cae.
+
+        NOTA: El cliente Redis se crea UNA SOLA VEZ fuera del loop para evitar el leak
+        de conexiones. Antes, get_redis_fn() se llamaba dentro de while True: cada error
+        de reconexión creaba un nuevo pool sin cerrar el anterior, acumulando pools
+        huérfanos a lo largo del uptime del servicio.
         """
         logger.info("[WebSocket] Iniciando Redis Pub/Sub listener...")
-        while True:
-            pubsub = None
-            try:
-                redis = await get_redis_fn()
-                pubsub = redis.pubsub()  # conexión dedicada, no comparte pool
-                await pubsub.subscribe(self.PUBSUB_CHANNEL)
-                logger.info(f"[WebSocket] Suscrito al canal Redis '{self.PUBSUB_CHANNEL}'")
+        redis_client = await get_redis_fn()  # Un solo cliente, reutilizado en todas las reconexiones
+        try:
+            while True:
+                pubsub = None
+                try:
+                    pubsub = redis_client.pubsub()  # conexión dedicada, no comparte pool
+                    await pubsub.subscribe(self.PUBSUB_CHANNEL)
+                    logger.info(f"[WebSocket] Suscrito al canal Redis '{self.PUBSUB_CHANNEL}'")
 
-                async for raw_msg in pubsub.listen():
-                    if raw_msg["type"] == "message":
+                    async for raw_msg in pubsub.listen():
+                        if raw_msg["type"] == "message":
+                            try:
+                                data = json.loads(raw_msg["data"])
+                                # Sincronización cross-worker de phone→advisor
+                                route = data.pop("_route", None)
+                                if route:
+                                    self.register_phone_owner(route["phone"], route["advisor_id"])
+                                target = data.pop("_target", None)
+                                if not data and not target:
+                                    continue  # Mensaje solo de sync, nada que enviar
+                                if target:
+                                    await self.send_to_advisor(target, data)
+                                else:
+                                    await self.broadcast(data)
+                            except Exception as e:
+                                logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+
+                except asyncio.CancelledError:
+                    logger.info("[WebSocket] Redis listener cancelado limpiamente")
+                    raise
+                except Exception as e:
+                    logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
+                finally:
+                    # Cerrar el pubsub explícitamente para evitar
+                    # RuntimeError('aclose(): asynchronous generator is already running')
+                    if pubsub is not None:
                         try:
-                            data = json.loads(raw_msg["data"])
-                            await self.broadcast(data)
-                        except Exception as e:
-                            logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+                            await pubsub.unsubscribe()
+                            await pubsub.aclose()
+                        except Exception:
+                            pass
 
-            except asyncio.CancelledError:
-                logger.info("[WebSocket] Redis listener cancelado limpiamente")
-                raise
-            except Exception as e:
-                logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
-            finally:
-                # Cerrar el pubsub explícitamente para evitar
-                # RuntimeError('aclose(): asynchronous generator is already running')
-                if pubsub is not None:
-                    try:
-                        await pubsub.unsubscribe()
-                        await pubsub.aclose()
-                    except Exception:
-                        pass
-
-            await asyncio.sleep(2)  # fuera del try/except — siempre espera antes de reconectar
+                await asyncio.sleep(2)  # fuera del try/except — siempre espera antes de reconectar
+        finally:
+            # Cerrar el cliente Redis al salir del loop (CancelledError en shutdown graceful)
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
 
 
 # Instancia global del manager

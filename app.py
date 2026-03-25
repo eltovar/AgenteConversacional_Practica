@@ -454,8 +454,17 @@ async def check_conversation_timeouts():
     logger.info("[Scheduler] Hora actual (Bogotá): %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
 
     try:
-        # Usar método correcto de Sesión 1
-        active_contacts = await state_manager.get_all_human_active_contacts()
+        # Paginar para procesar contactos en posición >100 del ZSET
+        all_active_contacts: list = []
+        _offset = 0
+        _page_size = 100
+        while True:
+            page = await state_manager.get_all_human_active_contacts(limit=_page_size, offset=_offset)
+            all_active_contacts.extend(page)
+            if len(page) < _page_size:
+                break
+            _offset += _page_size
+        active_contacts = all_active_contacts
 
         logger.info("[Scheduler] Contactos activos encontrados: %d", len(active_contacts))
 
@@ -762,54 +771,105 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info("[STARTUP] Iniciando servidor Sofía v2.0... (Worker PID: %s)", pid)
 
-    # Cargar Knowledge Base
+    # Cargar Knowledge Base — un solo worker indexa (lock Redis para evitar stampede)
+    # Con 4 workers Gunicorn, sin lock todos ejecutan reload_knowledge_base() simultáneamente:
+    # 4× DELETE + 4× INSERT + 4× embedding API calls → estado no determinístico en pgvector.
+    # Redis SET NX (only if Not eXists) garantiza que solo 1 worker indexa; los demás
+    # solo inicializan la conexión SQLAlchemy sin tocar los datos.
     try:
         from rag.rag_service import rag_service
-        result = rag_service.reload_knowledge_base()
-        if result["status"] == "error":
-            raise RuntimeError(f"Fallo en carga KB: {result.get('message')}")
-        logger.info("[STARTUP] ✅ KB Lista. Chunks indexados: %s", result.get('chunks_indexed'))
+        from rag.vector_store import pg_vector_store
+        import redis.asyncio as _redis_rag
+
+        _rag_redis = _redis_rag.from_url(
+            get_redis_url(), encoding="utf-8", decode_responses=True,
+            socket_timeout=2.0, socket_connect_timeout=2.0
+        )
+        # Atómico: solo el primer worker en ganar el lock indexa la KB.
+        # TTL 120s cubre sobrecarga de embeddings; se limpia solo al expirar.
+        _rag_lock = await _rag_redis.set("rag_kb_lock", str(pid), nx=True, ex=120)
+        await _rag_redis.aclose()
+
+        if _rag_lock:
+            # Este worker ganó el lock → ejecuta DELETE + embeddings + INSERT
+            result = rag_service.reload_knowledge_base()
+            if result["status"] == "error":
+                raise RuntimeError(f"Fallo en carga KB: {result.get('message')}")
+            logger.info("[STARTUP] ✅ KB Lista. Chunks: %s (líder PID: %s)", result.get('chunks_indexed'), pid)
+        else:
+            # Otro worker ya está indexando → solo inicializar la conexión DB (sin re-indexar)
+            pg_vector_store.initialize_db()
+            logger.info("[STARTUP] ⏭  KB indexada por otro worker. Conexión DB lista (PID: %s)", pid)
+
     except Exception as e:
         logger.error("[STARTUP] ⚠️ Error cargando KB: %s", e)
 
-    # Configurar jobs del scheduler
-    if APPOINTMENT_REMINDERS_ENABLED:
+    # Scheduler: solo UN worker por instancia Railway ejecuta los jobs.
+    # Sin lock, N workers corren cada job independientemente:
+    #   - check_appointment_reminders efectivo cada 15 min → Rate Limit HubSpot + duplicados
+    #   - check_appointment_followups efectivo cada 7.5 min → mensajes duplicados post-cita
+    # Redis SET NX garantiza atomicamente que solo 1 worker adquiere el liderazgo.
+    _is_scheduler_leader = False
+    try:
+        import redis.asyncio as _redis_sched
+        _sched_redis = _redis_sched.from_url(
+            get_redis_url(), encoding="utf-8", decode_responses=True,
+            socket_timeout=2.0, socket_connect_timeout=2.0
+        )
+        # TTL 300s: si el worker lider muere o se hace redeploy, otro toma el liderazgo
+        # en maximos 5min — sin necesidad de DEL manual antes de cada deploy
+        _sched_lock = await _sched_redis.set(
+            "scheduler_leader", str(pid), nx=True, ex=300
+        )
+        await _sched_redis.aclose()
+        _is_scheduler_leader = bool(_sched_lock)
+        if _is_scheduler_leader:
+            logger.info("[STARTUP] Worker %s es el scheduler leader", pid)
+        else:
+            logger.info("[STARTUP] Worker %s omite scheduler (otro worker es leader)", pid)
+    except Exception as _sched_err:
+        # Fallback: si Redis no disponible al startup, arrancar scheduler de todas formas
+        _is_scheduler_leader = True
+        logger.warning("[STARTUP] Lock scheduler Redis fallo (%s) — scheduler sin coordinacion", _sched_err)
+
+    if _is_scheduler_leader:
+        if APPOINTMENT_REMINDERS_ENABLED:
+            scheduler.add_job(
+                check_appointment_reminders,
+                trigger=IntervalTrigger(minutes=30),
+                id="apt_reminders",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] Scheduler de recordatorios de citas HABILITADO (cada 30 min)")
+
+        if FOLLOWUP_ENABLED:
+            scheduler.add_job(
+                check_and_send_followups,
+                trigger=IntervalTrigger(hours=1),
+                id="followup_24h",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] Scheduler de seguimiento 24h HABILITADO")
+
+        if APPOINTMENT_REMINDERS_ENABLED:
+            scheduler.add_job(
+                check_appointment_followups,
+                trigger=IntervalTrigger(minutes=15),
+                id="apt_followups",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] Scheduler post-cita HABILITADO (cada 15 min, ventana 1h30min)")
+
         scheduler.add_job(
-            check_appointment_reminders,
-            trigger=IntervalTrigger(minutes=30),
-            id="apt_reminders",
+            check_conversation_timeouts,
+            trigger=IntervalTrigger(hours=2),
+            id="conv_timeouts",
             replace_existing=True
         )
-        logger.info("[STARTUP] ✅ Scheduler de recordatorios de citas HABILITADO (cada 30 min)")
+        logger.info("[STARTUP] Scheduler de timeouts HABILITADO (cada 2 horas)")
 
-    if FOLLOWUP_ENABLED:
-        scheduler.add_job(
-            check_and_send_followups,
-            trigger=IntervalTrigger(hours=1),
-            id="followup_24h",
-            replace_existing=True
-        )
-        logger.info("[STARTUP] ✅ Scheduler de seguimiento 24h HABILITADO")
-
-    if APPOINTMENT_REMINDERS_ENABLED:
-        scheduler.add_job(
-            check_appointment_followups,
-            trigger=IntervalTrigger(minutes=15),
-            id="apt_followups",
-            replace_existing=True
-        )
-        logger.info("[STARTUP] ✅ Scheduler de seguimiento post-cita HABILITADO (cada 15 min, ventana 1h30min)")
-
-    scheduler.add_job(
-        check_conversation_timeouts,
-        trigger=IntervalTrigger(hours=2),
-        id="conv_timeouts",
-        replace_existing=True
-    )
-    logger.info("[STARTUP] ✅ Scheduler de timeouts HABILITADO (cada 2 horas)")
-
-    scheduler.start()
-    logger.info("[STARTUP] Schedulers iniciados (Timezone: %s)", TIMEZONE_BOGOTA)
+        scheduler.start()
+        logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)
 
     # Iniciar Redis Pub/Sub listener para broadcast WebSocket cross-worker
     try:
@@ -830,8 +890,9 @@ async def startup_event():
 
     # Migrar SET legacy Redis → ZSET y eliminar la clave obsoleta (operación única)
     try:
-        from middleware.conversation_state import state_manager
-        await state_manager.cleanup_legacy_set()
+        _csm_legacy = ConversationStateManager(get_redis_url())
+        await _csm_legacy.cleanup_legacy_set()
+        await _csm_legacy.close()
     except Exception as e:
         logger.warning("[STARTUP] cleanup_legacy_set: %s (no crítico)", e)
 

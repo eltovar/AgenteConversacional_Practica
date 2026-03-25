@@ -25,7 +25,7 @@ import redis.asyncio as redis
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
-from .conversation_state import ConversationStateManager, ConversationStatus
+from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
@@ -1993,7 +1993,8 @@ async def transfer_contact(
             from_advisor=from_owner or "unknown",
             to_advisor=to_owner_id,
             contact_name=contact_name,
-            mode=mode
+            mode=mode,
+            redis_client=state_manager.redis
         )
     except Exception as e:
         logger.warning(f"[Panel] Error notificando WebSocket: {e}")
@@ -2102,24 +2103,24 @@ async def request_transfer(
     # 2. Reasignar owner en HubSpot en background (no bloquear respuesta)
     asyncio.create_task(_reassign_hubspot_owner(contact_id, to_owner_id=requesting_advisor_id))
 
-    # 3. Escribir phone_cache inverso para que edición de nombres funcione
+    # 3-5. Un cliente redis para phone_cache + notificaciones + broadcast
+    _rc_transfer = await _get_redis_client()
     try:
-        _rc = await _get_redis_client()
-        await _rc.set(f"phone_cache:{contact_id}", phone, ex=86400, nx=True)
+        await _rc_transfer.set(f"phone_cache:{contact_id}", phone, ex=86400, nx=True)
     except Exception:
         pass
 
-    # 4. Notificar al ex-propietario (solo informativo)
+    # 4. Notificar al ex-propietario (solo informativo) — cross-worker safe
     await ws_manager.notify_contact_transferred(
         phone=phone,
         from_advisor=owner_advisor_id,
         to_advisor=requesting_advisor_id,
         contact_name=display,
-        mode="exclusive"
+        mode="exclusive",
+        redis_client=_rc_transfer
     )
 
     # 5. Broadcast para que todos los paneles refresquen
-    _rc_transfer = await _get_redis_client()
     await ws_manager.publish_broadcast(_rc_transfer, {
         "type": "contact_updated",
         "phone": phone,
@@ -2173,7 +2174,7 @@ async def accept_transfer(
     await _rc.delete(f"transfer_req:{contact_id}")
 
     # 4. Notificar al solicitante
-    await ws_manager.send_to_advisor(requester_id, {
+    await ws_manager.publish_to_advisor(_rc, requester_id, {
         "type": "transfer_accepted",
         "contact_id": contact_id,
         "phone": phone,
@@ -2215,7 +2216,7 @@ async def reject_transfer(
     await _rc.delete(f"transfer_req:{contact_id}")
 
     if requester_id:
-        await ws_manager.send_to_advisor(requester_id, {
+        await ws_manager.publish_to_advisor(_rc, requester_id, {
             "type": "transfer_rejected",
             "contact_id": contact_id,
             "phone": phone,
@@ -3996,7 +3997,7 @@ async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
             recent_out.append({"ts": ts, "phone_last10": phone[-10:], "status": status, "contact_id": cid})
         result["recent_contacts"] = recent_out
 
-        result["timestamp"] = datetime.now().isoformat()
+        result["timestamp"] = get_bogota_now().isoformat()
         return result
 
     except Exception as e:
@@ -5241,7 +5242,7 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
                 if message.get("type") == "ping":
                     await websocket.send_json({
                         "type": "pong",
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": get_bogota_now().isoformat()
                     })
 
                 # Comando para registrar teléfono activo
@@ -5255,7 +5256,7 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
                 # Sin mensajes del cliente → ping proactivo para mantener viva la conexión
                 await websocket.send_json({
                     "type": "ping",
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": get_bogota_now().isoformat()
                 })
 
             except json.JSONDecodeError:

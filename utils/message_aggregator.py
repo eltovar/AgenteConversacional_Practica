@@ -31,8 +31,9 @@ class MessageAggregator:
             redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_PUBLIC_URL")
             if redis_url:
                 self.redis = redis.from_url(
-                    redis_url, 
+                    redis_url,
                     decode_responses=True,
+                    max_connections=3,           # Cap explícito — evita pool sin límite
                     socket_timeout=3.0,
                     socket_connect_timeout=3.0,
                     retry_on_timeout=True

@@ -176,9 +176,10 @@ class ConversationStateManager:
             
         # Configuración optimizada de Redis con timeouts
         self.redis = redis.from_url(
-            self.redis_url, 
-            encoding="utf-8", 
+            self.redis_url,
+            encoding="utf-8",
             decode_responses=True,
+            max_connections=10,          # Cap explícito — componente de mayor frecuencia
             socket_timeout=3.0,          # Timeout para operaciones (antes 5.0)
             socket_connect_timeout=3.0,  # Timeout para conexión
             retry_on_timeout=True,       # Reintentar en timeout

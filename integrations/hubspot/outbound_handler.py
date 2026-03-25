@@ -13,6 +13,7 @@ import hashlib
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+from middleware.conversation_state import get_bogota_now
 
 import redis
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
@@ -257,14 +258,14 @@ class OutboundHandler:
                     state = json.loads(state_data)
                     state["status"] = ConversationStatus.HUMAN_ACTIVE.value
                     state["handoff_reason"] = reason
-                    state["human_active_since"] = datetime.utcnow().isoformat()
+                    state["human_active_since"] = get_bogota_now().isoformat()
                     redis_client.set(state_key, json.dumps(state))
                 else:
                     # Crear nuevo estado
                     new_state = {
                         "status": ConversationStatus.HUMAN_ACTIVE.value,
                         "handoff_reason": reason,
-                        "human_active_since": datetime.utcnow().isoformat()
+                        "human_active_since": get_bogota_now().isoformat()
                     }
                     redis_client.set(state_key, json.dumps(new_state))
 

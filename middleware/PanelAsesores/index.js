@@ -11,7 +11,7 @@ function formatBogotaDate(ts) {
     try {
         if (!ts) return '';
         let safeTs = ts.trim();
-        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !safeTs.includes('+')) {
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(safeTs)) {
             safeTs += 'Z';
         }
         return new Date(safeTs).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }); // "YYYY-MM-DD"
@@ -58,7 +58,7 @@ function formatBogotaTime(ts) {
         if (!ts) return '';
         // Forzar que el string termine en 'Z' (UTC) si no la tiene
         let safeTs = ts.trim();
-        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !safeTs.includes('+')) {
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(safeTs) && !safeTs.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(safeTs)) {
             safeTs += 'Z';
         }
         // Parsear como UTC
@@ -79,7 +79,7 @@ function formatBogotaTime(ts) {
 // Las variables API_KEY, BASE_URL y ADVISOR_NAMES son inyectadas desde index.html
 
 const POLLING_INTERVAL_IDLE = 10000;   // 10 segundos cuando no hay chat activo
-const POLLING_INTERVAL_ACTIVE = 3000;  // 3 segundos cuando hay chat abierto
+const POLLING_INTERVAL_ACTIVE = 10000;  // 10 segundos — WS maneja eventos en tiempo real (era 3s → 429s)
 
 // Etapas del Pipeline de HubSpot (Contact-based)
 const PIPELINE_STAGES = [
@@ -1503,6 +1503,8 @@ function renderContactsList(contacts) {
         return;
     }
 
+    const savedScrollTop = container.scrollTop;
+
     // Construir mapa de elementos existentes en el DOM indexados por phone
     const existingMap = new Map();
     for (const el of container.querySelectorAll('.contact-item[data-phone]')) {
@@ -1567,6 +1569,8 @@ function renderContactsList(contacts) {
             _updateContactTimeAgo(phone, contact.time_ago);
         }
     }
+
+    container.scrollTop = savedScrollTop;
 }
 
 // Variable para tracking de primera carga

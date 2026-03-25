@@ -173,8 +173,12 @@ class ConnectionManager:
         logger.info(f"[WebSocket] notify_new_message: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
 
         if redis_client is not None:
-            await self.publish_broadcast(redis_client, notification)
-            return 0  # Pub/Sub no retorna conteo local
+            advisor_id = self.phone_to_advisor.get(phone)
+            if advisor_id:
+                await self.publish_to_advisor(redis_client, advisor_id, notification)
+            else:
+                await self.publish_broadcast(redis_client, notification)
+            return 0
 
         return await self.broadcast(notification)
 

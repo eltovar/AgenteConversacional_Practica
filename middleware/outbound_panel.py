@@ -1954,33 +1954,37 @@ async def transfer_contact(
 
     from_owner = result.get("from_owner")
 
-    # === 2. Actualizar HubSpot (solo en modo exclusive) ===
-    hubspot_updated = False
+    # === 2. Actualizar HubSpot en background (no bloquear la respuesta) ===
+    hubspot_updated = "queued"
     if mode == "exclusive" and contact_id:
         import httpx
         hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
 
         if hubspot_api_key:
-            try:
-                url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.patch(
-                        url,
-                        json={"properties": {"hubspot_owner_id": to_owner_id}},
-                        headers={
-                            "Authorization": f"Bearer {hubspot_api_key}",
-                            "Content-Type": "application/json"
-                        }
-                    )
+            _cid = contact_id
+            _oid = to_owner_id
+            _key = hubspot_api_key
 
-                    if response.status_code == 200:
-                        hubspot_updated = True
-                        logger.info(f"[Panel] HubSpot owner actualizado: {contact_id} -> {to_owner_id}")
-                    else:
-                        logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
+            async def _update_hubspot_owner():
+                try:
+                    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{_cid}"
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        response = await client.patch(
+                            url,
+                            json={"properties": {"hubspot_owner_id": _oid}},
+                            headers={
+                                "Authorization": f"Bearer {_key}",
+                                "Content-Type": "application/json"
+                            }
+                        )
+                        if response.status_code == 200:
+                            logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}")
+                        else:
+                            logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
+                except Exception as e:
+                    logger.warning(f"[Panel] Error actualizando HubSpot (no crítico): {e}")
 
-            except Exception as e:
-                logger.warning(f"[Panel] Error actualizando HubSpot (no crítico): {e}")
+            asyncio.create_task(_update_hubspot_owner())
 
     # === 3. Notificar vía WebSocket ===
     try:
@@ -3357,6 +3361,17 @@ async def get_active_contacts(
         logger.info(f"[Panel] Usando Redis URL: {re.sub(r':[^:@/]+@', ':***@', redis_url)}")
         state_manager = ConversationStateManager(redis_url)
 
+        # === CACHE: Respuesta completa en Redis (TTL 5s) para colapsar concurrent requests ===
+        _cache_params = f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:{page}:{limit}"
+        _contacts_cache_key = f"contacts_resp:{hashlib.md5(_cache_params.encode()).hexdigest()}"
+        try:
+            _cached = await state_manager.redis.get(_contacts_cache_key)
+            if _cached:
+                logger.debug(f"[Panel] GET /contacts cache HIT para advisor={advisor or 'all'}")
+                return json.loads(_cached)
+        except Exception:
+            pass  # Cache miss o error Redis → continuar con lógica normal
+
         if advisor:
             # Cuando hay filtro de advisor: escanear todo el ZSET para no perder contactos
             # del advisor en páginas posteriores (problema cuando todos tienen el mismo score,
@@ -3878,7 +3893,7 @@ async def get_active_contacts(
                 f"stage={c.get('current_stage', 'N/A')}"
             )
 
-        return {
+        _response_data = {
             "contacts": contacts_sorted[:limit],
             "filter": filter_time,
             "advisor": advisor,
@@ -3890,6 +3905,13 @@ async def get_active_contacts(
             "since": since.isoformat(),
             "until": until.isoformat()
         }
+        try:
+            await state_manager.redis.set(
+                _contacts_cache_key, json.dumps(_response_data, default=str), ex=5
+            )
+        except Exception:
+            pass  # No bloquear la respuesta si el cache write falla
+        return _response_data
 
     except Exception as e:
         logger.error(f"[Panel] Error obteniendo contactos: {e}")

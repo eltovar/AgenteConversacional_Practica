@@ -1038,6 +1038,21 @@ class TimelineLogger:
         since_ms = int(since.timestamp() * 1000)
         until_ms = int((until or datetime.utcnow()).timestamp() * 1000)
 
+        # Cache Redis 5 min — los contactos históricos no cambian por segundo.
+        # Redondeamos a cubos de 5 min para que requests cercanas compartan clave.
+        _since_bucket = (since_ms // 300000) * 300000
+        _until_bucket = (until_ms // 300000) * 300000
+        _cache_key = f"timeline_activity:{_since_bucket}:{_until_bucket}:{limit}"
+        try:
+            _r = await self._get_redis()
+            _cached = await _r.get(_cache_key)
+            if _cached:
+                import json as _json
+                logger.debug(f"[TimelineLogger] get_contacts_with_advisor_activity cache HIT")
+                return _json.loads(_cached)
+        except Exception:
+            pass
+
         payload = {
             "filterGroups": [{
                 "filters": [
@@ -1139,10 +1154,18 @@ class TimelineLogger:
                             "email": props.get("email", ""),
                         })
 
-                return {
+                _result = {
                     "contacts": contacts,
                     "paging": {"next_after": next_after}
                 }
+                try:
+                    import json as _json
+                    _r = await self._get_redis()
+                    await _r.set(_cache_key, _json.dumps(_result), ex=300)
+                    logger.debug(f"[TimelineLogger] get_contacts_with_advisor_activity cache WRITE ({len(contacts)} contactos)")
+                except Exception:
+                    pass
+                return _result
 
         except Exception as e:
             logger.error(f"[TimelineLogger] Error buscando contactos: {e}")

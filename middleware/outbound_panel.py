@@ -3354,7 +3354,7 @@ async def get_active_contacts(
         redis_url = os.getenv("REDIS_URL") if is_railway else (
             os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
         )
-        logger.info(f"[Panel] Usando Redis URL: {redis_url}")
+        logger.info(f"[Panel] Usando Redis URL: {re.sub(r':[^:@/]+@', ':***@', redis_url)}")
         state_manager = ConversationStateManager(redis_url)
 
         if advisor:

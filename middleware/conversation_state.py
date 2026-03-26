@@ -538,19 +538,31 @@ class ConversationStateManager:
 
             # 2. Guardar metadata
             now_iso = get_bogota_now_iso()
+
+            # Preservar last_activity real del último mensaje para que el polling del panel
+            # no detecte el click del asesor como "nuevo mensaje" → badge/índice-0 falso.
+            meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
+            existing_last_activity = now_iso  # fallback si no existe meta previo
+            try:
+                existing_raw = await self.redis.get(meta_key)
+                if existing_raw:
+                    existing_meta = json.loads(existing_raw)
+                    if existing_meta.get("last_activity"):
+                        existing_last_activity = existing_meta["last_activity"]
+            except Exception:
+                pass  # best-effort
+
             meta = {
                 "phone_normalized": phone_num,
                 "contact_id": contact_id,
                 "status": ConversationStatus.HUMAN_ACTIVE.value,
-                "last_activity": now_iso,
+                "last_activity": existing_last_activity,
                 "handoff_reason": reason,
                 "assigned_owner_id": owner_id,
                 "canal_origen": canal_origen,
                 "display_name": display_name,
                 "created_at": now_iso
             }
-
-            meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
             # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
             await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
             # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días
@@ -603,6 +615,7 @@ class ConversationStateManager:
                     "status": ConversationStatus.PENDING_HANDOFF.value,
                     "last_activity": now_iso,
                     "handoff_reason": reason,
+                    "in_panel": True,  # Resetea in_panel=False de un cierre previo
                 })
                 if contact_id:
                     meta["contact_id"] = contact_id

@@ -2419,6 +2419,20 @@ async def close_conversation(
                 member_orig = f"{phone}:{canal_safe}"
                 await r.zrem("active_conversations_sorted", member_orig)
                 await r.srem("bot_controlled_conversations", member_orig)
+
+            # Setear in_panel=False para que update_activity() no re-agregue al ZSET
+            # si el cliente envía un mensaje mientras el bot está activo post-cierre.
+            meta_key_close = f"conv_meta:{phone_normalized}:{canal_safe}"
+            raw_close = await r.get(meta_key_close)
+            if raw_close:
+                try:
+                    meta_close = json.loads(raw_close)
+                    meta_close["in_panel"] = False
+                    ttl_close = await r.ttl(meta_key_close)
+                    ex_close = ttl_close if ttl_close and ttl_close > 0 else state_manager.PANEL_TTL_SECONDS
+                    await r.set(meta_key_close, json.dumps(meta_close), ex=ex_close)
+                except Exception as e_meta:
+                    logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {phone_normalized}: {e_meta}")
         except Exception as e:
             logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
 

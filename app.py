@@ -82,6 +82,7 @@ from integrations.hubspot import get_outbound_router, get_timeline_logger
 
 # Importar función para actualizar ventana de 24h
 from middleware.outbound_panel import update_last_client_message
+from middleware.websocket_manager import ws_manager
 
 
 
@@ -424,6 +425,33 @@ async def check_appointment_reminders():
 
                     sent += 1
                     logger.info("[Scheduler][Reminder] ✅ Recordatorio enviado a %s", apt.phone_normalized)
+                    # Guardar en MongoDB para que aparezca en el panel
+                    try:
+                        canal_apt = apt.canal or "whatsapp"
+                        mongo_mgr = get_mongo_manager()
+                        await mongo_mgr.save_message(
+                            phone=apt.phone_normalized,
+                            content=message,
+                            sender="bot",
+                            channel=canal_apt,
+                            hubspot_contact_id=apt.contact_id,
+                            message_sid=result.get("message_sid"),
+                            metadata={"source": "Recordatorio automático de cita"}
+                        )
+                        await state_manager.update_activity(apt.phone_normalized, canal=canal_apt)
+                        await ws_manager.publish_broadcast(state_manager.redis, {
+                            "type": "contact_updated",
+                            "action": "new_message",
+                            "phone": apt.phone_normalized,
+                            "canal": canal_apt,
+                            "sender": "bot",
+                            "preview": message[:100],
+                            "contact_name": contact_name
+                        })
+                    except Exception as _panel_err:
+                        logger.warning(
+                            "[Scheduler][Reminder] No se pudo guardar en panel: %s", _panel_err
+                        )
                 else:
                     logger.warning(
                         "[Scheduler][Reminder] ❌ Error enviando recordatorio a %s: %s",
@@ -723,6 +751,33 @@ async def check_appointment_followups():
 
                         sent += 1
                         logger.info("[Scheduler][Followup] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
+                        # Guardar en MongoDB para que aparezca en el panel
+                        try:
+                            canal_apt = apt.canal or "whatsapp"
+                            mongo_mgr = get_mongo_manager()
+                            await mongo_mgr.save_message(
+                                phone=apt.phone_normalized,
+                                content=message,
+                                sender="bot",
+                                channel=canal_apt,
+                                hubspot_contact_id=apt.contact_id,
+                                message_sid=result.get("message_sid"),
+                                metadata={"source": "Seguimiento post-cita automático"}
+                            )
+                            await state_manager.update_activity(apt.phone_normalized, canal=canal_apt)
+                            await ws_manager.publish_broadcast(state_manager.redis, {
+                                "type": "contact_updated",
+                                "action": "new_message",
+                                "phone": apt.phone_normalized,
+                                "canal": canal_apt,
+                                "sender": "bot",
+                                "preview": message[:100],
+                                "contact_name": contact_name
+                            })
+                        except Exception as _panel_err:
+                            logger.warning(
+                                "[Scheduler][Followup] No se pudo guardar en panel: %s", _panel_err
+                            )
                     else:
                         logger.warning("[Scheduler][Followup] ❌ Error enviando followup a %s", apt.phone_normalized)
                 else:

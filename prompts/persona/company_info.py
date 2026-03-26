@@ -68,7 +68,7 @@ Jurídico (Data Crédito, demandas, codeudores)
   WhatsApp: 321 789 86 79
 
 Servicios Públicos (EPM, financiación, revisión gas)
-  WhatsApp: 604 444 63 64
+  WhatsApp: 323 508 18 84
 
 Reparaciones y Mantenimiento
   WhatsApp: 323 327 7132

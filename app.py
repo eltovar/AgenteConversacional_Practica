@@ -392,10 +392,19 @@ async def check_appointment_reminders():
 
             # Enviar vía Twilio
             if twilio_client.is_available:
-                result = await twilio_client.send_whatsapp_message(
-                    to=apt.phone_normalized,
-                    body=message
-                )
+                _reminder_sid = os.getenv("TWILIO_REMINDER_TEMPLATE_SID")
+                if _reminder_sid:
+                    result = await twilio_client.send_whatsapp_message(
+                        to=apt.phone_normalized,
+                        body=message,
+                        content_sid=_reminder_sid,
+                        content_variables={"1": contact_name, "2": scheduled_dt.strftime('%H:%M')}
+                    )
+                else:
+                    result = await twilio_client.send_whatsapp_message(
+                        to=apt.phone_normalized,
+                        body=message
+                    )
 
                 if result.get("status") == "success":
                     # Marcar como enviado (método correcto de Sesión 1)
@@ -684,10 +693,19 @@ async def check_appointment_followups():
                 )
 
                 if twilio_client.is_available:
-                    result = await twilio_client.send_whatsapp_message(
-                        to=apt.phone_normalized,
-                        body=message
-                    )
+                    _followup_sid = os.getenv("TWILIO_FOLLOWUP_TEMPLATE_SID")
+                    if _followup_sid:
+                        result = await twilio_client.send_whatsapp_message(
+                            to=apt.phone_normalized,
+                            body=message,
+                            content_sid=_followup_sid,
+                            content_variables={"1": contact_name}
+                        )
+                    else:
+                        result = await twilio_client.send_whatsapp_message(
+                            to=apt.phone_normalized,
+                            body=message
+                        )
 
                     if result.get("status") == "success":
                         await apt_manager.mark_followup_sent(apt.phone_normalized, apt.canal)

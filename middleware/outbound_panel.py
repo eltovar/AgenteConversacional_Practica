@@ -1967,18 +1967,28 @@ async def transfer_contact(
 
             async def _update_hubspot_owner():
                 try:
+                    from urllib.parse import quote as _quote
+                    _props = {"hubspot_owner_id": _oid}
+                    _panel_base = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+                    _admin_key = os.getenv("ADMIN_API_KEY", "")
+                    if _panel_base and _admin_key and phone_normalized:
+                        _props["url_chat"] = (
+                            f"{_panel_base}/whatsapp/panel/"
+                            f"?key={_admin_key}&advisor={_oid}&phone={_quote(phone_normalized, safe='')}"
+                        )
                     url = f"https://api.hubapi.com/crm/v3/objects/contacts/{_cid}"
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         response = await client.patch(
                             url,
-                            json={"properties": {"hubspot_owner_id": _oid}},
+                            json={"properties": _props},
                             headers={
                                 "Authorization": f"Bearer {_key}",
                                 "Content-Type": "application/json"
                             }
                         )
                         if response.status_code == 200:
-                            logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}")
+                            logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}"
+                                        + (" + url_chat actualizado" if "url_chat" in _props else ""))
                         else:
                             logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
                 except Exception as e:
@@ -2034,25 +2044,40 @@ def _get_advisor_name(advisor_id: str) -> str:
     return "Asesor"
 
 
-async def _reassign_hubspot_owner(contact_id: str, to_owner_id: str) -> bool:
-    """PATCH hubspot_owner_id de un contacto en HubSpot."""
+async def _reassign_hubspot_owner(contact_id: str, to_owner_id: str, phone: str = None) -> bool:
+    """PATCH hubspot_owner_id (y url_chat si se proporciona phone) en HubSpot."""
     try:
         import httpx
+        from urllib.parse import quote
         hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
         if not hubspot_api_key or not contact_id:
             return False
+
+        properties = {"hubspot_owner_id": to_owner_id}
+
+        # Actualizar url_chat si tenemos phone y las env vars necesarias
+        panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+        admin_api_key = os.getenv("ADMIN_API_KEY", "")
+        if phone and panel_base_url and admin_api_key:
+            phone_encoded = quote(phone, safe='')
+            properties["url_chat"] = (
+                f"{panel_base_url}/whatsapp/panel/"
+                f"?key={admin_api_key}&advisor={to_owner_id}&phone={phone_encoded}"
+            )
+
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.patch(
                 url,
-                json={"properties": {"hubspot_owner_id": to_owner_id}},
+                json={"properties": properties},
                 headers={
                     "Authorization": f"Bearer {hubspot_api_key}",
                     "Content-Type": "application/json"
                 }
             )
         if response.status_code == 200:
-            logger.info(f"[Panel] HubSpot owner reasignado: {contact_id} -> {to_owner_id}")
+            logger.info(f"[Panel] HubSpot owner reasignado: {contact_id} -> {to_owner_id}"
+                        + (" + url_chat actualizado" if "url_chat" in properties else ""))
             return True
         logger.warning(f"[Panel] HubSpot reasignación falló: {response.status_code}")
         return False
@@ -2105,7 +2130,7 @@ async def request_transfer(
         logger.warning(f"[Panel] activate_human en transfer-request falló: {e}")
 
     # 2. Reasignar owner en HubSpot en background (no bloquear respuesta)
-    asyncio.create_task(_reassign_hubspot_owner(contact_id, to_owner_id=requesting_advisor_id))
+    asyncio.create_task(_reassign_hubspot_owner(contact_id, to_owner_id=requesting_advisor_id, phone=phone))
 
     # 3-5. Un cliente redis para phone_cache + notificaciones + broadcast
     _rc_transfer = await _get_redis_client()
@@ -2159,7 +2184,7 @@ async def accept_transfer(
     contact_name = req_data.get("contact_name", phone)
 
     # 1. Reasignar owner en HubSpot
-    await _reassign_hubspot_owner(contact_id, to_owner_id=requester_id)
+    await _reassign_hubspot_owner(contact_id, to_owner_id=requester_id, phone=phone)
 
     # 2. Actualizar assigned_owner_id en Redis conv_meta si el contacto está activo
     try:
@@ -3163,20 +3188,55 @@ async def search_contacts_by_keyword(
 
     try:
         from database.mongodb_client import MongoDBManager
-        
+
         logger.info(f"[Panel] Búsqueda por palabra clave: '{q}'")
-        
+
         mongo_manager = MongoDBManager()
         matching_phones = await mongo_manager.search_messages_fulltext(q, limit=limit)
-        
+
         logger.info(f"[Panel] Búsqueda '{q}': {len(matching_phones)} contactos encontrados")
-        
+
+        # Enriquecer con datos de Redis (nombre, status) para phones que el frontend no tenga
+        enriched_contacts = []
+        if matching_phones:
+            state_manager = ConversationStateManager(
+                os.getenv("REDIS_URL") if os.getenv("RAILWAY_ENVIRONMENT")
+                else (os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379"))
+            )
+            for phone in matching_phones:
+                meta = await state_manager.get_meta(phone)
+                display_name = phone
+                contact_id = None
+                conversation_status = "historical"
+                last_activity = None
+                if meta:
+                    display_name = meta.display_name or phone
+                    contact_id = meta.contact_id
+                    conversation_status = meta.status or "historical"
+                    last_activity = meta.last_activity.isoformat() if meta.last_activity else None
+                # Intentar nombre desde cache HubSpot si Redis no tiene nombre útil
+                if contact_id and (display_name == phone or display_name in ("Sin nombre", "Cliente Nuevo")):
+                    cached_name = await _get_cached_contact_name(contact_id)
+                    if cached_name:
+                        hs_name = f"{cached_name.get('firstname', '')} {cached_name.get('lastname', '')}".strip()
+                        if hs_name:
+                            display_name = hs_name
+                enriched_contacts.append({
+                    "phone": phone,
+                    "display_name": display_name,
+                    "contact_id": contact_id,
+                    "conversation_status": conversation_status,
+                    "last_activity": last_activity,
+                    "is_active": conversation_status in ("HUMAN_ACTIVE", "IN_CONVERSATION", "BOT_ACTIVE"),
+                })
+
         return {
             "query": q,
             "count": len(matching_phones),
-            "phones": matching_phones
+            "phones": matching_phones,
+            "contacts": enriched_contacts,
         }
-        
+
     except Exception as e:
         logger.error(f"[Panel] Error en búsqueda por palabra clave: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -3194,11 +3254,11 @@ async def _get_contacts_by_worker_filter(
     1. MongoDB: citas futuras activas del worker → contact_ids + phones
     2. HubSpot batch: obtener nombre/email de los contactos (1 llamada)
     3. Por cada contacto: obtener lifecyclestage desde _get_contact_lifecyclestage (usa caché Redis)
-    4. Filtrar: solo etapa "marketingqualifiedlead" (Visita agendada)
+    4. Filtrar: solo etapa "marketingqualifiedlead" o "customer" (Visita agendada + Cerrado ganado)
     5. Redis: añadir estado de conversación si está activo
     6. Retornar ordenado por appointment_dt ASC
     """
-    STAGE_CITA_AGENDADA = "marketingqualifiedlead"
+    STAGES_VISIBLES_WORKER = {"marketingqualifiedlead", "customer"}
 
     mongo_mgr = get_mongo_manager()
     appointment_records = await mongo_mgr.get_contacts_by_worker(worker_id)
@@ -3252,8 +3312,8 @@ async def _get_contacts_by_worker_filter(
         except Exception:
             current_stage = None
 
-        # Filtrar: solo etapa "Visita agendada"
-        if current_stage != STAGE_CITA_AGENDADA:
+        # Filtrar: solo etapas visibles (Visita agendada + Cerrado ganado)
+        if current_stage not in STAGES_VISIBLES_WORKER:
             continue
 
         # Nombre desde HubSpot batch
@@ -3278,6 +3338,40 @@ async def _get_contacts_by_worker_filter(
         conversation_status = redis_meta.status if redis_meta else "historical"
         last_activity = redis_meta.last_activity.isoformat() if (redis_meta and redis_meta.last_activity) else None
 
+        # Calcular time_ago usando last_activity o appointment_dt como fallback
+        from zoneinfo import ZoneInfo
+        _tz = ZoneInfo("America/Bogota")
+        _now = datetime.now(_tz)
+        time_ago_str = ""
+        ref_time = last_activity or rec.get("appointment_dt")
+        if ref_time:
+            try:
+                if isinstance(ref_time, str):
+                    ref_dt = datetime.fromisoformat(ref_time.replace("Z", "+00:00"))
+                else:
+                    ref_dt = ref_time
+                if ref_dt.tzinfo is None:
+                    ref_dt = ref_dt.replace(tzinfo=_tz)
+                delta = _now - ref_dt.astimezone(_tz)
+                secs = delta.total_seconds()
+                local = ref_dt.astimezone(_tz)
+                h = local.hour % 12 or 12
+                t = f"{h}:{local.strftime('%M')} {'a.m.' if local.hour < 12 else 'p.m.'}"
+                if secs < 3600:
+                    time_ago_str = f"hace {int(secs // 60)} min"
+                elif secs < 86400:
+                    time_ago_str = f"hoy {t}"
+                elif secs < 172800:
+                    time_ago_str = f"ayer {t}"
+                elif delta.days < 7:
+                    _dias = ['lun','mar','mié','jue','vie','sáb','dom']
+                    time_ago_str = f"{_dias[local.weekday()]} {t}"
+                else:
+                    _meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+                    time_ago_str = f"{local.day} {_meses[local.month - 1]}"
+            except (ValueError, TypeError):
+                time_ago_str = "en espera"
+
         contacts_out.append({
             "contact_id": cid,
             "phone": phone,
@@ -3292,7 +3386,7 @@ async def _get_contacts_by_worker_filter(
             "last_activity": last_activity,
             "is_active": conversation_status in ("HUMAN_ACTIVE", "IN_CONVERSATION", "BOT_ACTIVE"),
             "canal_origen": rec.get("canal", "whatsapp"),
-            "time_ago": "",
+            "time_ago": time_ago_str,
             "ttl_display": "",
         })
 
@@ -3585,7 +3679,11 @@ async def get_active_contacts(
             until = now
         elif filter_time == "custom" and date_from:
             since = datetime.fromisoformat(date_from)
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=TIMEZONE)
             until = datetime.fromisoformat(date_to) if date_to else now
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=TIMEZONE)
         else:
             since = now - timedelta(hours=24)
             until = now

@@ -245,13 +245,30 @@ async function filterContacts(searchTerm) {
 
             // Combinar resultados: agregar contactos del servidor que no estén en local
             const localPhones = new Set(localFiltered.map(c => c.phone));
-            const additionalContacts = allContacts.filter(contact =>
+            const allContactPhones = new Set(allContacts.map(c => c.phone));
+
+            // Contactos que están en allContacts pero no en localFiltered
+            const additionalFromLocal = allContacts.filter(contact =>
                 serverPhones.includes(contact.phone) && !localPhones.has(contact.phone)
             );
 
-            if (additionalContacts.length > 0) {
-                console.log(`[Panel] Búsqueda en historial: +${additionalContacts.length} contactos`);
-                renderContactsList([...localFiltered, ...additionalContacts]);
+            // Contactos que NO están en allContacts — usar datos enriquecidos del servidor
+            const serverContacts = data.contacts || [];
+            const additionalFromServer = serverContacts
+                .filter(c => !allContactPhones.has(c.phone) && !localPhones.has(c.phone))
+                .map(c => ({
+                    ...c,
+                    time_ago: '',
+                    has_appointment: false,
+                    handoff_reason: '',
+                    canal_origen: '',
+                    _from_search: true,
+                }));
+
+            const allAdditional = [...additionalFromLocal, ...additionalFromServer];
+            if (allAdditional.length > 0) {
+                console.log(`[Panel] Búsqueda en historial: +${additionalFromLocal.length} local, +${additionalFromServer.length} servidor`);
+                renderContactsList([...localFiltered, ...allAdditional]);
             }
         } catch (error) {
             console.warn('[Panel] Error en búsqueda de historial:', error);
@@ -963,7 +980,15 @@ async function loadWorkerFilterOptions() {
 function onWorkerFilterChange(workerId) {
     activeWorkerFilter = workerId;
     const timeFilter = document.getElementById('timeFilter');
-    if (timeFilter) timeFilter.disabled = !!workerId;
+    if (timeFilter) {
+        timeFilter.disabled = !!workerId;
+        // Al desactivar worker filter, resetear time filter a default para evitar estado inconsistente
+        if (!workerId && timeFilter.value === 'custom') {
+            timeFilter.value = '24h';
+            const customDates = document.getElementById('customDates');
+            if (customDates) customDates.classList.add('hidden');
+        }
+    }
     loadContacts();
 }
 
@@ -1063,7 +1088,8 @@ async function loadContacts() {
                     console.log('[Panel] Deep link: auto-seleccionando', deepLinkPhone);
                     selectContact(target.contact_id || '', target.phone, target.display_name || target.phone, target.canal_origen || 'whatsapp');
                 } else {
-                    console.warn('[Panel] Deep link: contacto no encontrado en lista activa:', deepLinkPhone);
+                    // Contacto inactivo o sin sesión Redis: reactivar automáticamente
+                    _handleDeepLinkMiss(deepLinkPhone);
                 }
             }
         }
@@ -1077,6 +1103,62 @@ async function loadContacts() {
                 <p class="text-sm">${error.message}</p>
             </div>
         `;
+    }
+}
+
+/**
+ * Fallback del deep link: el contacto no está en allContacts (inactivo en Redis).
+ * Llama take-control para reactivarlo, refresca la lista y auto-selecciona.
+ * @param {string} phone - Teléfono normalizado (con +)
+ */
+async function _handleDeepLinkMiss(phone) {
+    console.log('[Panel] Deep link: contacto inactivo, intentando reactivar:', phone);
+    showToast('Cargando conversación...', 'info');
+
+    try {
+        // 1. Reactivar en Redis vía take-control
+        const takeControlUrl =
+            `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
+            `canal=whatsapp` +
+            (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
+
+        const tcResp = await fetch(takeControlUrl, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY }
+        });
+
+        if (!tcResp.ok) {
+            const err = await tcResp.json().catch(() => ({}));
+            throw new Error(err.detail || `take-control HTTP ${tcResp.status}`);
+        }
+
+        const tcData = await tcResp.json();
+        console.log('[Panel] Deep link reactivación:', tcData.action, phone);
+
+        // 2. Refrescar lista (Redis ya tiene el contacto activo)
+        await loadContacts();
+
+        // 3a. Caso normal: contacto aparece en allContacts tras el refresh
+        const target = allContacts.find(c => c.phone === phone);
+        if (target) {
+            console.log('[Panel] Deep link: contacto reactivado, seleccionando');
+            selectContact(
+                target.contact_id || '',
+                target.phone,
+                target.display_name || target.phone,
+                target.canal_origen || 'whatsapp'
+            );
+        } else {
+            // 3b. Fallback: take-control exitoso pero contacto aún no en lista
+            // (posible lag Redis o filtro advisor no coincide).
+            // selectContact con phone solo: loadContactDetail carga historial desde MongoDB.
+            console.warn('[Panel] Deep link fallback: abriendo chat directo por phone');
+            selectContact('', phone, phone, 'whatsapp');
+        }
+
+    } catch (err) {
+        console.error('[Panel] Deep link: error en reactivación:', err);
+        showToast(`No se pudo cargar la conversación: ${err.message}`, 'error');
     }
 }
 

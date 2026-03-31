@@ -191,6 +191,12 @@ class MongoDBManager:
                 unique=True
             )
 
+            # Índices para contact_notes (notas internas de asesores)
+            await self.db.contact_notes.create_index(
+                [("contact_id", ASCENDING), ("is_deleted", ASCENDING), ("created_at", DESCENDING)],
+                name="note_contact_created_idx"
+            )
+
             self._indexes_created = True
             logger.info("[MongoDB] Índices creados/verificados")
 
@@ -1056,6 +1062,82 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo cita {appointment_id}: {e}")
             return None
+
+    # ------------------------------------------------------------------ #
+    #  Contact Notes CRUD                                                  #
+    # ------------------------------------------------------------------ #
+
+    async def create_note(self, contact_id: str, content: str,
+                          advisor_id: str, advisor_name: str,
+                          phone: str = "") -> Optional[str]:
+        """Crea una nota interna para un contacto. Retorna el _id como str."""
+        if not await self.connect():
+            return None
+        try:
+            now = datetime.now(TIMEZONE)
+            doc = {
+                "contact_id": contact_id,
+                "phone": phone,
+                "advisor_id": advisor_id,
+                "advisor_name": advisor_name,
+                "content": content.strip(),
+                "created_at": now,
+                "updated_at": now,
+                "is_deleted": False,
+            }
+            result = await self.db.contact_notes.insert_one(doc)
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"[MongoDB] Error creando nota para {contact_id}: {e}")
+            return None
+
+    async def get_notes(self, contact_id: str) -> list:
+        """Retorna notas activas de un contacto, ordenadas más recientes primero."""
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.contact_notes.find(
+                {"contact_id": contact_id, "is_deleted": False},
+                sort=[("created_at", DESCENDING)]
+            )
+            notes = []
+            async for doc in cursor:
+                doc["_id"] = str(doc["_id"])
+                doc["created_at"] = doc["created_at"].isoformat() if hasattr(doc.get("created_at"), "isoformat") else str(doc.get("created_at", ""))
+                doc["updated_at"] = doc["updated_at"].isoformat() if hasattr(doc.get("updated_at"), "isoformat") else str(doc.get("updated_at", ""))
+                notes.append(doc)
+            return notes
+        except Exception as e:
+            logger.error(f"[MongoDB] Error obteniendo notas para {contact_id}: {e}")
+            return []
+
+    async def update_note(self, note_id: str, content: str) -> bool:
+        """Actualiza el contenido de una nota. Retorna True si se modificó."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.contact_notes.update_one(
+                {"_id": ObjectId(note_id), "is_deleted": False},
+                {"$set": {"content": content.strip(), "updated_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando nota {note_id}: {e}")
+            return False
+
+    async def soft_delete_note(self, note_id: str) -> bool:
+        """Marca una nota como eliminada (soft delete). Retorna True si se modificó."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.contact_notes.update_one(
+                {"_id": ObjectId(note_id), "is_deleted": False},
+                {"$set": {"is_deleted": True, "updated_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error eliminando nota {note_id}: {e}")
+            return False
 
     async def close(self):
         """Cierra la conexión."""

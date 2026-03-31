@@ -211,12 +211,12 @@ async function filterContacts(searchTerm) {
     const term = searchTerm.toLowerCase().trim();
 
     if (!term) {
-        renderContactsList(allContacts);
+        _applyFiltersAndRender();
         return;
     }
 
     // Búsqueda local inmediata (nombre, teléfono, canal, razón)
-    const localFiltered = allContacts.filter(contact => {
+    let localFiltered = allContacts.filter(contact => {
         const haystack = [
             contact.display_name || '',
             contact.phone || '',
@@ -225,6 +225,9 @@ async function filterContacts(searchTerm) {
         ].join(' ').toLowerCase();
         return haystack.includes(term);
     });
+    // Aplicar filtros activos sobre el resultado de búsqueda
+    if (activePortalFilter) localFiltered = localFiltered.filter(c => c.canal_origen === activePortalFilter);
+    if (activeStageFilter)  localFiltered = localFiltered.filter(c => c.current_stage === activeStageFilter);
 
     // Mostrar resultados locales inmediatamente
     renderContactsList(localFiltered);
@@ -328,9 +331,9 @@ async function updateDealStage(contactId, stageId) {
 
             // Notificacion visual temporal
             if (dropdown) {
-                dropdown.classList.add('ring-2', 'ring-green-400');
+                dropdown.classList.add('ring-2', 'ring-yellow-400');
                 setTimeout(() => {
-                    dropdown.classList.remove('ring-2', 'ring-green-400');
+                    dropdown.classList.remove('ring-2', 'ring-yellow-400');
                 }, 1500);
             }
         } else {
@@ -690,7 +693,7 @@ async function openTemplateModal() {
                     <p class="text-gray-500">Cargando templates...</p>
                 </div>
                 <div class="p-4 border-t bg-gray-50">
-                    <button onclick="showCreateTemplateForm()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                    <button onclick="showCreateTemplateForm()" class="bg-[#F5C400] text-[#1A1A1A] font-semibold px-4 py-2 rounded hover:bg-[#D4A800]">
                         + Crear Template
                     </button>
                 </div>
@@ -780,7 +783,7 @@ function showCreateTemplateForm() {
                 <p class="text-xs text-gray-500 mt-1">Variables disponibles: {nombre}, {fecha}, {hora}, {direccion}</p>
             </div>
             <div class="flex gap-2">
-                <button type="submit" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                <button type="submit" class="bg-[#F5C400] text-[#1A1A1A] font-semibold px-4 py-2 rounded hover:bg-[#D4A800]">
                     Guardar
                 </button>
                 <button type="button" onclick="renderTemplateList()" class="bg-gray-200 px-4 py-2 rounded hover:bg-gray-300">
@@ -960,6 +963,98 @@ async function deleteTemplate(templateId) {
 // Variable global para el worker filter activo
 let activeWorkerFilter = '';
 
+// Variable global para el portal filter activo (filtrado local en allContacts)
+let activePortalFilter = '';
+
+// Variable global para el filtro de etapa activo
+let activeStageFilter = '';
+
+// Mapa de canal_origen → label corto para los chips de portal
+const CANAL_LABELS = {
+    finca_raiz: 'FR', metrocuadrado: 'MC', instagram: 'IG',
+    facebook: 'FB', whatsapp_directo: 'WA', pagina_web: 'WEB',
+    tiktok: 'TT', ciencuadras: 'CC', charly: 'CH'
+};
+
+/**
+ * Aplica filtros activos (portal + etapa) sobre allContacts y renderiza.
+ * Llamado desde loadContacts(), filterByPortal(), onStageFilterChange().
+ */
+function _applyFiltersAndRender() {
+    let filtered = allContacts;
+    if (activePortalFilter) filtered = filtered.filter(c => c.canal_origen === activePortalFilter);
+    if (activeStageFilter)  filtered = filtered.filter(c => c.current_stage === activeStageFilter);
+    renderContactsList(filtered);
+}
+
+/**
+ * Reconstruye los chips de portal según los canales realmente presentes en contacts.
+ * @param {Array} contacts - Array de contactos (allContacts)
+ */
+function _rebuildPortalChips(contacts) {
+    const row = document.getElementById('portalFilterRow');
+    if (!row) return;
+    const todosBtn = row.querySelector('[data-canal=""]');
+    const canales = [...new Set(contacts.map(c => c.canal_origen).filter(Boolean))].sort();
+    row.innerHTML = '';
+    if (todosBtn) row.appendChild(todosBtn);
+    canales.forEach(canal => {
+        const label = CANAL_LABELS[canal] || canal.slice(0, 3).toUpperCase();
+        const btn = document.createElement('button');
+        btn.className = `portal-chip${activePortalFilter === canal ? ' active' : ''}`;
+        btn.dataset.canal = canal;
+        btn.textContent = label;
+        btn.onclick = () => filterByPortal(canal);
+        row.appendChild(btn);
+    });
+    // Si el filtro activo ya no existe en los canales, resetear a "Todos"
+    if (activePortalFilter && !canales.includes(activePortalFilter)) {
+        activePortalFilter = '';
+        if (todosBtn) todosBtn.classList.add('active');
+    }
+}
+
+/**
+ * Handler del select de filtro por etapa.
+ * @param {string} val - ID de la etapa, o '' para todas
+ */
+function onStageFilterChange(val) {
+    activeStageFilter = val;
+    _applyFiltersAndRender();
+}
+
+/**
+ * Pobla el select #stageFilter con las etapas del pipeline.
+ * Llamado una sola vez en la inicialización.
+ */
+function _initStageFilter() {
+    const sel = document.getElementById('stageFilter');
+    if (!sel) return;
+    PIPELINE_STAGES.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = s.name;
+        sel.appendChild(opt);
+    });
+}
+
+/**
+ * Activa o desactiva el filtro de portal y re-renderiza la lista.
+ * @param {string} canal - Valor de canal_origen, o '' para mostrar todos
+ */
+function filterByPortal(canal) {
+    activePortalFilter = canal;
+    // Actualizar UI de chips
+    document.querySelectorAll('#portalFilterRow .portal-chip').forEach(btn => {
+        if (btn.dataset.canal === canal) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+    _applyFiltersAndRender();
+}
+
 async function loadWorkerFilterOptions() {
     const sel = document.getElementById('workerFilter');
     if (!sel) return;
@@ -1108,7 +1203,8 @@ async function loadContacts() {
             allContacts = allContacts.filter(c => !recentlyClosedPhones.has(c.phone));
         }
 
-        renderContactsList(allContacts);
+        _rebuildPortalChips(allContacts);
+        _applyFiltersAndRender();
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
         if (!deepLinkHandled) {
@@ -1439,14 +1535,11 @@ function _buildPipelineDropdown(contactIdForDropdown, currentStageForDropdown) {
     const options = PIPELINE_STAGES.map(stage =>
         `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
     ).join('');
-    return `
-        <select class="text-xs border rounded px-1 py-0.5 bg-white cursor-pointer hover:border-blue-400 focus:ring-1 focus:ring-blue-400"
+    return `<select class="text-xs text-gray-700 bg-transparent border-0 cursor-pointer font-medium focus:ring-0 focus:outline-none max-w-[140px]"
                 data-contact-id="${contactIdForDropdown}"
                 onchange="updateDealStage('${contactIdForDropdown}', this.value)"
-                onclick="event.stopPropagation()">
-            ${options}
-        </select>
-    `;
+                onclick="event.stopPropagation()"
+                title="Cambiar etapa">${options}</select>`;
 }
 
 /**
@@ -1468,7 +1561,6 @@ function _getContactFingerprint(contact) {
         contact.display_name || '',
         contact.canal_origen || '',
         currentStage,
-        contact.ttl_display || '',
         contact.handoff_reason || '',
         contact.has_appointment ? '1' : '0',
         contactId === currentContactId ? 'active' : '',
@@ -1502,10 +1594,12 @@ function _buildContactHTML(contact) {
     const canalOrigen = contact.canal_origen || '';
 
     let bgClass = '';
-    if (isInConversation) {
-        bgClass = 'bg-blue-50 border-l-4 border-blue-500';
+    if (status === 'PENDING_HANDOFF') {
+        bgClass = 'contact-state-pending';
+    } else if (isInConversation) {
+        bgClass = 'contact-state-in-conversation';
     } else if (isHumanActive || isActive) {
-        bgClass = 'bg-green-50 border-l-4 border-green-500';
+        bgClass = 'contact-state-human';
     }
 
     const timeAgo = contact.time_ago || '';
@@ -1517,11 +1611,15 @@ function _buildContactHTML(contact) {
         'metrocuadrado': 'bg-orange-100 text-orange-700',
         'pagina_web': 'bg-indigo-100 text-indigo-700',
         'whatsapp_directo': 'bg-green-100 text-green-700',
+        'ciencuadras': 'bg-cyan-100 text-cyan-700',
+        'charly': 'bg-violet-100 text-violet-700',
+        'tiktok': 'bg-gray-900 text-white',
         'default': 'bg-gray-100 text-gray-600'
     };
     const canalColorClass = canalColors[canalOrigen] || canalColors['default'];
-    const canalBadge = canalOrigen && canalOrigen !== 'default'
-        ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded mr-1">${canalOrigen.replace('_', ' ')}</span>`
+    const canalLabel = CANAL_LABELS[canalOrigen] || (canalOrigen ? canalOrigen.slice(0, 3).toUpperCase() : '');
+    const canalBadge = canalLabel
+        ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded font-semibold">${canalLabel}</span>`
         : '';
 
     const cacheKey = contactId || phone;
@@ -1532,25 +1630,17 @@ function _buildContactHTML(contact) {
         contactDealCache[cacheKey] = { current_stage: contact.current_stage };
     }
 
-    let badge = '';
+    // Fila 2 de la card: canal badge + stage select (o badge estático)
+    let stageRow = '';
     if (isInConversation || isHumanActive || isActive) {
         const pipelineDropdown = _buildPipelineDropdown(contactId, currentStage);
-        if (pipelineDropdown) {
-            badge = `${canalBadge}${pipelineDropdown}
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}
-                     ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
-        } else if (isInConversation) {
-            badge = `${canalBadge}<span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">En conversacion</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}`;
-        } else {
-            badge = `${canalBadge}<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full animate-pulse">En espera</span>
-                     ${timeAgo ? `<p class="text-xs text-gray-400 mt-1" data-time-ago>Llego ${timeAgo}</p>` : ''}
-                     ${contact.ttl_display ? `<p class="text-xs text-orange-400 mt-0.5">${contact.ttl_display}</p>` : ''}`;
-        }
+        stageRow = pipelineDropdown || `<span class="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full animate-pulse">En espera</span>`;
     } else if (status === 'BOT_ACTIVE') {
-        badge = `${canalBadge}`;
+        stageRow = currentStage
+            ? `<span class="text-xs text-gray-500">${PIPELINE_STAGES.find(s => s.id === currentStage)?.name || ''}</span>`
+            : '';
     } else {
-        badge = `${canalBadge}<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>`;
+        stageRow = `<span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Historial</span>`;
     }
 
     const bgColors = ['10B981', '3B82F6', 'F59E0B', 'EF4444', '8B5CF6', 'EC4899', '06B6D4'];
@@ -1578,11 +1668,12 @@ function _buildContactHTML(contact) {
         ? `<span class="absolute -top-1 -left-1 bg-gray-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Sofía está manejando">🤖</span>`
         : '';
 
+    // Layout 2 filas: [Fila 1] nombre + timeAgo  |  [Fila 2] canal badge + stage select
     return `
-        <div class="contact-item p-3 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
+        <div class="contact-item p-2.5 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
              data-phone="${phone}"
              onclick="selectContact('${contactId}', '${phone}', '${displayName.replace(/'/g, "\\'")}', '${canalOrigen}')">
-            <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2.5">
                 <div class="relative flex-shrink-0">
                     <img src="${avatarUrl}"
                          class="w-10 h-10 rounded-full"
@@ -1594,12 +1685,15 @@ function _buildContactHTML(contact) {
                     ${crossAdvisorBadge}
                 </div>
                 <div class="flex-1 min-w-0">
-                    <p class="font-medium text-gray-800 truncate">${displayName}</p>
-                    <p class="text-sm text-gray-500 truncate">${phone || contact.email || 'Sin contacto'}</p>
-                    ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate">${contact.handoff_reason}</p>` : ''}
-                </div>
-                <div class="text-right">
-                    ${badge}
+                    <div class="flex items-center justify-between gap-1">
+                        <p class="font-semibold text-sm text-gray-900 truncate">${displayName}</p>
+                        ${timeAgo ? `<span class="text-xs text-gray-400 flex-shrink-0" data-time-ago>Llego ${timeAgo}</span>` : ''}
+                    </div>
+                    <div class="flex items-center gap-1 mt-0.5 min-w-0">
+                        ${canalBadge}
+                        <div class="min-w-0 overflow-hidden">${stageRow}</div>
+                    </div>
+                    ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate mt-0.5">${contact.handoff_reason}</p>` : ''}
                 </div>
             </div>
         </div>
@@ -1953,20 +2047,20 @@ function openEditNameModal() {
                     <div class="mb-4">
                         <label class="block text-sm font-medium mb-1">Nombre</label>
                         <input type="text" id="editFirstname" name="firstname" required
-                            class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                            class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
                             placeholder="Nombre">
                     </div>
                     <div class="mb-4">
                         <label class="block text-sm font-medium mb-1">Apellido</label>
                         <input type="text" id="editLastname" name="lastname"
-                            class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                            class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
                             placeholder="Apellido (opcional)">
                     </div>
                     <div class="flex gap-2 justify-end">
                         <button type="button" onclick="closeEditNameModal()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">
                             Cancelar
                         </button>
-                        <button type="submit" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                        <button type="submit" class="px-4 py-2 bg-[#F5C400] text-[#1A1A1A] font-semibold rounded hover:bg-[#D4A800]">
                             Guardar
                         </button>
                     </div>
@@ -2051,6 +2145,12 @@ async function closeConversation() {
             document.getElementById('editNameBtn').classList.add('hidden');
             document.getElementById('closeConversationBtn').classList.add('hidden');
             document.getElementById('transferContactBtn').classList.add('hidden');
+            document.getElementById('detailsPanelToggle')?.classList.add('hidden');
+            document.getElementById('mainGrid')?.classList.remove('details-hidden');
+            // Ocultar banner y resetear panel de detalles
+            const _banner = document.getElementById('handoffBanner');
+            if (_banner) _banner.classList.add('hidden');
+            _updateDetailsPanel(null);
 
             // Remoción optimista: quitar del cache local inmediatamente para que el
             // próximo render (polling o WS) no lo vuelva a mostrar.
@@ -2059,7 +2159,7 @@ async function closeConversation() {
             setTimeout(() => recentlyClosedPhones.delete(closedPhone), 15000);
             allContacts = allContacts.filter(c => c.phone !== closedPhone);
             _contactFingerprints.delete(closedPhone);
-            renderContactsList(allContacts);
+            _applyFiltersAndRender();
 
             // NO llamar loadContacts() aquí — el siguiente ciclo de polling se encarga.
             // Llamarlo causaría race condition si hay una respuesta de polling en vuelo.
@@ -2114,7 +2214,7 @@ async function saveNameChange(event) {
             );
             if (idx !== -1) {
                 allContacts[idx].display_name = displayName;
-                renderContactsList(allContacts);
+                _applyFiltersAndRender();
             }
             closeEditNameModal();
             // NO llamar loadContacts() inmediatamente: HubSpot tarda ~1-3s en propagar
@@ -2609,11 +2709,9 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }
     }
 
-    // Mostrar botón de agendar cita solo cuando hay un contacto activo
-    const apptBtn = document.getElementById('scheduleAppointmentBtn');
-    if (apptBtn) {
-        apptBtn.classList.toggle('hidden', !contactId);
-    }
+    // Mostrar toggle de Columna C y asegurar que el panel esté visible
+    document.getElementById('detailsPanelToggle')?.classList.remove('hidden');
+    document.getElementById('mainGrid')?.classList.remove('details-hidden');
 
     currentContactId = contactId;
     currentPhone = phone;
@@ -2726,6 +2824,446 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     if (chatContainer) {
         const overlay = chatContainer.querySelector('.loading-overlay');
         if (overlay) overlay.remove();
+    }
+
+    // Actualizar banner de handoff y panel de detalles con datos del contacto seleccionado
+    const _selectedContact = allContacts.find(c => c.phone === phone || (c.contact_id || c.id) === contactId);
+    if (_selectedContact) {
+        _updateHandoffBanner(_selectedContact.conversation_status || _selectedContact.status, displayName);
+        _updateDetailsPanel(_selectedContact);
+    } else {
+        _updateHandoffBanner('BOT_ACTIVE', displayName);
+    }
+}
+
+// =========================================================================
+// BANNER DE HANDOFF — Indicador de modo Sofía vs Asesora
+// =========================================================================
+
+/**
+ * Actualiza el banner de handoff según el estado de la conversación.
+ * @param {string} status - BOT_ACTIVE | HUMAN_ACTIVE | IN_CONVERSATION | PENDING_HANDOFF
+ * @param {string} contactName - Nombre del contacto seleccionado
+ */
+function _updateHandoffBanner(status, contactName) {
+    const banner = document.getElementById('handoffBanner');
+    const icon = document.getElementById('handoffBannerIcon');
+    const text = document.getElementById('handoffBannerText');
+    const takeBtn = document.getElementById('handoffTakeControlBtn');
+    if (!banner) return;
+
+    banner.classList.remove('hidden', 'handoff-banner-bot', 'handoff-banner-human',
+                            'handoff-banner-pending', 'handoff-banner-in-conversation');
+
+    const name = contactName || 'el contacto';
+
+    if (status === 'PENDING_HANDOFF') {
+        banner.classList.add('handoff-banner-pending');
+        icon.textContent = '🔔';
+        text.textContent = `${name} necesita atención urgente`;
+        takeBtn.classList.remove('hidden');
+    } else if (status === 'HUMAN_ACTIVE') {
+        banner.classList.add('handoff-banner-human');
+        icon.textContent = '👤';
+        text.textContent = `Es tu turno — ${name} está esperando`;
+        takeBtn.classList.add('hidden');
+    } else if (status === 'IN_CONVERSATION') {
+        banner.classList.add('handoff-banner-in-conversation');
+        icon.textContent = '💬';
+        text.textContent = `Conversación activa con ${name}`;
+        takeBtn.classList.add('hidden');
+    } else {
+        // BOT_ACTIVE o desconocido
+        banner.classList.add('handoff-banner-bot');
+        icon.textContent = '🤖';
+        text.textContent = 'Sofía está atendiendo en piloto automático';
+        takeBtn.classList.remove('hidden');
+    }
+}
+
+/**
+ * Toma control desde el botón del banner (cuando Sofía está activa).
+ * Reutiliza el endpoint de take-control ya definido.
+ */
+async function takeControlFromBanner() {
+    if (!currentPhone) return;
+    const takeControlUrl = `${BASE_URL}/contacts/${encodeURIComponent(currentPhone)}/take-control?` +
+        `canal=${encodeURIComponent(currentCanal || 'whatsapp')}` +
+        (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
+    try {
+        await fetch(takeControlUrl, { method: 'POST', headers: { 'X-API-Key': API_KEY } });
+        scheduleContactsRefresh();
+    } catch (e) {
+        console.warn('[Panel] Error tomar control desde banner:', e);
+    }
+}
+
+/**
+ * Muestra/oculta la Columna C (panel de detalles).
+ * En pantallas <1280px la columna es un drawer fixed; en ≥1280px se alterna la visibilidad.
+ */
+function toggleDetailsPanel() {
+    const grid = document.getElementById('mainGrid');
+    if (!grid) return;
+    if (window.innerWidth < 1280) {
+        // En móvil: drawer fixed
+        const panel = document.getElementById('detailsPanel');
+        if (panel) panel.classList.toggle('panel-open');
+    } else {
+        // En desktop: colapsar columna del grid
+        grid.classList.toggle('details-hidden');
+    }
+}
+
+// =========================================================================
+// PANEL DE DETALLES (COLUMNA C) — Lead info, datos básicos
+// =========================================================================
+
+/**
+ * Popula la columna C con los datos del contacto seleccionado.
+ * Usa los datos ya disponibles en allContacts (sin fetch adicional).
+ * @param {Object} contact - Objeto de contacto de allContacts
+ */
+function _updateDetailsPanel(contact) {
+    const empty = document.getElementById('detailsEmpty');
+    const content = document.getElementById('detailsContent');
+    const scheduleBtn = document.getElementById('scheduleApptPanelBtn');
+    if (!content) return;
+
+    if (!contact) {
+        if (empty) empty.classList.remove('hidden');
+        content.classList.add('hidden');
+        return;
+    }
+
+    if (empty) empty.classList.add('hidden');
+    content.classList.remove('hidden');
+
+    // Mostrar botón de agendar solo si hay contactId
+    if (scheduleBtn) {
+        scheduleBtn.classList.toggle('hidden', !contact.contact_id);
+    }
+
+    // Cargar próxima cita y notas de forma asíncrona (no bloquean el render del panel)
+    if (contact.contact_id) {
+        loadNextAppointmentForPanel(contact.contact_id);
+        loadNotes(contact.contact_id);
+    } else {
+        const apptEl = document.getElementById('nextAppointmentContent');
+        if (apptEl) apptEl.innerHTML = '<p class="text-sm text-gray-400">Sin cita programada</p>';
+        const notesEl = document.getElementById('notesList');
+        if (notesEl) notesEl.innerHTML = '<p class="text-xs text-gray-400 px-1">Sin contactId disponible</p>';
+    }
+
+    // Construir lead info
+    const infoEl = document.getElementById('leadInfoContent');
+    if (!infoEl) return;
+
+    const canalColors = {
+        'instagram': 'bg-pink-100 text-pink-700',
+        'facebook': 'bg-blue-100 text-blue-700',
+        'finca_raiz': 'bg-yellow-100 text-yellow-700',
+        'metrocuadrado': 'bg-orange-100 text-orange-700',
+        'pagina_web': 'bg-indigo-100 text-indigo-700',
+        'whatsapp_directo': 'bg-emerald-100 text-emerald-700',
+        'default': 'bg-gray-100 text-gray-600'
+    };
+    const canalClass = canalColors[contact.canal_origen] || canalColors['default'];
+    const canalLabel = (contact.canal_origen || '').replace('_', ' ') || '—';
+
+    // Stage label desde PIPELINE_STAGES
+    const stageLabel = PIPELINE_STAGES.find(s => s.id === contact.current_stage)?.name || contact.current_stage || '—';
+
+    infoEl.innerHTML = `
+        <div class="flex items-center justify-between py-1 border-b border-gray-100">
+            <span class="text-gray-500 text-xs">Canal</span>
+            <span class="text-xs font-medium ${canalClass} px-2 py-0.5 rounded-full">${canalLabel}</span>
+        </div>
+        <div class="flex items-center justify-between py-1 border-b border-gray-100">
+            <span class="text-gray-500 text-xs">Etapa</span>
+            <span class="text-xs font-semibold text-gray-800">${stageLabel}</span>
+        </div>
+        <div class="flex items-center justify-between py-1 border-b border-gray-100">
+            <span class="text-gray-500 text-xs">Teléfono</span>
+            <span class="text-xs font-mono text-gray-700">${contact.phone || '—'}</span>
+        </div>
+        ${contact.owner_name ? `
+        <div class="flex items-center justify-between py-1">
+            <span class="text-gray-500 text-xs">Asesora</span>
+            <span class="text-xs font-medium text-gray-700">${contact.owner_name}</span>
+        </div>` : ''}
+    `;
+}
+
+// =========================================================================
+// CITAS EN COLUMNA C — Próxima cita del contacto seleccionado
+// =========================================================================
+
+/**
+ * Carga la próxima cita del contacto y la renderiza en la Columna C.
+ * Usa el endpoint existente GET /contacts/{contact_id}/appointments
+ * @param {string} contactId - HubSpot contact ID
+ */
+async function loadNextAppointmentForPanel(contactId) {
+    const container = document.getElementById('nextAppointmentContent');
+    const btn = document.getElementById('scheduleApptPanelBtn');
+    if (!container || !contactId) return;
+
+    container.innerHTML = '<p class="text-xs text-gray-400 animate-pulse">Cargando...</p>';
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/appointments`,
+            { headers: { 'X-API-Key': API_KEY } }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const appts = data.appointments || data || [];
+
+        // Filtrar solo futuras o pendientes/confirmadas
+        const now = new Date();
+        const upcoming = (appts || [])
+            .filter(a => a.status !== 'cancelled' && new Date(a.appointment_dt) >= now)
+            .sort((a, b) => new Date(a.appointment_dt) - new Date(b.appointment_dt));
+
+        if (upcoming.length === 0) {
+            container.innerHTML = '<p class="text-sm text-gray-400">Sin cita programada</p>';
+            if (btn) btn.classList.remove('hidden');
+            return;
+        }
+
+        const next = upcoming[0];
+        const dt = new Date(next.appointment_dt);
+        const dateStr = dt.toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short' });
+        const timeStr = dt.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true });
+        const statusColors = { pending: 'text-amber-600', confirmed: 'text-emerald-600', completed: 'text-gray-400' };
+        const statusColor = statusColors[next.status] || 'text-gray-500';
+
+        container.innerHTML = `
+            <div class="appt-card">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="text-sm font-semibold text-gray-800">📅 ${dateStr}</p>
+                        <p class="text-xs text-gray-600 mt-0.5">⏰ ${timeStr}</p>
+                        ${next.worker_name ? `<p class="text-xs text-gray-500 mt-0.5">👤 ${next.worker_name}</p>` : ''}
+                        ${next.notes ? `<p class="text-xs text-gray-500 mt-1 italic truncate">${next.notes}</p>` : ''}
+                    </div>
+                    <span class="text-xs font-semibold ${statusColor} capitalize">${next.status}</span>
+                </div>
+                ${upcoming.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${upcoming.length - 1} cita(s) más</p>` : ''}
+            </div>
+        `;
+
+        if (btn) btn.classList.remove('hidden');
+
+    } catch (err) {
+        console.warn('[Panel] Error cargando cita para columna C:', err);
+        container.innerHTML = '<p class="text-xs text-red-400">Error al cargar cita</p>';
+    }
+}
+
+// =========================================================================
+// NOTAS INTERNAS — Módulo de Notas en Columna C
+// =========================================================================
+
+/** Muestra el formulario de nueva nota y pone foco en el textarea. */
+function openAddNote() {
+    const form = document.getElementById('addNoteForm');
+    if (form) {
+        form.classList.remove('hidden');
+        document.getElementById('newNoteText')?.focus();
+    }
+}
+
+/** Oculta y limpia el formulario de nueva nota. */
+function cancelAddNote() {
+    const form = document.getElementById('addNoteForm');
+    if (form) {
+        form.classList.add('hidden');
+        const t = document.getElementById('newNoteText');
+        if (t) t.value = '';
+    }
+}
+
+/**
+ * Carga las notas activas del contacto y renderiza en #notesList.
+ * @param {string} contactId - HubSpot contact ID
+ */
+async function loadNotes(contactId) {
+    const container = document.getElementById('notesList');
+    if (!container || !contactId) return;
+
+    container.innerHTML = '<p class="text-xs text-gray-400 animate-pulse px-1">Cargando notas...</p>';
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/notes`,
+            { headers: { 'X-API-Key': API_KEY } }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderNotes(data.notes || [], contactId);
+    } catch (err) {
+        console.warn('[Panel] Error cargando notas:', err);
+        container.innerHTML = '<p class="text-xs text-red-400 px-1">Error al cargar notas</p>';
+    }
+}
+
+/**
+ * Renderiza el array de notas en #notesList.
+ * @param {Array} notes - Array de objetos nota
+ * @param {string} contactId - Para re-bind de acciones
+ */
+function renderNotes(notes, contactId) {
+    const container = document.getElementById('notesList');
+    if (!container) return;
+
+    if (!notes || notes.length === 0) {
+        container.innerHTML = '<p class="text-xs text-gray-400 px-1">Sin notas. Agrega la primera nota.</p>';
+        return;
+    }
+
+    container.innerHTML = notes.map(note => {
+        const dt = new Date(note.created_at);
+        const dateStr = dt.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+        const timeStr = dt.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true });
+        const wasEdited = note.updated_at !== note.created_at;
+        const escapedContent = note.content.replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `
+        <div class="note-card" id="note-${note._id}">
+            <div id="note-view-${note._id}">
+                <p class="text-sm text-gray-800 leading-snug whitespace-pre-wrap">${note.content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+                <div class="flex items-center justify-between mt-2">
+                    <span class="text-xs text-gray-400">${note.advisor_name || 'Asesor'} · ${dateStr} ${timeStr}${wasEdited ? ' · editada' : ''}</span>
+                    <div class="flex gap-2">
+                        <button onclick="editNote('${note._id}', '${escapedContent}', '${contactId}')" class="text-xs text-gray-400 hover:text-blue-600 transition-colors" title="Editar">✏️</button>
+                        <button onclick="deleteNote('${note._id}', '${contactId}')" class="text-xs text-gray-400 hover:text-red-500 transition-colors" title="Eliminar">🗑</button>
+                    </div>
+                </div>
+            </div>
+            <div id="note-edit-${note._id}" class="hidden note-card-edit">
+                <textarea id="note-edit-text-${note._id}" class="w-full text-sm" rows="3">${note.content.replace(/</g, '&lt;')}</textarea>
+                <div class="flex justify-end gap-2 mt-2">
+                    <button onclick="cancelEditNote('${note._id}')" class="text-xs text-gray-500 hover:text-gray-700">Cancelar</button>
+                    <button onclick="confirmEditNote('${note._id}', '${contactId}')" class="text-xs font-semibold text-[#1A1A1A] bg-[#F5C400] px-3 py-1 rounded-full hover:bg-[#D4A800]">Guardar</button>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+/**
+ * Muestra el inline editor para una nota específica.
+ * @param {string} noteId
+ * @param {string} currentContent
+ */
+function editNote(noteId, currentContent, _contactId) {
+    document.getElementById(`note-view-${noteId}`)?.classList.add('hidden');
+    const editEl = document.getElementById(`note-edit-${noteId}`);
+    if (editEl) {
+        editEl.classList.remove('hidden');
+        const ta = document.getElementById(`note-edit-text-${noteId}`);
+        if (ta) { ta.value = currentContent.replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>'); ta.focus(); }
+    }
+}
+
+/** Cancela la edición y restaura la vista. */
+function cancelEditNote(noteId) {
+    document.getElementById(`note-view-${noteId}`)?.classList.remove('hidden');
+    document.getElementById(`note-edit-${noteId}`)?.classList.add('hidden');
+}
+
+/**
+ * Confirma y guarda la edición de una nota via PATCH.
+ * @param {string} noteId
+ * @param {string} contactId
+ */
+async function confirmEditNote(noteId, contactId) {
+    const ta = document.getElementById(`note-edit-text-${noteId}`);
+    const content = ta?.value?.trim();
+    if (!content) return;
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/notes/${encodeURIComponent(noteId)}`,
+            {
+                method: 'PATCH',
+                headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content })
+            }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderNotes(data.notes || [], contactId);
+    } catch (err) {
+        console.error('[Panel] Error actualizando nota:', err);
+        showToast('Error al guardar la nota', 'error');
+    }
+}
+
+/**
+ * Elimina (soft delete) una nota via DELETE.
+ * @param {string} noteId
+ * @param {string} contactId
+ */
+async function deleteNote(noteId, contactId) {
+    if (!confirm('¿Eliminar esta nota?')) return;
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/notes/${encodeURIComponent(noteId)}`,
+            {
+                method: 'DELETE',
+                headers: { 'X-API-Key': API_KEY }
+            }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderNotes(data.notes || [], contactId);
+    } catch (err) {
+        console.error('[Panel] Error eliminando nota:', err);
+        showToast('Error al eliminar la nota', 'error');
+    }
+}
+
+/**
+ * Guarda una nueva nota via POST y limpia el formulario.
+ */
+async function saveNewNote() {
+    const ta = document.getElementById('newNoteText');
+    const content = ta?.value?.trim();
+    if (!content) return;
+
+    const contactId = currentContactId;
+    if (!contactId) { showToast('Selecciona un contacto primero', 'warning'); return; }
+
+    const advisorId = ADVISOR_ID || '';
+    const advisorName = ADVISOR_NAME || '';
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/notes`,
+            {
+                method: 'POST',
+                headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    content,
+                    advisor_id: advisorId,
+                    advisor_name: advisorName,
+                    phone: currentPhone || ''
+                })
+            }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderNotes(data.notes || [], contactId);
+        // Limpiar y cerrar formulario
+        if (ta) ta.value = '';
+        cancelAddNote();
+        showToast('Nota guardada', 'success');
+    } catch (err) {
+        console.error('[Panel] Error guardando nota:', err);
+        showToast('Error al guardar la nota', 'error');
     }
 }
 
@@ -3183,6 +3721,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Cargar workers para el filtro de citas
     loadWorkerFilterOptions();
 
+    // Poblar el select de filtro por etapa con PIPELINE_STAGES
+    _initStageFilter();
+
     // Inicializar listeners del template picker (slash command)
     _initTemplatePickerListeners();
 
@@ -3432,7 +3973,7 @@ function handleWebSocketMessage(data) {
                 const ni = allContacts.findIndex(c => c.phone === data.phone);
                 if (ni !== -1) {
                     allContacts[ni].display_name = data.display_name;
-                    renderContactsList(allContacts);
+                    _applyFiltersAndRender();
                 }
                 break;
             }
@@ -3451,7 +3992,7 @@ function handleWebSocketMessage(data) {
                     const _nmContact = allContacts.splice(_nmIdx, 1)[0];
                     allContacts.unshift(_nmContact);
                     _contactFingerprints.delete(_scrollPhone); // forzar reconstrucción del elemento
-                    renderContactsList(allContacts);
+                    _applyFiltersAndRender();
                 }
                 scheduleContactsRefresh();
                 setTimeout(() => {
@@ -3603,6 +4144,12 @@ function handleContactTransferred(data) {
  */
 function handleStatusChange(data) {
     console.log('[Panel] Cambio de estado:', data.phone, data.old_status, '->', data.new_status);
+
+    // Actualizar banner si el status_change es del contacto actualmente seleccionado
+    if (data.phone && data.phone === currentPhone && data.new_status) {
+        const name = allContacts.find(c => c.phone === data.phone)?.display_name || data.phone;
+        _updateHandoffBanner(data.new_status, name);
+    }
 
     // Refrescar lista para actualizar badges
     loadContacts();
@@ -3944,7 +4491,7 @@ function showTransferRequestModal(msg) {
                 </p>
                 <div class="flex gap-2 mt-3">
                     <button onclick="acceptTransfer('${msg.contact_id}')"
-                        class="px-3 py-1.5 bg-green-600 text-white text-xs rounded hover:bg-green-700 font-medium">
+                        class="px-3 py-1.5 bg-[#F5C400] text-[#1A1A1A] text-xs rounded hover:bg-[#D4A800] font-semibold">
                         Aceptar
                     </button>
                     <button onclick="rejectTransfer('${msg.contact_id}')"
@@ -3998,17 +4545,21 @@ async function rejectTransfer(contactId) {
  * @param {'success'|'warning'|'error'|'info'} type - Tipo de notificación
  */
 function showToast(message, type = 'info') {
-    const colors = {
-        success: 'bg-green-600',
-        warning: 'bg-yellow-500',
-        error:   'bg-red-600',
-        info:    'bg-blue-600'
-    };
+    const cssClass = {
+        success: 'toast-success',
+        warning: 'toast-warning',
+        error:   'toast-error',
+        info:    'toast-info'
+    }[type] || 'toast-info';
     const div = document.createElement('div');
-    div.className = `fixed top-4 right-4 z-50 px-4 py-3 rounded shadow-lg text-white text-sm font-medium ${colors[type] || colors.info}`;
+    div.className = `fixed top-4 right-4 z-50 px-4 py-3 rounded-lg text-sm font-medium ${cssClass}`;
     div.textContent = message;
     document.body.appendChild(div);
-    setTimeout(() => div.remove(), 4000);
+    setTimeout(() => {
+        div.style.transition = 'opacity 0.3s';
+        div.style.opacity = '0';
+        setTimeout(() => div.remove(), 300);
+    }, 3700);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4378,12 +4929,12 @@ function renderWorkersList(workers) {
         <div class="flex items-center gap-2 p-2 bg-gray-50 rounded border" data-worker-id="${w.id}">
             <span class="flex-1 text-sm font-medium text-gray-700 worker-name-display">${w.name}</span>
             <input type="text" value="${w.name}"
-                class="hidden flex-1 text-sm border rounded px-2 py-1 focus:ring-1 focus:ring-green-400 worker-name-input">
+                class="hidden flex-1 text-sm border rounded px-2 py-1 focus:ring-1 focus:ring-yellow-400 worker-name-input">
             <button onclick="startEditWorker('${w.id}')"
                 class="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 worker-edit-btn"
                 title="Editar nombre">&#9998;</button>
             <button onclick="saveEditWorker('${w.id}')"
-                class="hidden text-green-600 hover:text-green-800 text-xs px-2 py-1 worker-save-btn"
+                class="hidden text-yellow-600 hover:text-yellow-800 text-xs px-2 py-1 worker-save-btn"
                 title="Guardar">&#10003;</button>
             <button onclick="deleteWorker('${w.id}', '${w.name}')"
                 class="text-red-400 hover:text-red-600 text-xs px-2 py-1"
@@ -4778,7 +5329,7 @@ async function submitAppointment(event) {
                 const _badgeTarget = allContacts.find(c => c.contact_id === currentContactId);
                 if (_badgeTarget) {
                     _badgeTarget.has_appointment = true;
-                    renderContactsList(allContacts);
+                    _applyFiltersAndRender();
                     console.log('[Badge] Optimistic update: has_appointment=true para', currentContactId);
                 }
             }

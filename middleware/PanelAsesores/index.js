@@ -137,6 +137,9 @@ let selectedMediaFile = null;  // Archivo multimedia seleccionado
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
 const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos recién cerrados
+// [Bug2] Render guard: evita que dos renders DOM corran intercalados (causa index jumping)
+let _renderInProgress = false;
+let _pendingRenderContacts = null;
 
 // Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
 let unreadCounts = {};
@@ -1012,6 +1015,16 @@ async function loadContacts() {
         url += `&advisor=${ADVISOR_ID}`;
     }
 
+    // [Sync] Primera carga con deep link: incluir teléfono aunque sea cross-advisor
+    if (!deepLinkHandled) {
+        const _dlPhone = urlParams.get('phone');
+        if (_dlPhone) {
+            let _dlNorm = _dlPhone.replace(/\s+/g, '').trim();
+            if (!_dlNorm.startsWith('+')) _dlNorm = '+' + _dlNorm;
+            url += `&include_phone=${encodeURIComponent(_dlNorm)}`;
+        }
+    }
+
     // Agregar fechas si es filtro custom (solo cuando no hay worker filter)
     if (!workerIdParam && filter === 'custom') {
         const dateFrom = document.getElementById('dateFrom').value;
@@ -1554,6 +1567,11 @@ function _buildContactHTML(contact) {
         ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
         : '';
 
+    // [Sync] Badge cross-advisor: bottom-left (slot libre) — contacto reasignado a otro asesor
+    const crossAdvisorBadge = contact.cross_advisor
+        ? `<span class="absolute -bottom-1 -left-1 bg-sky-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Asignado a otro asesor">🔄</span>`
+        : '';
+
     const stateBadge = (isInConversation || isHumanActive || isActive)
         ? `<span class="absolute -top-1 -left-1 bg-blue-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Asesora atendiendo">👤</span>`
         : status === 'BOT_ACTIVE'
@@ -1573,6 +1591,7 @@ function _buildContactHTML(contact) {
                     ${stateBadge}
                     ${unreadBadge}
                     ${apptBadge}
+                    ${crossAdvisorBadge}
                 </div>
                 <div class="flex-1 min-w-0">
                     <p class="font-medium text-gray-800 truncate">${displayName}</p>
@@ -1598,6 +1617,25 @@ function _buildContactHTML(contact) {
  * Evita el parpadeo causado por reemplazar container.innerHTML completo.
  */
 function renderContactsList(contacts) {
+    // [Bug2] Guard: si hay un render en curso, encolar el más reciente y salir.
+    // Cuando el render activo termine (requestAnimationFrame callback), procesará el encolado.
+    if (_renderInProgress) {
+        _pendingRenderContacts = contacts;
+        return;
+    }
+    _renderInProgress = true;
+    requestAnimationFrame(() => {
+        _renderContactsListInner(contacts);
+        _renderInProgress = false;
+        if (_pendingRenderContacts !== null) {
+            const _next = _pendingRenderContacts;
+            _pendingRenderContacts = null;
+            renderContactsList(_next);
+        }
+    });
+}
+
+function _renderContactsListInner(contacts) {
     const container = document.getElementById('contactsList');
 
     if (!contacts || contacts.length === 0) {
@@ -3405,6 +3443,16 @@ function handleWebSocketMessage(data) {
             // El scroll y ensureContactVisible se ejecutan 200ms después (>150ms debounce).
             if (data.action === 'new_message' && data.phone) {
                 const _scrollPhone = data.phone;
+                // [Bug2] Reorder inmediato en memoria sin esperar GET /contacts.
+                // Mueve el contacto al tope de allContacts y fuerza re-render local.
+                // scheduleContactsRefresh() sigue activo para sincronizar datos completos.
+                const _nmIdx = allContacts.findIndex(c => c.phone === _scrollPhone);
+                if (_nmIdx > 0) {
+                    const _nmContact = allContacts.splice(_nmIdx, 1)[0];
+                    allContacts.unshift(_nmContact);
+                    _contactFingerprints.delete(_scrollPhone); // forzar reconstrucción del elemento
+                    renderContactsList(allContacts);
+                }
                 scheduleContactsRefresh();
                 setTimeout(() => {
                     ensureContactVisible(_scrollPhone);
@@ -4724,10 +4772,21 @@ async function submitAppointment(event) {
                 : `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`;
             resultDiv.classList.remove('hidden');
 
-            // Recargar y volver a lista
+            // [Badge] Update optimista: mostrar badge 📅 inmediatamente sin esperar GET /contacts
+            // Solo en citas nuevas (no edición). La confirmación del servidor llega con loadContacts().
+            if (!editingId && currentContactId) {
+                const _badgeTarget = allContacts.find(c => c.contact_id === currentContactId);
+                if (_badgeTarget) {
+                    _badgeTarget.has_appointment = true;
+                    renderContactsList(allContacts);
+                    console.log('[Badge] Optimistic update: has_appointment=true para', currentContactId);
+                }
+            }
+
+            // Recargar y volver a lista (confirma estado real desde servidor)
             setTimeout(async () => {
                 await _loadAppointmentsAndRender();
-                loadContacts(); // Actualizar badge
+                loadContacts(); // Sincroniza badge con estado real del backend
                 resultDiv.classList.add('hidden');
             }, 1500);
         } else {

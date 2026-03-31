@@ -101,7 +101,7 @@ _httpx_client: Optional[httpx.AsyncClient] = None
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
 # ============================================================================
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
-CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — nombres cambian raramente
+CONTACT_NAME_CACHE_TTL = 120     # 2 minutos (era 14400=4h — reducido para sync nombres HubSpot)
 CONTACT_NAME_CACHE_PREFIX = "contact_name:"
 
 def get_httpx_client() -> httpx.AsyncClient:
@@ -408,7 +408,7 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
 # BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
 # ============================================================================
 
-HUBSPOT_BATCH_CACHE_TTL = 300  # 5 minutos — reduce llamadas repetidas al cargar panel
+HUBSPOT_BATCH_CACHE_TTL = 120  # 2 minutos (era 300=5min — reducido para sync reasignaciones de advisor)
 
 
 async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
@@ -3483,6 +3483,7 @@ async def get_active_contacts(
     limit: int = Query(30, ge=1, le=100),
     page: int = Query(1, ge=1, description="Página (1-based) para paginación del ZSET"),
     worker_id: Optional[str] = Query(None, description="Worker ID para filtrar contactos por encargado de cita"),
+    include_phone: Optional[str] = Query(None, description="Teléfono a incluir aunque no pertenezca al advisor (deep link cross-advisor)"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -4033,22 +4034,42 @@ async def get_active_contacts(
                     f"{len(active_contacts)} contactos visibles, {excluded_count} excluidos"
                 )
 
+        # === [Sync] Deep link cross-advisor: incluir contacto aunque no pertenezca al advisor ===
+        if include_phone:
+            _ip_norm = include_phone.strip()
+            if not any(c.get("phone") == _ip_norm for c in active_contacts):
+                logger.info(
+                    f"[Sync] include_phone={_ip_norm} no está en filtro advisor "
+                    f"— inyectando skeleton cross_advisor"
+                )
+                active_contacts.insert(0, {
+                    "phone": _ip_norm,
+                    "cross_advisor": True,
+                    "status": "HUMAN_ACTIVE",
+                })
+
         # === PASO 7: El orden ya viene correcto del ZSET (por last_activity descendente) ===
         # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"
         contacts_sorted = active_contacts  # Mantener orden del backend
 
         # === PASO 7.5: Marcar contactos con citas activas (una sola query MongoDB) ===
+        # FIX Bug5: se consultan TODOS los contact_ids, no solo los de la primera página.
+        # Antes: contacts_sorted[:limit] → contactos en posición >limit nunca obtenían badge.
         try:
             mongo_mgr = get_mongo_manager()
-            page_contact_ids = [
-                c.get("contact_id", "") for c in contacts_sorted[:limit]
+            all_contact_ids = [
+                c.get("contact_id", "") for c in contacts_sorted
                 if c.get("contact_id")
             ]
-            contacts_with_appts = await mongo_mgr.get_contacts_with_appointments(page_contact_ids)
+            contacts_with_appts = await mongo_mgr.get_contacts_with_appointments(all_contact_ids)
+            logger.debug(
+                f"[Badge] Appointment query: {len(all_contact_ids)} contactos revisados, "
+                f"{len(contacts_with_appts)} con cita activa"
+            )
             for c in contacts_sorted:
                 c["has_appointment"] = c.get("contact_id", "") in contacts_with_appts
         except Exception as appt_err:
-            logger.warning(f"[Panel] Error verificando citas activas: {appt_err}")
+            logger.warning(f"[Badge] Error verificando citas activas: {appt_err}")
             for c in contacts_sorted:
                 c["has_appointment"] = False
 

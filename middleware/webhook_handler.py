@@ -2171,6 +2171,40 @@ async def _sync_conversation_with_analysis_to_hubspot(
                     f"[HubSpot Sync] ✅ Nombre del cliente actualizado: {analysis.nombre_detectado} "
                     f"(contact_id: {contact_id})"
                 )
+                # [Naming] Sincronizar display_name en Redis y notificar panel abierto.
+                # Sin esto el panel queda con "Cliente Nuevo" aunque HubSpot ya tiene el nombre.
+                _new_name = analysis.nombre_detectado
+                try:
+                    import json as _j
+                    from .outbound_panel import _get_redis_client
+                    _rc = await _get_redis_client()
+                    # 1. Actualizar display_name en todos los canales del contacto
+                    _meta_keys = await _rc.keys(f"conv_meta:{phone}:*")
+                    for _mk in _meta_keys:
+                        _raw = await _rc.get(_mk)
+                        if _raw:
+                            try:
+                                _m = _j.loads(_raw)
+                                _m["display_name"] = _new_name
+                                _ttl = await _rc.ttl(_mk)
+                                if _ttl > 0:
+                                    await _rc.setex(_mk, _ttl, _j.dumps(_m))
+                                else:
+                                    await _rc.set(_mk, _j.dumps(_m))
+                            except Exception:
+                                pass
+                    # 2. Invalidar cache de nombre (GET /contacts lo refresca desde HubSpot)
+                    await _rc.delete(f"contact_name:{contact_id}")
+                    logger.info(f"[Naming] display_name='{_new_name}' sincronizado en Redis para {phone}")
+                    # 3. Notificar panel vía WebSocket (fire-and-forget)
+                    await ws_manager.publish_broadcast(_rc, {
+                        "type": "contact_updated",
+                        "phone": phone,
+                        "action": "name_updated",
+                        "display_name": _new_name
+                    })
+                except Exception as _redis_err:
+                    logger.warning(f"[Naming] Error sincronizando nombre en Redis: {_redis_err}")
             except Exception as name_err:
                 logger.error(f"[HubSpot Sync] Error actualizando nombre: {name_err}")
 

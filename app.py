@@ -384,8 +384,25 @@ async def check_appointment_reminders():
                 apt.phone_normalized, status.value if status else "N/A"
             )
 
-            # Construir mensaje de recordatorio
-            contact_name = apt.contact_name or "cliente"
+            # Construir mensaje de recordatorio — resolver nombre con fallback de 3 niveles
+            contact_name = apt.contact_name
+            _name_source = "appointment_redis"
+            if not contact_name:
+                # Nivel 2: Redis conversation meta (display_name se popula desde webhook)
+                try:
+                    _meta = await state_manager.get_meta(apt.phone_normalized, apt.canal)
+                    if _meta and _meta.display_name:
+                        contact_name = _meta.display_name.split()[0]
+                        _name_source = "redis_meta"
+                except Exception:
+                    pass
+            if not contact_name:
+                contact_name = "cliente"
+                _name_source = "fallback"
+            logger.info(
+                "[Scheduler][Naming] %s → nombre='%s' (source=%s)",
+                apt.phone_normalized, contact_name, _name_source
+            )
             message = (
                 f"¡Hola {contact_name}! 👋 Te recuerdo tu cita programada para hoy "
                 f"a las {scheduled_dt.strftime('%H:%M')}. ¡Te esperamos!"
@@ -705,13 +722,28 @@ async def check_appointment_followups():
                     skipped += 1
                     continue
 
-                contact_name = apt.contact_name or "cliente"
+                # Resolver nombre con fallback de 3 niveles
+                contact_name = apt.contact_name
+                _name_source = "appointment_redis"
+                if not contact_name:
+                    try:
+                        _meta = await state_manager.get_meta(apt.phone_normalized, apt.canal)
+                        if _meta and _meta.display_name:
+                            contact_name = _meta.display_name.split()[0]
+                            _name_source = "redis_meta"
+                    except Exception:
+                        pass
+                if not contact_name:
+                    contact_name = "cliente"
+                    _name_source = "fallback"
+
                 apt_dt = apt.scheduled_dt
                 minutes_since = (now - apt_dt).total_seconds() / 60
 
                 logger.info(
-                    "[Scheduler][Followup] Seguimiento post-cita %s: %.0f min después de la cita (estado conv: %s)",
-                    apt.phone_normalized, minutes_since, status.value if status else "N/A"
+                    "[Scheduler][Followup] Seguimiento post-cita %s: %.0f min después (estado conv: %s, nombre='%s' source=%s)",
+                    apt.phone_normalized, minutes_since, status.value if status else "N/A",
+                    contact_name, _name_source
                 )
 
                 message = (

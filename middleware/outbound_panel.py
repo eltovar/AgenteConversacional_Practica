@@ -320,6 +320,14 @@ async def _get_redis_client() -> redis.Redis:
     return _redis_pool
 
 
+def _get_redis_url_str() -> str:
+    """Retorna la URL de Redis según entorno (Railway vs local). Helper centralizado para ConversationStateManager."""
+    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+    return os.getenv("REDIS_URL") if is_railway else (
+        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+
+
 async def _hubspot_post(client, url: str, payload: dict, api_key: str, max_retries: int = 3):
     """
     POST a HubSpot con retry automático en 429 (rate limit).
@@ -2013,6 +2021,14 @@ async def transfer_contact(
     except Exception as e:
         logger.warning(f"[Panel] Error notificando WebSocket: {e}")
 
+    # Inbox: agregar al inbox del receptor, remover del emisor
+    try:
+        await state_manager.add_to_advisor_inbox(to_owner_id, phone_normalized, canal or "whatsapp")
+        if from_owner:
+            await state_manager.remove_from_advisor_inbox(from_owner, phone_normalized, canal or "whatsapp")
+    except Exception as _tr_inbox_err:
+        logger.warning(f"[Panel][Inbox] Error en inbox transfer (non-fatal): {_tr_inbox_err}")
+
     return {
         "status": "success",
         "message": f"Contacto transferido a {to_owner_id}",
@@ -2156,6 +2172,14 @@ async def request_transfer(
         "action": "transfer_completed"
     })
 
+    # Inbox: el receptor recibe el contacto como no-leído; el emisor lo pierde
+    try:
+        _sm_tr = ConversationStateManager(_get_redis_url_str())
+        await _sm_tr.add_to_advisor_inbox(requesting_advisor_id, phone, canal or "whatsapp")
+        await _sm_tr.remove_from_advisor_inbox(owner_advisor_id, phone, canal or "whatsapp")
+    except Exception as _tr_req_inbox_err:
+        logger.warning(f"[Panel][Inbox] Error inbox transfer-request (non-fatal): {_tr_req_inbox_err}")
+
     logger.info(f"[Panel] Transfer directo: {owner_advisor_id} -> {requesting_advisor_id} para {contact_id} ({canal})")
     return {"status": "transferred", "phone": phone, "canal": canal}
 
@@ -2217,6 +2241,14 @@ async def accept_transfer(
         "phone": phone,
         "action": "transfer_completed"
     })
+
+    # Inbox: el solicitante recibe el contacto como no-leído; el propietario anterior lo pierde
+    try:
+        _sm_ta = ConversationStateManager(_get_redis_url_str())
+        await _sm_ta.add_to_advisor_inbox(requester_id, phone, None)
+        await _sm_ta.remove_from_advisor_inbox(by_advisor_id, phone, None)
+    except Exception as _ta_inbox_err:
+        logger.warning(f"[Panel][Inbox] Error inbox transfer-accept (non-fatal): {_ta_inbox_err}")
 
     logger.info(f"[Panel] Transfer accept: {by_advisor_id} -> {requester_id} para {contact_id}")
     return {"status": "accepted"}
@@ -2461,6 +2493,16 @@ async def close_conversation(
         except Exception as e:
             logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
 
+        # Inbox: remover del inbox del asesor asignado al cerrar conversación
+        try:
+            _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
+            if _close_meta and _close_meta.assigned_owner_id:
+                await state_manager.remove_from_advisor_inbox(
+                    _close_meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
+                )
+        except Exception as _close_inbox_err:
+            logger.warning(f"[Panel] Error removiendo inbox al cerrar (non-fatal): {_close_inbox_err}")
+
         canal_info = f":{canal}" if canal else ""
         logger.info(
             f"[Panel] Conversación cerrada — BOT_ACTIVE + removido del panel: "
@@ -2478,6 +2520,34 @@ async def close_conversation(
     except Exception as e:
         logger.error(f"[Panel] Error cerrando conversación: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Endpoint: Marcar contacto como leído (borra del advisor_inbox en Redis)
+# ============================================================================
+
+@router.post("/contacts/{phone}/mark-read")
+async def mark_contact_read(
+    phone: str,
+    advisor_id: str = Query(..., description="ID del asesor que leyó el contacto"),
+    canal: Optional[str] = Query(None, description="Canal del contacto (opcional)"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Registra que el asesor abrió un contacto, removiéndolo de su advisor_inbox en Redis.
+    Llamado desde el frontend al hacer click en un contacto (fire-and-forget).
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    try:
+        normalizer = PhoneNormalizer()
+        phone_norm = normalizer.normalize(phone) or phone
+        sm = ConversationStateManager(_get_redis_url_str())
+        await sm.remove_from_advisor_inbox(advisor_id, phone_norm, canal)
+        return {"status": "ok", "phone": phone_norm}
+    except Exception as e:
+        logger.warning(f"[Panel][Inbox] mark_contact_read error (non-fatal): {e}")
+        return {"status": "error"}
 
 
 # ============================================================================
@@ -3982,6 +4052,33 @@ async def get_active_contacts(
             for c in contacts_sorted:
                 c["has_appointment"] = False
 
+        # === PASO 7.6: Calcular has_unread desde advisor_inbox ===
+        # Solo cuando hay filtro de advisor para evitar carga extra en vista global.
+        # Fail-safe: si Redis falla, has_unread=False (sin badges) — no romper UI.
+        # Reutiliza state_manager (~l.3540) — evita crear nuevo pool Redis por llamada.
+        # Usa c.get("canal") — coincide con la clave escrita por add_to_advisor_inbox.
+        # canal_origen ("finca_raiz" etc.) != clave ZSET → no usar aquí.
+        if advisor and contacts_sorted:
+            try:
+                _inbox_contacts = [
+                    {
+                        "phone": c.get("phone", ""),
+                        "canal": c.get("canal") or "whatsapp",
+                    }
+                    for c in contacts_sorted if c.get("phone")
+                ]
+                _unread_map = await state_manager.get_inbox_unread_map(advisor, _inbox_contacts)
+                for c in contacts_sorted:
+                    c["has_unread"] = _unread_map.get(c.get("phone", ""), False)
+                logger.info(
+                    f"[Panel] has_unread calculado para {advisor}: "
+                    f"{sum(1 for c in contacts_sorted if c.get('has_unread'))} no leídos"
+                )
+            except Exception as _ue:
+                logger.warning(f"[Panel] Error calculando has_unread (non-fatal): {_ue}")
+                for c in contacts_sorted:
+                    c["has_unread"] = False
+
         # active_count = solo contactos ESPERANDO respuesta (HUMAN_ACTIVE / PENDING_HANDOFF)
         # IN_CONVERSATION no cuenta: ya están siendo atendidos
         waiting_statuses = {"HUMAN_ACTIVE", "PENDING_HANDOFF"}
@@ -4348,14 +4445,20 @@ async def create_appointment(
         logger.warning(f"[Panel] No se pudo crear nota en HubSpot para cita: {hs_err}")
         # No falla el endpoint — la cita se guarda en MongoDB de todas formas
 
-    # Obtener phone del contacto para guardar en MongoDB
+    # Obtener phone y firstname del contacto para guardar en MongoDB y Redis
     phone = ""
+    contact_firstname = ""
     try:
         hs_info = await _get_hubspot_contact_info(contact_id)
         if hs_info:
             phone = hs_info.get("phone", "")
+            contact_firstname = (hs_info.get("firstname") or "").strip()
     except Exception:
         pass
+    if contact_firstname:
+        logger.info(f"[Naming] Nombre resuelto desde HubSpot: '{contact_firstname}' para contact_id={contact_id}")
+    else:
+        logger.info(f"[Naming] Sin firstname en HubSpot para contact_id={contact_id} — se usará fallback en scheduler")
 
     # Persistir en MongoDB
     mongo_mgr = get_mongo_manager()
@@ -4407,7 +4510,7 @@ async def create_appointment(
                 phone_normalized=phone_normalized,
                 canal=body.canal,
                 scheduled_datetime=appt_dt_bogota,
-                contact_name=None,  # Se enriquece si se obtiene del contacto
+                contact_name=contact_firstname or None,
                 contact_id=contact_id,
                 notes=body.notes or None,
             )
@@ -4643,16 +4746,18 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     """
     Actualiza timestamp del mensaje del asesor en ConversationMeta.
     Usado para calcular TTL de 72h si asesor deja de responder.
+    También remueve el contacto del inbox del asesor (el asesor ya está atendiendo).
     """
     try:
-        # Redis URL unificado (Railway interna, local pública)
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = ConversationStateManager(_get_redis_url_str())
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
         logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
+        # Inbox: el asesor está enviando → ya vio el contacto → remover del inbox
+        meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
+        if meta and meta.assigned_owner_id:
+            await state_manager.remove_from_advisor_inbox(
+                meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
+            )
     except Exception as e:
         logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
 

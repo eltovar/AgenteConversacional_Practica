@@ -145,6 +145,9 @@ let _lastContactTimestamps = {};
 // Fix CR-4: timestamp del último evento WS recibido por phone.
 // Evita double-counting cuando el polling detecta el mismo mensaje que el WS ya notificó.
 const _lastWsNotifiedTimestamps = {};
+// Phones que el asesor abrió en esta sesión.
+// Previene re-inicialización de badges desde has_unread (backend) si el asesor ya los limpió.
+const _seenPhones = new Set();
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
@@ -1036,6 +1039,28 @@ async function loadContacts() {
         }
 
         allContacts = newContacts;  // Guardar en cache para el buscador
+
+        // ── Badges persistentes desde servidor (advisor_inbox) ────────────────
+        // Inicializa badges para contactos con actividad no leída desde la última sesión.
+        // Guards: solo con ADVISOR_ID, solo si el phone no fue visto en esta sesión,
+        // solo si el contacto no está actualmente abierto.
+        if (ADVISOR_ID) {
+            for (const contact of newContacts) {
+                const phone = contact.phone || '';
+                if (
+                    contact.has_unread &&
+                    phone &&
+                    phone !== currentPhone &&
+                    !_seenPhones.has(phone)
+                ) {
+                    // Solo inicializar si no hay conteo activo mayor (WS puede haber incrementado más)
+                    if (!(phone in unreadCounts) || unreadCounts[phone] === 0) {
+                        unreadCounts[phone] = 1;
+                        console.log('[Panel][Inbox] Badge inicializado desde servidor para', phone);
+                    }
+                }
+            }
+        }
 
         // Detección de mensajes nuevos por polling.
         // Solo actualiza el timestamp si es mayor (upgrade-only, nunca downgrade).
@@ -2533,6 +2558,19 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }
     }
 
+    // Inbox persistente: registrar como visto en esta sesión + marcar leído en Redis
+    if (phone) {
+        _seenPhones.add(phone);
+        if (ADVISOR_ID) {
+            const _markReadUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/mark-read`
+                + `?advisor=${encodeURIComponent(ADVISOR_ID)}`;
+            fetch(_markReadUrl, {
+                method: 'POST',
+                headers: { 'X-API-Key': API_KEY }
+            }).catch(err => console.warn('[Panel][Inbox] mark-read error (non-fatal):', err));
+        }
+    }
+
     // Mostrar botón de agendar cita solo cuando hay un contacto activo
     const apptBtn = document.getElementById('scheduleAppointmentBtn');
     if (apptBtn) {
@@ -3497,10 +3535,18 @@ function handleContactTransferred(data) {
 
     // Refrescar lista
     loadContacts();
-    // Actualizar badge de no leídos instantáneamente si aplica
+    // Actualizar badge según dirección de la transferencia
     if (data.phone) {
-        unreadCounts[data.phone] = 0;
-        updateUnreadBadge(data.phone, 0);
+        if (data.direction === 'incoming' && !_seenPhones.has(data.phone)) {
+            // Transferencia entrante: el asesor aún no ha visto este contacto → badge
+            unreadCounts[data.phone] = 1;
+            updateUnreadBadge(data.phone, 1);
+            console.log('[Panel][Inbox] Badge transferencia entrante para', data.phone);
+        } else if (data.direction !== 'incoming') {
+            // Transferencia saliente: limpiar badge propio
+            unreadCounts[data.phone] = 0;
+            updateUnreadBadge(data.phone, 0);
+        }
     }
 }
 

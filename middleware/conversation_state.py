@@ -989,6 +989,109 @@ class ConversationStateManager:
             logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {e}")
             return False
 
+    # ─── Inbox de no-leídos por asesor ────────────────────────────────────────
+    # Estructura: ZSET advisor_inbox:{advisor_id} → {phone:canal: unix_ts}
+    # score = timestamp cuando se generó el no-leído (diagnóstico + ordenamiento)
+    ADVISOR_INBOX_PREFIX = "advisor_inbox:"
+    ADVISOR_INBOX_TTL    = 90 * 86400  # 90 días
+
+    async def add_to_advisor_inbox(
+        self,
+        advisor_id: str,
+        phone: str,
+        canal: str,
+        score: float = None
+    ) -> None:
+        """
+        Agrega o actualiza un contacto en el inbox de no-leídos del asesor.
+        ZADD es idempotente — si ya estaba, solo actualiza el score.
+        """
+        try:
+            if not advisor_id or not phone:
+                return
+            canal_safe = (canal or "whatsapp").lower()
+            member = f"{phone}:{canal_safe}"
+            _score = score if score is not None else get_bogota_now().timestamp()
+            key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
+            await self.redis.zadd(key, {member: _score})
+            await self.redis.expire(key, self.ADVISOR_INBOX_TTL)
+            logger.info(
+                f"[Inbox][Add] advisor={advisor_id} phone={phone} "
+                f"canal={canal_safe} ts={_score:.0f}"
+            )
+        except Exception as e:
+            logger.error(f"[Inbox][Error][Add] advisor={advisor_id} phone={phone}: {e}")
+
+    async def remove_from_advisor_inbox(
+        self,
+        advisor_id: str,
+        phone: str,
+        canal: str = None
+    ) -> None:
+        """
+        Marca un contacto como leído removiéndolo del inbox del asesor.
+        Si canal es None intenta remover con todos los canales conocidos.
+        """
+        try:
+            if not advisor_id or not phone:
+                return
+            key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
+            if canal:
+                canales = [canal.lower()]
+            else:
+                canales = [
+                    "whatsapp", "instagram", "facebook",
+                    "finca_raiz", "metrocuadrado",
+                    "pagina_web", "whatsapp_directo",
+                ]
+            removed = 0
+            for c in canales:
+                removed += await self.redis.zrem(key, f"{phone}:{c}")
+            logger.info(
+                f"[Inbox][Clear] advisor={advisor_id} phone={phone} removed={removed > 0}"
+            )
+        except Exception as e:
+            logger.error(f"[Inbox][Error][Clear] advisor={advisor_id} phone={phone}: {e}")
+
+    async def get_inbox_unread_map(
+        self,
+        advisor_id: str,
+        contacts: list
+    ) -> dict:
+        """
+        Retorna {phone: bool} donde True = contacto tiene actividad no leída.
+        contacts: lista de dicts con al menos {phone, canal}.
+
+        Fail-safe: si Redis falla retorna {} → UI sigue funcionando sin badges.
+        Usa ZMSCORE (Redis >= 6.2): 1 round-trip para todos los contactos.
+        """
+        if not contacts or not advisor_id:
+            return {}
+        try:
+            key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
+            members = [
+                f"{c.get('phone', '')}:{(c.get('canal') or 'whatsapp').lower()}"
+                for c in contacts
+            ]
+            scores = await self.redis.zmscore(key, members)
+            unread_map = {}
+            for contact, score in zip(contacts, scores):
+                phone = contact.get("phone", "")
+                # score=None → no está en el inbox → leído
+                # score=float → está en el inbox → no-leído
+                unread_map[phone] = (score is not None)
+
+            no_leidos = sum(1 for v in unread_map.values() if v)
+            leidos    = sum(1 for v in unread_map.values() if not v)
+            logger.info(
+                f"[Inbox][Batch] advisor={advisor_id} "
+                f"no_leidos={no_leidos} leidos={leidos} total={len(contacts)}"
+            )
+            return unread_map
+        except Exception as e:
+            logger.error(f"[Inbox][Error][Batch] advisor={advisor_id}: {e}")
+            return {}  # Fail-safe: sin badges antes que romper la UI
+
     async def get_conversation_state(self, phone: str, canal: str = "whatsapp") -> Optional[Dict[str, Any]]:
         """
         Obtiene el estado completo de una conversación (status + metadata).

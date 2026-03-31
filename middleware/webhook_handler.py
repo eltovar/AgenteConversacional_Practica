@@ -290,6 +290,22 @@ async def _process_message_deferred(
         # (phone:whatsapp vs phone:instagram) cuando update_activity usa el default "whatsapp".
         await get_state_manager().update_activity(phone_normalized, canal=final_channel or "whatsapp")
 
+        # Inbox de no-leídos: registrar actividad para el asesor asignado.
+        # Se ejecuta ANTES del WS notify para que GET /contacts ya devuelva has_unread=True
+        # cuando el panel llama tras recibir el ping.
+        try:
+            _inbox_meta = await get_state_manager().get_meta(
+                phone_normalized, final_channel or "whatsapp"
+            )
+            if _inbox_meta and _inbox_meta.assigned_owner_id:
+                await get_state_manager().add_to_advisor_inbox(
+                    advisor_id=_inbox_meta.assigned_owner_id,
+                    phone=phone_normalized,
+                    canal=final_channel or "whatsapp",
+                )
+        except Exception as _inbox_err:
+            logger.warning(f"[Inbox][Webhook] Error escribiendo inbox (non-fatal): {_inbox_err}")
+
         # Notificar al panel vía WebSocket (cross-worker via Redis Pub/Sub)
         await ws_manager.notify_new_message(
             phone=phone_normalized,
@@ -1463,6 +1479,18 @@ async def _whatsapp_webhook_original_DISABLED(
 
         # Actualizar actividad
         await state_manager.update_activity(phone_normalized)
+
+        # Inbox de no-leídos: registrar para el asesor asignado (post-Sofía)
+        try:
+            _inbox_meta2 = await state_manager.get_meta(phone_normalized)
+            if _inbox_meta2 and _inbox_meta2.assigned_owner_id:
+                await state_manager.add_to_advisor_inbox(
+                    advisor_id=_inbox_meta2.assigned_owner_id,
+                    phone=phone_normalized,
+                    canal=final_channel or "whatsapp",
+                )
+        except Exception as _inbox_err2:
+            logger.warning(f"[Inbox][Webhook][Post] Error escribiendo inbox (non-fatal): {_inbox_err2}")
 
         # Notificar al panel vía WebSocket para reordenamiento instantáneo
         # (sin esto, el panel solo se actualiza en el próximo ciclo de polling)

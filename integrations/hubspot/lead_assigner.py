@@ -21,13 +21,13 @@ class LeadAssigner:
     
     OWNERS_CONFIG = {
         # === ASESOR PORTALES INMOBILIARIOS ===
-        # Portales: MetroCuadrado, Finca Raíz, Mercado Libre, LinkedIn
+        # Portales: Mercado Libre, LinkedIn, Facebook, Instagram, Ciencuadras, TikTok, Charly
         "equipo_portales": [
             {"name": "Asesor Portales", "id": "89096378", "active": True},
         ],
 
-        # === ASESOR DIRECTO + REDES SOCIALES ===
-        # Directo + Redes: Página Web, WhatsApp, Facebook, Instagram, Ciencuadras, YouTube, TikTok
+        # === ASESOR DIRECTO + PORTALES ESPECIALES ===
+        # Directo: Página Web, WhatsApp, YouTube + Portales: MetroCuadrado, Finca Raíz
         "equipo_directo": [
             {"name": "Asesor Directo", "id": "89096380", "active": True},
         ],
@@ -56,16 +56,16 @@ class LeadAssigner:
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
         # === PORTALES INMOBILIARIOS (ID: 89096378) ===
-        "metrocuadrado": "equipo_portales",
-        "finca_raiz": "equipo_portales",
         "mercado_libre": "equipo_portales",
         "linkedin": "equipo_portales",
 
-        # === DIRECTO (ID: 89096380) ===
+        # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
         "pagina_web": "equipo_directo",
         "whatsapp_directo": "equipo_directo",
         "whatsapp": "equipo_directo",  # Alias para compatibilidad con webhook
         "youtube": "equipo_directo",
+        "finca_raiz": "equipo_directo",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
+        "metrocuadrado": "equipo_directo",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)
 
         # === REDES SOCIALES + CIENCUADRAS (ID: 89096378) ===
         "facebook": "equipo_portales",
@@ -85,16 +85,16 @@ class LeadAssigner:
     # ═══════════════════════════════════════════════════════════════════════════
     CHANNEL_TO_OWNER = {
         # Asesor Portales (89096378)
-        "metrocuadrado": "89096378",
-        "finca_raiz": "89096378",
         "mercado_libre": "89096378",
         "linkedin": "89096378",
 
-        # Asesor Directo (89096380)
+        # Asesor Directo + Portales Especiales (89096380)
         "pagina_web": "89096380",
         "whatsapp_directo": "89096380",
         "whatsapp": "89096380",  # Alias para compatibilidad
         "youtube": "89096380",
+        "finca_raiz": "89096380",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
+        "metrocuadrado": "89096380",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)
 
         # Redes Sociales + Ciencuadras (89096378)
         "facebook": "89096378",

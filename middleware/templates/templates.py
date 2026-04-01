@@ -94,19 +94,19 @@ DEFAULT_TEMPLATES = {
     },
     "reactivacion_inmueble_link": {
         "id": "reactivacion_inmueble_link",
-        "name": "Reactivación Inmueble con Link",
+        "name": "Reactivación Inmueble",
         "category": "reactivacion",
         "body": (
             "Cordial saludo,\n"
             "Le escribe {asesor} de Inmobiliaria Proteger.\n"
             "Espero que se encuentre muy bien.\n"
             "Lo contacto porque me informan que se encuentra interesado en el inmueble "
-            "{link_inmueble} para arrendar."
+            "{inmueble} Quedo atenta a tu respuesta."
         ),
-        "variables": ["asesor", "link_inmueble"],
-        # {{1}}=asesor, {{2}}=link_inmueble
-        "content_sid": "HX9f029fe9e553c335c0a860ef40258b6b",
-        "content_variables_map": ["asesor", "link_inmueble"],
+        "variables": ["asesor", "inmueble"],
+        # {{1}}=asesor, {{2}}=inmueble
+        "content_sid": "HX00e43ed82eb07074ca930e5974e18b09",
+        "content_variables_map": ["asesor", "inmueble"],
         "is_default": True,
     },
     "seguimiento_personalizado": {

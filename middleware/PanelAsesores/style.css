@@ -309,3 +309,44 @@
         box-shadow: -4px 0 20px rgba(0,0,0,0.12);
     }
 }
+
+/* ===== Reply/Quote Feature ===== */
+.reply-btn {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    z-index: 10;
+    position: absolute;
+    top: -10px;
+    padding: 4px;
+    border-radius: 50%;
+    background: #fff;
+    border: 1px solid #E5E7EB;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.10);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.reply-btn:hover {
+    background: #F3F4F6;
+    border-color: #D1D5DB;
+}
+/* Advisor bubble: btn at top-left */
+.bubble-advisor .reply-btn { left: -10px; }
+/* Client/Bot bubble: btn at top-right */
+.bubble-client .reply-btn,
+.bubble-bot .reply-btn { right: -10px; }
+/* Show on bubble hover (not row hover) */
+.bubble-client:hover .reply-btn,
+.bubble-bot:hover .reply-btn,
+.bubble-advisor:hover .reply-btn {
+    opacity: 1;
+}
+.reply-quote {
+    max-width: 100%;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+.reply-quote:hover {
+    background-color: rgba(0,0,0,0.07) !important;
+}

@@ -227,7 +227,9 @@ class MongoDBManager:
         hubspot_contact_id: Optional[str] = None,
         message_sid: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        media: Optional[Dict[str, Any]] = None
+        media: Optional[Dict[str, Any]] = None,
+        reply_to_id: Optional[str] = None,
+        reply_to_preview: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """
         Guarda un mensaje para visualización inmediata en el panel.
@@ -241,6 +243,8 @@ class MongoDBManager:
             message_sid: ID del mensaje de Twilio (opcional)
             metadata: Datos adicionales (opcional)
             media: Diccionario con info de media (opcional)
+            reply_to_id: ID del mensaje citado (opcional)
+            reply_to_preview: Preview desnormalizado del mensaje citado (opcional)
 
         Returns:
             ID del documento insertado o None si falla
@@ -277,6 +281,10 @@ class MongoDBManager:
         }
         if media:
             message_doc["media"] = media
+        if reply_to_id:
+            message_doc["reply_to_id"] = reply_to_id
+            if reply_to_preview:
+                message_doc["reply_to_preview"] = reply_to_preview
 
         last_error = None
         for attempt in range(1, _MAX_SAVE_RETRIES + 1):
@@ -384,7 +392,9 @@ class MongoDBManager:
                         "format": media.get("format"),
                         "duration_seconds": media.get("duration_seconds"),
                         "processed_at": media.get("processed_at"),
-                    } if media else None
+                    } if media else None,
+                    "reply_to_id": msg.get("reply_to_id"),
+                    "reply_to_preview": msg.get("reply_to_preview"),
                 })
 
             logger.debug(f"[MongoDB] Historial obtenido: {len(formatted_messages)} mensajes para {phone}")
@@ -428,7 +438,9 @@ class MongoDBManager:
                     "align": "left" if msg.get("sender") == "client" else "right",
                     "message": msg.get("content", ""),
                     "media_url": msg.get("media_url"),
-                    "media_type": msg.get("media_type")
+                    "media_type": msg.get("media_type"),
+                    "reply_to_id": msg.get("reply_to_id"),
+                    "reply_to_preview": msg.get("reply_to_preview")
                 })
 
             return formatted_messages
@@ -436,6 +448,29 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo historial por contact_id: {e}")
             return []
+
+    async def get_message_by_sid(self, message_sid: str) -> Optional[Dict[str, Any]]:
+        """Busca un mensaje por su Twilio message_sid. Usado para reply context."""
+        if not message_sid or not await self.connect():
+            return None
+        try:
+            msg = await self.db.messages.find_one(
+                {"message_sid": message_sid},
+                {"_id": 1, "content": 1, "sender": 1, "media": 1, "timestamp": 1}
+            )
+            if msg:
+                return {
+                    "id": str(msg["_id"]),
+                    "content": (msg.get("content") or "")[:200],
+                    "sender": msg.get("sender"),
+                    "sender_name": self._get_sender_name(msg.get("sender")),
+                    "media_type": (msg.get("media", {}) or {}).get("type"),
+                    "timestamp": msg.get("timestamp").isoformat() if msg.get("timestamp") else None
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"[MongoDB] Error buscando mensaje por SID {message_sid}: {e}")
+            return None
 
     async def search_messages_fulltext(
         self,

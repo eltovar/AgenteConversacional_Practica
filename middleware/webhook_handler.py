@@ -137,11 +137,12 @@ async def _process_message_deferred(
     num_media: int,
     media_url: Optional[str],
     media_content_type: Optional[str],
-    early_channel: str
+    early_channel: str,
+    original_replied_message_sid: Optional[str] = None
 ):
     """
     Procesa un mensaje de WhatsApp de forma diferida (background task).
-    
+
     Esta función contiene toda la lógica pesada:
     - Procesamiento de multimedia
     - Identificación/creación de contacto en HubSpot
@@ -254,6 +255,28 @@ async def _process_message_deferred(
                 "original_filename": media_result.get("original_filename") or None,
             }
 
+        # Resolver reply context si el cliente citó un mensaje en WhatsApp
+        logger.info(f"[DeferredProcess][Reply] original_replied_message_sid={original_replied_message_sid}")
+        reply_to_id = None
+        reply_to_preview = None
+        if original_replied_message_sid:
+            try:
+                replied_msg = await mongo_manager.get_message_by_sid(original_replied_message_sid)
+                if replied_msg:
+                    reply_to_id = replied_msg["id"]
+                    reply_to_preview = {
+                        "sender": replied_msg["sender"],
+                        "sender_name": replied_msg["sender_name"],
+                        "content": replied_msg["content"],
+                        "media_type": replied_msg["media_type"],
+                        "timestamp": replied_msg["timestamp"]
+                    }
+                    logger.info(f"[DeferredProcess] Reply context resuelto: {original_replied_message_sid} → mongo:{reply_to_id}")
+                else:
+                    logger.warning(f"[DeferredProcess] Reply SID no encontrado en MongoDB: {original_replied_message_sid} (mensaje expirado o pre-sistema)")
+            except Exception as e:
+                logger.warning(f"[DeferredProcess] Error resolviendo reply context: {e}")
+
         client_mongo_id = await mongo_manager.save_message(
             phone=phone_normalized,
             content=processed_body,
@@ -261,7 +284,9 @@ async def _process_message_deferred(
             channel=final_channel,
             hubspot_contact_id=contact_id,
             message_sid=message_sid,
-            media=media_dict
+            media=media_dict,
+            reply_to_id=reply_to_id,
+            reply_to_preview=reply_to_preview
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
 
@@ -880,6 +905,9 @@ async def whatsapp_webhook(
     NumMedia: int = Form(0),
     MediaUrl0: Optional[str] = Form(None),
     MediaContentType0: Optional[str] = Form(None),
+    # Parámetros de reply context (Twilio envía cuando el cliente cita un mensaje)
+    OriginalRepliedMessageSid: Optional[str] = Form(None),
+    OriginalRepliedMessageSender: Optional[str] = Form(None),
 ):
     """
     Endpoint principal del webhook de Twilio.
@@ -894,6 +922,36 @@ async def whatsapp_webhook(
     """
     body_preview = Body[:50] if Body else "[Sin texto]"
     logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")
+
+    # Diagnóstico: log ALL form field keys from Twilio
+    form_data = None
+    try:
+        form_data = await request.form()
+        all_keys = list(form_data.keys())
+        reply_keys = [k for k in all_keys if 'original' in k.lower() or 'reply' in k.lower() or 'context' in k.lower()]
+        logger.info(f"[Webhook][FormKeys] Todos los campos: {all_keys}")
+        if reply_keys:
+            logger.info(f"[Webhook][FormKeys] Campos reply encontrados: {reply_keys}")
+            for rk in reply_keys:
+                logger.info(f"[Webhook][FormKeys] {rk} = {form_data.get(rk)}")
+    except Exception as e:
+        logger.warning(f"[Webhook][FormKeys] Error leyendo form data: {e}")
+
+    # Capturar OriginalRepliedMessageSid — puede venir via Form() o via raw form
+    if not OriginalRepliedMessageSid and form_data:
+        try:
+            raw_reply_sid = form_data.get("OriginalRepliedMessageSid")
+            if raw_reply_sid:
+                OriginalRepliedMessageSid = raw_reply_sid
+                OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
+                logger.info(f"[Webhook][Reply] Reply SID capturado via raw form: {raw_reply_sid}")
+        except Exception:
+            pass
+
+    if OriginalRepliedMessageSid:
+        logger.info(f"[Webhook][Reply] ✅ Cliente citó mensaje: SID={OriginalRepliedMessageSid}")
+    else:
+        logger.debug(f"[Webhook][Reply] No reply context en este mensaje")
 
     try:
         # ════════════════════════════════════════════════════════════
@@ -931,7 +989,8 @@ async def whatsapp_webhook(
             NumMedia,
             MediaUrl0,
             MediaContentType0,
-            early_channel
+            early_channel,
+            OriginalRepliedMessageSid
         )
         
         # Actualizar timestamps en background

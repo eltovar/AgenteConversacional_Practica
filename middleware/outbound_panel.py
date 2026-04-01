@@ -51,7 +51,9 @@ class SendMessageRequest(BaseModel):
     contact_id: Optional[str] = Field(None, description="ID del contacto en HubSpot")
     canal: Optional[str] = Field("whatsapp", description="Canal de origen para segregación")
     force_send: bool = Field(False, description="Forzar envío aunque ventana esté cerrada")
-    
+    reply_to_id: Optional[str] = Field(None, description="ID del mensaje citado")
+    reply_to_preview: Optional[dict] = Field(None, description="Preview del mensaje citado")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -789,6 +791,8 @@ async def send_message(
     canal: Optional[str] = Form(None, description="Canal de origen para segregación"),
     force_send: bool = Form(False, description="Forzar envío aunque ventana esté cerrada"),
     media_file: Optional[UploadFile] = File(None, description="Archivo multimedia (imagen/audio)"),
+    reply_to_id: Optional[str] = Form(None, description="ID del mensaje citado"),
+    reply_to_preview: Optional[str] = Form(None, description="Preview JSON del mensaje citado"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -831,6 +835,14 @@ async def send_message(
         canal_final = "whatsapp"
     else:
         canal_final = canal.lower().strip()
+
+    # Parsear reply_to_preview (Form data no soporta objetos anidados)
+    parsed_reply_preview = None
+    if reply_to_id and reply_to_preview:
+        try:
+            parsed_reply_preview = json.loads(reply_to_preview)
+        except (json.JSONDecodeError, TypeError):
+            parsed_reply_preview = None
 
     # Verificar ventana de 24 horas
     window_status = await check_24h_window(phone_normalized)
@@ -1008,7 +1020,9 @@ async def send_message(
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
                 metadata={"source": "Manual via Panel"},
-                media=media_dict
+                media=media_dict,
+                reply_to_id=reply_to_id,
+                reply_to_preview=parsed_reply_preview
             )
             if mongo_message_id:
                 logger.info(f"[Panel] Mensaje guardado en MongoDB: {mongo_message_id}, media_type={media_type}")
@@ -1079,7 +1093,9 @@ async def send_message(
                 "sofia_paused": True,
                 "message_source": "Manual via Panel",
                 "media_url": permanent_media_url,
-                "media_type": media_type
+                "media_type": media_type,
+                "reply_to_id": reply_to_id,
+                "reply_to_preview": parsed_reply_preview
             }
         )
     else:
@@ -1227,7 +1243,9 @@ async def send_message_json(
                 channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
-                metadata={"source": "Panel JSON API"}
+                metadata={"source": "Panel JSON API"},
+                reply_to_id=request.reply_to_id,
+                reply_to_preview=request.reply_to_preview
             )
         except Exception as e:
             logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")

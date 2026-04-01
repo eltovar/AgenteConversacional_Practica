@@ -134,6 +134,7 @@ let pollingInterval = null;
 let templatesData = [];  // Almacena templates cargados
 let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
+let replyToMessage = null;  // { id, sender, sender_name, content, media_type, timestamp }
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
 const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos recién cerrados
@@ -1975,10 +1976,46 @@ function renderChatBubbles(messages) {
                 }
             }
 
+            // --- QUOTE HTML (si este mensaje es respuesta a otro) ---
+            let quoteHtml = '';
+            if (msg.reply_to_id && msg.reply_to_preview) {
+                const rp = msg.reply_to_preview;
+                const rpSender = rp.sender_name || rp.sender || '';
+                let rpText = escapeHtml((rp.content || '').substring(0, 80));
+                if (rp.media_type && !rp.content) {
+                    rpText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[rp.media_type] || '📎 Archivo';
+                }
+                const rpColor = rp.sender === 'client' ? '#6B7280' : (rp.sender === 'bot' ? '#D97706' : '#2563EB');
+                quoteHtml = `
+                    <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${rpColor};" onclick="scrollToMessage('${msg.reply_to_id}')">
+                        <p class="text-xs font-semibold" style="color:${rpColor};">${escapeHtml(rpSender)}</p>
+                        <p class="text-xs text-gray-500 truncate">${rpText}</p>
+                    </div>`;
+            }
+
+            // --- REPLY BUTTON (inside bubble, visible on bubble hover via CSS) ---
+            const replyBtnHtml = `
+                <button class="reply-btn"
+                        onclick="event.stopPropagation();selectReplyMessage('${msg.id}')" title="Responder">
+                    <svg class="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/>
+                    </svg>
+                </button>`;
+
+            const _safeContent = (msg.message || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
             const msgHtml = `
-                <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3 animate-fadeIn" data-msg-id="${msg.id}">
-                    <div class="${bubbleClass} p-3 shadow-sm">
+                <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3 animate-fadeIn"
+                     data-msg-id="${msg.id}"
+                     data-sender="${msg.sender || ''}"
+                     data-sender-name="${escapeHtml(msg.sender_name || msg.sender || '')}"
+                     data-content="${_safeContent}"
+                     data-media-type="${msg.media?.type || ''}"
+                     data-timestamp="${msg.timestamp || ''}">
+                    <div class="${bubbleClass} p-3 shadow-sm relative">
+                        ${replyBtnHtml}
                         <p class="text-xs font-semibold text-gray-600 mb-1">${msg.sender_name || msg.sender}</p>
+                        ${quoteHtml}
                         ${mediaHtml}
                         ${msg.message ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(msg.message)}</p>` : ''}
                         <p class="text-xs text-gray-500 text-right mt-1">${timestamp}</p>
@@ -2282,6 +2319,52 @@ function clearMediaSelection() {
     document.getElementById('mediaInput').value = '';
     document.getElementById('mediaPreview').classList.add('hidden');
     console.log('[Panel] Seleccion de archivo limpiada');
+}
+
+// =========================================================================
+// REPLY / CITAR MENSAJE
+// =========================================================================
+
+function selectReplyMessage(msgId) {
+    const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!bubble) return;
+
+    replyToMessage = {
+        id: msgId,
+        sender: bubble.dataset.sender || '',
+        sender_name: bubble.dataset.senderName || '',
+        content: (bubble.dataset.content || '').substring(0, 200),
+        media_type: bubble.dataset.mediaType || null,
+        timestamp: bubble.dataset.timestamp || ''
+    };
+
+    const preview = document.getElementById('replyPreview');
+    document.getElementById('replyPreviewSender').textContent = replyToMessage.sender_name || replyToMessage.sender;
+
+    let previewText = replyToMessage.content.substring(0, 80);
+    if (replyToMessage.media_type && !replyToMessage.content) {
+        previewText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[replyToMessage.media_type] || '📎 Archivo';
+    } else if (replyToMessage.media_type) {
+        const icon = { image: '📷', audio: '🎵', document: '📄' }[replyToMessage.media_type] || '📎';
+        previewText = icon + ' ' + previewText;
+    }
+    document.getElementById('replyPreviewContent').textContent = previewText;
+    preview.classList.remove('hidden');
+    document.getElementById('messageInput').focus();
+}
+
+function cancelReply() {
+    replyToMessage = null;
+    document.getElementById('replyPreview').classList.add('hidden');
+}
+
+function scrollToMessage(msgId) {
+    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.style.transition = 'background-color 0.3s';
+    el.style.backgroundColor = 'rgba(245, 196, 0, 0.15)';
+    setTimeout(() => { el.style.backgroundColor = ''; }, 1500);
 }
 
 // =========================================================================
@@ -2718,9 +2801,10 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     currentCanal = canal;  // Guardar canal para segregacion
     currentName = displayName || null;
 
-    // Limpiar estado del template picker al cambiar de contacto
+    // Limpiar estado del template picker y reply al cambiar de contacto
     activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
     closeTemplatePicker();
+    cancelReply();
     const hint = document.getElementById('templateHint');
     if (hint) hint.classList.add('hidden');
 
@@ -3335,6 +3419,18 @@ async function sendMessage(e) {
             formData.append('canal', currentCanal);
         }
 
+        // Incluir contexto de cita si existe
+        if (replyToMessage) {
+            formData.append('reply_to_id', replyToMessage.id);
+            formData.append('reply_to_preview', JSON.stringify({
+                sender: replyToMessage.sender,
+                sender_name: replyToMessage.sender_name,
+                content: replyToMessage.content,
+                media_type: replyToMessage.media_type,
+                timestamp: replyToMessage.timestamp
+            }));
+        }
+
         console.log('[Panel] Enviando POST a:', `${BASE_URL}/send-message`, 'canal:', currentCanal);
 
         const response = await fetch(`${BASE_URL}/send-message`, {
@@ -3361,8 +3457,10 @@ async function sendMessage(e) {
 
             document.getElementById('messageInput').value = '';
 
-            // Limpiar seleccion de archivo
+            // Limpiar seleccion de archivo y reply
             clearMediaSelection();
+            const _replySnapshot = replyToMessage; // capturar antes de limpiar
+            cancelReply();
 
             // OPTIMISTIC UI: Mostrar burbuja inmediatamente sin esperar query a MongoDB
             // Elimina el "efecto fantasma" (~500ms de chat vacío tras enviar).
@@ -3381,6 +3479,22 @@ async function sendMessage(e) {
                     _mediaHtml = `<div class="mb-2"><a href="${data.media_url}" target="_blank" class="text-blue-600 underline text-sm">Ver archivo</a></div>`;
                 }
 
+                // Cita en burbuja optimista
+                let _quoteHtml = '';
+                if (_replySnapshot) {
+                    const _rp = _replySnapshot;
+                    const _rpColor = _rp.sender === 'client' ? '#6B7280' : (_rp.sender === 'bot' ? '#D97706' : '#2563EB');
+                    let _rpText = escapeHtml((_rp.content || '').substring(0, 80));
+                    if (_rp.media_type && !_rp.content) {
+                        _rpText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[_rp.media_type] || '📎 Archivo';
+                    }
+                    _quoteHtml = `
+                        <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${_rpColor};">
+                            <p class="text-xs font-semibold" style="color:${_rpColor};">${escapeHtml(_rp.sender_name || _rp.sender)}</p>
+                            <p class="text-xs text-gray-500 truncate">${_rpText}</p>
+                        </div>`;
+                }
+
                 const _senderName = ADVISOR_NAME || 'Asesor';
                 const _tempId = `temp-${Date.now()}`;
                 const _msgText = message; // capturado antes de limpiar el input
@@ -3389,6 +3503,7 @@ async function sendMessage(e) {
                     <div class="flex justify-end mb-3 animate-fadeIn" data-msg-id="${_tempId}" data-optimistic="true">
                         <div class="bubble-advisor p-3 shadow-sm">
                             <p class="text-xs font-semibold text-gray-600 mb-1">${escapeHtml(_senderName)}</p>
+                            ${_quoteHtml}
                             ${_mediaHtml}
                             ${_msgText ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(_msgText)}</p>` : ''}
                             <p class="text-xs text-gray-500 text-right mt-1">${formatBogotaTime(new Date().toISOString())}</p>

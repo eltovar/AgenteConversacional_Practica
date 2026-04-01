@@ -411,7 +411,7 @@ class AppointmentManager:
 
     async def get_appointments_needing_reminder(self) -> List[Appointment]:
         """
-        Obtiene citas que necesitan recordatorio (24h antes).
+        Obtiene citas que necesitan recordatorio (5h antes).
 
         CORREGIDO:
         - Usa datetime.now(TIMEZONE_BOGOTA) para comparaciones
@@ -426,10 +426,10 @@ class AppointmentManager:
         # CRÍTICO: Usar timezone de Bogotá para "ahora"
         now = get_bogota_now()
 
-        # Buscar citas programadas entre 23h y 25h desde ahora
-        # (ventana de 2h para el job que corre cada hora)
-        min_time = now + timedelta(hours=23)
-        max_time = now + timedelta(hours=25)
+        # Buscar citas programadas entre 4.5h y 5.5h desde ahora
+        # (ventana de 1h para el job que corre cada 30min)
+        min_time = now + timedelta(hours=4, minutes=30)
+        max_time = now + timedelta(hours=5, minutes=30)
 
         logger.info(
             "[AppointmentManager] Buscando recordatorios: ahora=%s, "

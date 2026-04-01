@@ -331,7 +331,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 async def check_appointment_reminders():
     """
-    Verifica citas próximas y envía recordatorios 1 hora antes.
+    Verifica citas próximas y envía recordatorios 5 horas antes.
     Implementa idempotencia verificando 'reminder_sent' en Redis.
 
     COMPATIBLE con AppointmentManager de Sesión 1.

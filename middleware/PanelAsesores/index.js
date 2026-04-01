@@ -152,6 +152,10 @@ const _lastWsNotifiedTimestamps = {};
 // Phones que el asesor abrió en esta sesión.
 // Previene re-inicialización de badges desde has_unread (backend) si el asesor ya los limpió.
 const _seenPhones = new Set();
+// Seguimiento de alertas flotantes de espera
+const _pendingAlertShown = {}; // { [phone]: { shownAt: timestampMs } }
+const PENDING_ALERT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
+const PENDING_ALERT_COOLDOWN_MS = 30 * 60 * 1000;      // 30 minutos
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
@@ -1081,16 +1085,6 @@ async function loadWorkerFilterOptions() {
 
 function onWorkerFilterChange(workerId) {
     activeWorkerFilter = workerId;
-    const timeFilter = document.getElementById('timeFilter');
-    if (timeFilter) {
-        timeFilter.disabled = !!workerId;
-        // Al desactivar worker filter, resetear time filter a default para evitar estado inconsistente
-        if (!workerId && timeFilter.value === 'custom') {
-            timeFilter.value = '24h';
-            const customDates = document.getElementById('customDates');
-            if (customDates) customDates.classList.add('hidden');
-        }
-    }
     loadContacts();
 }
 
@@ -1098,9 +1092,8 @@ async function loadContacts() {
     const workerSel = document.getElementById('workerFilter');
     const workerIdParam = workerSel ? workerSel.value : '';
 
-    // Si hay filtro worker activo, ignorar filtro de tiempo
-    const filter = document.getElementById('timeFilter').value;
-    let url = `${BASE_URL}/contacts?filter_time=${filter}`;
+    // Siempre filtro personalizado — los date inputs están siempre visibles
+    let url = `${BASE_URL}/contacts?filter_time=custom`;
 
     if (workerIdParam) {
         url = `${BASE_URL}/contacts?worker_id=${encodeURIComponent(workerIdParam)}`;
@@ -1121,13 +1114,20 @@ async function loadContacts() {
         }
     }
 
-    // Agregar fechas si es filtro custom (solo cuando no hay worker filter)
-    if (!workerIdParam && filter === 'custom') {
-        const dateFrom = document.getElementById('dateFrom').value;
-        const dateTo = document.getElementById('dateTo').value;
+    // Agregar fechas y campo de fecha (solo cuando no hay worker filter)
+    if (!workerIdParam) {
+        const dateFrom = document.getElementById('dateFrom')?.value;
+        const dateTo = document.getElementById('dateTo')?.value;
         if (dateFrom) url += `&date_from=${dateFrom}T00:00:00`;
         if (dateTo) url += `&date_to=${dateTo}T23:59:59`;
+        const dateFieldEl = document.querySelector('input[name="dateField"]:checked');
+        const dateField = dateFieldEl ? dateFieldEl.value : 'last_activity';
+        url += `&date_field=${dateField}`;
+        console.log(`[Filtro] Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}  |  campo: ${dateField}  |  worker: ${workerIdParam || 'ninguno'}`);
+    } else {
+        console.log(`[Filtro] Modo worker: ${workerIdParam} (filtro de fechas ignorado)`);
     }
+    console.log(`[Filtro] GET ${url}`);
 
     try {
         const response = await fetch(url, {
@@ -1139,11 +1139,16 @@ async function loadContacts() {
         const data = await response.json();
         const newContacts = data.contacts || [];
 
+        console.log(`[Filtro] Respuesta: ${newContacts.length} contactos  |  activos: ${data.active_count ?? '?'}  |  históricos: ${data.historical_count ?? '?'}  |  rango: ${data.since ?? '?'} → ${data.until ?? '?'}`);
+        if (newContacts.length === 0) {
+            console.warn('[Filtro] ⚠️  El backend devolvió 0 contactos. Causas posibles: rango de fechas sin actividad, filtro de asesora muy restrictivo, o error Redis transitorio.');
+        }
+
         // Fix: guard contra error Redis transitorio — si el backend devuelve 0 contactos
         // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
         // connections). Mantener la lista anterior evita el blink total de la UI.
         if (newContacts.length === 0 && allContacts.length > 0) {
-            console.warn('[Panel] Backend devolvió 0 contactos (posible error Redis transitorio) — manteniendo lista anterior');
+            console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
             return;
         }
 
@@ -1206,6 +1211,8 @@ async function loadContacts() {
 
         _rebuildPortalChips(allContacts);
         _applyFiltersAndRender();
+        console.log(`[Filtro] Renderizando ${allContacts.length} contactos en lista.`);
+        checkPendingResponseAlerts();
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
         if (!deepLinkHandled) {
@@ -2767,6 +2774,9 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         return;
     }
 
+    // Descartar alerta de espera si existe para este contacto
+    _dismissPendingAlert(phone);
+
     // Al abrir el chat de un contacto, marcar sus mensajes como leídos
     if (phone && unreadCounts[phone]) {
         delete unreadCounts[phone];
@@ -3811,6 +3821,9 @@ function handleVisibilityChange() {
                 loadChatHistory(currentContactId);
             }
         }
+
+        // Revisar alertas de espera al volver a la pestaña
+        checkPendingResponseAlerts();
     }
 }
 
@@ -3845,22 +3858,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // Iniciar polling
     startPolling();
 
-    // Filtro de tiempo
-    document.getElementById('timeFilter').addEventListener('change', function () {
-        const customDates = document.getElementById('customDates');
-        if (this.value === 'custom') {
-            customDates.classList.remove('hidden');
-        } else {
-            customDates.classList.add('hidden');
-            loadContacts();
-        }
-    });
+    // Revisión periódica de alertas de espera (cada 5 min, por si el tab no recibe eventos)
+    setInterval(checkPendingResponseAlerts, 5 * 60 * 1000);
+
+    // Inicializar rango de fechas por defecto (últimos 7 días)
+    (function _initDefaultDates() {
+        const _today = new Date();
+        const _weekAgo = new Date(_today);
+        _weekAgo.setDate(_today.getDate() - 7);
+        const _toISO = d => d.toISOString().split('T')[0];
+        const _fromEl = document.getElementById('dateFrom');
+        const _toEl = document.getElementById('dateTo');
+        if (_fromEl && !_fromEl.value) _fromEl.value = _toISO(_weekAgo);
+        if (_toEl && !_toEl.value) _toEl.value = _toISO(_today);
+    })();
 
     // Boton refresh
     document.getElementById('refreshBtn').addEventListener('click', loadContacts);
 
-    // Aplicar fechas custom
-    document.getElementById('applyDatesBtn').addEventListener('click', loadContacts);
+    // Cambio en radio de campo de fecha → recargar
+    document.querySelectorAll('input[name="dateField"]').forEach(r => {
+        r.addEventListener('change', loadContacts);
+    });
 
     // Enviar mensaje - Form submit
     const sendForm = document.getElementById('sendForm');
@@ -4291,6 +4310,99 @@ document.addEventListener('click', () => {
         _sharedAudioCtx.resume().catch(() => {});
     }
 }, { once: true });
+
+// ========== ALERTAS FLOTANTES DE ESPERA ==========
+
+function _dismissPendingAlert(phone) {
+    if (!phone) return;
+    // Siempre registrar/actualizar cooldown, incluso si no había alerta visible
+    // (p.ej. usuario abre contacto desde sidebar antes de que aparezca la alerta)
+    _pendingAlertShown[phone] = { shownAt: Date.now() };
+    const card = document.querySelector(`[data-alert-phone="${phone}"]`);
+    if (card) {
+        card.style.transition = 'opacity 0.3s, transform 0.3s';
+        card.style.opacity = '0';
+        card.style.transform = 'translateX(20px)';
+        setTimeout(() => card.remove(), 300);
+    }
+}
+
+function _showPendingResponseAlert(phone, name, waitMs) {
+    const container = document.getElementById('pendingAlertsContainer');
+    if (!container) return;
+
+    // Quitar carta previa para este teléfono si existe (re-crear con datos frescos)
+    const existing = container.querySelector(`[data-alert-phone="${phone}"]`);
+    if (existing) existing.remove();
+
+    const hoursWaiting = Math.floor(waitMs / 3600000);
+    const minutesWaiting = Math.floor((waitMs % 3600000) / 60000);
+    const waitLabel = hoursWaiting > 0
+        ? `${hoursWaiting}h ${minutesWaiting}m esperando`
+        : `${minutesWaiting} min esperando`;
+
+    const initials = (name || '?').split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+
+    const card = document.createElement('div');
+    card.setAttribute('data-alert-phone', phone);
+    card.className = 'pointer-events-auto flex items-center gap-3 bg-white border border-red-200 border-l-4 border-l-red-500 rounded-lg shadow-lg px-4 py-3 cursor-pointer select-none';
+
+    card.innerHTML = `
+        <div class="flex-shrink-0 w-9 h-9 rounded-full bg-red-100 text-red-600 flex items-center justify-center font-bold text-sm">${initials}</div>
+        <div class="flex-1 min-w-0">
+            <p class="font-semibold text-sm text-gray-900 truncate">${name || phone}</p>
+            <p class="text-xs text-red-600 font-medium">sigue esperando respuesta</p>
+            <p class="text-xs text-gray-400">${waitLabel}</p>
+        </div>
+        <button data-dismiss-phone="${phone}" class="flex-shrink-0 text-gray-300 hover:text-gray-500 p-1 rounded transition-colors" title="Descartar">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+        </button>
+    `;
+
+    card.addEventListener('click', (e) => {
+        if (e.target.closest('[data-dismiss-phone]')) return;
+        _dismissPendingAlert(phone);
+        const contact = allContacts.find(c => c.phone === phone);
+        if (contact) {
+            selectContact(contact.contact_id || '', phone, contact.display_name || phone, contact.canal_origen || 'whatsapp');
+        }
+    });
+
+    card.querySelector('[data-dismiss-phone]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        _dismissPendingAlert(phone);
+    });
+
+    container.appendChild(card);
+}
+
+function checkPendingResponseAlerts() {
+    const now = Date.now();
+    const container = document.getElementById('pendingAlertsContainer');
+    if (!container) return;
+
+    for (const contact of allContacts) {
+        const phone = contact.phone;
+        const status = contact.conversation_status || contact.status || '';
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(status)) continue;
+        if (phone === currentPhone) continue;
+
+        const lastTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
+        if (!lastTs || (now - lastTs) < PENDING_ALERT_THRESHOLD_MS) continue;
+
+        const record = _pendingAlertShown[phone];
+        if (record && (now - record.shownAt) < PENDING_ALERT_COOLDOWN_MS) continue;
+
+        if (container.children.length >= 5) break;
+
+        _showPendingResponseAlert(phone, contact.display_name, now - lastTs);
+        _pendingAlertShown[phone] = { shownAt: now };
+    }
+}
+
+// ======================================================
 
 function playNotificationBeep() {
     try {

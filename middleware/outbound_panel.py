@@ -3502,6 +3502,7 @@ async def get_active_contacts(
     page: int = Query(1, ge=1, description="Página (1-based) para paginación del ZSET"),
     worker_id: Optional[str] = Query(None, description="Worker ID para filtrar contactos por encargado de cita"),
     include_phone: Optional[str] = Query(None, description="Teléfono a incluir aunque no pertenezca al advisor (deep link cross-advisor)"),
+    date_field: str = Query("last_activity", description="Campo de fecha para filtro custom: last_activity | created_at"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -3559,7 +3560,7 @@ async def get_active_contacts(
         state_manager = ConversationStateManager(redis_url)
 
         # === CACHE: Respuesta completa en Redis (TTL 5s) para colapsar concurrent requests ===
-        _cache_params = f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:{page}:{limit}"
+        _cache_params = f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:{date_field}:{page}:{limit}"
         _contacts_cache_key = f"contacts_resp:{hashlib.md5(_cache_params.encode()).hexdigest()}"
         try:
             _cached = await state_manager.redis.get(_contacts_cache_key)
@@ -3811,9 +3812,12 @@ async def get_active_contacts(
                     logger.debug(f"[Panel] Contacto {contact.get('phone')} incluido (activo/en espera)")
                     continue
 
-                # PRIORIDAD 2: Para contactos no activos, filtrar por last_activity
-                # Usar last_activity como referencia principal; fallback a activated_at
-                ref_time = contact.get("last_activity") or contact.get("activated_at")
+                # PRIORIDAD 2: Para contactos no activos, filtrar por el campo elegido
+                # date_field=created_at → filtrar por fecha de llegada; default → last_activity
+                if date_field == "created_at":
+                    ref_time = contact.get("activated_at") or contact.get("last_activity")
+                else:
+                    ref_time = contact.get("last_activity") or contact.get("activated_at")
                 if ref_time:
                     try:
                         if isinstance(ref_time, str):

@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Panel de Asesores - WhatsApp</title>
+    <title>Panel de Asesores - Proteger Inmobiliaria</title>
+    <link rel="icon" type="image/png" href="/whatsapp/panel/static/icono.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="/whatsapp/panel/static/style.css">
     <style>
@@ -61,24 +62,26 @@
                 <p id="panelSubtitle" class="text-sm opacity-70 mt-1">Inmobiliaria Proteger</p>
             </div>
 
-            <!-- Filtros de tiempo -->
+            <!-- Filtros de tiempo — Solo filtro personalizado -->
             <div class="p-3 bg-gray-50 border-b">
                 <div class="flex flex-wrap gap-2">
-                    <select id="timeFilter" class="text-sm border rounded px-2 py-1 flex-1">
-                        <option value="24h">Ultimas 24 horas</option>
-                        <option value="48h">Ultimas 48 horas</option>
-                        <option value="1week">Ultima semana</option>
-                        <option value="custom">Personalizado</option>
-                    </select>
+                    <input type="date" id="dateFrom" class="text-sm border rounded px-2 py-1 flex-1">
+                    <input type="date" id="dateTo" class="text-sm border rounded px-2 py-1 flex-1">
                     <button id="refreshBtn" class="bg-[#1A1A1A] text-white px-3 py-1 rounded text-sm hover:bg-gray-800 border border-gray-600">
                         &#10227;
                     </button>
                 </div>
-                <!-- Fechas personalizadas (oculto por defecto) -->
-                <div id="customDates" class="hidden mt-2 flex gap-2">
-                    <input type="date" id="dateFrom" class="text-sm border rounded px-2 py-1 flex-1">
-                    <input type="date" id="dateTo" class="text-sm border rounded px-2 py-1 flex-1">
-                    <button id="applyDatesBtn" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">OK</button>
+                <div class="mt-2 flex gap-4">
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input type="radio" name="dateField" id="dateFieldLastActivity"
+                               value="last_activity" checked class="accent-[#F5C400]">
+                        <span class="text-xs text-gray-700 font-medium">Último mensaje</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input type="radio" name="dateField" id="dateFieldCreatedAt"
+                               value="created_at" class="accent-[#F5C400]">
+                        <span class="text-xs text-gray-700 font-medium">Fecha de llegada</span>
+                    </label>
                 </div>
                 <!-- Filtro por encargado de cita -->
                 <div class="mt-2">
@@ -711,5 +714,10 @@
         let ADVISOR_NAMES = {{ advisor_names | tojson | safe }};
     </script>
     <script src="/whatsapp/panel/static/index.js"></script>
+    <!-- Contenedor de alertas flotantes de espera -->
+    <div id="pendingAlertsContainer"
+         class="fixed bottom-5 right-5 z-[60] flex flex-col gap-2 pointer-events-none"
+         style="max-width: 320px;">
+    </div>
 </body>
 </html>

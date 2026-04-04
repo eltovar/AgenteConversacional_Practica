@@ -993,10 +993,18 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error buscando citas activas: {e}")
             return set()
 
-    async def get_contacts_by_worker(self, worker_id: str) -> List[Dict[str, Any]]:
+    async def get_contacts_by_worker(
+        self,
+        worker_id: str,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Retorna la lista de contactos que tienen una cita futura activa con un worker específico.
+        Retorna la lista de contactos que tienen una cita activa con un worker específico.
         Usado por el filtro de worker en el panel.
+
+        Si se proveen date_from/date_to, filtra citas dentro del rango.
+        Si no, usa ventana por defecto: desde 4 horas antes de ahora en adelante.
 
         Returns:
             Lista de dicts con {contact_id, phone, appointment_dt (ISO str), worker_name}
@@ -1005,11 +1013,20 @@ class MongoDBManager:
             return []
         try:
             now = datetime.now(TIMEZONE)
+            if date_from or date_to:
+                dt_filter: Dict[str, Any] = {}
+                if date_from:
+                    dt_filter["$gte"] = date_from
+                if date_to:
+                    dt_filter["$lte"] = date_to
+            else:
+                # Ventana por defecto: desde 4h atrás para cubrir delay del scheduler
+                dt_filter = {"$gte": now - timedelta(hours=4)}
             cursor = self.db.appointments.find(
                 {
                     "worker_id": worker_id,
                     "status": "scheduled",
-                    "appointment_dt": {"$gte": now}
+                    "appointment_dt": dt_filter,
                 },
                 {"contact_id": 1, "phone": 1, "appointment_dt": 1, "worker_name": 1}
             ).sort("appointment_dt", 1)  # ASC: más próxima primero

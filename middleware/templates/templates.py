@@ -114,13 +114,12 @@ DEFAULT_TEMPLATES = {
         "name": "Seguimiento Personalizado",
         "category": "seguimiento",
         "body": (
-            "Hola {nombre}, espero que esté muy bien. "
-            "Le escribo para dar seguimiento a nuestra conversación anterior "
-            "respecto a {tema}. ¿Sigue interesado en avanzar?"
+            "Hola {nombre} ¿Como se encuentra el día de hoy? "
+            "{tema}. Estaré pendiente a su respuesta."
         ),
         "variables": ["nombre", "tema"],
         # {{1}}=nombre, {{2}}=tema
-        "content_sid": "HX287a1c005459a6ceaec90a35108330c3",
+        "content_sid": "HX015a4c21c7aeb082448aeaa97396dbbf",
         "content_variables_map": ["nombre", "tema"],
         "is_default": True,
     },

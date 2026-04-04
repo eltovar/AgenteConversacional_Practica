@@ -3334,12 +3334,14 @@ async def _get_contacts_by_worker_filter(
     worker_id: str,
     advisor: Optional[str],
     limit: int,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
 ) -> dict:
     """
     Branch del pipeline de contactos activado cuando se filtra por worker_id.
 
     Lógica:
-    1. MongoDB: citas futuras activas del worker → contact_ids + phones
+    1. MongoDB: citas del worker en rango de fechas (o ventana por defecto) → contact_ids + phones
     2. HubSpot batch: obtener nombre/email de los contactos (1 llamada)
     3. Por cada contacto: obtener lifecyclestage desde _get_contact_lifecyclestage (usa caché Redis)
     4. Filtrar: solo etapa "marketingqualifiedlead" o "customer" (Visita agendada + Cerrado ganado)
@@ -3349,7 +3351,9 @@ async def _get_contacts_by_worker_filter(
     STAGES_VISIBLES_WORKER = {"marketingqualifiedlead", "customer"}
 
     mongo_mgr = get_mongo_manager()
-    appointment_records = await mongo_mgr.get_contacts_by_worker(worker_id)
+    appointment_records = await mongo_mgr.get_contacts_by_worker(
+        worker_id, date_from=date_from, date_to=date_to
+    )
 
     if not appointment_records:
         return {
@@ -3544,10 +3548,28 @@ async def get_active_contacts(
         # Cuando worker_id está activo, el pipeline normal se omite.
         # Se buscan contactos desde MongoDB appointments y se filtran por etapa HubSpot.
         if worker_id:
+            _wf_date_from: Optional[datetime] = None
+            _wf_date_to: Optional[datetime] = None
+            if date_from:
+                try:
+                    _wf_date_from = datetime.fromisoformat(date_from)
+                    if _wf_date_from.tzinfo is None:
+                        _wf_date_from = _wf_date_from.replace(tzinfo=TIMEZONE)
+                except ValueError:
+                    pass
+            if date_to:
+                try:
+                    _wf_date_to = datetime.fromisoformat(date_to)
+                    if _wf_date_to.tzinfo is None:
+                        _wf_date_to = _wf_date_to.replace(tzinfo=TIMEZONE)
+                except ValueError:
+                    pass
             return await _get_contacts_by_worker_filter(
                 worker_id=worker_id,
                 advisor=advisor,
                 limit=limit,
+                date_from=_wf_date_from,
+                date_to=_wf_date_to,
             )
 
         # === PASO 1: Obtener contactos ACTIVOS de Redis ===

@@ -1114,18 +1114,18 @@ async function loadContacts() {
         }
     }
 
-    // Agregar fechas y campo de fecha (solo cuando no hay worker filter)
+    // Agregar fechas — siempre, incluyendo cuando hay worker filter
+    const dateFrom = document.getElementById('dateFrom')?.value;
+    const dateTo = document.getElementById('dateTo')?.value;
+    if (dateFrom) url += `&date_from=${dateFrom}T00:00:00`;
+    if (dateTo) url += `&date_to=${dateTo}T23:59:59`;
     if (!workerIdParam) {
-        const dateFrom = document.getElementById('dateFrom')?.value;
-        const dateTo = document.getElementById('dateTo')?.value;
-        if (dateFrom) url += `&date_from=${dateFrom}T00:00:00`;
-        if (dateTo) url += `&date_to=${dateTo}T23:59:59`;
         const dateFieldEl = document.querySelector('input[name="dateField"]:checked');
         const dateField = dateFieldEl ? dateFieldEl.value : 'last_activity';
         url += `&date_field=${dateField}`;
-        console.log(`[Filtro] Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}  |  campo: ${dateField}  |  worker: ${workerIdParam || 'ninguno'}`);
+        console.log(`[Filtro] Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}  |  campo: ${dateField}  |  worker: ninguno`);
     } else {
-        console.log(`[Filtro] Modo worker: ${workerIdParam} (filtro de fechas ignorado)`);
+        console.log(`[Filtro] Modo worker: ${workerIdParam} | Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}`);
     }
     console.log(`[Filtro] GET ${url}`);
 
@@ -3880,6 +3880,12 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('input[name="dateField"]').forEach(r => {
         r.addEventListener('change', loadContacts);
     });
+
+    // Cambio en inputs de fecha → recargar automáticamente
+    const _dateFrom = document.getElementById('dateFrom');
+    const _dateTo = document.getElementById('dateTo');
+    if (_dateFrom) _dateFrom.addEventListener('change', loadContacts);
+    if (_dateTo) _dateTo.addEventListener('change', loadContacts);
 
     // Enviar mensaje - Form submit
     const sendForm = document.getElementById('sendForm');

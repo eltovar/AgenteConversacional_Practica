@@ -4241,9 +4241,10 @@ function handleNewMessageNotification(data) {
         scheduleContactsRefresh();
     }
 
-    // Si el contacto actual es el que envio mensaje, refrescar chat
+    // Si el contacto actual es el que envio mensaje, refrescar chat y estado de ventana
     if (currentPhone === data.phone) {
         loadChatHistory(currentContactId);
+        checkWindowStatus(currentPhone);
     }
 }
 

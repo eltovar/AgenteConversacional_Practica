@@ -4146,9 +4146,10 @@ function handleWebSocketMessage(data) {
             } else {
                 scheduleContactsRefresh();
             }
-            // Si el chat activo es el que recibió el mensaje, refrescar historial
+            // Si el chat activo es el que recibió el mensaje, refrescar historial y estado de ventana
             if (currentPhone && data.phone && data.phone === currentPhone) {
                 loadChatHistory(currentContactId);
+                checkWindowStatus(currentPhone);
             }
             break;
 

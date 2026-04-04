@@ -2559,7 +2559,8 @@ async def mark_contact_read(
         raise HTTPException(status_code=401, detail="API Key inválida")
     try:
         normalizer = PhoneNormalizer()
-        phone_norm = normalizer.normalize(phone) or phone
+        validation = normalizer.normalize(phone)
+        phone_norm = validation.normalized if validation.is_valid else phone
         sm = ConversationStateManager(_get_redis_url_str())
         await sm.remove_from_advisor_inbox(advisor_id, phone_norm, canal)
         return {"status": "ok", "phone": phone_norm}
@@ -4687,6 +4688,29 @@ async def update_appointment(
     )
     if not ok:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    # Sync Redis si cambió appointment_dt — actualiza ZSET score y resetea flags
+    # para que el scheduler use la nueva ventana de recordatorio/seguimiento
+    if appt_dt:
+        try:
+            apt_doc = await mongo_mgr.get_appointment_by_id(appointment_id)
+            if apt_doc and apt_doc.get("phone"):
+                from middleware.appointment_manager import AppointmentManager
+                redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+                apt_mgr = AppointmentManager(redis_url)
+                rescheduled = await apt_mgr.reschedule_appointment(
+                    apt_doc["phone"],
+                    apt_doc.get("canal", "whatsapp"),
+                    appt_dt
+                )
+                await apt_mgr.close()
+                if rescheduled:
+                    logger.info("[Panel] Cita reprogramada en Redis: %s → %s", apt_doc["phone"], appt_dt)
+                else:
+                    logger.warning("[Panel] Cita no encontrada en Redis para reprogramar: %s", apt_doc["phone"])
+        except Exception as redis_err:
+            logger.warning("[Panel] Error sync Redis en reprogramación (non-fatal): %s", redis_err)
+
     return {"ok": True}
 
 

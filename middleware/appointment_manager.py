@@ -296,6 +296,59 @@ class AppointmentManager:
             logger.error("[AppointmentManager] Error actualizando cita: %s", e)
             return False
 
+    async def reschedule_appointment(
+        self,
+        phone_normalized: str,
+        canal: str,
+        new_scheduled_datetime: datetime
+    ) -> bool:
+        """
+        Reprograma una cita: actualiza el score en ZSET y resetea flags de notificación.
+        Llamar cuando PATCH /appointments cambia appointment_dt para que el scheduler
+        use la nueva ventana de tiempo (recordatorio y seguimiento).
+        """
+        # Normalizar a TZ Bogotá
+        if new_scheduled_datetime.tzinfo is None:
+            new_scheduled_datetime = new_scheduled_datetime.replace(tzinfo=TIMEZONE_BOGOTA)
+        else:
+            new_scheduled_datetime = new_scheduled_datetime.astimezone(TIMEZONE_BOGOTA)
+
+        appointment = await self.get_appointment(phone_normalized, canal)
+        if not appointment:
+            logger.warning(
+                "[AppointmentManager] reschedule: cita no encontrada en Redis %s:%s",
+                phone_normalized, canal
+            )
+            return False
+
+        # Actualizar datetime y resetear flags para que disparar en nueva ventana
+        appointment.scheduled_datetime = new_scheduled_datetime.isoformat()
+        appointment.reminder_sent = False
+        appointment.reminder_sent_at = None
+        appointment.followup_sent = False
+        appointment.followup_sent_at = None
+
+        r = await self._get_redis()
+        key = self._build_key(phone_normalized, canal)
+
+        # Persistir JSON actualizado
+        await r.set(key, json.dumps(appointment.to_dict()), ex=self.APPOINTMENT_TTL)
+
+        # Actualizar score en ZSET (este es el fix crítico)
+        await r.zadd(self.APPOINTMENT_INDEX, {key: new_scheduled_datetime.timestamp()})
+
+        # Limpiar keys de idempotencia para permitir nuevos envíos en hora correcta
+        reminder_key = self._build_notification_key(phone_normalized, canal, "reminder")
+        followup_key = self._build_notification_key(phone_normalized, canal, "followup")
+        await r.delete(reminder_key, followup_key)
+
+        logger.info(
+            "[AppointmentManager] Cita reprogramada: %s:%s → %s",
+            phone_normalized, canal,
+            new_scheduled_datetime.strftime('%Y-%m-%d %H:%M %Z')
+        )
+        return True
+
     # ═══════════════════════════════════════════════════════════════════════════
     # MARCADO DE NOTIFICACIONES (CON IDEMPOTENCIA)
     # ═══════════════════════════════════════════════════════════════════════════
@@ -398,6 +451,11 @@ class AppointmentManager:
             r = await self._get_redis()
             key = self._build_key(phone_normalized, canal)
             await r.zrem(self.APPOINTMENT_INDEX, key)
+            # Limpiar keys de idempotencia — evita que una nueva cita del mismo
+            # cliente herede el flag "recordatorio ya enviado" de la cita cancelada
+            reminder_key = self._build_notification_key(phone_normalized, canal, "reminder")
+            followup_key = self._build_notification_key(phone_normalized, canal, "followup")
+            await r.delete(reminder_key, followup_key)
             logger.info(
                 "[AppointmentManager] Cita cancelada: %s:%s",
                 phone_normalized, canal

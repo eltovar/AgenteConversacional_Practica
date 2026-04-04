@@ -2794,7 +2794,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         _seenPhones.add(phone);
         if (ADVISOR_ID) {
             const _markReadUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/mark-read`
-                + `?advisor=${encodeURIComponent(ADVISOR_ID)}`;
+                + `?advisor_id=${encodeURIComponent(ADVISOR_ID)}`;
             fetch(_markReadUrl, {
                 method: 'POST',
                 headers: { 'X-API-Key': API_KEY }

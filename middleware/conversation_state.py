@@ -92,6 +92,7 @@ class ConversationMeta:
     # === CAMPOS DE DEAL HUBSPOT (parchados por patch_redis_deal_ids.py) ===
     deal_id: Optional[str] = None
     deal_stage: Optional[str] = None
+    last_advisor_message: Optional[str] = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -319,6 +320,7 @@ class ConversationStateManager:
                         "in_priority_zset": in_priority_zset,
                         "deal_id": meta.deal_id if meta else None,
                         "deal_stage": meta.deal_stage if meta else None,
+                        "last_advisor_message": meta.last_advisor_message if meta else None,
                     })
 
             # ── Paso 3: Escrituras pendientes en un solo pipeline ─────────────────────
@@ -379,6 +381,7 @@ class ConversationStateManager:
                         "in_priority_zset": False,
                         "deal_id": meta.deal_id,
                         "deal_stage": meta.deal_stage,
+                        "last_advisor_message": meta.last_advisor_message,
                     })
 
                 if bot_ghosts:

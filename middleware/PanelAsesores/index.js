@@ -158,7 +158,10 @@ const _lastWsNotifiedTimestamps = {};
 // Previene re-inicialización de badges desde has_unread (backend) si el asesor ya los limpió.
 const _seenPhones = new Set();
 // Seguimiento de alertas flotantes de espera
-const _pendingAlertShown = {}; // { [phone]: { shownAt: timestampMs } }
+let _pendingAlertShown = (() => { // { [phone]: { shownAt: timestampMs } }
+    try { return JSON.parse(sessionStorage.getItem('_pendingAlertShown') || '{}'); }
+    catch { return {}; }
+})();
 const PENDING_ALERT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
 const PENDING_ALERT_COOLDOWN_MS = 30 * 60 * 1000;      // 30 minutos
 // Flag para saber si ya se ejecutó el auto-select de deep link
@@ -4333,6 +4336,7 @@ function _dismissPendingAlert(phone) {
     // Siempre registrar/actualizar cooldown, incluso si no había alerta visible
     // (p.ej. usuario abre contacto desde sidebar antes de que aparezca la alerta)
     _pendingAlertShown[phone] = { shownAt: Date.now() };
+    try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
     const card = document.querySelector(`[data-alert-phone="${phone}"]`);
     if (card) {
         card.style.transition = 'opacity 0.3s, transform 0.3s';
@@ -4398,6 +4402,22 @@ function checkPendingResponseAlerts() {
     const container = document.getElementById('pendingAlertsContainer');
     if (!container) return;
 
+    // --- Limpieza de tarjetas que ya no son elegibles ---
+    for (const card of Array.from(container.querySelectorAll('[data-alert-phone]'))) {
+        const cardPhone = card.getAttribute('data-alert-phone');
+        const contact = allContacts.find(c => c.phone === cardPhone);
+        if (!contact) { card.remove(); continue; }
+        const st = contact.conversation_status || contact.status || '';
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(st)) { card.remove(); continue; }
+        if (cardPhone === currentPhone) { card.remove(); continue; }
+        const lastClientTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
+        const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
+        // Asesora respondió después del último mensaje del cliente → ya no está en espera
+        if (lastAdvisorTs && lastAdvisorTs >= lastClientTs) { card.remove(); continue; }
+        // Actividad del cliente reciente (< 2h) → ya no está en espera
+        if (lastClientTs && (now - lastClientTs) < PENDING_ALERT_THRESHOLD_MS) { card.remove(); continue; }
+    }
+
     for (const contact of allContacts) {
         const phone = contact.phone;
         const status = contact.conversation_status || contact.status || '';
@@ -4407,6 +4427,10 @@ function checkPendingResponseAlerts() {
         const lastTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
         if (!lastTs || (now - lastTs) < PENDING_ALERT_THRESHOLD_MS) continue;
 
+        // Asesora ya respondió después del último mensaje del cliente → no mostrar alerta
+        const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
+        if (lastAdvisorTs && lastAdvisorTs >= lastTs) continue;
+
         const record = _pendingAlertShown[phone];
         if (record && (now - record.shownAt) < PENDING_ALERT_COOLDOWN_MS) continue;
 
@@ -4414,6 +4438,7 @@ function checkPendingResponseAlerts() {
 
         _showPendingResponseAlert(phone, contact.display_name, now - lastTs);
         _pendingAlertShown[phone] = { shownAt: now };
+        try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
     }
 }
 

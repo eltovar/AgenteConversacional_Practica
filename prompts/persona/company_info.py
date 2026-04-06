@@ -51,6 +51,8 @@ Asesores Comerciales (compra, venta, arriendo de inmuebles)
 
 Caja (pagos, consignaciones, certificados de renta)
   WhatsApp: 604 444 63 64
+  Horario Caja: Lunes a viernes 8:30 a.m. – 4:00 p.m. | Sábados 8:30 a.m. – 11:30 a.m.
+  ATENCIÓN: Caja cierra antes que el resto de la empresa (empresa: lunes-viernes hasta 5:00 p.m., sábados hasta 12:00 p.m.)
 
 Administraciones (cuotas residenciales, multas, convivencia)
   WhatsApp: 320 609 28 96

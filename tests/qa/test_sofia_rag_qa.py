@@ -644,6 +644,9 @@ class TestInformacionInstitucional:
         ("¿En qué municipios operan?", "Sabaneta"),
         ("¿Tienen propiedades en Medellín?", "Medellín"),
         ("¿Cuál es la misión de la empresa?", "Misión"),
+        ("¿Cómo contacto a un asesor comercial?", "321 817 5110"),
+        ("Quiero hablar con un asesor para ver apartamentos", "321 817 5110"),
+        ("¿Cuál es el WhatsApp de asesores?", "321 817 5110"),
     ]
 
     @pytest.mark.asyncio
@@ -715,13 +718,16 @@ class TestSoporteDepartamentos:
     """
 
     CASOS_SOPORTE = [
-        ("¿A quién llamo por un daño en el apartamento?",   "323 327 7132",  "Reparaciones"),
-        ("Tengo problemas con la factura EPM",              "323 508 18 84", "Servicios Públicos"),
-        ("Quiero hablar con el abogado",                    "321 789 86 79", "Jurídico"),
-        ("¿Cuánto es la administración del conjunto?",      "320 609 2896",  "Administraciones"),
-        ("Quiero saber sobre mi certificado tributario",    NUMERO_CORRECTO, "Contabilidad"),
-        ("¿Cómo termino mi contrato de arrendamiento?",     NUMERO_CORRECTO, "Contratos"),
-        ("Necesito certificado de ingresos del arriendo",   NUMERO_CORRECTO, "Caja"),
+        ("¿A quién llamo por un daño en el apartamento?",          "323 327 7132",  "Reparaciones"),
+        ("Tengo problemas con la factura EPM",                     "323 508 18 84", "Servicios Públicos"),
+        ("Quiero hablar con el abogado",                           "321 789 86 79", "Jurídico"),
+        ("¿Cuánto es la administración del conjunto?",             "320 609 2896",  "Administraciones"),
+        ("Quiero saber sobre mi certificado tributario",           NUMERO_CORRECTO, "Contabilidad"),
+        ("¿Cómo termino mi contrato de arrendamiento?",            NUMERO_CORRECTO, "Contratos"),
+        ("Necesito certificado de ingresos del arriendo",          NUMERO_CORRECTO, "Caja"),
+        ("Estoy en mora, ¿cómo hago un acuerdo de pago?",         "310 515 5781",  "Cartera"),
+        ("Tengo una deuda de arriendo, ¿qué puedo hacer?",        "310 515 5781",  "Cartera"),
+        ("¿Con quién hablo si no puedo pagar el arriendo?",       "310 515 5781",  "Cartera"),
     ]
 
     @pytest.mark.asyncio
@@ -1037,4 +1043,135 @@ class TestToolDocumentMapIntegrity:
                     corruptos.append(f"{path_str} (UnicodeDecodeError)")
         assert not corruptos, (
             f"[ANOMALÍA] Archivos con posible corrupción de encoding: {corruptos}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── BLOQUE 11: HORARIOS ESPECÍFICOS DE CAJA ─────────────────────────────────
+# Caja cierra a las 4:00 PM (lunes-viernes) y 11:30 AM (sábados).
+# Diferente al horario general de la empresa (5:00 PM / 12:00 PM).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HORA_CIERRE_CAJA_SEMANA = "4:00 PM"
+HORA_CIERRE_CAJA_SABADO = "11:30 AM"
+HORA_CIERRE_GENERAL_SEMANA = "5:00 PM"   # Horario general de la empresa
+HORA_CIERRE_GENERAL_SABADO = "12:00 PM"  # Horario general de la empresa
+
+
+class TestCajaHorarios:
+    """
+    BLOQUE 11 — Verificación de horarios específicos del departamento de Caja.
+
+    REGLA CRÍTICA: El departamento de Caja tiene horarios DIFERENTES al horario
+    general de la empresa:
+      • Empresa (general): Lunes-Viernes 8:30–5:00 PM | Sábados 8:30–12:00 PM
+      • Caja (específico): Lunes-Viernes 8:30–4:00 PM | Sábados 8:30–11:30 AM
+    """
+
+    # ── Tests de integridad estática (KB en reposo) ──────────────────────────
+
+    def test_kb_caja_tiene_horario_semana_correcto(self):
+        """soporte_caja_pagos.txt debe documentar que Caja cierra a las 4:00 PM."""
+        assert HORA_CIERRE_CAJA_SEMANA in KB_CONTENT["soporte_caja"], (
+            f"[ANOMALÍA URGENTE] soporte_caja_pagos.txt no documenta el cierre a las "
+            f"'{HORA_CIERRE_CAJA_SEMANA}' (lunes-viernes). Sofia podría informar horario incorrecto."
+        )
+
+    def test_kb_caja_tiene_horario_sabado_correcto(self):
+        """soporte_caja_pagos.txt debe documentar que Caja cierra a las 11:30 AM los sábados."""
+        assert HORA_CIERRE_CAJA_SABADO in KB_CONTENT["soporte_caja"], (
+            f"[ANOMALÍA URGENTE] soporte_caja_pagos.txt no documenta el cierre a las "
+            f"'{HORA_CIERRE_CAJA_SABADO}' (sábados). Sofia podría informar horario incorrecto."
+        )
+
+    def test_kb_institucional_tiene_horario_especial_caja(self):
+        """informacion_institucional.txt debe advertir que Caja tiene horario diferente."""
+        contenido = KB_CONTENT["info_institucional"]
+        tiene_4pm = HORA_CIERRE_CAJA_SEMANA in contenido
+        tiene_11_30 = HORA_CIERRE_CAJA_SABADO in contenido
+        assert tiene_4pm and tiene_11_30, (
+            f"[ANOMALÍA] informacion_institucional.txt no diferencia el horario de Caja.\n"
+            f"  4:00 PM presente: {tiene_4pm}\n"
+            f"  11:30 AM presente: {tiene_11_30}"
+        )
+
+    def test_kb_caja_tiene_nota_diferencia_horario(self):
+        """KB Caja debe incluir una nota aclarando que su horario difiere del general."""
+        contenido = KB_CONTENT["soporte_caja"]
+        tiene_nota = (
+            "diferente" in contenido.lower() or
+            "IMPORTANTE" in contenido or
+            "NOTA" in contenido
+        )
+        assert tiene_nota, (
+            "[ANOMALÍA] soporte_caja_pagos.txt no tiene nota aclaratoria sobre la "
+            "diferencia de horario respecto al horario general de la empresa."
+        )
+
+    # ── Tests de runtime (contexto enviado al LLM) ──────────────────────────
+
+    PREGUNTAS_HORARIO_CAJA = [
+        "¿A qué hora cierra la caja?",
+        "¿Hasta qué hora puedo pagar en la inmobiliaria?",
+        "¿Cuál es el horario de caja?",
+        "¿Hasta qué hora atiende caja los sábados?",
+        "¿Puedo pagar el arriendo a las 4:30 de la tarde?",
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pregunta", PREGUNTAS_HORARIO_CAJA)
+    async def test_contexto_caja_contiene_horario_correcto_semana(
+        self, info_agent, pregunta: str
+    ):
+        """El contexto RAG debe contener el horario correcto de Caja (4:00 PM) para consultas de horario."""
+        tool_response = _make_tool_response("soporte_contacto", "horario caja")
+        captured_context: List[str] = []
+
+        async def capture_final_call(messages_rag):
+            for msg in messages_rag:
+                captured_context.append(msg.content)
+            return MagicMock(content="El horario de Caja es lunes a viernes hasta las 4:00 PM.")
+
+        mock_client, _ = _build_agent_mock(tool_response)
+
+        with patch("agents.InfoAgent.info_agent.llama_client.client", mock_client), \
+             patch("agents.InfoAgent.info_agent.llama_client.ainvoke",
+                   side_effect=capture_final_call), \
+             patch("agents.InfoAgent.info_agent.rag_service.search_knowledge",
+                   side_effect=_rag_side_effect):
+
+            await info_agent.process_info_query(pregunta)
+
+        full_context = " ".join(captured_context)
+        assert HORA_CIERRE_CAJA_SEMANA in full_context, (
+            f"[ANOMALÍA URGENTE] Horario de Caja '{HORA_CIERRE_CAJA_SEMANA}' NO llegó al LLM.\n"
+            f"Pregunta: '{pregunta}'\n"
+            f"Contexto (400 chars): {full_context[:400]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_contexto_caja_contiene_horario_sabado_correcto(self, info_agent):
+        """El contexto RAG debe contener el horario de Caja del sábado (11:30 AM)."""
+        tool_response = _make_tool_response("soporte_contacto", "horario caja sábado")
+        captured_context: List[str] = []
+
+        async def capture_final_call(messages_rag):
+            for msg in messages_rag:
+                captured_context.append(msg.content)
+            return MagicMock(content="Los sábados Caja atiende hasta las 11:30 AM.")
+
+        mock_client, _ = _build_agent_mock(tool_response)
+
+        with patch("agents.InfoAgent.info_agent.llama_client.client", mock_client), \
+             patch("agents.InfoAgent.info_agent.llama_client.ainvoke",
+                   side_effect=capture_final_call), \
+             patch("agents.InfoAgent.info_agent.rag_service.search_knowledge",
+                   side_effect=_rag_side_effect):
+
+            await info_agent.process_info_query("¿Hasta qué hora atiende caja el sábado?")
+
+        full_context = " ".join(captured_context)
+        assert HORA_CIERRE_CAJA_SABADO in full_context, (
+            f"[ANOMALÍA URGENTE] Horario de Caja sábado '{HORA_CIERRE_CAJA_SABADO}' NO llegó al LLM.\n"
+            f"Contexto (400 chars): {full_context[:400]}"
         )

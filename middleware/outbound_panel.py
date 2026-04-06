@@ -2547,13 +2547,14 @@ async def close_conversation(
 @router.post("/contacts/{phone}/mark-read")
 async def mark_contact_read(
     phone: str,
-    advisor_id: str = Query(..., description="ID del asesor que leyó el contacto"),
+    advisor_id: Optional[str] = Query(None, description="ID del asesor que leyó el contacto (se infiere del meta si no se provee)"),
     canal: Optional[str] = Query(None, description="Canal del contacto (opcional)"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Registra que el asesor abrió un contacto, removiéndolo de su advisor_inbox en Redis.
     Llamado desde el frontend al hacer click en un contacto (fire-and-forget).
+    Si advisor_id no se provee, se infiere de ConversationMeta.assigned_owner_id.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -2562,7 +2563,13 @@ async def mark_contact_read(
         validation = normalizer.normalize(phone)
         phone_norm = validation.normalized if validation.is_valid else phone
         sm = ConversationStateManager(_get_redis_url_str())
-        await sm.remove_from_advisor_inbox(advisor_id, phone_norm, canal)
+        # Si no se recibe advisor_id, inferirlo del meta del contacto
+        if not advisor_id:
+            _meta = await sm.get_meta(phone_norm, canal or "whatsapp")
+            if _meta:
+                advisor_id = _meta.assigned_owner_id
+        if advisor_id:
+            await sm.remove_from_advisor_inbox(advisor_id, phone_norm, canal)
         return {"status": "ok", "phone": phone_norm}
     except Exception as e:
         logger.warning(f"[Panel][Inbox] mark_contact_read error (non-fatal): {e}")

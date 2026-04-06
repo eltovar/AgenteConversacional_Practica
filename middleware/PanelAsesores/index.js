@@ -120,9 +120,14 @@ const ADVISOR_PORTALS = {
     ],
 };
 
-// Leer parametro advisor de la URL
+// Leer parametro advisor de la URL y persistir en sessionStorage para sobrevivir F5/reloads.
+// sessionStorage (no localStorage) para que cada pestaña/sesión sea independiente.
 const urlParams = new URLSearchParams(window.location.search);
-const ADVISOR_ID = urlParams.get('advisor');
+const _rawAdvisorId = urlParams.get('advisor');
+if (_rawAdvisorId) {
+    sessionStorage.setItem('panel_advisor_id', _rawAdvisorId);
+}
+const ADVISOR_ID = _rawAdvisorId || sessionStorage.getItem('panel_advisor_id');
 
 const ADVISOR_NAME = ADVISOR_ID ? (ADVISOR_NAMES[ADVISOR_ID] || `Asesor ${ADVISOR_ID}`) : null;
 
@@ -2789,17 +2794,19 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }
     }
 
-    // Inbox persistente: registrar como visto en esta sesión + marcar leído en Redis
+    // Inbox persistente: registrar como visto en esta sesión + marcar leído en Redis.
+    // Siempre se dispara: si ADVISOR_ID está disponible se envía, si no el backend
+    // lo infiere de ConversationMeta.assigned_owner_id (no más 422 por param faltante).
     if (phone) {
         _seenPhones.add(phone);
-        if (ADVISOR_ID) {
-            const _markReadUrl = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/mark-read`
-                + `?advisor_id=${encodeURIComponent(ADVISOR_ID)}`;
-            fetch(_markReadUrl, {
-                method: 'POST',
-                headers: { 'X-API-Key': API_KEY }
-            }).catch(err => console.warn('[Panel][Inbox] mark-read error (non-fatal):', err));
-        }
+        const _mrParams = new URLSearchParams();
+        if (ADVISOR_ID) _mrParams.set('advisor_id', ADVISOR_ID);
+        if (canal) _mrParams.set('canal', canal);
+        const _mrQuery = _mrParams.toString() ? `?${_mrParams.toString()}` : '';
+        fetch(`${BASE_URL}/contacts/${encodeURIComponent(phone)}/mark-read${_mrQuery}`, {
+            method: 'POST',
+            headers: { 'X-API-Key': API_KEY }
+        }).catch(err => console.warn('[Panel][Inbox] mark-read error (non-fatal):', err));
     }
 
     // Mostrar toggle de Columna C y asegurar que el panel esté visible

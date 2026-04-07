@@ -1107,11 +1107,18 @@ async function loadContacts() {
     const workerSel = document.getElementById('workerFilter');
     const workerIdParam = workerSel ? workerSel.value : '';
 
-    // Siempre filtro personalizado — los date inputs están siempre visibles
-    let url = `${BASE_URL}/contacts?filter_time=custom`;
+    // Un solo input de fecha — filtra por un día específico
+    const dateFrom = document.getElementById('dateFrom')?.value;
 
+    // Construir URL base según modo activo
+    let url;
     if (workerIdParam) {
         url = `${BASE_URL}/contacts?worker_id=${encodeURIComponent(workerIdParam)}`;
+    } else if (dateFrom) {
+        url = `${BASE_URL}/contacts?filter_time=custom`;
+    } else {
+        // Sin fecha: mostrar todos los contactos activos sin filtro histórico
+        url = `${BASE_URL}/contacts?filter_time=all`;
     }
 
     // Agregar filtro por advisor si esta presente en la URL
@@ -1129,18 +1136,21 @@ async function loadContacts() {
         }
     }
 
-    // Agregar fechas — siempre, incluyendo cuando hay worker filter
-    const dateFrom = document.getElementById('dateFrom')?.value;
-    const dateTo = document.getElementById('dateTo')?.value;
-    if (dateFrom) url += `&date_from=${dateFrom}T00:00:00`;
-    if (dateTo) url += `&date_to=${dateTo}T23:59:59`;
-    if (!workerIdParam) {
+    // Agregar fecha: si dateFrom tiene valor, se filtra ese día completo (00:00 → 23:59)
+    if (dateFrom) {
+        url += `&date_from=${dateFrom}T00:00:00`;
+        url += `&date_to=${dateFrom}T23:59:59`;
+    }
+
+    if (!workerIdParam && dateFrom) {
         const dateFieldEl = document.querySelector('input[name="dateField"]:checked');
         const dateField = dateFieldEl ? dateFieldEl.value : 'last_activity';
         url += `&date_field=${dateField}`;
-        console.log(`[Filtro] Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}  |  campo: ${dateField}  |  worker: ninguno`);
+        console.log(`[Filtro] Fecha: ${dateFrom}  |  campo: ${dateField}`);
+    } else if (workerIdParam) {
+        console.log(`[Filtro] Modo worker: ${workerIdParam} | Fecha: ${dateFrom || '(todas)'}`);
     } else {
-        console.log(`[Filtro] Modo worker: ${workerIdParam} | Rango: ${dateFrom || '(sin desde)'} → ${dateTo || '(sin hasta)'}`);
+        console.log(`[Filtro] Sin fecha — mostrando todos los contactos activos`);
     }
     console.log(`[Filtro] GET ${url}`);
 
@@ -3886,17 +3896,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Revisión periódica de alertas de espera (cada 5 min, por si el tab no recibe eventos)
     setInterval(checkPendingResponseAlerts, 5 * 60 * 1000);
 
-    // Inicializar rango de fechas por defecto (últimos 7 días)
-    (function _initDefaultDates() {
-        const _today = new Date();
-        const _weekAgo = new Date(_today);
-        _weekAgo.setDate(_today.getDate() - 7);
-        const _toISO = d => d.toISOString().split('T')[0];
-        const _fromEl = document.getElementById('dateFrom');
-        const _toEl = document.getElementById('dateTo');
-        if (_fromEl && !_fromEl.value) _fromEl.value = _toISO(_weekAgo);
-        if (_toEl && !_toEl.value) _toEl.value = _toISO(_today);
-    })();
+    // Sin fecha por defecto: el panel arranca mostrando todos los contactos activos.
+    // El usuario elige un día específico para filtrar historial.
+    (function _initDefaultDates() {})();
 
     // Boton refresh
     document.getElementById('refreshBtn').addEventListener('click', loadContacts);
@@ -3906,11 +3908,9 @@ document.addEventListener('DOMContentLoaded', () => {
         r.addEventListener('change', loadContacts);
     });
 
-    // Cambio en inputs de fecha → recargar automáticamente
+    // Cambio en input de fecha → recargar automáticamente
     const _dateFrom = document.getElementById('dateFrom');
-    const _dateTo = document.getElementById('dateTo');
     if (_dateFrom) _dateFrom.addEventListener('change', loadContacts);
-    if (_dateTo) _dateTo.addEventListener('change', loadContacts);
 
     // Enviar mensaje - Form submit
     const sendForm = document.getElementById('sendForm');

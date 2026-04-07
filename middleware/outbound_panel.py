@@ -3814,19 +3814,20 @@ async def get_active_contacts(
             until = now
 
         # === PASO 3.5: Filtrar contactos por fecha, PERO siempre incluir los activos ===
-        # REGLA IMPORTANTE: Contactos en HUMAN_ACTIVE o IN_CONVERSATION SIEMPRE se muestran
-        # porque están esperando atención. El filtro de tiempo solo aplica a históricos.
+        # REGLA: En modos de ventana deslizante (24h/48h/1week), los contactos en
+        # HUMAN_ACTIVE/PENDING_HANDOFF/IN_CONVERSATION siempre se muestran (bypass PRIORIDAD 1).
+        # En modo fecha específica (custom), TODOS los contactos se filtran por fecha — sin bypass.
         if filter_time != "all":
             filtered_active = []
             for contact in active_contacts:
-                # PRIORIDAD 1: Solo bypassear si es una conversación activa con humano.
+                # PRIORIDAD 1: Bypass solo en modos de ventana deslizante (no "custom").
                 # Nota: is_active=True está hardcoded para TODOS los contactos de Redis
                 # (conversation_state.py:316,377) — no puede usarse como condición de bypass
                 # porque haría que PRIORIDAD 2 (filtro por fecha) NUNCA se ejecute.
                 status = contact.get("conversation_status") or contact.get("status") or ""
                 is_human_active = status in ["HUMAN_ACTIVE", "PENDING_HANDOFF", "IN_CONVERSATION"]
 
-                if is_human_active:
+                if is_human_active and filter_time != "custom":
                     # Calcular time_ago para mostrar, pero NO filtrar
                     # Usar last_activity (último mensaje) como referencia de tiempo
                     ref_time = contact.get("last_activity") or contact.get("activated_at")

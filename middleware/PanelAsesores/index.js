@@ -102,22 +102,25 @@ const PIPELINE_STAGES = [
     { id: "1326623541", name: "Ya encontro" }
 ];
 
-// Portales disponibles por equipo (advisor ID → portales)
+// Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.
+// La asignación del contacto se determina por advisor_id (quien crea), no por el canal seleccionado.
+const ALL_PORTALS = [
+    { value: "metrocuadrado",    label: "MetroCuadrado" },
+    { value: "finca_raiz",       label: "Finca Raíz" },
+    { value: "facebook",         label: "Facebook" },
+    { value: "instagram",        label: "Instagram" },
+    { value: "ciencuadras",      label: "Ciencuadras" },
+    { value: "tiktok",           label: "TikTok" },
+    { value: "charly",           label: "Charly" },
+    { value: "pagina_web",       label: "Página Web" },
+    { value: "whatsapp_directo", label: "WhatsApp Directo" },
+    { value: "youtube",          label: "YouTube" },
+];
+
+// Mapeo advisor ID → portales. Todos los IDs usan la lista completa.
 const ADVISOR_PORTALS = {
-    "89096378": [  // equipo_portales
-        { value: "metrocuadrado",  label: "MetroCuadrado" },
-        { value: "finca_raiz",     label: "Finca Raíz" },
-        { value: "facebook",       label: "Facebook" },
-        { value: "instagram",      label: "Instagram" },
-        { value: "ciencuadras",    label: "Ciencuadras" },
-        { value: "tiktok",         label: "TikTok" },
-        { value: "charly",         label: "Charly" },
-    ],
-    "89096380": [  // equipo_directo
-        { value: "pagina_web",       label: "Página Web" },
-        { value: "whatsapp_directo", label: "WhatsApp Directo" },
-        { value: "youtube",          label: "YouTube" },
-    ],
+    "89096378": ALL_PORTALS,
+    "89096380": ALL_PORTALS,
 };
 
 // Leer parametro advisor de la URL y persistir en sessionStorage para sobrevivir F5/reloads.
@@ -4582,8 +4585,7 @@ function openCreateContactModal() {
         // Poblar portales según el asesor activo
         const sel = document.getElementById('portalOrigenSelect');
         if (sel) {
-            const portals = ADVISOR_PORTALS[ADVISOR_ID]
-                || [...ADVISOR_PORTALS["89096378"], ...ADVISOR_PORTALS["89096380"]];
+            const portals = ADVISOR_PORTALS[ADVISOR_ID] || ALL_PORTALS;
             sel.innerHTML = '<option value="">-- Seleccionar --</option>'
                 + portals.map(p => `<option value="${p.value}">${p.label}</option>`).join('');
         }

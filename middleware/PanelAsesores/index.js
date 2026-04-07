@@ -1172,7 +1172,8 @@ async function loadContacts() {
         // Fix: guard contra error Redis transitorio — si el backend devuelve 0 contactos
         // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
         // connections). Mantener la lista anterior evita el blink total de la UI.
-        if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam) {
+        // Excepción: si hay un filtro activo (worker o fecha), el 0 es intencional → limpiar lista.
+        if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam && !dateFrom) {
             console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
             return;
         }
@@ -1766,9 +1767,22 @@ function _renderContactsListInner(contacts) {
     const container = document.getElementById('contactsList');
 
     if (!contacts || contacts.length === 0) {
-        const _emptyMsg = activeWorkerFilter && activeWorkerName
-            ? `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`
-            : 'No hay contactos esperando atención.';
+        const _currentDate = document.getElementById('dateFrom')?.value;
+        let _emptyMsg;
+        if (activeWorkerFilter && activeWorkerName) {
+            _emptyMsg = `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`;
+        } else if (_currentDate) {
+            const [_y, _m, _d] = _currentDate.split('-');
+            const _meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+            const _fechaDisplay = `${parseInt(_d)} ${_meses[parseInt(_m) - 1]}. ${_y}`;
+            const _fieldEl = document.querySelector('input[name="dateField"]:checked');
+            const _field = _fieldEl ? _fieldEl.value : 'last_activity';
+            _emptyMsg = _field === 'created_at'
+                ? `No hay contactos que llegaron el <strong>${_fechaDisplay}</strong>.`
+                : `No hay contactos con actividad el <strong>${_fechaDisplay}</strong>.`;
+        } else {
+            _emptyMsg = 'No hay contactos esperando atención.';
+        }
         container.innerHTML = `
             <div class="p-4 text-center text-gray-400">
                 <p>${_emptyMsg}</p>

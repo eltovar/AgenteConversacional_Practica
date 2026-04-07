@@ -3309,7 +3309,7 @@ async def search_contacts_by_keyword(
                     display_name = meta.display_name or phone
                     contact_id = meta.contact_id
                     conversation_status = meta.status or "historical"
-                    last_activity = meta.last_activity.isoformat() if meta.last_activity else None
+                    last_activity = meta.last_activity if meta.last_activity else None
                 # Intentar nombre desde cache HubSpot si Redis no tiene nombre útil
                 if contact_id and (display_name == phone or display_name in ("Sin nombre", "Cliente Nuevo")):
                     cached_name = await _get_cached_contact_name(contact_id)
@@ -3356,7 +3356,12 @@ async def _get_contacts_by_worker_filter(
     5. Redis: añadir estado de conversación si está activo
     6. Retornar ordenado por appointment_dt ASC
     """
-    STAGES_VISIBLES_WORKER = {"marketingqualifiedlead", "customer"}
+    STAGES_VISIBLES_WORKER = {
+        "marketingqualifiedlead",  # Visita agendada
+        "customer",                # Cerrado ganado
+        "1326631578",              # Nuevo Lead (custom)
+        "1326623075",              # En Conversación (custom)
+    }
 
     mongo_mgr = get_mongo_manager()
     appointment_records = await mongo_mgr.get_contacts_by_worker(
@@ -3436,7 +3441,7 @@ async def _get_contacts_by_worker_filter(
             pass
 
         conversation_status = redis_meta.status if redis_meta else "historical"
-        last_activity = redis_meta.last_activity.isoformat() if (redis_meta and redis_meta.last_activity) else None
+        last_activity = redis_meta.last_activity if (redis_meta and redis_meta.last_activity) else None
 
         # Calcular time_ago usando last_activity o appointment_dt como fallback
         from zoneinfo import ZoneInfo

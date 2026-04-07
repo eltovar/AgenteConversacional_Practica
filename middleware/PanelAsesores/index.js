@@ -975,6 +975,7 @@ async function deleteTemplate(templateId) {
 
 // Variable global para el worker filter activo
 let activeWorkerFilter = '';
+let activeWorkerName = '';  // nombre legible del worker activo (para empty state)
 
 // Variable global para el portal filter activo (filtrado local en allContacts)
 let activePortalFilter = '';
@@ -1093,6 +1094,12 @@ async function loadWorkerFilterOptions() {
 
 function onWorkerFilterChange(workerId) {
     activeWorkerFilter = workerId;
+    // Guardar nombre legible del worker para el empty state
+    const sel = document.getElementById('workerFilter');
+    const selectedOpt = sel ? sel.options[sel.selectedIndex] : null;
+    activeWorkerName = selectedOpt && workerId
+        ? selectedOpt.textContent.replace('👤 Citas de', '').trim()
+        : '';
     loadContacts();
 }
 
@@ -1155,7 +1162,7 @@ async function loadContacts() {
         // Fix: guard contra error Redis transitorio — si el backend devuelve 0 contactos
         // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
         // connections). Mantener la lista anterior evita el blink total de la UI.
-        if (newContacts.length === 0 && allContacts.length > 0) {
+        if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam) {
             console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
             return;
         }
@@ -1749,9 +1756,12 @@ function _renderContactsListInner(contacts) {
     const container = document.getElementById('contactsList');
 
     if (!contacts || contacts.length === 0) {
+        const _emptyMsg = activeWorkerFilter && activeWorkerName
+            ? `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`
+            : 'No hay contactos esperando atención.';
         container.innerHTML = `
             <div class="p-4 text-center text-gray-400">
-                <p>No hay contactos esperando atención.</p>
+                <p>${_emptyMsg}</p>
             </div>
         `;
         _contactFingerprints.clear();

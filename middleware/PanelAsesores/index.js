@@ -3539,6 +3539,11 @@ async function sendMessage(e) {
             // polling incremental complejo. Un refresh inmediato es suficiente.
             loadChatHistory(contactId);
             scheduleContactsRefresh(); // Reordenar la lista inmediatamente
+            // Suprimir alerta de espera permanentemente para este contacto tras responder
+            if (currentPhone) {
+                _pendingAlertShown[currentPhone] = { shownAt: Date.now() };
+                try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
+            }
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -4414,6 +4419,9 @@ function checkPendingResponseAlerts() {
         const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
         // Asesora respondió después del último mensaje del cliente → ya no está en espera
         if (lastAdvisorTs && lastAdvisorTs >= lastClientTs) { card.remove(); continue; }
+        // Asesora abrió/respondió contacto después del último mensaje del cliente (tracking local)
+        const dismissedAt = (_pendingAlertShown[cardPhone]?.shownAt) || 0;
+        if (dismissedAt >= lastClientTs) { card.remove(); continue; }
         // Actividad del cliente reciente (< 2h) → ya no está en espera
         if (lastClientTs && (now - lastClientTs) < PENDING_ALERT_THRESHOLD_MS) { card.remove(); continue; }
     }
@@ -4432,7 +4440,12 @@ function checkPendingResponseAlerts() {
         if (lastAdvisorTs && lastAdvisorTs >= lastTs) continue;
 
         const record = _pendingAlertShown[phone];
-        if (record && (now - record.shownAt) < PENDING_ALERT_COOLDOWN_MS) continue;
+        if (record) {
+            // Supresión permanente: asesora manejó este contacto DESPUÉS del último msg del cliente
+            if (record.shownAt >= lastTs) continue;
+            // Cooldown: alerta ya mostrada recientemente (evita spam en misma ventana de tiempo)
+            if ((now - record.shownAt) < PENDING_ALERT_COOLDOWN_MS) continue;
+        }
 
         if (container.children.length >= 5) break;
 

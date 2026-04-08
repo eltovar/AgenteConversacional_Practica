@@ -493,7 +493,7 @@ async def check_appointment_reminders():
 
 async def check_conversation_timeouts():
     """
-    Detecta conversaciones en HUMAN_ACTIVE inactivas por > 24h
+    Detecta conversaciones en HUMAN_ACTIVE inactivas por > 96h (4 días)
     y las devuelve a BOT_ACTIVE.
 
     COMPATIBLE con ConversationStateManager de Sesión 1.
@@ -543,8 +543,9 @@ async def check_conversation_timeouts():
                 phone, canal or "default", diff_hours, status
             )
 
-            # Si han pasado más de 24 horas en estado humano sin actividad
-            if diff_hours > 24 and status in ["HUMAN_ACTIVE", "IN_CONVERSATION"]:
+            # Si han pasado más de 96 horas (4 días) en estado humano sin actividad
+            # Antes era 24h — se aumentó para no solapar con el HUMAN_PANEL_STATE_TTL de 7 días
+            if diff_hours > 96 and status in ["HUMAN_ACTIVE", "IN_CONVERSATION"]:
                 logger.info(
                     "[Scheduler] Timeout detectado para %s:%s (%.1f horas inactivo). "
                     "Reseteando a BOT_ACTIVE.",

@@ -138,7 +138,8 @@ async def _process_message_deferred(
     media_url: Optional[str],
     media_content_type: Optional[str],
     early_channel: str,
-    original_replied_message_sid: Optional[str] = None
+    original_replied_message_sid: Optional[str] = None,
+    incoming_channel: Optional[str] = None
 ):
     """
     Procesa un mensaje de WhatsApp de forma diferida (background task).
@@ -238,8 +239,17 @@ async def _process_message_deferred(
             contact_id=contact_id
         )
         
-        # Usar el canal histórico para consistencia
-        final_channel = historical_channel if historical_channel != "whatsapp" else detect_channel_dynamic(processed_body, redis_channel)
+        # Determinar final_channel: si el mensaje llegó DIRECTAMENTE por WhatsApp
+        # (prefijo 'whatsapp:' en el campo From de Twilio), forzar 'whatsapp' para
+        # que el panel pueda leer los mensajes (MongoDB filtra por channel=whatsapp).
+        # Sin este guard, contactos con historial de otro canal (instagram, finca_raiz, etc.)
+        # tendrían sus mensajes de WhatsApp almacenados con channel='instagram', haciendo
+        # que el panel nunca los muestre al cargar el historial con canal='whatsapp'.
+        _real_incoming = incoming_channel or early_channel
+        if _real_incoming == "whatsapp":
+            final_channel = "whatsapp"
+        else:
+            final_channel = historical_channel if historical_channel != "whatsapp" else detect_channel_dynamic(processed_body, redis_channel)
         
         # Guardar mensaje en MongoDB SIEMPRE (para el panel)
         mongo_manager = get_mongo_manager()
@@ -974,6 +984,10 @@ async def whatsapp_webhook(
         # ════════════════════════════════════════════════════════════
         early_channel = detect_channel_dynamic(Body, None)
         logger.info(f"[Webhook] Canal detectado tempranamente: {early_channel}")
+        # Canal real del mensaje según prefijo Twilio ('whatsapp:+...' = WhatsApp directo)
+        # No depende del contenido del mensaje — es el canal de transporte real
+        incoming_channel = "whatsapp" if From.lower().startswith("whatsapp:") else early_channel
+        logger.info(f"[Webhook] Canal entrante real (From prefix): {incoming_channel}")
 
         # ════════════════════════════════════════════════════════════
         # PASO 3: Encolar procesamiento en background y retornar OK
@@ -990,7 +1004,8 @@ async def whatsapp_webhook(
             MediaUrl0,
             MediaContentType0,
             early_channel,
-            OriginalRepliedMessageSid
+            OriginalRepliedMessageSid,
+            incoming_channel
         )
         
         # Actualizar timestamps en background

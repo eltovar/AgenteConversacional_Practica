@@ -674,10 +674,12 @@ class ConversationStateManager:
 
                 # Actualizar score en ZSET para reordenamiento
                 # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
+                _did_zadd = False
                 if meta.get("in_panel", True):
                     index_member = f"{phone}:{canal_safe}"
                     score = get_bogota_now().timestamp()
                     await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                    _did_zadd = True
 
             else:
                 # Contacto nuevo sin meta: crear entrada mínima temporal para que GET /contacts
@@ -695,9 +697,33 @@ class ConversationStateManager:
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                _did_zadd = True
                 logger.debug(
                     f"[ConversationState] Meta temporal creado para contacto nuevo {phone}:{canal_safe}"
                 )
+
+            # P3-D: Fusionar identidad de canal — cuando llega mensaje WhatsApp, eliminar
+            # entradas ZSET de otros canales (ej. phone:instagram) para el mismo teléfono.
+            # Evita duplicados en el panel para contactos que cambiaron de canal.
+            if _did_zadd and canal_safe == "whatsapp":
+                whatsapp_member = f"{phone}:whatsapp"
+                cursor = 0
+                stale_members = []
+                while True:
+                    cursor, results = await self.redis.zscan(
+                        self.ACTIVE_CONTACTS_ZSET, cursor, match=f"{phone}:*", count=20
+                    )
+                    for member, _ in results:
+                        m = member if isinstance(member, str) else member.decode()
+                        if m != whatsapp_member:
+                            stale_members.append(m)
+                    if cursor == 0:
+                        break
+                if stale_members:
+                    await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, *stale_members)
+                    logger.info(
+                        f"[ConversationState][P3-D] Canal merge {phone}: zrem {stale_members}"
+                    )
 
             return True
         except Exception as e:

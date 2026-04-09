@@ -156,14 +156,16 @@ async def _process_message_deferred(
 
         # ════════════════════════════════════════════════════════════
         # IDEMPOTENCIA: Prevenir doble procesamiento por Twilio retry
-        # Twilio reintenta el webhook si no recibe ACK en ~15s (workers lentos, timeouts, etc.)
-        # Solución: Redis NX lock por message_sid — si ya existe, saltar silenciosamente.
+        # P1-A FIX: Se separa en dos fases:
+        #   FASE 1 (aquí): solo CHECK — si la key ya existe, saltar
+        #   FASE 2 (post-save): ESCRITURA — solo después de guardar en MongoDB
+        # Razón: escribir aquí + morir antes del save = retry descartado = pérdida permanente
         # ════════════════════════════════════════════════════════════
-        if message_sid:
-            _idem_key = f"msg_processed:{message_sid}"
-            _redis = get_state_manager().redis
-            _is_new = await _redis.set(_idem_key, "1", nx=True, ex=120)  # TTL 2 min
-            if not _is_new:
+        _idem_key = f"msg_processed:{message_sid}" if message_sid else None
+        _redis_idem = get_state_manager().redis
+        if _idem_key:
+            _already_processed = await _redis_idem.get(_idem_key)
+            if _already_processed:
                 logger.info(f"[DeferredProcess] Mensaje {message_sid} ya procesado — skip (Twilio retry)")
                 return
 
@@ -299,6 +301,15 @@ async def _process_message_deferred(
             reply_to_preview=reply_to_preview
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
+
+        # P1-A FIX FASE 2: Escribir key de idempotencia DESPUÉS del save exitoso.
+        # Si el worker muere aquí, el retry de Twilio procesará el mensaje de nuevo
+        # (tolerable: save_message es idempotente por message_sid en MongoDB).
+        if _idem_key and client_mongo_id:
+            try:
+                await _redis_idem.set(_idem_key, "1", ex=300)  # TTL 5 min
+            except Exception:
+                pass  # No crítico — en el peor caso hay doble procesamiento tolerable
 
         # Nota automática en HubSpot cuando el cliente envía un documento
         if (

@@ -465,8 +465,17 @@ class MongoDBManager:
                     "timestamp": msg.get("timestamp").isoformat() if msg.get("timestamp") else None,
                     "align": "left" if msg.get("sender") == "client" else "right",
                     "message": msg.get("content", ""),
-                    "media_url": msg.get("media_url"),
-                    "media_type": msg.get("media_type"),
+                    "media": {
+                        # P2-A fix: leer subdocumento anidado (formato actual de save_message)
+                        # Fallback a campos flat legacy para documentos MongoDB anteriores
+                        "permanent_url": (msg.get("media") or {}).get("permanent_url") or msg.get("media_url"),
+                        "type": (msg.get("media") or {}).get("type") or msg.get("media_type"),
+                        "transcription": (msg.get("media") or {}).get("transcription"),
+                        "analysis": (msg.get("media") or {}).get("analysis"),
+                        "size_bytes": (msg.get("media") or {}).get("size_bytes"),
+                        "doc_icon": (msg.get("media") or {}).get("doc_icon"),
+                        "original_filename": (msg.get("media") or {}).get("original_filename"),
+                    },
                     "reply_to_id": msg.get("reply_to_id"),
                     "reply_to_preview": msg.get("reply_to_preview")
                 })

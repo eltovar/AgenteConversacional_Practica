@@ -1373,6 +1373,21 @@ async function loadChatHistory(contactId) {
 
         console.log('[Panel] Respuesta de historial:', response.status);
 
+        // P2-C: verificar HTTP status antes de parsear — distingue error de "sin mensajes"
+        if (!response.ok) {
+            console.error(`[Panel] Error cargando historial: HTTP ${response.status}`);
+            const chatMessages = document.getElementById('chatMessages');
+            if (chatMessages) {
+                chatMessages.innerHTML = `
+                    <div class="flex flex-col items-center justify-center h-full text-red-500 py-8 text-sm gap-2">
+                        <span>Error al cargar el historial (${response.status})</span>
+                        <button onclick="loadChatHistory('${requestedContactId}')"
+                                class="text-blue-500 underline text-xs">Reintentar</button>
+                    </div>`;
+            }
+            return;
+        }
+
         const data = await response.json();
         console.log('[Panel] Datos recibidos para', requestedContactId, '- mensajes:', data.messages?.length || 0);
 
@@ -1385,6 +1400,17 @@ async function loadChatHistory(contactId) {
         // Verificar si hay error en la respuesta (aunque sea 200)
         if (data.error) {
             console.warn('[Panel] Error en respuesta:', data.error);
+        }
+
+        // P2-B: HubSpot timeout — mostrar aviso de historial parcial + retry automático
+        if (data.hs_timeout) {
+            console.warn('[Panel] HubSpot timeout — historial puede ser parcial, reintentando en 8s');
+            showToast('Cargando historial completo...', 'info');
+            setTimeout(() => {
+                if (currentContactId === requestedContactId) {
+                    loadChatHistory(contactId);
+                }
+            }, 8000);
         }
 
         // Renderizar mensajes (puede estar vacio)
@@ -1508,6 +1534,14 @@ async function loadContactDetail(phone, contactId, canal) {
         // Race condition: si el contacto cambió mientras esperábamos, descartar
         if (currentContactId !== requestedContactId) {
             console.warn(`[Panel] Race condition en loadContactDetail: descartado (${requestedContactId})`);
+            return;
+        }
+
+        // P2-C: verificar HTTP status antes de parsear — distingue error de "sin mensajes"
+        if (!response.ok) {
+            console.error(`[Panel] Error en detail: HTTP ${response.status}`);
+            renderChatBubbles([]);
+            showToast(`Error cargando conversación (${response.status})`, 'error');
             return;
         }
 

@@ -1058,6 +1058,7 @@ async def send_message(
         )
 
         # Mover contacto al top de la lista (actualizar score ZSET)
+        _rc = None  # P1-B fix: inicializar antes del try para evitar UnboundLocalError si Redis cae
         try:
             _rc = await _get_redis_client()
             _now_ts = datetime.now(timezone.utc).timestamp()
@@ -1068,12 +1069,13 @@ async def send_message(
 
         # Notificar a todos los asesores via WS para que refresquen la lista
         try:
-            await ws_manager.publish_broadcast(_rc, {
-                "type": "contact_updated",
-                "phone": phone_normalized,
-                "action": "new_message",
-                "canal": canal_final
-            })
+            if _rc:  # P1-B fix: solo publicar si _rc fue asignado exitosamente
+                await ws_manager.publish_broadcast(_rc, {
+                    "type": "contact_updated",
+                    "phone": phone_normalized,
+                    "action": "new_message",
+                    "canal": canal_final
+                })
         except Exception as _we:
             logger.warning(f"[Panel] Error broadcast WS en send_message: {_we}")
 
@@ -1262,6 +1264,7 @@ async def send_message_json(
             )
 
         # Mover contacto al top de la lista (actualizar score ZSET)
+        _rc = None  # P1-B fix: inicializar antes del try para evitar UnboundLocalError si Redis cae
         try:
             _rc = await _get_redis_client()
             _now_ts = datetime.now(timezone.utc).timestamp()
@@ -1272,12 +1275,13 @@ async def send_message_json(
 
         # Notificar a todos los asesores via WS
         try:
-            await ws_manager.publish_broadcast(_rc, {
-                "type": "contact_updated",
-                "phone": phone_normalized,
-                "action": "new_message",
-                "canal": canal_final
-            })
+            if _rc:  # P1-B fix: solo publicar si _rc fue asignado exitosamente
+                await ws_manager.publish_broadcast(_rc, {
+                    "type": "contact_updated",
+                    "phone": phone_normalized,
+                    "action": "new_message",
+                    "canal": canal_final
+                })
         except Exception as _we:
             logger.warning(f"[Panel-JSON] Error broadcast WS: {_we}")
 
@@ -3111,9 +3115,14 @@ async def get_history_by_contact_id(
         # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
         #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
         # =====================================================================
+        hs_timeout = False  # P2-B: flag para indicar al frontend que HubSpot no respondió a tiempo
         if len(messages) <= 20:
             try:
                 hs_messages = await asyncio.wait_for(_hs_task, timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"[Panel] HubSpot timeout (>15s) para contact_id={contact_id} — historial puede ser parcial")
+                hs_messages = []
+                hs_timeout = True
             except Exception as hs_err:
                 logger.warning(f"[Panel] HubSpot task falló: {hs_err}")
                 hs_messages = []
@@ -3140,7 +3149,8 @@ async def get_history_by_contact_id(
             "count": len(messages),
             "canal": canal,
             "phone": phone,
-            "source": source
+            "source": source,
+            "hs_timeout": hs_timeout
         }
 
     except Exception as e:

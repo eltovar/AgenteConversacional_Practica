@@ -138,7 +138,8 @@ class TimelineLogger:
             self._redis = aioredis.from_url(
                 self._redis_url,
                 encoding="utf-8",
-                decode_responses=True
+                decode_responses=True,
+                max_connections=5,
             )
         return self._redis
 
@@ -175,6 +176,11 @@ class TimelineLogger:
             contact_id: ID del contacto en HubSpot
             note_ids: Lista de IDs de notas asociadas
         """
+        # NO cachear resultados vacíos: si el contacto no tiene notas aún,
+        # los mensajes pueden llegar en segundos y el caché ocultaría el historial.
+        if not note_ids:
+            return
+
         try:
             r = await self._get_redis()
             cache_key = f"hs_assoc:contact:{contact_id}:notes"

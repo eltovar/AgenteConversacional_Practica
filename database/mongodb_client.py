@@ -5,6 +5,7 @@ Cliente MongoDB para almacenamiento en tiempo real de mensajes.
 
 import asyncio
 import os
+import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -58,6 +59,8 @@ class MongoDBManager:
         self.db: Optional[AsyncIOMotorDatabase] = None
         self._connected = False
         self._indexes_created = False
+        self._last_ping: float = 0.0        # monotonic ts del último ping exitoso
+        self._PING_INTERVAL: float = 30.0   # verificar conectividad cada 30s
 
     async def connect(self) -> bool:
         """
@@ -66,8 +69,27 @@ class MongoDBManager:
         Returns:
             True si la conexión fue exitosa
         """
+        now = time.monotonic()
         if self._connected and self.client:
-            return True
+            # Verificar conexión viva cada 30s con ping rápido
+            if now - self._last_ping < self._PING_INTERVAL:
+                return True
+            try:
+                await asyncio.wait_for(
+                    self.client.admin.command('ping'),
+                    timeout=2.0
+                )
+                self._last_ping = now
+                return True
+            except Exception as ping_err:
+                logger.warning(f"[MongoDB] Ping falló ({ping_err}), reconectando...")
+                self._connected = False
+                self._last_ping = 0.0
+                try:
+                    self.client.close()
+                except Exception:
+                    pass
+                self.client = None
 
         if not self.mongo_url:
             logger.warning("[MongoDB] MONGO_URL no configurada - MongoDB deshabilitado")
@@ -78,10 +100,12 @@ class MongoDBManager:
                 self.mongo_url,
                 serverSelectionTimeoutMS=5000,
                 connectTimeoutMS=5000,
-                maxPoolSize=10,
+                socketTimeoutMS=30000,    # timeout por operación — evita queries colgadas
+                maxIdleTimeMS=45000,      # cerrar conexiones idle >45s — evita stale sockets
+                maxPoolSize=20,           # aumentado de 10 → más capacidad concurrente
                 minPoolSize=1,
-                w=1,          # acknowledged write (explícito)
-                journal=True, # journal flush antes de confirmar — garantiza durabilidad en disco
+                w=1,
+                journal=True,
             )
 
             # Verificar conexión
@@ -89,6 +113,7 @@ class MongoDBManager:
 
             self.db = self.client.get_database("inmobiliaria_chat")
             self._connected = True
+            self._last_ping = time.monotonic()
 
             # Crear índices si no existen
             await self._ensure_indexes()
@@ -403,6 +428,9 @@ class MongoDBManager:
 
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo historial: {e}")
+            # Reset para forzar reconexión en la siguiente llamada
+            self._connected = False
+            self._last_ping = 0.0
             return []
 
     async def get_history_by_contact_id(
@@ -447,6 +475,8 @@ class MongoDBManager:
 
         except Exception as e:
             logger.error(f"[MongoDB] Error obteniendo historial por contact_id: {e}")
+            self._connected = False
+            self._last_ping = 0.0
             return []
 
     async def get_message_by_sid(self, message_sid: str) -> Optional[Dict[str, Any]]:

@@ -167,6 +167,13 @@ let _pendingAlertShown = (() => { // { [phone]: { shownAt: timestampMs } }
 })();
 const PENDING_ALERT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
 const PENDING_ALERT_COOLDOWN_MS = 30 * 60 * 1000;      // 30 minutos
+// "Marcar como no leído" manual — persiste en localStorage entre sesiones
+let _manuallyUnread = new Set(
+    (() => { try { return JSON.parse(localStorage.getItem('_manuallyUnread') || '[]'); } catch { return []; } })()
+);
+function _saveManuallyUnread() {
+    try { localStorage.setItem('_manuallyUnread', JSON.stringify([..._manuallyUnread])); } catch {}
+}
 // Flag para saber si ya se ejecutó el auto-select de deep link
 let deepLinkHandled = false;
 
@@ -1690,6 +1697,11 @@ function _buildContactHTML(contact) {
         ? `<span class="unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none">${unread > 9 ? '9+' : unread}</span>`
         : '';
 
+    // Punto azul: "marcado como no leído" manualmente (solo si no hay badge rojo real)
+    const manualUnreadBadge = (_manuallyUnread.has(phone) && phone !== currentPhone && unread === 0)
+        ? `<span class="manual-unread-badge absolute -top-1 -right-1 bg-blue-500 rounded-full w-[12px] h-[12px]" title="Marcado como no leído"></span>`
+        : '';
+
     const apptBadge = contact.has_appointment
         ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
         : '';
@@ -1718,6 +1730,7 @@ function _buildContactHTML(contact) {
                          onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=%3F&background=gray&color=fff&size=40&rounded=true';">
                     ${stateBadge}
                     ${unreadBadge}
+                    ${manualUnreadBadge}
                     ${apptBadge}
                     ${crossAdvisorBadge}
                 </div>
@@ -2822,6 +2835,14 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     // Descartar alerta de espera si existe para este contacto
     _dismissPendingAlert(phone);
 
+    // Limpiar "marcado como no leído" manual al abrir el contacto
+    if (phone && _manuallyUnread.has(phone)) {
+        _manuallyUnread.delete(phone);
+        _saveManuallyUnread();
+        const manualBadge = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"] .manual-unread-badge`);
+        if (manualBadge) manualBadge.remove();
+    }
+
     // Al abrir el chat de un contacto, marcar sus mensajes como leídos
     if (phone && unreadCounts[phone]) {
         delete unreadCounts[phone];
@@ -3917,6 +3938,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // El usuario elige un día específico para filtrar historial.
     (function _initDefaultDates() {})();
 
+    // Right-click en contactos → menú "Marcar como no leído"
+    const _contactsList = document.getElementById('contactsList');
+    if (_contactsList) {
+        _contactsList.addEventListener('contextmenu', (e) => {
+            const contactEl = e.target.closest('.contact-item[data-phone]');
+            if (!contactEl) return;
+            e.preventDefault();
+            const phone = contactEl.getAttribute('data-phone');
+            if (phone) _showUnreadContextMenu(e.clientX, e.clientY, phone);
+        });
+    }
+
     // Boton refresh
     document.getElementById('refreshBtn').addEventListener('click', loadContacts);
 
@@ -4361,6 +4394,75 @@ document.addEventListener('click', () => {
     }
 }, { once: true });
 
+// ========== "MARCAR COMO NO LEÍDO" — Menú contextual ==========
+
+/** Cierra cualquier menú contextual de "no leído" abierto */
+function _closeUnreadContextMenu() {
+    const existing = document.getElementById('_unreadContextMenu');
+    if (existing) existing.remove();
+}
+
+/**
+ * Muestra un mini-menú contextual para marcar/desmarcar como no leído.
+ * Se posiciona donde el usuario hizo right-click.
+ */
+function _showUnreadContextMenu(x, y, phone) {
+    _closeUnreadContextMenu();
+    const isUnread = _manuallyUnread.has(phone);
+    const menu = document.createElement('div');
+    menu.id = '_unreadContextMenu';
+    menu.className = 'fixed bg-white shadow-lg rounded-lg border border-gray-200 py-1 z-[70] min-w-[200px]';
+    menu.style.left = `${Math.min(x, window.innerWidth - 220)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - 60)}px`;
+
+    const option = document.createElement('div');
+    option.className = 'px-4 py-2.5 text-sm hover:bg-gray-100 cursor-pointer flex items-center gap-2 select-none';
+    if (isUnread) {
+        option.innerHTML = '<span class="text-green-500">&#10003;</span> Marcar como leído';
+    } else {
+        option.innerHTML = '<span class="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span> Marcar como no leído';
+    }
+    option.addEventListener('click', () => {
+        if (isUnread) {
+            _manuallyUnread.delete(phone);
+            // Remover badge visual
+            const badge = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"] .manual-unread-badge`);
+            if (badge) badge.remove();
+        } else {
+            _manuallyUnread.add(phone);
+            // Agregar badge visual si no hay badge rojo de mensajes reales
+            const contactEl = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"]`);
+            if (contactEl && !contactEl.querySelector('.unread-badge')) {
+                const avatarWrap = contactEl.querySelector('.relative.flex-shrink-0');
+                if (avatarWrap && !avatarWrap.querySelector('.manual-unread-badge')) {
+                    const dot = document.createElement('span');
+                    dot.className = 'manual-unread-badge absolute -top-1 -right-1 bg-blue-500 rounded-full w-[12px] h-[12px]';
+                    dot.title = 'Marcado como no leído';
+                    avatarWrap.appendChild(dot);
+                }
+            }
+        }
+        _saveManuallyUnread();
+        _closeUnreadContextMenu();
+    });
+
+    menu.appendChild(option);
+    document.body.appendChild(menu);
+
+    // Cerrar al hacer click fuera
+    setTimeout(() => {
+        const _handler = (e) => {
+            if (!menu.contains(e.target)) {
+                _closeUnreadContextMenu();
+                document.removeEventListener('click', _handler, true);
+                document.removeEventListener('contextmenu', _handler, true);
+            }
+        };
+        document.addEventListener('click', _handler, true);
+        document.addEventListener('contextmenu', _handler, true);
+    }, 0);
+}
+
 // ========== ALERTAS FLOTANTES DE ESPERA ==========
 
 function _dismissPendingAlert(phone) {
@@ -4440,7 +4542,7 @@ function checkPendingResponseAlerts() {
         const contact = allContacts.find(c => c.phone === cardPhone);
         if (!contact) { card.remove(); continue; }
         const st = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(st)) { card.remove(); continue; }
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE', 'IN_CONVERSATION'].includes(st)) { card.remove(); continue; }
         if (cardPhone === currentPhone) { card.remove(); continue; }
         const lastClientTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
         const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
@@ -4456,7 +4558,7 @@ function checkPendingResponseAlerts() {
     for (const contact of allContacts) {
         const phone = contact.phone;
         const status = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(status)) continue;
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE', 'IN_CONVERSATION'].includes(status)) continue;
         if (phone === currentPhone) continue;
 
         const lastTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;

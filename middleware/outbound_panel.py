@@ -2844,38 +2844,38 @@ async def get_contact_detail(
     mongo_manager = get_mongo_manager()
 
     async def _get_messages():
-        messages = []
-        source = "none"
         try:
             # Paso 1: MongoDB por teléfono + canal
-            messages = await mongo_manager.get_history(
+            mongo_msgs = await mongo_manager.get_history(
                 phone=phone_normalized,
                 limit=limit,
                 channel=canal
             )
-            if messages:
-                return messages, "mongodb"
 
-            # Paso 1.5: fallback sin filtro de canal (lead de portal como mercado_libre/ciencuadras
-            # tiene canal=portal pero mensajes guardados con channel=whatsapp)
-            if canal and canal not in ("whatsapp", "instagram"):
-                messages = await mongo_manager.get_history(
+            # Paso 1.5: si canal de portal y sin resultados → reintentar sin filtro de canal
+            # (lead mercado_libre/ciencuadras: canal=portal pero mensajes en channel=whatsapp)
+            if not mongo_msgs and canal and canal not in ("whatsapp", "instagram"):
+                mongo_msgs = await mongo_manager.get_history(
                     phone=phone_normalized,
                     limit=limit,
                     channel=None
                 )
-                if messages:
+                if mongo_msgs:
                     logger.info(
-                        f"[Panel] Historial sin filtro canal: {len(messages)} msgs para "
+                        f"[Panel] Historial sin filtro canal: {len(mongo_msgs)} msgs para "
                         f"{phone_normalized} (canal={canal} → fallback phone-only)"
                     )
-                    return messages, "mongodb"
 
-            # Pasos 2 + 3 en PARALELO: MongoDB por contact_id y HubSpot simultáneamente
-            # (reduce latencia de ~1.5s secuencial a max(MongoDB, HubSpot) ~0.5-0.8s)
+            # Si MongoDB ya tiene historial completo (>20) → retornar sin consultar HubSpot
+            if len(mongo_msgs) > 20:
+                return mongo_msgs, "mongodb"
+
+            # Pasos 2 + 3 en PARALELO: MongoDB por contact_id y HubSpot simultáneamente.
+            # SIEMPRE se ejecuta cuando mongo_msgs ≤ 20, incluso si Paso 1 devolvió algo,
+            # para evitar mostrar historial parcial (ej: 1 mensaje outbound vs 15 en HubSpot).
             if contact_id and contact_id.isdigit():
                 _tl = get_timeline_logger()
-                mongo_messages, hs_messages = await asyncio.gather(
+                mongo2_msgs, hs_messages = await asyncio.gather(
                     mongo_manager.get_history_by_contact_id(
                         hubspot_contact_id=contact_id,
                         limit=limit
@@ -2886,29 +2886,32 @@ async def get_contact_detail(
                     ),
                     return_exceptions=True,
                 )
-                # Normalizar excepciones a listas vacías
-                if isinstance(mongo_messages, Exception):
-                    logger.warning(f"[Panel] MongoDB contact_id falló: {mongo_messages}")
-                    mongo_messages = []
+                if isinstance(mongo2_msgs, Exception):
+                    logger.warning(f"[Panel] MongoDB contact_id falló: {mongo2_msgs}")
+                    mongo2_msgs = []
                 if isinstance(hs_messages, Exception):
                     logger.warning(f"[Panel] HubSpot falló: {hs_messages}")
                     hs_messages = []
 
-                if len(hs_messages) > len(mongo_messages):
+                # Mejor resultado de MongoDB entre Paso 1 y Paso 2
+                best_mongo = mongo_msgs if len(mongo_msgs) >= len(mongo2_msgs) else mongo2_msgs
+
+                if len(hs_messages) > len(best_mongo):
                     logger.info(
                         f"[Panel] HubSpot supera MongoDB ({len(hs_messages)} vs "
-                        f"{len(mongo_messages)} msgs) → usando HubSpot para {phone_normalized}"
+                        f"{len(best_mongo)} msgs) → usando HubSpot para {phone_normalized}"
                     )
                     return hs_messages, "hubspot"
-            else:
-                mongo_messages = []
 
-            if mongo_messages:
-                return mongo_messages, "mongodb"
+                if best_mongo:
+                    return best_mongo, "mongodb"
+
+            elif mongo_msgs:
+                return mongo_msgs, "mongodb"
 
         except Exception as e:
             logger.error(f"[Panel] Error obteniendo mensajes en detail: {e}")
-        return messages or [], source
+        return [], "none"
 
     # Ejecutar historial + window-status en paralelo (1 round-trip combinado)
     (messages, source), window_status = await asyncio.gather(

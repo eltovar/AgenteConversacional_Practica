@@ -993,6 +993,12 @@ async def whatsapp_webhook(
         # PASO 3: Encolar procesamiento en background y retornar OK
         # ════════════════════════════════════════════════════════════
         # CRÍTICO: Retornar 200 OK inmediatamente para evitar timeout de Twilio
+        # Checkpoint: log pre-BackgroundTask para recovery manual si el worker muere (OOM)
+        logger.info(
+            f"[Checkpoint] MSG_PRE_PROCESS | phone={phone_normalized} | "
+            f"sid={MessageSid or 'N/A'} | channel={incoming_channel or early_channel} | "
+            f"body={Body[:80]!r}"
+        )
         background_tasks.add_task(
             _process_message_deferred,
             phone_normalized,

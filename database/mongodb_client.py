@@ -391,7 +391,7 @@ class MongoDBManager:
                         "size_bytes": media.get("size_bytes"),
                         "format": media.get("format"),
                         "duration_seconds": media.get("duration_seconds"),
-                        "processed_at": media.get("processed_at"),
+                        "processed_at": media.get("processed_at").isoformat() if isinstance(media.get("processed_at"), datetime) else media.get("processed_at"),
                     } if media else None,
                     "reply_to_id": msg.get("reply_to_id"),
                     "reply_to_preview": msg.get("reply_to_preview"),

@@ -3070,10 +3070,9 @@ async def get_history_by_contact_id(
         }
 
     except Exception as e:
-        # Log del error pero retornar 200 con lista vacía para evitar 502
         logger.error(f"[Panel] Error obteniendo historial para {contact_id}: {e}", exc_info=True)
         return JSONResponse(
-            status_code=200,
+            status_code=500,
             content={
                 "contact_id": contact_id,
                 "messages": [],

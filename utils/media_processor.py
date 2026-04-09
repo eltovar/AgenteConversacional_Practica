@@ -15,6 +15,7 @@ ARQUITECTURA:
 MIGRACIÓN: Cloudinary → Bunny.net (más económico, mismo rendimiento)
 """
 
+import asyncio
 import os
 import time
 import httpx
@@ -257,6 +258,14 @@ class MediaProcessor:
     def __init__(self):
         """Inicializa el procesador con credenciales de Twilio."""
         self.twilio_auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        self._semaphore: Optional[asyncio.Semaphore] = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Semáforo para limitar procesamiento concurrente de media (máx 3).
+        Creado lazy para asegurar que pertenece al event loop activo del worker."""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(3)
+        return self._semaphore
 
     # =========================================================================
     # DESCARGA DESDE TWILIO
@@ -590,6 +599,7 @@ class MediaProcessor:
             "original_filename": "",
         }
 
+        await self._get_semaphore().acquire()
         try:
             # Determinar tipo de media
             content_lower = content_type.lower()
@@ -685,6 +695,9 @@ class MediaProcessor:
         except Exception as e:
             logger.error(f"[MediaProcessor] Error procesando media entrante: {e}")
             result["body_for_ai"] = "[Error procesando archivo multimedia]"
+
+        finally:
+            self._get_semaphore().release()
 
         return result
 

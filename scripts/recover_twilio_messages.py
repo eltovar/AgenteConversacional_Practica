@@ -39,11 +39,13 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WA_NUMBER   = os.getenv("TWILIO_PHONE_NUMBER", "")  # formato: whatsapp:+573123969894
 
+# Para ejecución LOCAL: usar URL pública de Railway (la interna solo es accesible
+# desde dentro de Railway). Priorizar MONGO_PUBLIC_URL sobre MONGO_URL.
 MONGO_URL = (
-    os.getenv("MONGO_URL") or
-    os.getenv("MONGODB_URL") or
     os.getenv("MONGO_PUBLIC_URL") or
-    os.getenv("MONGODB_PUBLIC_URL")
+    os.getenv("MONGODB_PUBLIC_URL") or
+    os.getenv("MONGO_URL") or
+    os.getenv("MONGODB_URL")
 )
 MONGO_DB_NAME = "inmobiliaria_chat"
 
@@ -83,7 +85,7 @@ def fetch_twilio_messages(twilio_client: TwilioClient, phone: str) -> list:
     y outbound (nosotros → cliente). Retorna lista ordenada cronológicamente.
     """
     wa_client  = _to_wa(phone)
-    wa_us      = TWILIO_WA_NUMBER  # ya tiene prefijo whatsapp:
+    wa_us      = _to_wa(TWILIO_WA_NUMBER)  # asegura prefijo whatsapp: siempre
 
     all_msgs = []
 

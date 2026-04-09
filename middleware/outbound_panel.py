@@ -2878,17 +2878,30 @@ async def get_contact_detail(
                     limit=limit
                 )
                 if messages:
-                    return messages, "mongodb"
+                    mongo_messages = messages
+                else:
+                    mongo_messages = []
+            else:
+                mongo_messages = []
 
-            # Paso 3: Fallback HubSpot
-            if contact_id and contact_id.isdigit():
+            # Paso 3: HubSpot — se activa siempre que MongoDB tenga ≤ 2 mensajes
+            # (evita mostrar historial incompleto por OOM kill o mensajes perdidos)
+            if contact_id and contact_id.isdigit() and len(mongo_messages) <= 2:
                 timeline_logger = get_timeline_logger()
-                messages = await timeline_logger.get_notes_for_contact(
+                hs_messages = await timeline_logger.get_notes_for_contact(
                     contact_id=contact_id,
                     limit=limit
                 )
-                if messages:
-                    return messages, "hubspot"
+                if len(hs_messages) > len(mongo_messages):
+                    logger.info(
+                        f"[Panel] HubSpot supera MongoDB ({len(hs_messages)} vs "
+                        f"{len(mongo_messages)} msgs) → usando HubSpot para {phone_normalized}"
+                    )
+                    return hs_messages, "hubspot"
+
+            if mongo_messages:
+                return mongo_messages, "mongodb"
+
         except Exception as e:
             logger.error(f"[Panel] Error obteniendo mensajes en detail: {e}")
         return messages or [], source
@@ -3081,17 +3094,22 @@ async def get_history_by_contact_id(
                 logger.debug(f"[Panel] Historial desde MongoDB (contact_id): {len(messages)} msgs")
 
         # =====================================================================
-        # PASO 3: Fallback a HubSpot (datos históricos de migración)
+        # PASO 3: HubSpot — se activa si MongoDB tiene ≤ 2 mensajes
+        # (protección contra OOM kills que dejaron historial incompleto)
         # =====================================================================
-        if not messages:
+        if len(messages) <= 2:
             timeline_logger = get_timeline_logger()
-            messages = await timeline_logger.get_notes_for_contact(
+            hs_messages = await timeline_logger.get_notes_for_contact(
                 contact_id=contact_id,
                 limit=limit
             )
-            if messages:
+            if len(hs_messages) > len(messages):
+                logger.info(
+                    f"[Panel] HubSpot supera MongoDB ({len(hs_messages)} vs "
+                    f"{len(messages)} msgs) → usando HubSpot para contact_id={contact_id}"
+                )
+                messages = hs_messages
                 source = "hubspot"
-                logger.debug(f"[Panel] Historial desde HubSpot (fallback): {len(messages)} msgs")
 
         # Asegurar que messages sea una lista válida
         if messages is None:

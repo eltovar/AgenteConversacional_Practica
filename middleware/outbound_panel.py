@@ -2871,34 +2871,37 @@ async def get_contact_detail(
                     )
                     return messages, "mongodb"
 
-            # Paso 2: MongoDB por contact_id si hay
+            # Pasos 2 + 3 en PARALELO: MongoDB por contact_id y HubSpot simultáneamente
+            # (reduce latencia de ~1.5s secuencial a max(MongoDB, HubSpot) ~0.5-0.8s)
             if contact_id and contact_id.isdigit():
-                messages = await mongo_manager.get_history_by_contact_id(
-                    hubspot_contact_id=contact_id,
-                    limit=limit
+                _tl = get_timeline_logger()
+                mongo_messages, hs_messages = await asyncio.gather(
+                    mongo_manager.get_history_by_contact_id(
+                        hubspot_contact_id=contact_id,
+                        limit=limit
+                    ),
+                    _tl.get_notes_for_contact(
+                        contact_id=contact_id,
+                        limit=limit
+                    ),
+                    return_exceptions=True,
                 )
-                if messages:
-                    mongo_messages = messages
-                else:
+                # Normalizar excepciones a listas vacías
+                if isinstance(mongo_messages, Exception):
+                    logger.warning(f"[Panel] MongoDB contact_id falló: {mongo_messages}")
                     mongo_messages = []
-            else:
-                mongo_messages = []
+                if isinstance(hs_messages, Exception):
+                    logger.warning(f"[Panel] HubSpot falló: {hs_messages}")
+                    hs_messages = []
 
-            # Paso 3: HubSpot — se activa siempre que MongoDB tenga ≤ 20 mensajes
-            # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
-            #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
-            if contact_id and contact_id.isdigit() and len(mongo_messages) <= 20:
-                timeline_logger = get_timeline_logger()
-                hs_messages = await timeline_logger.get_notes_for_contact(
-                    contact_id=contact_id,
-                    limit=limit
-                )
                 if len(hs_messages) > len(mongo_messages):
                     logger.info(
                         f"[Panel] HubSpot supera MongoDB ({len(hs_messages)} vs "
                         f"{len(mongo_messages)} msgs) → usando HubSpot para {phone_normalized}"
                     )
                     return hs_messages, "hubspot"
+            else:
+                mongo_messages = []
 
             if mongo_messages:
                 return mongo_messages, "mongodb"
@@ -3050,6 +3053,12 @@ async def get_history_by_contact_id(
     try:
         mongo_manager = get_mongo_manager()
 
+        # Lanzar HubSpot en background inmediatamente — corre en paralelo con MongoDB
+        _tl = get_timeline_logger()
+        _hs_task = asyncio.create_task(
+            _tl.get_notes_for_contact(contact_id=contact_id, limit=limit)
+        )
+
         # =====================================================================
         # PASO 1: MongoDB por teléfono (preferido - más eficiente)
         # =====================================================================
@@ -3095,16 +3104,16 @@ async def get_history_by_contact_id(
                 logger.debug(f"[Panel] Historial desde MongoDB (contact_id): {len(messages)} msgs")
 
         # =====================================================================
-        # PASO 3: HubSpot — se activa si MongoDB tiene ≤ 20 mensajes
+        # PASO 3: HubSpot — comparar con resultado MongoDB (ya corrió en paralelo)
         # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
         #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
         # =====================================================================
         if len(messages) <= 20:
-            timeline_logger = get_timeline_logger()
-            hs_messages = await timeline_logger.get_notes_for_contact(
-                contact_id=contact_id,
-                limit=limit
-            )
+            try:
+                hs_messages = await asyncio.wait_for(_hs_task, timeout=15.0)
+            except Exception as hs_err:
+                logger.warning(f"[Panel] HubSpot task falló: {hs_err}")
+                hs_messages = []
             if len(hs_messages) > len(messages):
                 logger.info(
                     f"[Panel] HubSpot supera MongoDB ({len(hs_messages)} vs "
@@ -3112,6 +3121,8 @@ async def get_history_by_contact_id(
                 )
                 messages = hs_messages
                 source = "hubspot"
+        else:
+            _hs_task.cancel()  # MongoDB ya tiene suficientes — cancelar HubSpot para ahorrar recursos
 
         # Asegurar que messages sea una lista válida
         if messages is None:

@@ -2884,9 +2884,10 @@ async def get_contact_detail(
             else:
                 mongo_messages = []
 
-            # Paso 3: HubSpot — se activa siempre que MongoDB tenga ≤ 2 mensajes
-            # (evita mostrar historial incompleto por OOM kill o mensajes perdidos)
-            if contact_id and contact_id.isdigit() and len(mongo_messages) <= 2:
+            # Paso 3: HubSpot — se activa siempre que MongoDB tenga ≤ 20 mensajes
+            # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
+            #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
+            if contact_id and contact_id.isdigit() and len(mongo_messages) <= 20:
                 timeline_logger = get_timeline_logger()
                 hs_messages = await timeline_logger.get_notes_for_contact(
                     contact_id=contact_id,
@@ -3094,10 +3095,11 @@ async def get_history_by_contact_id(
                 logger.debug(f"[Panel] Historial desde MongoDB (contact_id): {len(messages)} msgs")
 
         # =====================================================================
-        # PASO 3: HubSpot — se activa si MongoDB tiene ≤ 2 mensajes
-        # (protección contra OOM kills que dejaron historial incompleto)
+        # PASO 3: HubSpot — se activa si MongoDB tiene ≤ 20 mensajes
+        # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
+        #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
         # =====================================================================
-        if len(messages) <= 2:
+        if len(messages) <= 20:
             timeline_logger = get_timeline_logger()
             hs_messages = await timeline_logger.get_notes_for_contact(
                 contact_id=contact_id,

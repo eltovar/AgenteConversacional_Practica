@@ -1057,11 +1057,26 @@ async def send_message(
             canal_final
         )
 
-        # Mover contacto al top de la lista (actualizar score ZSET)
+        # Mover contacto al top de la lista (actualizar score ZSET + last_activity en meta)
         _rc = None  # P1-B fix: inicializar antes del try para evitar UnboundLocalError si Redis cae
         try:
             _rc = await _get_redis_client()
             _now_ts = datetime.now(timezone.utc).timestamp()
+            _now_iso = get_bogota_now().isoformat()
+
+            # FIX: Actualizar last_activity síncronamente ANTES del WS para que loadContacts()
+            # reciba el contacto en la posición correcta. El sort de GET /contacts usa last_activity
+            # del meta; sin esto, el reorder en memoria del frontend se pierde al llamar loadContacts().
+            _meta_key_la = f"conv_meta:{phone_normalized}:{canal_final}"
+            _meta_raw_la = await _rc.get(_meta_key_la)
+            if _meta_raw_la:
+                _meta_obj_la = json.loads(_meta_raw_la)
+                _meta_obj_la["last_activity"] = _now_iso
+                _meta_ttl_la = await _rc.ttl(_meta_key_la)
+                _ex_la = _meta_ttl_la if _meta_ttl_la and _meta_ttl_la > 0 else 7 * 86400
+                await _rc.set(_meta_key_la, json.dumps(_meta_obj_la), ex=_ex_la)
+                logger.debug(f"[Panel] last_activity actualizado síncronamente para {phone_normalized}:{canal_final}")
+
             await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
             logger.info(f"[Panel] ZSET actualizado para {phone_normalized}:{canal_final}")
         except Exception as _ze:
@@ -1263,11 +1278,26 @@ async def send_message_json(
                 mongo_message_id
             )
 
-        # Mover contacto al top de la lista (actualizar score ZSET)
+        # Mover contacto al top de la lista (actualizar score ZSET + last_activity en meta)
         _rc = None  # P1-B fix: inicializar antes del try para evitar UnboundLocalError si Redis cae
         try:
             _rc = await _get_redis_client()
             _now_ts = datetime.now(timezone.utc).timestamp()
+            _now_iso = get_bogota_now().isoformat()
+
+            # FIX: Actualizar last_activity síncronamente ANTES del WS para que loadContacts()
+            # reciba el contacto en la posición correcta. El sort de GET /contacts usa last_activity
+            # del meta; sin esto, el reorder en memoria del frontend se pierde al llamar loadContacts().
+            _meta_key_la = f"conv_meta:{phone_normalized}:{canal_final}"
+            _meta_raw_la = await _rc.get(_meta_key_la)
+            if _meta_raw_la:
+                _meta_obj_la = json.loads(_meta_raw_la)
+                _meta_obj_la["last_activity"] = _now_iso
+                _meta_ttl_la = await _rc.ttl(_meta_key_la)
+                _ex_la = _meta_ttl_la if _meta_ttl_la and _meta_ttl_la > 0 else 7 * 86400
+                await _rc.set(_meta_key_la, json.dumps(_meta_obj_la), ex=_ex_la)
+                logger.debug(f"[Panel-JSON] last_activity actualizado síncronamente para {phone_normalized}:{canal_final}")
+
             await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
             logger.info(f"[Panel-JSON] ZSET actualizado para {phone_normalized}:{canal_final}")
         except Exception as _ze:

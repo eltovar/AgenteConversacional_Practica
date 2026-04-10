@@ -4242,7 +4242,12 @@ function handleWebSocketMessage(data) {
                     allContacts.unshift(_nmContact);
                     _contactFingerprints.delete(_scrollPhone); // forzar reconstrucción del elemento
                     _applyFiltersAndRender();
+                } else if (_nmIdx === -1) {
+                    // Contacto no está en allContacts aún (ej: recién creado o fuera del filtro de fechas).
+                    // scheduleContactsRefresh() lo traerá en la posición correcta cuando loadContacts() complete.
+                    console.log('[Panel][Reorder] Contacto no encontrado en lista local:', _scrollPhone, '— loadContacts() lo agregará');
                 }
+                // _nmIdx === 0: contacto ya está en el tope, no necesita reordenarse
                 scheduleContactsRefresh();
                 setTimeout(() => {
                     ensureContactVisible(_scrollPhone);

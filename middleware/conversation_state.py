@@ -1085,13 +1085,15 @@ class ConversationStateManager:
             data = await self.redis.get(meta_key)
             if data:
                 meta = json.loads(data)
-                meta["last_advisor_message"] = get_bogota_now_iso()
+                _now_iso = get_bogota_now_iso()
+                meta["last_advisor_message"] = _now_iso
+                meta["last_activity"] = _now_iso      # FIX: actualizar last_activity para sort correcto en GET /contacts
                 # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
                 ttl = await self.redis.ttl(meta_key)
                 if not ttl or ttl <= 0:
                     ttl = self._calculate_dynamic_ttl()
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
-                
+
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()

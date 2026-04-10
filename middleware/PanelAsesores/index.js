@@ -2064,6 +2064,18 @@ function renderChatBubbles(messages) {
                 }
             }
 
+            // Detectar audio guardado como texto plano: "🎵 Audio: https://..."
+            // Ocurre cuando MongoDB guarda el audio en msg.message en vez de msg.media
+            let _displayMsg = msg.message || '';
+            if (!mediaUrl && _displayMsg) {
+                const _atm = _displayMsg.match(/^🎵\s*Audio:\s*(https?:\/\/\S+)([\s\S]*)?$/i);
+                if (_atm) {
+                    const _pid3 = `ap-txt-${String(msg.id || Date.now()).replace(/\W/g,'')}-${Math.random().toString(36).slice(2,6)}`;
+                    mediaHtml = buildAudioPlayerHtml(_atm[1], _detectAudioType(_atm[1]), _pid3);
+                    _displayMsg = (_atm[2] || '').trim(); // preservar texto adicional (ej: [Fuente: ...])
+                }
+            }
+
             // --- QUOTE HTML (si este mensaje es respuesta a otro) ---
             let quoteHtml = '';
             if (msg.reply_to_id && msg.reply_to_preview) {
@@ -2105,7 +2117,7 @@ function renderChatBubbles(messages) {
                         <p class="text-xs font-semibold text-gray-600 mb-1">${msg.sender_name || msg.sender}</p>
                         ${quoteHtml}
                         ${mediaHtml}
-                        ${msg.message ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(msg.message)}</p>` : ''}
+                        ${_displayMsg ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(_displayMsg)}</p>` : ''}
                         <p class="text-xs text-gray-500 text-right mt-1">${timestamp}</p>
                     </div>
                 </div>

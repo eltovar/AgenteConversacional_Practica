@@ -350,3 +350,110 @@
 .reply-quote:hover {
     background-color: rgba(0,0,0,0.07) !important;
 }
+
+/* ===== Custom Audio Player (WhatsApp-style) ===== */
+.audio-player {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 190px;
+    max-width: 260px;
+    padding: 2px 0;
+    margin-bottom: 6px;
+}
+
+.audio-play-btn {
+    flex-shrink: 0;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #2563EB;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border: none;
+    transition: background 0.15s, transform 0.1s;
+    outline: none;
+    padding: 0;
+}
+.audio-play-btn:hover  { background: #1D4ED8; transform: scale(1.06); }
+.audio-play-btn:active { transform: scale(0.94); }
+
+/* Client bubble — gris */
+.bubble-client .audio-play-btn       { background: #6B7280; }
+.bubble-client .audio-play-btn:hover { background: #4B5563; }
+
+.audio-waveform-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.audio-bars {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 20px;
+}
+
+.audio-bar {
+    flex: 1;
+    border-radius: 2px;
+    background: #93C5FD;
+    transition: background 0.2s;
+    min-width: 2px;
+    transform-origin: center;
+}
+
+/* Playing state — barras animadas */
+.audio-player.is-playing .audio-bar {
+    background: #2563EB;
+    animation: audioWavePulse 1.2s ease-in-out infinite;
+}
+.audio-player.is-playing .audio-bar:nth-child(2n) { animation-delay: 0.15s; }
+.audio-player.is-playing .audio-bar:nth-child(3n) { animation-delay: 0.30s; }
+.audio-player.is-playing .audio-bar:nth-child(5n) { animation-delay: 0.45s; }
+.audio-player.is-playing .audio-bar:nth-child(7n) { animation-delay: 0.60s; }
+
+@keyframes audioWavePulse {
+    0%, 100% { transform: scaleY(1);   opacity: 1;    }
+    50%       { transform: scaleY(1.5); opacity: 0.8;  }
+}
+
+/* Client bubble — barras */
+.bubble-client .audio-bar                            { background: #D1D5DB; }
+.bubble-client .audio-player.is-playing .audio-bar  { background: #6B7280; }
+
+/* Progress track */
+.audio-progress-track {
+    height: 2px;
+    background: #BFDBFE;
+    border-radius: 2px;
+    overflow: hidden;
+}
+.audio-progress-fill {
+    height: 100%;
+    background: #2563EB;
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.25s linear;
+}
+.bubble-client .audio-progress-track { background: #E5E7EB; }
+.bubble-client .audio-progress-fill  { background: #6B7280; }
+
+/* Duration label */
+.audio-duration {
+    font-size: 0.68rem;
+    color: #6B7280;
+    min-width: 30px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    flex-shrink: 0;
+}

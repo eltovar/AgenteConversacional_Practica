@@ -2012,19 +2012,8 @@ function renderChatBubbles(messages) {
                             </div>`;
                     }
                 } else if (mediaType === 'audio') {
-                    // Detectar tipo de audio por extension para mejor compatibilidad
-                    let audioType = 'audio/mpeg';
-                    if (mediaUrl.includes('.webm')) audioType = 'audio/webm';
-                    else if (mediaUrl.includes('.ogg')) audioType = 'audio/ogg';
-                    else if (mediaUrl.includes('.mp4') || mediaUrl.includes('.m4a')) audioType = 'audio/mp4';
-
-                    mediaHtml = `
-                        <div class="mb-2">
-                            <audio controls class="w-full" style="max-width: 280px;">
-                                <source src="${mediaUrl}" type="${audioType}">
-                                Tu navegador no soporta audio.
-                            </audio>
-                        </div>`;
+                    const _pid = `ap-${String(msg.id || Date.now()).replace(/\W/g,'')}-${Math.random().toString(36).slice(2,6)}`;
+                    mediaHtml = buildAudioPlayerHtml(mediaUrl, _detectAudioType(mediaUrl), _pid);
                     // Mostrar transcripcion de audio si existe
                     if (transcription) {
                         mediaHtml += `
@@ -2464,6 +2453,138 @@ function scrollToMessage(msgId) {
     el.style.transition = 'background-color 0.3s';
     el.style.backgroundColor = 'rgba(245, 196, 0, 0.15)';
     setTimeout(() => { el.style.backgroundColor = ''; }, 1500);
+}
+
+// =========================================================================
+// REPRODUCTOR DE AUDIO PERSONALIZADO
+// =========================================================================
+
+/** Instancias Audio activas. { playerId: { audio: Audio, playing: bool } } */
+const _audioPlayers = {};
+
+/** Detecta MIME type del audio por extensión de URL. */
+function _detectAudioType(url) {
+    if (!url) return 'audio/mpeg';
+    if (url.includes('.webm')) return 'audio/webm';
+    if (url.includes('.ogg'))  return 'audio/ogg';
+    if (url.includes('.mp4') || url.includes('.m4a')) return 'audio/mp4';
+    return 'audio/mpeg';
+}
+
+/** Alturas en px de las 19 barras del waveform (máx 18px en contenedor 20px). */
+const _WAVE_HEIGHTS = [4, 8, 14, 10, 18, 12, 16, 6, 18, 12, 8, 15, 5, 14, 10, 18, 12, 8, 4];
+
+const _PLAY_SVG  = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M8 5v14l11-7z"/></svg>`;
+const _PAUSE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
+
+/**
+ * Genera el HTML del reproductor de audio personalizado (WhatsApp-style).
+ * @param {string} src       - URL del archivo de audio
+ * @param {string} audioType - MIME type ('audio/ogg', 'audio/mpeg', etc.)
+ * @param {string} playerId  - ID único para este reproductor
+ */
+function buildAudioPlayerHtml(src, audioType, playerId) {
+    const bars = _WAVE_HEIGHTS
+        .map(h => `<span class="audio-bar" style="height:${h}px"></span>`)
+        .join('');
+
+    return `<div class="audio-player"
+             data-player-id="${playerId}"
+             data-src="${src}"
+             data-type="${audioType}">
+            <button class="audio-play-btn"
+                    onclick="toggleAudioPlayer('${playerId}')"
+                    title="Reproducir audio"
+                    aria-label="Reproducir / Pausar">
+                ${_PLAY_SVG}
+            </button>
+            <div class="audio-waveform-wrap">
+                <div class="audio-bars">${bars}</div>
+                <div class="audio-progress-track">
+                    <div class="audio-progress-fill" id="apf-${playerId}"></div>
+                </div>
+            </div>
+            <span class="audio-duration" id="apd-${playerId}">0:00</span>
+        </div>`;
+}
+
+/**
+ * Alterna reproducción / pausa del reproductor de audio.
+ * Pausa automáticamente cualquier otro reproductor activo.
+ * @param {string} id - ID del reproductor
+ */
+function toggleAudioPlayer(id) {
+    const el = document.querySelector(`[data-player-id="${id}"]`);
+    if (!el) return;
+
+    if (!_audioPlayers[id]) {
+        const audio    = new Audio(el.dataset.src);
+        const durEl    = document.getElementById(`apd-${id}`);
+        const fillEl   = document.getElementById(`apf-${id}`);
+
+        const _fmt = (secs) => {
+            const m = Math.floor(secs / 60);
+            const s = Math.floor(secs % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        };
+
+        audio.addEventListener('loadedmetadata', () => {
+            if (durEl && isFinite(audio.duration)) durEl.textContent = _fmt(audio.duration);
+        });
+
+        audio.addEventListener('timeupdate', () => {
+            if (!audio.duration) return;
+            if (fillEl) fillEl.style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+            if (durEl && isFinite(audio.duration))
+                durEl.textContent = _fmt(audio.duration - audio.currentTime);
+        });
+
+        audio.addEventListener('ended', () => {
+            const p = _audioPlayers[id];
+            if (p) p.playing = false;
+            el.classList.remove('is-playing');
+            const btn = el.querySelector('.audio-play-btn');
+            if (btn) btn.innerHTML = _PLAY_SVG;
+            if (fillEl) fillEl.style.width = '0%';
+            if (durEl && isFinite(audio.duration)) durEl.textContent = _fmt(audio.duration);
+            audio.currentTime = 0;
+        });
+
+        audio.addEventListener('error', () => {
+            console.warn('[AudioPlayer] Error cargando:', el.dataset.src);
+        });
+
+        _audioPlayers[id] = { audio, playing: false };
+    }
+
+    const player = _audioPlayers[id];
+    const btn    = el.querySelector('.audio-play-btn');
+
+    if (player.playing) {
+        player.audio.pause();
+        player.playing = false;
+        el.classList.remove('is-playing');
+        if (btn) btn.innerHTML = _PLAY_SVG;
+    } else {
+        // Pausar todos los demás reproductores activos
+        Object.entries(_audioPlayers).forEach(([pid, p]) => {
+            if (pid !== id && p.playing) {
+                p.audio.pause();
+                p.playing = false;
+                const other = document.querySelector(`[data-player-id="${pid}"]`);
+                if (other) {
+                    other.classList.remove('is-playing');
+                    const ob = other.querySelector('.audio-play-btn');
+                    if (ob) ob.innerHTML = _PLAY_SVG;
+                }
+            }
+        });
+
+        player.audio.play().catch(e => console.warn('[AudioPlayer] Error reproduciendo:', e));
+        player.playing = true;
+        el.classList.add('is-playing');
+        if (btn) btn.innerHTML = _PAUSE_SVG;
+    }
 }
 
 // =========================================================================
@@ -3586,7 +3707,8 @@ async function sendMessage(e) {
                 if (data.media_type === 'image' && data.media_url) {
                     _mediaHtml = `<div class="mb-2"><img src="${data.media_url}" alt="Imagen" class="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity" style="max-height:300px;object-fit:contain;" onclick="window.open('${data.media_url}','_blank')"></div>`;
                 } else if (data.media_type === 'audio' && data.media_url) {
-                    _mediaHtml = `<div class="mb-2"><audio controls class="w-full" style="max-width:280px;"><source src="${data.media_url}">Tu navegador no soporta audio.</audio></div>`;
+                    const _optPid = `ap-opt-${Date.now()}`;
+                    _mediaHtml = buildAudioPlayerHtml(data.media_url, _detectAudioType(data.media_url), _optPid);
                 } else if (data.media_url) {
                     _mediaHtml = `<div class="mb-2"><a href="${data.media_url}" target="_blank" class="text-blue-600 underline text-sm">Ver archivo</a></div>`;
                 }

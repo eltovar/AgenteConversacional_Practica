@@ -725,6 +725,91 @@ class ConversationStateManager:
                         f"[ConversationState][P3-D] Canal merge {phone}: zrem {stale_members}"
                     )
 
+                    # ── P3-D v2: Migrar datos, status, markers e inbox de canales stale ──
+                    wa_meta_key = f"{self.META_PREFIX}{phone}:whatsapp"
+                    wa_state_key = f"{self.STATE_PREFIX}{phone}:whatsapp"
+                    wa_marker_key = f"conv_was_panel:{phone}:whatsapp"
+
+                    # Leer meta whatsapp actual para merge
+                    wa_meta_raw = await self.redis.get(wa_meta_key)
+                    wa_meta = json.loads(wa_meta_raw) if wa_meta_raw else {}
+                    wa_status_raw = await self.redis.get(wa_state_key)
+                    wa_status = wa_status_raw if isinstance(wa_status_raw, str) else (
+                        wa_status_raw.decode() if wa_status_raw else None
+                    )
+
+                    _STATUS_PRIO = {"IN_CONVERSATION": 4, "HUMAN_ACTIVE": 3, "PENDING_HANDOFF": 2, "BOT_ACTIVE": 1}
+                    best_status = wa_status
+                    best_prio = _STATUS_PRIO.get(wa_status, 0)
+                    stale_advisor_id = None
+
+                    for stale_m in stale_members:
+                        stale_canal = stale_m.split(":", 1)[1] if ":" in stale_m else stale_m
+                        s_meta_key = f"{self.META_PREFIX}{phone}:{stale_canal}"
+                        s_state_key = f"{self.STATE_PREFIX}{phone}:{stale_canal}"
+                        s_marker_key = f"conv_was_panel:{phone}:{stale_canal}"
+
+                        # 1) Meta merge: copiar campos faltantes del stale al whatsapp
+                        s_meta_raw = await self.redis.get(s_meta_key)
+                        if s_meta_raw:
+                            s_meta = json.loads(s_meta_raw)
+                            for fld in ("contact_id", "display_name", "assigned_owner_id",
+                                        "assigned_owner_ids", "primary_owner_id", "handoff_reason",
+                                        "deal_id", "deal_stage", "transfer_history", "canal_origen"):
+                                if s_meta.get(fld) and not wa_meta.get(fld):
+                                    wa_meta[fld] = s_meta[fld]
+                            # Preservar created_at más antiguo
+                            s_created = s_meta.get("created_at", "")
+                            if s_created and (not wa_meta.get("created_at") or s_created < wa_meta["created_at"]):
+                                wa_meta["created_at"] = s_created
+                            if s_meta.get("assigned_owner_id"):
+                                stale_advisor_id = s_meta["assigned_owner_id"]
+
+                        # 2) Status promote: si stale tiene mayor prioridad
+                        s_status_raw = await self.redis.get(s_state_key)
+                        s_status = s_status_raw if isinstance(s_status_raw, str) else (
+                            s_status_raw.decode() if s_status_raw else None
+                        )
+                        s_prio = _STATUS_PRIO.get(s_status, 0)
+                        if s_prio > best_prio:
+                            best_status = s_status
+                            best_prio = s_prio
+
+                        # 3) Marker: copiar marcador de re-entrada al panel
+                        if await self.redis.exists(s_marker_key):
+                            await self.redis.set(wa_marker_key, "1", ex=self.PANEL_TTL_SECONDS)
+
+                        # 4) Cleanup: eliminar keys stale
+                        await self.redis.delete(s_meta_key, s_state_key, s_marker_key)
+
+                    # Guardar meta mergeado en whatsapp
+                    wa_meta.pop("_temp_meta", None)
+                    wa_meta["in_panel"] = True
+                    wa_ttl = await self.redis.ttl(wa_meta_key)
+                    if not wa_ttl or wa_ttl <= 0:
+                        wa_ttl = self.PANEL_TTL_SECONDS if best_prio >= 2 else self._calculate_dynamic_ttl()
+                    await self.redis.set(wa_meta_key, json.dumps(wa_meta), ex=wa_ttl)
+
+                    # Promover status si el stale tenía prioridad mayor
+                    if best_status and best_status != wa_status:
+                        await self.redis.set(wa_state_key, best_status, ex=self.HUMAN_PANEL_STATE_TTL)
+                        logger.info(f"[P3-D v2] Status promovido {phone}: {wa_status} → {best_status}")
+
+                    # 5) Inbox migration: mover entry stale al canal whatsapp
+                    if stale_advisor_id:
+                        inbox_key = f"advisor_inbox:{stale_advisor_id}"
+                        for stale_m in stale_members:
+                            score = await self.redis.zscore(inbox_key, stale_m)
+                            if score is not None:
+                                await self.redis.zadd(inbox_key, {whatsapp_member: score})
+                                await self.redis.zrem(inbox_key, stale_m)
+
+                    logger.info(
+                        f"[P3-D v2] Canal merge completo {phone}: "
+                        f"meta={'merged' if wa_meta_raw else 'created'}, "
+                        f"status={best_status}, stale_cleaned={len(stale_members)}"
+                    )
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_activity: {e}")

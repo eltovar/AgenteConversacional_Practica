@@ -4759,7 +4759,7 @@ function checkPendingResponseAlerts() {
         const contact = allContacts.find(c => c.phone === cardPhone);
         if (!contact) { card.remove(); continue; }
         const st = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE', 'IN_CONVERSATION'].includes(st)) { card.remove(); continue; }
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(st)) { card.remove(); continue; }
         if (cardPhone === currentPhone) { card.remove(); continue; }
         const lastClientTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
         const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
@@ -4775,7 +4775,7 @@ function checkPendingResponseAlerts() {
     for (const contact of allContacts) {
         const phone = contact.phone;
         const status = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE', 'IN_CONVERSATION'].includes(status)) continue;
+        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(status)) continue;
         if (phone === currentPhone) continue;
 
         const lastTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;

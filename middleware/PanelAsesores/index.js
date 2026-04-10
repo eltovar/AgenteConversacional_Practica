@@ -1212,6 +1212,19 @@ async function loadContacts() {
             }
         }
 
+        // Reconciliación: si servidor dice has_unread=false pero tenemos badge local → limpiar.
+        // El servidor es fuente de verdad para LIMPIAR (advisor marcó como leído en otra tab/sesión).
+        // Solo aplica si el contacto no está abierto actualmente ni fue cerrado recientemente.
+        for (const contact of newContacts) {
+            const _rp = contact.phone || '';
+            if (!contact.has_unread && _rp && _rp !== currentPhone &&
+                unreadCounts[_rp] > 0 && !recentlyClosedPhones.has(_rp)) {
+                console.log('[Panel][Inbox] Servidor limpia badge para', _rp, '(has_unread=false)');
+                unreadCounts[_rp] = 0;
+                updateUnreadBadge(_rp, 0);
+            }
+        }
+
         // Detección de mensajes nuevos por polling.
         // Solo actualiza el timestamp si es mayor (upgrade-only, nunca downgrade).
         // Esto evita falsos positivos cuando el backend devuelve el mismo contacto
@@ -2293,7 +2306,14 @@ async function closeConversation() {
             // próximo render (polling o WS) no lo vuelva a mostrar.
             // Guard de 15s contra respuestas de polling en vuelo que lleguen tarde.
             recentlyClosedPhones.add(closedPhone);
-            setTimeout(() => recentlyClosedPhones.delete(closedPhone), 15000);
+            // TTL extendido a 90s: cubre HubSpot 429 retry (12s) + múltiples ciclos de polling (10s c/u)
+            setTimeout(() => recentlyClosedPhones.delete(closedPhone), 90000);
+            // Persistir en sessionStorage para sobrevivir F5
+            try {
+                const _cp = JSON.parse(sessionStorage.getItem('_rcpPhones') || '[]');
+                _cp.push({ phone: closedPhone, ts: Date.now() });
+                sessionStorage.setItem('_rcpPhones', JSON.stringify(_cp));
+            } catch(_e) {}
             allContacts = allContacts.filter(c => c.phone !== closedPhone);
             _contactFingerprints.delete(closedPhone);
             _applyFiltersAndRender();
@@ -4177,6 +4197,18 @@ let wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
  * Usa el ADVISOR_ID de la URL si esta disponible.
  */
 function connectWebSocket() {
+    // Guard: abortar si ya hay WS activo o conectando — previene conexiones duplicadas
+    // (servidor mostraba Total: 1→2→3 en cada F5, causando múltiples loadContacts() y 429s)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        console.log('[Panel] WS ya activo (readyState:', ws.readyState, ') — reconexión ignorada');
+        return;
+    }
+    // Si está cerrando: limpiar handlers para evitar bucle recursivo de reconexión
+    if (ws && ws.readyState === WebSocket.CLOSING) {
+        ws.onclose = null;
+        ws = null;
+    }
+
     // Si no hay ADVISOR_ID, conectar con "all" para recibir broadcasts
     const advisorId = ADVISOR_ID || 'all';
 
@@ -4329,6 +4361,12 @@ function handleWebSocketMessage(data) {
 
             // Si action es 'new_message', actualizar badge directamente sin re-render
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
+                // Guard: ignorar badge si el contacto fue cerrado recientemente
+                if (recentlyClosedPhones.has(data.phone)) {
+                    console.log('[Panel][Badge] Ignorando new_message WS para contacto cerrado:', data.phone);
+                    scheduleContactsRefresh();
+                    break;
+                }
                 // Fix dedup-WS: el backend puede disparar 2 notificaciones por el mismo mensaje
                 // (p.ej. bot silenciado + notificación temprana). Si el mismo phone ya incrementó
                 // badge por WS en los últimos 2s, solo actualizar el DOM sin volver a contar.
@@ -4463,6 +4501,12 @@ function handleNewMessageNotification(data) {
 
     // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
     if (data.phone && data.phone !== currentPhone) {
+        // Guard: ignorar badge si el contacto fue cerrado recientemente
+        if (recentlyClosedPhones.has(data.phone)) {
+            console.log('[Panel][Badge] Ignorando new_message handler para contacto cerrado:', data.phone);
+            scheduleContactsRefresh();
+            return;
+        }
         const _now2 = Date.now();
         const _alreadyCounted2 = (_lastWsNotifiedTimestamps[data.phone] || 0) > _now2 - 2000;
         _lastWsNotifiedTimestamps[data.phone] = _now2;  // Fix CR-4: marcar evento WS
@@ -4828,6 +4872,22 @@ function sendWebSocketPing() {
 
 // Iniciar WebSocket cuando el DOM este listo
 document.addEventListener('DOMContentLoaded', () => {
+    // Restaurar recentlyClosedPhones desde sessionStorage (sobrevive F5)
+    // Evita que contactos cerrados recientemente reaparezcan con badge al recargar
+    try {
+        const _stored = JSON.parse(sessionStorage.getItem('_rcpPhones') || '[]');
+        const _now0 = Date.now();
+        const _valid = _stored.filter(e => _now0 - e.ts < 90000);
+        _valid.forEach(e => {
+            recentlyClosedPhones.add(e.phone);
+            const remaining = 90000 - (_now0 - e.ts);
+            setTimeout(() => recentlyClosedPhones.delete(e.phone), remaining);
+        });
+        // Limpiar entradas expiradas del storage
+        sessionStorage.setItem('_rcpPhones', JSON.stringify(_valid));
+        if (_valid.length > 0) console.log('[Panel] Restaurados', _valid.length, 'contactos cerrados desde sessionStorage');
+    } catch(_e) {}
+
     // Conectar WebSocket (con delay para dar tiempo a que el servidor este listo)
     setTimeout(connectWebSocket, 1000);
 

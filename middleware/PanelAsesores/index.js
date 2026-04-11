@@ -342,47 +342,51 @@ async function filterContacts(searchTerm) {
         }
 
         // ── Rama B: Búsqueda en historial de mensajes (fulltext) ──
-        // Se ejecuta SIEMPRE: el usuario puede estar buscando por nombre o contenido
-        // aunque el término parezca un número (ej. el número puede estar mencionado en un mensaje).
-        try {
-            const response = await fetch(
-                `${BASE_URL}/contacts/search?q=${encodeURIComponent(term)}&limit=20`,
-                { headers: { 'X-API-Key': API_KEY } }
-            );
-            if (response.ok) {
-                const data = await response.json();
-                const serverPhones = data.phones || [];
-
-                // Phones de allContacts no incluidos en localFiltered
-                const moreFromLocal = allContacts.filter(contact =>
-                    serverPhones.includes(contact.phone) &&
-                    !localPhones.has(contact.phone) &&
-                    !additionalFromLocal.some(c => c.phone === contact.phone)
+        // CRÍTICO: SOLO ejecutar si NO es un teléfono. El fulltext de MongoDB
+        // tokeniza por separadores y, al buscar un número, matchea tokens comunes
+        // (57, 313, 840, ...) en CUALQUIER mensaje → 12+ falsos positivos.
+        // Para búsqueda por teléfono, la rama A (/hydrate) ya dio la respuesta correcta.
+        if (!phoneE164) {
+            try {
+                const response = await fetch(
+                    `${BASE_URL}/contacts/search?q=${encodeURIComponent(term)}&limit=20`,
+                    { headers: { 'X-API-Key': API_KEY } }
                 );
-                additionalFromLocal = [...additionalFromLocal, ...moreFromLocal];
+                if (response.ok) {
+                    const data = await response.json();
+                    const serverPhones = data.phones || [];
 
-                const alreadyAddedPhones = new Set([
-                    ...additionalFromServer.map(c => c.phone),
-                    ...additionalFromLocal.map(c => c.phone),
-                ]);
-                const serverContacts = data.contacts || [];
-                const moreFromServer = serverContacts
-                    .filter(c =>
-                        !allContactPhones.has(c.phone) &&
-                        !localPhones.has(c.phone) &&
-                        !alreadyAddedPhones.has(c.phone)
-                    )
-                    .map(c => ({
-                        ...c,
-                        _from_search: true,
-                        cross_advisor: !!(
-                            ADVISOR_ID && c.owner_id && String(c.owner_id) !== String(ADVISOR_ID)
-                        ),
-                    }));
-                additionalFromServer = [...additionalFromServer, ...moreFromServer];
+                    // Phones de allContacts no incluidos en localFiltered
+                    const moreFromLocal = allContacts.filter(contact =>
+                        serverPhones.includes(contact.phone) &&
+                        !localPhones.has(contact.phone) &&
+                        !additionalFromLocal.some(c => c.phone === contact.phone)
+                    );
+                    additionalFromLocal = [...additionalFromLocal, ...moreFromLocal];
+
+                    const alreadyAddedPhones = new Set([
+                        ...additionalFromServer.map(c => c.phone),
+                        ...additionalFromLocal.map(c => c.phone),
+                    ]);
+                    const serverContacts = data.contacts || [];
+                    const moreFromServer = serverContacts
+                        .filter(c =>
+                            !allContactPhones.has(c.phone) &&
+                            !localPhones.has(c.phone) &&
+                            !alreadyAddedPhones.has(c.phone)
+                        )
+                        .map(c => ({
+                            ...c,
+                            _from_search: true,
+                            cross_advisor: !!(
+                                ADVISOR_ID && c.owner_id && String(c.owner_id) !== String(ADVISOR_ID)
+                            ),
+                        }));
+                    additionalFromServer = [...additionalFromServer, ...moreFromServer];
+                }
+            } catch (error) {
+                console.warn('[Panel] Error en búsqueda de historial:', error);
             }
-        } catch (error) {
-            console.warn('[Panel] Error en búsqueda de historial:', error);
         }
 
         // Si el término cambió mientras esperábamos, abortar el render
@@ -1100,6 +1104,14 @@ const CANAL_LABELS = {
  * Llamado desde loadContacts(), filterByPortal(), onStageFilterChange().
  */
 function _applyFiltersAndRender() {
+    // CRÍTICO: si hay búsqueda activa, delegar a filterContacts para no clobberear
+    // los resultados de búsqueda con el polling periódico.
+    const _activeTerm = (window._currentSearchTerm || '').trim();
+    if (_activeTerm) {
+        // Re-ejecuta filterContacts que hará render local + eventualmente /hydrate
+        filterContacts(_activeTerm);
+        return;
+    }
     let filtered = allContacts;
     if (activePortalFilter) filtered = filtered.filter(c => c.canal_origen === activePortalFilter);
     if (activeStageFilter)  filtered = filtered.filter(c => c.current_stage === activeStageFilter);
@@ -1926,6 +1938,7 @@ function _buildContactHTML(contact) {
                         <div class="min-w-0 overflow-hidden">${stageRow}</div>
                     </div>
                     ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate mt-0.5">${contact.handoff_reason}</p>` : ''}
+                    ${contact.cross_advisor && contact.owner_name ? `<p class="text-xs text-sky-600 truncate mt-0.5 font-medium" title="Asesora asignada">👤 ${contact.owner_name}</p>` : ''}
                 </div>
             </div>
         </div>
@@ -1992,12 +2005,20 @@ function _renderContactsListInner(contacts) {
             _emptyMsg = 'No hay contactos esperando atención.';
         }
         container.innerHTML = `
-            <div class="p-4 text-center text-gray-400">
+            <div class="p-4 text-center text-gray-400 empty-state-msg">
                 <p>${_emptyMsg}</p>
             </div>
         `;
         _contactFingerprints.clear();
         return;
+    }
+
+    // FIX-G: limpiar cualquier empty-state residual de renders previos que no
+    // fueron reemplazados (por ej. cuando transicionamos de 0 resultados a N).
+    // El diff-renderer sólo gestiona nodos con [data-phone], así que un div de
+    // empty-state queda flotando como "item fantasma" entre contactos.
+    for (const el of container.querySelectorAll('.empty-state-msg')) {
+        el.remove();
     }
 
     const savedScrollTop = container.scrollTop;

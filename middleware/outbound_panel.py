@@ -103,7 +103,7 @@ _httpx_client: Optional[httpx.AsyncClient] = None
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
 # ============================================================================
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
-CONTACT_NAME_CACHE_TTL = 120     # 2 minutos (era 14400=4h — reducido para sync nombres HubSpot)
+CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — invalidación explícita al editar nombre (ver PATCH /contacts/{id})
 CONTACT_NAME_CACHE_PREFIX = "contact_name:"
 
 def get_httpx_client() -> httpx.AsyncClient:
@@ -410,7 +410,7 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
 # BATCH REQUESTS - Optimización para reducir llamadas a HubSpot (429 fix)
 # ============================================================================
 
-HUBSPOT_BATCH_CACHE_TTL = 120  # 2 minutos (era 300=5min — reducido para sync reasignaciones de advisor)
+HUBSPOT_BATCH_CACHE_TTL = 600  # 10 minutos — batch key incluye md5 de IDs, reutilizable entre workers
 
 
 async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
@@ -489,6 +489,330 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 
 # Caché temporal para datos de contactos (se llena con batch, se consume en enriquecimiento)
 _batch_contact_cache: Dict[str, Dict[str, Any]] = {}
+
+
+# ============================================================================
+# Contact Hydration Service — pipeline unificada Redis → HubSpot → Mongo
+# ============================================================================
+
+async def _hydrate_contact(
+    phone: str,
+    canal_hint: Optional[str] = None,
+    add_to_zset: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    Materializa un contacto completo desde Redis + HubSpot + MongoDB.
+
+    Pipeline de resolución (best-effort, cada paso aislado en try/except):
+      A. Normalizar phone
+      B. ZSCAN ZSET por phone:* + pipeline lectura state/meta/marker de cada canal
+      C. Resolver contact_id (meta OR ContactManager._search_contact)
+      D. Enriquecer con HubSpot (cache → batch → search_by_phone)
+      E. lifecyclestage
+      F. owner_id / owner_name
+      G. has_appointment
+      H. conversation_status
+      I. canal / canal_origen
+      J. Persistencia opcional (ensure_meta_with_channel + update_activity)
+
+    Retorna un dict COMPLETO (con fallback phone como display_name — nunca None)
+    o None SOLO si no hay rastro del contacto en ninguna fuente Y el phone es inválido.
+    """
+    # ── Paso A: Normalizar phone ────────────────────────────────────────────
+    try:
+        validation = PhoneNormalizer().normalize(phone)
+    except Exception as e:
+        logger.warning(f"[Hydrate] Error normalizando phone '{phone}': {e}")
+        return None
+    if not validation.is_valid:
+        logger.debug(f"[Hydrate] Phone inválido '{phone}': {validation.error_message}")
+        return None
+    phone_norm = validation.normalized
+
+    redis_client = await _get_redis_client()
+
+    STATUS_PRIORITY = {
+        ConversationStatus.IN_CONVERSATION.value: 4,
+        ConversationStatus.HUMAN_ACTIVE.value: 3,
+        ConversationStatus.PENDING_HANDOFF.value: 2,
+        ConversationStatus.BOT_ACTIVE.value: 1,
+    }
+
+    # ── Paso B: ZSCAN para detectar canales en el panel ─────────────────────
+    score_by_canal: Dict[str, float] = {}
+    try:
+        cursor = 0
+        while True:
+            cursor, results = await redis_client.zscan(
+                ConversationStateManager.ACTIVE_CONTACTS_ZSET,
+                cursor,
+                match=f"{phone_norm}:*",
+                count=20,
+            )
+            for raw_member, score in results:
+                m = raw_member if isinstance(raw_member, str) else raw_member.decode()
+                if ":" not in m:
+                    continue
+                _p, canal_part = m.split(":", 1)
+                if _p != phone_norm:
+                    continue  # defensive: zscan match debería filtrar, pero por si acaso
+                score_by_canal[canal_part.lower()] = float(score) if score is not None else 0.0
+            if cursor == 0:
+                break
+    except Exception as e:
+        logger.warning(f"[Hydrate] Error zscan ZSET para {phone_norm}: {e}")
+
+    # Canales candidatos: los del ZSET + canal_hint + whatsapp (siempre probamos)
+    probe_canals: list = []
+    if canal_hint:
+        ch = canal_hint.lower()
+        if ch not in probe_canals:
+            probe_canals.append(ch)
+    for c in score_by_canal.keys():
+        if c not in probe_canals:
+            probe_canals.append(c)
+    if "whatsapp" not in probe_canals:
+        probe_canals.append("whatsapp")
+
+    state_raws: Dict[str, Optional[str]] = {}
+    meta_raws: Dict[str, Optional[str]] = {}
+    markers: Dict[str, bool] = {}
+    try:
+        pipe = redis_client.pipeline(transaction=False)
+        for c in probe_canals:
+            pipe.get(f"{ConversationStateManager.STATE_PREFIX}{phone_norm}:{c}")
+            pipe.get(f"{ConversationStateManager.META_PREFIX}{phone_norm}:{c}")
+            pipe.exists(f"conv_was_panel:{phone_norm}:{c}")
+        _results = await pipe.execute()
+        for i, c in enumerate(probe_canals):
+            state_raws[c] = _results[i * 3]
+            meta_raws[c] = _results[i * 3 + 1]
+            markers[c] = bool(_results[i * 3 + 2])
+    except Exception as e:
+        logger.warning(f"[Hydrate] Error pipeline lectura state/meta para {phone_norm}: {e}")
+
+    # Seleccionar el mejor canal: prioridad de status > score > bonus canal_hint
+    best_canal: Optional[str] = None
+    best_prio = -1
+    best_score_eff: float = -1.0
+    best_meta_dict: dict = {}
+    best_status: Optional[str] = None
+
+    for c in probe_canals:
+        state_raw = state_raws.get(c)
+        meta_raw = meta_raws.get(c)
+        has_marker = markers.get(c, False)
+        if not (state_raw or meta_raw or has_marker or c in score_by_canal):
+            continue
+        m_dict: dict = {}
+        if meta_raw:
+            try:
+                m_dict = json.loads(meta_raw)
+                if 'advisor' in m_dict and not m_dict.get('assigned_owner_id'):
+                    m_dict['assigned_owner_id'] = m_dict['advisor']
+                if 'owner_id' in m_dict and not m_dict.get('assigned_owner_id'):
+                    m_dict['assigned_owner_id'] = m_dict['owner_id']
+                if 'name' in m_dict and not m_dict.get('display_name'):
+                    m_dict['display_name'] = m_dict['name']
+            except Exception:
+                m_dict = {}
+        effective_status = state_raw or m_dict.get("status") or ConversationStatus.BOT_ACTIVE.value
+        prio = STATUS_PRIORITY.get(effective_status, 0)
+        score_here = score_by_canal.get(c, 0.0)
+        bonus = 0.5 if (canal_hint and c == canal_hint.lower()) else 0.0
+        score_eff = score_here + bonus
+        if (prio > best_prio) or (prio == best_prio and score_eff > best_score_eff):
+            best_canal = c
+            best_prio = prio
+            best_score_eff = score_eff
+            best_meta_dict = m_dict
+            best_status = effective_status
+
+    if best_canal is None:
+        # Sin traza en Redis. Seguiremos intentando HubSpot antes de retornar.
+        best_canal = (canal_hint.lower() if canal_hint else "whatsapp")
+        best_status = ConversationStatus.BOT_ACTIVE.value
+        best_meta_dict = {}
+
+    # ── Paso C: Resolver contact_id ─────────────────────────────────────────
+    contact_id = best_meta_dict.get("contact_id")
+    if not contact_id:
+        try:
+            cm = ContactManager()
+            contact_id = await cm._search_contact(phone_norm)
+        except Exception as e:
+            logger.debug(f"[Hydrate] _search_contact falló para {phone_norm}: {e}")
+
+    # ── Paso D: Enriquecer con HubSpot ──────────────────────────────────────
+    display_name = (best_meta_dict.get("display_name") or "").strip()
+    hs_owner_id: Optional[str] = None
+    lifecyclestage_cached: Optional[str] = None
+
+    if contact_id:
+        try:
+            cached = await _get_cached_contact_name(contact_id)
+            if cached:
+                fn = (cached.get("firstname") or "").strip()
+                ln = (cached.get("lastname") or "").strip()
+                full = (fn + " " + ln).strip()
+                if full and not display_name:
+                    display_name = full
+        except Exception:
+            pass
+
+        try:
+            batch = await _hubspot_batch_get_contacts([contact_id])
+            b = batch.get(contact_id) or {}
+            fn = (b.get("firstname") or "").strip()
+            ln = (b.get("lastname") or "").strip()
+            full = (fn + " " + ln).strip()
+            if full:
+                display_name = full  # HubSpot es la autoridad del nombre
+                try:
+                    await _cache_contact_name(contact_id, fn, ln)
+                except Exception:
+                    pass
+            if b.get("hubspot_owner_id"):
+                hs_owner_id = str(b.get("hubspot_owner_id"))
+            if b.get("lifecyclestage"):
+                lifecyclestage_cached = b.get("lifecyclestage")
+        except Exception as e:
+            logger.debug(f"[Hydrate] batch HubSpot falló para {contact_id}: {e}")
+
+    # Último recurso: si aún no hay nombre, intentar search_contact_by_phone_with_properties
+    if not display_name and HUBSPOT_API_KEY:
+        try:
+            from integrations.hubspot.hubspot_client import HubSpotClient
+            _hc = HubSpotClient()
+            hs = await _hc.search_contact_by_phone_with_properties(phone_norm)
+            if hs:
+                props = hs.get("properties") or {}
+                fn = (props.get("firstname") or "").strip()
+                ln = (props.get("lastname") or "").strip()
+                full = (fn + " " + ln).strip()
+                if full:
+                    display_name = full
+                if not contact_id and hs.get("id"):
+                    contact_id = hs.get("id")
+                if not hs_owner_id and props.get("hubspot_owner_id"):
+                    hs_owner_id = str(props.get("hubspot_owner_id"))
+        except Exception as e:
+            logger.debug(f"[Hydrate] search_contact_by_phone_with_properties falló: {e}")
+
+    # Fallback final: phone como display (NUNCA None ni vacío)
+    if not display_name:
+        display_name = phone_norm
+
+    # ── Paso E: current_stage ───────────────────────────────────────────────
+    current_stage = lifecyclestage_cached
+    if contact_id and not current_stage:
+        try:
+            current_stage = await _get_contact_lifecyclestage(contact_id)
+        except Exception:
+            current_stage = None
+
+    # ── Paso F: owner_id / owner_name ───────────────────────────────────────
+    owner_id = best_meta_dict.get("assigned_owner_id") or hs_owner_id
+    assigned_owner_ids = best_meta_dict.get("assigned_owner_ids") or []
+    owner_name: Optional[str] = None
+    if owner_id:
+        try:
+            owner_name = _get_advisor_name(str(owner_id))
+        except Exception:
+            owner_name = None
+
+    # ── Paso G: has_appointment ─────────────────────────────────────────────
+    has_appointment = False
+    if contact_id:
+        try:
+            mongo_mgr = get_mongo_manager()
+            appt_set = await mongo_mgr.get_contacts_with_appointments([contact_id])
+            has_appointment = contact_id in appt_set
+        except Exception:
+            pass
+
+    # ── Paso H: conversation_status ─────────────────────────────────────────
+    conversation_status = best_status or ConversationStatus.BOT_ACTIVE.value
+
+    # ── Paso I: canal / canal_origen ────────────────────────────────────────
+    canal_final = best_canal or (canal_hint.lower() if canal_hint else "whatsapp")
+    canal_origen = best_meta_dict.get("canal_origen") or canal_final
+
+    last_activity = best_meta_dict.get("last_activity") or get_bogota_now_iso()
+    created_at = best_meta_dict.get("created_at") or last_activity
+
+    # Fuente efectiva del dato
+    if best_meta_dict:
+        source = "redis"
+    elif contact_id:
+        source = "hubspot"
+    else:
+        source = "phone"
+
+    # Si no hay NINGUNA señal (sin meta en Redis, sin contact_id, sin display real)
+    # aun así retornamos el contacto con fallback phone — el caller decide qué hacer.
+    result: Dict[str, Any] = {
+        "phone": phone_norm,
+        "contact_id": contact_id,
+        "display_name": display_name,
+        "canal": canal_final,
+        "canal_origen": canal_origen,
+        "owner_id": owner_id,
+        "owner_name": owner_name,
+        "assigned_owner_ids": assigned_owner_ids,
+        "conversation_status": conversation_status,
+        "status": conversation_status,
+        "last_activity": last_activity,
+        "activated_at": created_at,
+        "current_stage": current_stage,
+        "has_appointment": has_appointment,
+        "is_active": True,
+        "handoff_reason": best_meta_dict.get("handoff_reason"),
+        "deal_id": best_meta_dict.get("deal_id"),
+        "deal_stage": best_meta_dict.get("deal_stage"),
+        "last_advisor_message": best_meta_dict.get("last_advisor_message"),
+        "source": source,
+    }
+
+    # Si no hay rastro alguno (ni Redis ni HubSpot), retornar None — contacto inexistente
+    if source == "phone" and not best_meta_dict:
+        logger.info(f"[Hydrate] {phone_norm} sin rastro en Redis/HubSpot → None")
+        return None
+
+    # ── Paso J: Persistencia opcional ───────────────────────────────────────
+    if add_to_zset:
+        try:
+            _sm = ConversationStateManager(_get_redis_url_str())
+            await _sm.ensure_meta_with_channel(
+                phone=phone_norm,
+                canal=canal_final,
+                canal_origen=canal_origen,
+                contact_id=contact_id,
+                display_name=display_name,
+                owner_id=owner_id,
+                add_to_zset=True,
+            )
+            await _sm.update_activity(phone_norm, canal=canal_final)
+            logger.info(
+                f"[Hydrate] {phone_norm}:{canal_final} re-inyectado al panel "
+                f"(owner={owner_id}, name='{display_name}')"
+            )
+        except Exception as e:
+            logger.warning(f"[Hydrate] Error persistiendo {phone_norm} al panel: {e}")
+
+    logger.debug(
+        f"[Hydrate] {phone_norm} → canal={canal_final}, status={conversation_status}, "
+        f"contact_id={contact_id}, owner={owner_id}, source={source}"
+    )
+    return result
+
+
+async def _hydrate_contact_and_ensure_panel(
+    phone: str,
+    canal_hint: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Thin wrapper: hidrata el contacto y lo persiste al panel (add_to_zset=True)."""
+    return await _hydrate_contact(phone, canal_hint=canal_hint, add_to_zset=True)
 
 
 async def _update_contact_to_en_conversacion(contact_id: str) -> None:
@@ -2970,6 +3294,35 @@ async def get_contact_detail(
     }
 
 
+@router.get("/contacts/{phone}/hydrate")
+async def hydrate_contact_endpoint(
+    phone: str,
+    canal: Optional[str] = Query(None, description="Canal preferido (hint) si se conoce"),
+    ensure_panel: bool = Query(False, description="Si True, re-inyecta el contacto al panel (ZSET)"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Retorna un contacto completamente hidratado desde Redis + HubSpot + MongoDB.
+
+    Complementa /contacts/{phone}/detail (historial + ventana 24h) — este endpoint
+    retorna SOLO metadatos completos del contacto (nombre, owner, stage, canal, etc.)
+    y NO filtra por advisor (flujo cross-advisor correcto).
+
+    Usado por el frontend en deep links de HubSpot y recuperación de estado ghost.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    hydrated = await _hydrate_contact(
+        phone=phone,
+        canal_hint=canal,
+        add_to_zset=bool(ensure_panel),
+    )
+    if hydrated is None:
+        raise HTTPException(status_code=404, detail="contacto no encontrado")
+    return hydrated
+
+
 @router.get("/conversations/{phone}")
 async def get_conversation_history(
     phone: str,
@@ -3405,39 +3758,26 @@ async def search_contacts_by_keyword(
 
         logger.info(f"[Panel] Búsqueda '{q}': {len(matching_phones)} contactos encontrados")
 
-        # Enriquecer con datos de Redis (nombre, status) para phones que el frontend no tenga
+        # Enriquecimiento UNIFICADO via _hydrate_contact — garantiza que cada contacto
+        # venga con owner_id, owner_name, canal, current_stage, etc. (mismos campos que
+        # GET /contacts). Rate-limit con Semaphore(3) para no saturar HubSpot.
         enriched_contacts = []
         if matching_phones:
-            state_manager = ConversationStateManager(
-                os.getenv("REDIS_URL") if os.getenv("RAILWAY_ENVIRONMENT")
-                else (os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379"))
+            _sem = asyncio.Semaphore(3)
+
+            async def _h(_p: str):
+                async with _sem:
+                    try:
+                        return await _hydrate_contact(_p, canal_hint=None, add_to_zset=False)
+                    except Exception as _he:
+                        logger.debug(f"[Panel][Search] Hydrate {_p} falló: {_he}")
+                        return None
+
+            hydrated_list = await asyncio.gather(
+                *[_h(p) for p in matching_phones[:limit]],
+                return_exceptions=False,
             )
-            for phone in matching_phones:
-                meta = await state_manager.get_meta(phone)
-                display_name = phone
-                contact_id = None
-                conversation_status = "historical"
-                last_activity = None
-                if meta:
-                    display_name = meta.display_name or phone
-                    contact_id = meta.contact_id
-                    conversation_status = meta.status or "historical"
-                    last_activity = meta.last_activity if meta.last_activity else None
-                # Intentar nombre desde cache HubSpot si Redis no tiene nombre útil
-                if contact_id and (display_name == phone or display_name in ("Sin nombre", "Cliente Nuevo")):
-                    cached_name = await _get_cached_contact_name(contact_id)
-                    if cached_name:
-                        hs_name = f"{cached_name.get('firstname', '')} {cached_name.get('lastname', '')}".strip()
-                        if hs_name:
-                            display_name = hs_name
-                enriched_contacts.append({
-                    "phone": phone,
-                    "display_name": display_name,
-                    "contact_id": contact_id,
-                    "conversation_status": conversation_status,
-                    "last_activity": last_activity,
-                    "is_active": conversation_status in ("HUMAN_ACTIVE", "IN_CONVERSATION", "BOT_ACTIVE"),
-                })
+            enriched_contacts = [c for c in hydrated_list if c]
 
         return {
             "query": q,
@@ -4208,18 +4548,36 @@ async def get_active_contacts(
                 )
 
         # === [Sync] Deep link cross-advisor: incluir contacto aunque no pertenezca al advisor ===
+        # Hidratación completa via _hydrate_contact — garantiza que el frontend reciba
+        # display_name, contact_id, canal, owner, stage reales (NO skeleton parcial).
         if include_phone:
             _ip_norm = include_phone.strip()
             if not any(c.get("phone") == _ip_norm for c in active_contacts):
-                logger.info(
-                    f"[Sync] include_phone={_ip_norm} no está en filtro advisor "
-                    f"— inyectando skeleton cross_advisor"
-                )
-                active_contacts.insert(0, {
-                    "phone": _ip_norm,
-                    "cross_advisor": True,
-                    "status": "HUMAN_ACTIVE",
-                })
+                try:
+                    hydrated = await _hydrate_contact(
+                        _ip_norm, canal_hint=None, add_to_zset=False
+                    )
+                    if hydrated:
+                        # Marcar como cross_advisor si el owner real no coincide con el advisor actual
+                        hydrated["cross_advisor"] = bool(
+                            advisor
+                            and hydrated.get("owner_id")
+                            and str(hydrated.get("owner_id")) != str(advisor)
+                        )
+                        active_contacts.insert(0, hydrated)
+                        logger.info(
+                            f"[Sync] include_phone={_ip_norm} hidratado "
+                            f"(owner={hydrated.get('owner_id')}, "
+                            f"name='{hydrated.get('display_name')}', "
+                            f"cross_advisor={hydrated.get('cross_advisor')})"
+                        )
+                    else:
+                        logger.warning(
+                            f"[Sync] _hydrate_contact({_ip_norm}) retornó None "
+                            f"— contacto no existe en Redis/HubSpot"
+                        )
+                except Exception as _he:
+                    logger.warning(f"[Sync] Error hidratando include_phone={_ip_norm}: {_he}")
 
         # === PASO 7: El orden ya viene correcto del ZSET (por last_activity descendente) ===
         # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"

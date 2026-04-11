@@ -284,17 +284,19 @@ async function filterContacts(searchTerm) {
                 serverPhones.includes(contact.phone) && !localPhones.has(contact.phone)
             );
 
-            // Contactos que NO están en allContacts — usar datos enriquecidos del servidor
+            // Contactos que NO están en allContacts — vienen ya hidratados via
+            // _hydrate_contact en el backend (display_name real, owner, canal, stage,
+            // has_appointment, etc.). No sobreescribir esos campos con defaults vacíos.
             const serverContacts = data.contacts || [];
             const additionalFromServer = serverContacts
                 .filter(c => !allContactPhones.has(c.phone) && !localPhones.has(c.phone))
                 .map(c => ({
                     ...c,
-                    time_ago: '',
-                    has_appointment: false,
-                    handoff_reason: '',
-                    canal_origen: '',
                     _from_search: true,
+                    // cross_advisor flag para que el render muestre el badge correcto
+                    cross_advisor: !!(
+                        ADVISOR_ID && c.owner_id && String(c.owner_id) !== String(ADVISOR_ID)
+                    ),
                 }));
 
             const allAdditional = [...additionalFromLocal, ...additionalFromServer];
@@ -1141,8 +1143,10 @@ async function loadContacts() {
         const _dlPhone = urlParams.get('phone');
         if (_dlPhone) {
             let _dlNorm = _dlPhone.replace(/\s+/g, '').trim();
-            if (!_dlNorm.startsWith('+')) _dlNorm = '+' + _dlNorm;
-            url += `&include_phone=${encodeURIComponent(_dlNorm)}`;
+            if (_dlNorm && !_dlNorm.startsWith('+') && /^\d/.test(_dlNorm)) {
+                _dlNorm = '+' + _dlNorm;
+            }
+            if (_dlNorm) url += `&include_phone=${encodeURIComponent(_dlNorm)}`;
         }
     }
 
@@ -1271,15 +1275,20 @@ async function loadContacts() {
                 // Normalizar: quitar espacios y agregar + si no lo tiene
                 // (URLs convierten + en espacio, así que "+" llega como " ")
                 deepLinkPhone = deepLinkPhone.replace(/\s+/g, '').trim();
-                if (!deepLinkPhone.startsWith('+')) {
+                if (deepLinkPhone && !deepLinkPhone.startsWith('+') && /^\d/.test(deepLinkPhone)) {
                     deepLinkPhone = '+' + deepLinkPhone;
                 }
                 const target = allContacts.find(c => c.phone === deepLinkPhone);
                 if (target) {
                     console.log('[Panel] Deep link: auto-seleccionando', deepLinkPhone);
-                    selectContact(target.contact_id || '', target.phone, target.display_name || target.phone, target.canal_origen || 'whatsapp');
+                    selectContact(
+                        target.contact_id || '',
+                        target.phone,
+                        target.display_name || target.phone,
+                        target.canal || target.canal_origen || 'whatsapp'
+                    );
                 } else {
-                    // Contacto inactivo o sin sesión Redis: reactivar automáticamente
+                    // Contacto no está en la lista tras include_phone → hidratar vía /hydrate
                     _handleDeepLinkMiss(deepLinkPhone);
                 }
             }
@@ -1298,57 +1307,90 @@ async function loadContacts() {
 }
 
 /**
- * Fallback del deep link: el contacto no está en allContacts (inactivo en Redis).
- * Llama take-control para reactivarlo, refresca la lista y auto-selecciona.
+ * Fallback del deep link: el contacto no está en allContacts tras la carga inicial.
+ *
+ * Llama GET /contacts/{phone}/hydrate?ensure_panel=true para obtener todos los
+ * metadatos REALES del contacto (contact_id, display_name, owner, canal, stage)
+ * en UN solo round-trip. El endpoint además re-inyecta el contacto al panel vía
+ * _hydrate_contact_and_ensure_panel() — siguiente poll ya lo verá.
+ *
+ * Reemplaza el viejo flujo take-control + reload + fallback selectContact('',...)
+ * que producía estado "ghost" cuando el contacto no se materializaba.
+ *
  * @param {string} phone - Teléfono normalizado (con +)
  */
 async function _handleDeepLinkMiss(phone) {
-    console.log('[Panel] Deep link: contacto inactivo, intentando reactivar:', phone);
+    // Normalización defensiva: asegurar formato +E164
+    let phoneNorm = (phone || '').replace(/\s+/g, '').trim();
+    if (phoneNorm && !phoneNorm.startsWith('+') && /^\d/.test(phoneNorm)) {
+        phoneNorm = '+' + phoneNorm;
+    }
+    if (!phoneNorm) {
+        console.error('[Panel] Deep link: phone vacío, abortando');
+        return;
+    }
+
+    console.log('[Panel] Deep link: hidratando contacto cross-advisor:', phoneNorm);
     showToast('Cargando conversación...', 'info');
 
     try {
-        // 1. Reactivar en Redis vía take-control
-        const takeControlUrl =
-            `${BASE_URL}/contacts/${encodeURIComponent(phone)}/take-control?` +
-            `canal=whatsapp` +
-            (ADVISOR_ID ? `&advisor_id=${encodeURIComponent(ADVISOR_ID)}` : '');
+        const hydrateUrl =
+            `${BASE_URL}/contacts/${encodeURIComponent(phoneNorm)}/hydrate` +
+            `?ensure_panel=true`;
 
-        const tcResp = await fetch(takeControlUrl, {
-            method: 'POST',
+        const resp = await fetch(hydrateUrl, {
             headers: { 'X-API-Key': API_KEY }
         });
 
-        if (!tcResp.ok) {
-            const err = await tcResp.json().catch(() => ({}));
-            throw new Error(err.detail || `take-control HTTP ${tcResp.status}`);
+        if (resp.status === 404) {
+            console.warn('[Panel] Deep link: contacto no existe en Redis/HubSpot:', phoneNorm);
+            showToast('Este número no tiene historial en el sistema', 'error');
+            return;
         }
 
-        const tcData = await tcResp.json();
-        console.log('[Panel] Deep link reactivación:', tcData.action, phone);
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `hydrate HTTP ${resp.status}`);
+        }
 
-        // 2. Refrescar lista (Redis ya tiene el contacto activo)
-        await loadContacts();
+        const contact = await resp.json();
+        console.log('[Panel] Deep link hidratado:', {
+            phone: contact.phone,
+            name: contact.display_name,
+            owner: contact.owner_id,
+            canal: contact.canal,
+            source: contact.source
+        });
 
-        // 3a. Caso normal: contacto aparece en allContacts tras el refresh
-        const target = allContacts.find(c => c.phone === phone);
-        if (target) {
-            console.log('[Panel] Deep link: contacto reactivado, seleccionando');
-            selectContact(
-                target.contact_id || '',
-                target.phone,
-                target.display_name || target.phone,
-                target.canal_origen || 'whatsapp'
+        // Inyectar en allContacts si aún no está (el próximo poll lo traerá, pero
+        // el usuario no debe esperar al poll)
+        if (!allContacts.some(c => c.phone === contact.phone)) {
+            // Marcar cross_advisor si el owner real no es la asesora actual
+            contact.cross_advisor = !!(
+                ADVISOR_ID && contact.owner_id && String(contact.owner_id) !== String(ADVISOR_ID)
             );
-        } else {
-            // 3b. Fallback: take-control exitoso pero contacto aún no en lista
-            // (posible lag Redis o filtro advisor no coincide).
-            // selectContact con phone solo: loadContactDetail carga historial desde MongoDB.
-            console.warn('[Panel] Deep link fallback: abriendo chat directo por phone');
-            selectContact('', phone, phone, 'whatsapp');
+            allContacts.unshift(contact);
+            try { _applyFiltersAndRender(); } catch (_e) {}
         }
+
+        // Mensaje informativo si el contacto es de otra asesora (cross-advisor)
+        if (contact.owner_name &&
+            ADVISOR_ID &&
+            contact.owner_id &&
+            String(contact.owner_id) !== String(ADVISOR_ID)) {
+            showToast(`Contacto de: ${contact.owner_name}`, 'info');
+        }
+
+        // Seleccionar con TODOS los campos reales — nunca más phone como fallback de nombre
+        selectContact(
+            contact.contact_id || '',
+            contact.phone,
+            contact.display_name || contact.phone,
+            contact.canal || contact.canal_origen || 'whatsapp'
+        );
 
     } catch (err) {
-        console.error('[Panel] Deep link: error en reactivación:', err);
+        console.error('[Panel] Deep link: error hidratando:', err);
         showToast(`No se pudo cargar la conversación: ${err.message}`, 'error');
     }
 }
@@ -3024,6 +3066,15 @@ function cancelRecording() {
 // =========================================================================
 
 async function selectContact(contactId, phone, displayName, canal = null) {
+    // Guard: phone es requerido — selectContact sin phone crea estado "ghost"
+    // (header visible pero handlers de editar/cerrar/plantilla fallan con
+    // "debes seleccionar un contacto primero"). Abortamos explícitamente.
+    if (!phone) {
+        console.error('[Panel] selectContact llamado sin phone — abortando para evitar ghost state', { contactId, displayName, canal });
+        try { showToast && showToast('No se pudo abrir el contacto (datos incompletos)', 'error'); } catch (_e) {}
+        return;
+    }
+
     // Si es el mismo contacto, no hacer nada (evita recargas innecesarias)
     if (currentContactId === contactId && currentPhone === phone) {
         console.log('[Panel] Mismo contacto seleccionado, ignorando');
@@ -3137,10 +3188,14 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     clearMediaSelection();
 
     // Actualizar visualmente la seleccion en la lista (inmediatamente)
+    // Usamos data-phone (atributo ya presente en el DOM) en lugar de parsear el string
+    // del onclick — evita fallas cuando contact_id está vacío o contiene caracteres raros.
     document.querySelectorAll('.contact-item').forEach(el => {
         el.classList.remove('active');
     });
-    const selectedItem = document.querySelector(`.contact-item[onclick*="'${contactId}'"]`);
+    const selectedItem = phone
+        ? document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"]`)
+        : null;
     if (selectedItem) {
         selectedItem.classList.add('active');
     }

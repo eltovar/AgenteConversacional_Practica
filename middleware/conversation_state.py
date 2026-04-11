@@ -111,6 +111,7 @@ class ConversationStateManager:
     INACTIVITY_THRESHOLD = 172800  # 48h — umbral para mover BOT_ACTIVE del ZSET a BOT_CONTROLLED_SET
     PANEL_TTL_SECONDS = 365 * 86400  # 1 año — meta_key de contactos que tuvieron handoff no expira en la práctica
     HUMAN_PANEL_STATE_TTL = 7 * 86400  # 7 días — state_key de HUMAN_ACTIVE/IN_CONVERSATION sobrevive el fin de semana
+    STATE_REFRESH_THRESHOLD = 2 * 86400  # 2 días — umbral para refresh-on-read de state_key en get_active_contacts
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -260,6 +261,14 @@ class ConversationStateManager:
             now_ts = get_bogota_now().timestamp()
             ghosts_to_remove = []
             to_move_to_bot_set = []
+            state_keys_to_refresh = []  # Refresh-on-read: state_keys cerca de expirar
+
+            # Estados del panel que justifican refresh-on-read (no BOT_ACTIVE)
+            _PANEL_ACTIVE_STATUSES = {
+                ConversationStatus.HUMAN_ACTIVE.value,
+                ConversationStatus.IN_CONVERSATION.value,
+                ConversationStatus.PENDING_HANDOFF.value,
+            }
 
             if valid_members:
                 pipe = self.redis.pipeline(transaction=False)
@@ -274,6 +283,7 @@ class ConversationStateManager:
 
                 for i, member in enumerate(valid_members):
                     phone, canal = member.split(":", 1)
+                    c = canal.lower()
                     base = i * 4
                     status_raw = results[base]
                     meta_raw   = results[base + 1]
@@ -291,6 +301,17 @@ class ConversationStateManager:
                             f"[ConversationState] TTL expirado para {phone}:{canal} — "
                             f"mostrando como BOT_ACTIVE en el panel"
                         )
+
+                    # Refresh-on-read: si el contacto está activo en panel y su state_key
+                    # está a punto de expirar, re-extender TTL para evitar que "baje"
+                    # visualmente a BOT_ACTIVE tras inactividad natural del cliente.
+                    if (
+                        status_raw in _PANEL_ACTIVE_STATUSES
+                        and meta is not None
+                        and isinstance(ttl, int)
+                        and 0 < ttl < self.STATE_REFRESH_THRESHOLD
+                    ):
+                        state_keys_to_refresh.append(f"{self.STATE_PREFIX}{phone}:{c}")
 
                     in_priority_zset = True
                     if status_raw == ConversationStatus.BOT_ACTIVE.value:
@@ -324,14 +345,23 @@ class ConversationStateManager:
                     })
 
             # ── Paso 3: Escrituras pendientes en un solo pipeline ─────────────────────
-            if ghosts_to_remove or to_move_to_bot_set:
+            if ghosts_to_remove or to_move_to_bot_set or state_keys_to_refresh:
                 write_pipe = self.redis.pipeline(transaction=False)
                 for member in ghosts_to_remove:
                     write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
                 for member in to_move_to_bot_set:
                     write_pipe.sadd(self.BOT_CONTROLLED_SET, member)
                     write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
+                # Refresh-on-read: re-extender TTL del state_key al máximo (7 días).
+                # expire() es no-op si la key no existe → safe.
+                for state_key in state_keys_to_refresh:
+                    write_pipe.expire(state_key, self.HUMAN_PANEL_STATE_TTL)
                 await write_pipe.execute()
+                if state_keys_to_refresh:
+                    logger.debug(
+                        f"[ConversationState] Refresh-on-read: {len(state_keys_to_refresh)} "
+                        f"state_keys re-extendidos a {self.HUMAN_PANEL_STATE_TTL}s"
+                    )
 
             # ── Paso 4: BOT_CONTROLLED_SET — pipeline separado (1 round-trip) ─────────
             # Contactos BOT_ACTIVE >48h: visibles pero sin notificaciones
@@ -684,14 +714,19 @@ class ConversationStateManager:
             else:
                 # Contacto nuevo sin meta: crear entrada mínima temporal para que GET /contacts
                 # lo retorne inmediatamente cuando el panel llama tras recibir el WS.
-                # ensure_meta_with_channel() sobreescribirá con datos completos (~30s después).
+                # _hydrate_contact_and_ensure_panel() (dispara async abajo) sobreescribirá con
+                # datos completos desde HubSpot (~1-2s después).
+                #
+                # CRÍTICO: display_name = phone (NUNCA None) para que el panel nunca muestre
+                # "Cliente Nuevo" o vacío mientras llega la hidratación async.
                 minimal_meta = {
                     "phone_normalized": phone,
                     "canal_origen": canal_safe,
                     "last_activity": get_bogota_now_iso(),
                     "in_panel": True,
-                    "display_name": None,
+                    "display_name": phone,  # Fallback presentable — jamás None
                     "_temp_meta": True,
+                    "_needs_hydration": True,
                 }
                 await self.redis.set(meta_key, json.dumps(minimal_meta), ex=self._calculate_dynamic_ttl())
                 index_member = f"{phone}:{canal_safe}"
@@ -701,6 +736,34 @@ class ConversationStateManager:
                 logger.debug(
                     f"[ConversationState] Meta temporal creado para contacto nuevo {phone}:{canal_safe}"
                 )
+
+                # Disparar hidratación async (fire-and-forget) para enriquecer con nombre de
+                # HubSpot, owner, current_stage. Lazy import para evitar ciclo con outbound_panel.
+                # Si existe marker conv_was_panel, es un contacto que ya tuvo handoff — prioritario.
+                try:
+                    marker_key = f"conv_was_panel:{phone}:{canal_safe}"
+                    had_panel_before = await self.redis.exists(marker_key)
+                    if had_panel_before:
+                        logger.info(
+                            f"[ConversationState] Marker conv_was_panel presente para {phone} "
+                            f"— disparando _hydrate_contact_and_ensure_panel async"
+                        )
+
+                    async def _hydrate_async():
+                        try:
+                            from .outbound_panel import _hydrate_contact_and_ensure_panel
+                            await _hydrate_contact_and_ensure_panel(phone, canal_hint=canal_safe)
+                        except Exception as _he:
+                            logger.warning(
+                                f"[ConversationState] Hydrate async falló para {phone}: {_he}"
+                            )
+
+                    import asyncio as _asyncio
+                    _asyncio.create_task(_hydrate_async())
+                except Exception as _e:
+                    logger.debug(
+                        f"[ConversationState] No se pudo disparar hydrate async para {phone}: {_e}"
+                    )
 
             # P3-D: Fusionar identidad de canal — cuando llega mensaje WhatsApp, eliminar
             # entradas ZSET de otros canales (ej. phone:instagram) para el mismo teléfono.

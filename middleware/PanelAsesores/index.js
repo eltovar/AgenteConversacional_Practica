@@ -230,8 +230,36 @@ function hideLoader() {
 // Debounce para búsqueda en servidor (evitar spam de requests)
 let searchDebounceTimeout = null;
 
+// Estado global: término actual de búsqueda (para empty-state contextual)
+window._currentSearchTerm = '';
+
+/**
+ * Detecta si el término ingresado parece un teléfono y lo normaliza a E.164.
+ * Retorna null si no parece teléfono.
+ * Acepta: "3138405930", "+573138405930", "57 313 840 5930", "313-840-5930"
+ */
+function _detectPhoneTerm(term) {
+    if (!term) return null;
+    // Extraer solo dígitos y el + inicial si existe
+    const hasPlus = term.trim().startsWith('+');
+    const digits = term.replace(/[^\d]/g, '');
+    if (!digits) return null;
+    // Un teléfono válido tiene entre 10 y 15 dígitos
+    if (digits.length < 10 || digits.length > 15) return null;
+    // Si tiene + explícito o 11+ dígitos → asumir ya tiene código de país
+    if (hasPlus || digits.length >= 11) {
+        return '+' + digits;
+    }
+    // 10 dígitos → asumir Colombia (+57)
+    if (digits.length === 10) {
+        return '+57' + digits;
+    }
+    return null;
+}
+
 async function filterContacts(searchTerm) {
     const term = searchTerm.toLowerCase().trim();
+    window._currentSearchTerm = term;
 
     if (!term) {
         _applyFiltersAndRender();
@@ -260,53 +288,118 @@ async function filterContacts(searchTerm) {
         return;
     }
 
-    // Búsqueda en servidor (historial de mensajes) con debounce de 500ms
+    // ── Detección de teléfono: si es un número, llamar /hydrate directo ──
+    // /contacts/search usa fulltext de MongoDB sobre el body de los mensajes,
+    // NO sobre el campo phone. Para búsqueda por número necesitamos el endpoint
+    // /hydrate que consulta Redis + HubSpot directamente.
+    const phoneE164 = _detectPhoneTerm(term);
+
+    // Debounce 500ms para no spamear requests mientras el usuario escribe
     clearTimeout(searchDebounceTimeout);
     searchDebounceTimeout = setTimeout(async () => {
+        // Evitar carrera: si el término cambió durante el debounce, abortar
+        if (window._currentSearchTerm !== term) return;
+
+        const localPhones = new Set(localFiltered.map(c => c.phone));
+        const allContactPhones = new Set(allContacts.map(c => c.phone));
+        let additionalFromServer = [];
+        let additionalFromLocal = [];
+
+        // ── Rama A: Búsqueda por teléfono vía /hydrate ──
+        if (phoneE164) {
+            try {
+                const hydrateUrl = `${BASE_URL}/contacts/${encodeURIComponent(phoneE164)}/hydrate`;
+                const hResp = await fetch(hydrateUrl, {
+                    headers: { 'X-API-Key': API_KEY }
+                });
+                if (hResp.ok) {
+                    const hydrated = await hResp.json();
+                    if (hydrated && hydrated.phone) {
+                        // Si ya existe en allContacts, solo traerlo a primera plana
+                        if (allContactPhones.has(hydrated.phone)) {
+                            const existing = allContacts.find(c => c.phone === hydrated.phone);
+                            if (existing && !localPhones.has(existing.phone)) {
+                                additionalFromLocal.push(existing);
+                            }
+                        } else {
+                            additionalFromServer.push({
+                                ...hydrated,
+                                _from_search: true,
+                                cross_advisor: !!(
+                                    ADVISOR_ID && hydrated.owner_id &&
+                                    String(hydrated.owner_id) !== String(ADVISOR_ID)
+                                ),
+                            });
+                        }
+                    }
+                } else if (hResp.status === 404) {
+                    console.log(`[Panel] /hydrate 404 para ${phoneE164}`);
+                    // No encontrado — dejar que renderContactsList muestre empty state
+                }
+            } catch (e) {
+                console.warn('[Panel] Error consultando /hydrate:', e);
+            }
+        }
+
+        // ── Rama B: Búsqueda en historial de mensajes (fulltext) ──
+        // Se ejecuta SIEMPRE: el usuario puede estar buscando por nombre o contenido
+        // aunque el término parezca un número (ej. el número puede estar mencionado en un mensaje).
         try {
-            const response = await fetch(`${BASE_URL}/contacts/search?q=${encodeURIComponent(term)}&limit=20`, {
-                headers: { 'X-API-Key': API_KEY }
-            });
-
-            if (!response.ok) return;
-
-            const data = await response.json();
-            const serverPhones = data.phones || [];
-
-            if (serverPhones.length === 0) return;
-
-            // Combinar resultados: agregar contactos del servidor que no estén en local
-            const localPhones = new Set(localFiltered.map(c => c.phone));
-            const allContactPhones = new Set(allContacts.map(c => c.phone));
-
-            // Contactos que están en allContacts pero no en localFiltered
-            const additionalFromLocal = allContacts.filter(contact =>
-                serverPhones.includes(contact.phone) && !localPhones.has(contact.phone)
+            const response = await fetch(
+                `${BASE_URL}/contacts/search?q=${encodeURIComponent(term)}&limit=20`,
+                { headers: { 'X-API-Key': API_KEY } }
             );
+            if (response.ok) {
+                const data = await response.json();
+                const serverPhones = data.phones || [];
 
-            // Contactos que NO están en allContacts — vienen ya hidratados via
-            // _hydrate_contact en el backend (display_name real, owner, canal, stage,
-            // has_appointment, etc.). No sobreescribir esos campos con defaults vacíos.
-            const serverContacts = data.contacts || [];
-            const additionalFromServer = serverContacts
-                .filter(c => !allContactPhones.has(c.phone) && !localPhones.has(c.phone))
-                .map(c => ({
-                    ...c,
-                    _from_search: true,
-                    // cross_advisor flag para que el render muestre el badge correcto
-                    cross_advisor: !!(
-                        ADVISOR_ID && c.owner_id && String(c.owner_id) !== String(ADVISOR_ID)
-                    ),
-                }));
+                // Phones de allContacts no incluidos en localFiltered
+                const moreFromLocal = allContacts.filter(contact =>
+                    serverPhones.includes(contact.phone) &&
+                    !localPhones.has(contact.phone) &&
+                    !additionalFromLocal.some(c => c.phone === contact.phone)
+                );
+                additionalFromLocal = [...additionalFromLocal, ...moreFromLocal];
 
-            const allAdditional = [...additionalFromLocal, ...additionalFromServer];
-            if (allAdditional.length > 0) {
-                console.log(`[Panel] Búsqueda en historial: +${additionalFromLocal.length} local, +${additionalFromServer.length} servidor`);
-                renderContactsList([...localFiltered, ...allAdditional]);
+                const alreadyAddedPhones = new Set([
+                    ...additionalFromServer.map(c => c.phone),
+                    ...additionalFromLocal.map(c => c.phone),
+                ]);
+                const serverContacts = data.contacts || [];
+                const moreFromServer = serverContacts
+                    .filter(c =>
+                        !allContactPhones.has(c.phone) &&
+                        !localPhones.has(c.phone) &&
+                        !alreadyAddedPhones.has(c.phone)
+                    )
+                    .map(c => ({
+                        ...c,
+                        _from_search: true,
+                        cross_advisor: !!(
+                            ADVISOR_ID && c.owner_id && String(c.owner_id) !== String(ADVISOR_ID)
+                        ),
+                    }));
+                additionalFromServer = [...additionalFromServer, ...moreFromServer];
             }
         } catch (error) {
             console.warn('[Panel] Error en búsqueda de historial:', error);
-            // La búsqueda local ya se mostró, no hacer nada
+        }
+
+        // Si el término cambió mientras esperábamos, abortar el render
+        if (window._currentSearchTerm !== term) return;
+
+        const allAdditional = [...additionalFromLocal, ...additionalFromServer];
+        if (allAdditional.length > 0) {
+            console.log(
+                `[Panel] Búsqueda: +${additionalFromLocal.length} local, ` +
+                `+${additionalFromServer.length} servidor` +
+                (phoneE164 ? ` (phone detectado: ${phoneE164})` : '')
+            );
+            renderContactsList([...localFiltered, ...allAdditional]);
+        } else if (localFiltered.length === 0) {
+            // Ningún resultado en ningún lado — re-render para que el empty state
+            // contextual se muestre correctamente
+            renderContactsList([]);
         }
     }, 500);
 }
@@ -1873,8 +1966,18 @@ function _renderContactsListInner(contacts) {
 
     if (!contacts || contacts.length === 0) {
         const _currentDate = document.getElementById('dateFrom')?.value;
+        const _searchTerm = (window._currentSearchTerm || '').trim();
         let _emptyMsg;
-        if (activeWorkerFilter && activeWorkerName) {
+        if (_searchTerm) {
+            // Búsqueda activa: mensaje contextual
+            const _safeTerm = _searchTerm.replace(/[<>&]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[ch]));
+            // Si parece teléfono, dar feedback específico
+            const _looksLikePhone = /^\+?[\d\s\-()]+$/.test(_searchTerm) &&
+                                    _searchTerm.replace(/[^\d]/g, '').length >= 10;
+            _emptyMsg = _looksLikePhone
+                ? `No se encontró ningún contacto con el número <strong>${_safeTerm}</strong>.<br><span class="text-xs text-gray-500">Verifica que el número esté en HubSpot o intenta con el código de país.</span>`
+                : `Sin resultados para <strong>"${_safeTerm}"</strong>.<br><span class="text-xs text-gray-500">Intenta con otro término o parte del nombre.</span>`;
+        } else if (activeWorkerFilter && activeWorkerName) {
             _emptyMsg = `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`;
         } else if (_currentDate) {
             const [_y, _m, _d] = _currentDate.split('-');

@@ -316,9 +316,9 @@ async def _get_redis_client() -> redis.Redis:
             redis_url,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=5,
+            max_connections=20,
         )
-        logger.info("[Panel] Redis connection pool inicializado")
+        logger.info("[Panel] Redis connection pool inicializado (max=20)")
     return _redis_pool
 
 
@@ -538,6 +538,9 @@ async def _hydrate_contact(
         ConversationStatus.BOT_ACTIVE.value: 1,
     }
 
+    # Flag para saber si Redis quedó disponible — gobierna el fallback HubSpot
+    redis_ok = True
+
     # ── Paso B: ZSCAN para detectar canales en el panel ─────────────────────
     score_by_canal: Dict[str, float] = {}
     try:
@@ -560,6 +563,7 @@ async def _hydrate_contact(
             if cursor == 0:
                 break
     except Exception as e:
+        redis_ok = False
         logger.warning(f"[Hydrate] Error zscan ZSET para {phone_norm}: {e}")
 
     # Canales candidatos: los del ZSET + canal_hint + whatsapp (siempre probamos)
@@ -589,6 +593,7 @@ async def _hydrate_contact(
             meta_raws[c] = _results[i * 3 + 1]
             markers[c] = bool(_results[i * 3 + 2])
     except Exception as e:
+        redis_ok = False
         logger.warning(f"[Hydrate] Error pipeline lectura state/meta para {phone_norm}: {e}")
 
     # Seleccionar el mejor canal: prioridad de status > score > bonus canal_hint
@@ -636,7 +641,9 @@ async def _hydrate_contact(
 
     # ── Paso C: Resolver contact_id ─────────────────────────────────────────
     contact_id = best_meta_dict.get("contact_id")
-    if not contact_id:
+    # Si Redis está saturado, evitar _search_contact (usa Redis cache internamente)
+    # y saltar directo a HubSpot — reduce presión sobre el pool.
+    if not contact_id and redis_ok:
         try:
             cm = ContactManager()
             contact_id = await cm._search_contact(phone_norm)
@@ -647,6 +654,30 @@ async def _hydrate_contact(
     display_name = (best_meta_dict.get("display_name") or "").strip()
     hs_owner_id: Optional[str] = None
     lifecyclestage_cached: Optional[str] = None
+
+    # Si NO hay contact_id aún (Redis down o _search_contact falló),
+    # consultar HubSpot directamente ANTES del batch — la API directa
+    # no depende de nuestro Redis pool.
+    if not contact_id and HUBSPOT_API_KEY:
+        try:
+            from integrations.hubspot.hubspot_client import HubSpotClient
+            _hc = HubSpotClient()
+            hs = await _hc.search_contact_by_phone_with_properties(phone_norm)
+            if hs:
+                if hs.get("id"):
+                    contact_id = hs.get("id")
+                props = hs.get("properties") or {}
+                fn = (props.get("firstname") or "").strip()
+                ln = (props.get("lastname") or "").strip()
+                full = (fn + " " + ln).strip()
+                if full and not display_name:
+                    display_name = full
+                if not hs_owner_id and props.get("hubspot_owner_id"):
+                    hs_owner_id = str(props.get("hubspot_owner_id"))
+                if props.get("lifecyclestage"):
+                    lifecyclestage_cached = props.get("lifecyclestage")
+        except Exception as e:
+            logger.debug(f"[Hydrate] HubSpot direct lookup falló para {phone_norm}: {e}")
 
     if contact_id:
         try:

@@ -19,17 +19,20 @@ class LeadAssigner:
     # CONFIGURACIÓN DE EQUIPOS Y CANALES
     # ═══════════════════════════════════════════════════════════════════════════
     
+    # ✏️ EDITAR AQUÍ para cambiar los nombres de las asesoras en el panel.
+    # Este es el ÚNICO lugar donde se definen los nombres — mongodb_client.py y
+    # outbound_panel.py los leen automáticamente desde aquí.
     OWNERS_CONFIG = {
-        # === ASESOR PORTALES INMOBILIARIOS ===
+        # === PORTALES INMOBILIARIOS (ID: 89096378) ===
         # Portales: Mercado Libre, LinkedIn, Facebook, Instagram, Ciencuadras, TikTok, Charly
         "equipo_portales": [
-            {"name": "Asesor Portales", "id": "89096378", "active": True},
+            {"name": "Jubeny", "id": "89096378", "active": True},
         ],
 
-        # === ASESOR DIRECTO + PORTALES ESPECIALES ===
+        # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
         # Directo: Página Web, WhatsApp, YouTube + Portales: MetroCuadrado, Finca Raíz
         "equipo_directo": [
-            {"name": "Asesor Directo", "id": "89096380", "active": True},
+            {"name": "Luisa", "id": "89096380", "active": True},
         ],
 
         # === EQUIPO DE MARKETING (Solo métricas - NO responde) ===
@@ -38,16 +41,16 @@ class LeadAssigner:
             {"name": "Equipo de Marketing", "id": "82598814", "active": False},  # Inactivo para asignación
         ],
 
-        # === ASESOR RESPALDO (Solo transferencias manuales) ===
+        # === RESPALDO (Solo transferencias manuales, ID: 89096379) ===
         # No recibe asignación automática, solo contactos transferidos manualmente
         "equipo_respaldo": [
-            {"name": "Asesor Respaldo", "id": "89096379", "active": False},  # Inactivo para asignación automática
+            {"name": "Monica", "id": "89096379", "active": False},  # Inactivo para asignación automática
         ],
 
         # Equipo default (fallback - round robin entre portales y directo)
         "default": [
-            {"name": "Asesor Portales", "id": "89096378", "active": True},
-            {"name": "Asesor Directo", "id": "89096380", "active": True},
+            {"name": "Jubeny", "id": "89096378", "active": True},
+            {"name": "Luisa",  "id": "89096380", "active": True},
         ],
     }
 

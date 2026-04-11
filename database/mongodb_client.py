@@ -803,13 +803,22 @@ class MongoDBManager:
     # OPERACIONES DE ADVISORS (ASESORES DEL PANEL)
     # =========================================================================
 
-    # Configuración predeterminada de asesores (ID → nombre placeholder)
-    DEFAULT_ADVISORS = {
-        "89096380": "Asesor Portales",
-        "89096378": "Asesor Directo",
-        "82598814": "Equipo de Marketing",
-        "89096379": "Asesor Respaldo"
-    }
+    # DEFAULT_ADVISORS — derivado automáticamente de lead_assigner.OWNERS_CONFIG.
+    # NO editar aquí. Para cambiar nombres de asesoras, editar:
+    #   integrations/hubspot/lead_assigner.py → OWNERS_CONFIG  (busca: ✏️ EDITAR AQUÍ)
+    try:
+        from integrations.hubspot.lead_assigner import LeadAssigner as _LA
+        _seen_ids: set = set()
+        DEFAULT_ADVISORS: dict = {}
+        for _team_members in _LA.OWNERS_CONFIG.values():
+            for _m in _team_members:
+                if _m["id"] not in _seen_ids:
+                    DEFAULT_ADVISORS[_m["id"]] = _m["name"]
+                    _seen_ids.add(_m["id"])
+        del _seen_ids, _team_members, _m, _LA
+    except Exception:
+        # Fallback mínimo si lead_assigner no está disponible
+        DEFAULT_ADVISORS = {}
 
     async def init_advisors(self) -> bool:
         """Inicializa los asesores predeterminados si no existen."""
@@ -817,15 +826,18 @@ class MongoDBManager:
             return False
         try:
             for advisor_id, name in self.DEFAULT_ADVISORS.items():
-                # Upsert: crear solo si no existe
+                # $set para name → sincroniza siempre el nombre desde lead_assigner.OWNERS_CONFIG
+                # $setOnInsert para campos de auditoría → solo al crear por primera vez
                 await self.db.panel_advisors.update_one(
                     {"advisor_id": advisor_id},
-                    {"$setOnInsert": {
-                        "advisor_id": advisor_id,
-                        "name": name,
-                        "active": True,
-                        "created_at": datetime.now(TIMEZONE)
-                    }},
+                    {
+                        "$set": {"name": name},
+                        "$setOnInsert": {
+                            "advisor_id": advisor_id,
+                            "active": True,
+                            "created_at": datetime.now(TIMEZONE)
+                        }
+                    },
                     upsert=True
                 )
             logger.info(f"[MongoDB] Advisors inicializados: {len(self.DEFAULT_ADVISORS)}")

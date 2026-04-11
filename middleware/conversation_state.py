@@ -1146,25 +1146,32 @@ class ConversationStateManager:
     ) -> None:
         """
         Marca un contacto como leído removiéndolo del inbox del asesor.
-        Si canal es None intenta remover con todos los canales conocidos.
+
+        Fix-D (Abr 2026): CANAL-AGNOSTIC. Hace ZRANGE del inbox y remueve
+        TODOS los members que coincidan con el phone, sin importar el canal.
+        Evita badge fantasma cuando canal-escritura ≠ canal-lectura
+        (ej: contacto guardado como whatsapp pero panel lo devuelve como mercado_libre).
         """
         try:
             if not advisor_id or not phone:
                 return
             key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
-            if canal:
-                canales = [canal.lower()]
-            else:
-                canales = [
-                    "whatsapp", "instagram", "facebook",
-                    "finca_raiz", "metrocuadrado",
-                    "pagina_web", "whatsapp_directo",
-                ]
+            prefix = f"{phone}:"
+            all_members = await self.redis.zrange(key, 0, -1)
+            targets = []
+            for m in all_members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                if m == phone or m.startswith(prefix):
+                    targets.append(m)
+
             removed = 0
-            for c in canales:
-                removed += await self.redis.zrem(key, f"{phone}:{c}")
+            if targets:
+                removed = await self.redis.zrem(key, *targets)
+
             logger.info(
-                f"[Inbox][Clear] advisor={advisor_id} phone={phone} removed={removed > 0}"
+                f"[Inbox][Clear] advisor={advisor_id} phone={phone} "
+                f"removed={removed} targets={targets}"
             )
         except Exception as e:
             logger.error(f"[Inbox][Error][Clear] advisor={advisor_id} phone={phone}: {e}")
@@ -1178,30 +1185,45 @@ class ConversationStateManager:
         Retorna {phone: bool} donde True = contacto tiene actividad no leída.
         contacts: lista de dicts con al menos {phone, canal}.
 
+        Fix-D (Abr 2026): Lookup CANAL-AGNOSTIC.
+        Antes usaba ZMSCORE con key `{phone}:{canal}`, pero el canal del inbox
+        (canal de mensajería, ej: whatsapp) puede diferir del canal en
+        get_active_contacts (canal_origen, ej: mercado_libre) → ZMSCORE=None
+        → badge fantasma / badge faltante.
+
+        Ahora hace ZRANGE 0 -1 (1 round-trip) y extrae solo los teléfonos,
+        ignorando el canal del member. Para <~500 contactos por asesor es O(N)
+        trivial (<5ms) y elimina el mismatch de canal por completo.
+
         Fail-safe: si Redis falla retorna {} → UI sigue funcionando sin badges.
-        Usa ZMSCORE (Redis >= 6.2): 1 round-trip para todos los contactos.
         """
         if not contacts or not advisor_id:
             return {}
         try:
             key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
-            members = [
-                f"{c.get('phone', '')}:{(c.get('canal') or 'whatsapp').lower()}"
-                for c in contacts
-            ]
-            scores = await self.redis.zmscore(key, members)
+            all_members = await self.redis.zrange(key, 0, -1)
+            # Extraer solo el teléfono del member "{phone}:{canal}"
+            unread_phones = set()
+            for m in all_members:
+                # Member puede venir como bytes o str según decode_responses
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                if ":" in m:
+                    unread_phones.add(m.split(":", 1)[0])
+                else:
+                    unread_phones.add(m)
+
             unread_map = {}
-            for contact, score in zip(contacts, scores):
+            for contact in contacts:
                 phone = contact.get("phone", "")
-                # score=None → no está en el inbox → leído
-                # score=float → está en el inbox → no-leído
-                unread_map[phone] = (score is not None)
+                unread_map[phone] = (phone in unread_phones)
 
             no_leidos = sum(1 for v in unread_map.values() if v)
             leidos    = sum(1 for v in unread_map.values() if not v)
             logger.info(
                 f"[Inbox][Batch] advisor={advisor_id} "
-                f"no_leidos={no_leidos} leidos={leidos} total={len(contacts)}"
+                f"no_leidos={no_leidos} leidos={leidos} total={len(contacts)} "
+                f"inbox_size={len(unread_phones)}"
             )
             return unread_map
         except Exception as e:

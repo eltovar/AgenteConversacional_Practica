@@ -1856,6 +1856,9 @@ function _renderContactsListInner(contacts) {
     }
 
     const savedScrollTop = container.scrollTop;
+    // Fix-C: detectar cambio en índice 0 para forzar scroll al top (comportamiento WhatsApp)
+    const prevTopPhone = window._lastTopPhone || null;
+    const newTopPhone = contacts.length > 0 ? (contacts[0].phone || '') : '';
 
     // Construir mapa de elementos existentes en el DOM indexados por phone
     const existingMap = new Map();
@@ -1922,7 +1925,15 @@ function _renderContactsListInner(contacts) {
         }
     }
 
-    container.scrollTop = savedScrollTop;
+    // Fix-C: Si el índice 0 cambió (llegó mensaje nuevo que subió un contacto al top),
+    // scrollear al inicio. Si no cambió, restaurar posición para no interrumpir al asesor.
+    if (newTopPhone && newTopPhone !== prevTopPhone && prevTopPhone !== null) {
+        container.scrollTop = 0;
+        console.log(`[Panel][Scroll] Índice 0 cambió: ${prevTopPhone} → ${newTopPhone}, scrolleando al top`);
+    } else {
+        container.scrollTop = savedScrollTop;
+    }
+    window._lastTopPhone = newTopPhone;
 }
 
 // Variable para tracking de primera carga
@@ -4358,6 +4369,29 @@ function handleWebSocketMessage(data) {
         case 'contact_updated':
             // Nuevo mensaje o actividad → reordenar lista INMEDIATAMENTE
             console.log('[Panel] contact_updated recibido, action:', data.action, 'phone:', data.phone);
+
+            // Fix-B: Guard defensivo contra eventos WS para contactos que NO pertenecen
+            // a este asesor. Con Fix-A activo el backend enruta targeted, pero esto protege
+            // contra: (1) broadcast de fallback si meta no tiene assigned_owner_id,
+            // (2) backlog durante reconexión WS, (3) cache staleness, (4) regresiones futuras.
+            // Si phone no está en allContacts → silenciar beep/badge y schedule refresh.
+            if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
+                const _phoneInList = allContacts.some(c => (c.phone || '') === data.phone);
+                if (!_phoneInList) {
+                    console.warn('[Panel][Guard] Evento WS foráneo (phone no en lista local):', data.phone);
+                    if (!window._foreignProbation) window._foreignProbation = new Set();
+                    if (window._foreignProbation.has(data.phone)) {
+                        console.log('[Panel][Guard] Descartado — ya en probación:', data.phone);
+                        break;
+                    }
+                    window._foreignProbation.add(data.phone);
+                    setTimeout(() => window._foreignProbation.delete(data.phone), 10000);
+                    // Refresh silencioso: si el contacto es legítimo aparecerá en la próxima carga.
+                    // El siguiente evento WS para el mismo phone ya pasará el guard.
+                    scheduleContactsRefresh();
+                    break;
+                }
+            }
 
             // Si action es 'new_message', actualizar badge directamente sin re-render
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {

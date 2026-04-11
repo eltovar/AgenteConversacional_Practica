@@ -142,10 +142,18 @@ class ConnectionManager:
         message_preview: str = "",
         sender: str = "client",
         contact_name: str = "",
-        redis_client=None
+        redis_client=None,
+        assigned_owner_id: Optional[str] = None,
+        state_manager=None,
     ) -> int:
         """
         Notifica a los asesores sobre un nuevo mensaje.
+
+        Enrutamiento (en cascada):
+          1. assigned_owner_id explícito del caller (preferido — evita IO)
+          2. self.phone_to_advisor (cache local del worker, solo poblado en transferencias)
+          3. state_manager.get_meta(phone, canal).assigned_owner_id (fallback Redis)
+          4. publish_broadcast global (último recurso — contacto nuevo sin asignar)
 
         Args:
             phone: Teléfono del contacto
@@ -155,6 +163,8 @@ class ConnectionManager:
             contact_name: Nombre del contacto
             redis_client: Cliente Redis para publish_broadcast cross-worker.
                           Si se omite, usa broadcast local (solo este worker).
+            assigned_owner_id: ID del asesor dueño del contacto (preferido, evita IO).
+            state_manager: ConversationStateManager para fallback via get_meta().
 
         Returns:
             Número de notificaciones enviadas (siempre 0 cuando usa Pub/Sub)
@@ -173,10 +183,23 @@ class ConnectionManager:
         logger.info(f"[WebSocket] notify_new_message: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
 
         if redis_client is not None:
-            advisor_id = self.phone_to_advisor.get(phone)
+            # Resolver advisor_id en cascada
+            advisor_id = assigned_owner_id
+            if not advisor_id:
+                advisor_id = self.phone_to_advisor.get(phone)
+            if not advisor_id and state_manager is not None:
+                try:
+                    _m = await state_manager.get_meta(phone, canal)
+                    if _m and getattr(_m, "assigned_owner_id", None):
+                        advisor_id = _m.assigned_owner_id
+                except Exception as _e:
+                    logger.warning(f"[WebSocket] fallback get_meta falló para {phone}: {_e}")
+
             if advisor_id:
                 await self.publish_to_advisor(redis_client, advisor_id, notification)
+                logger.info(f"[WebSocket] notify_new_message → targeted advisor={advisor_id} phone={phone}")
             else:
+                logger.warning(f"[WebSocket] notify_new_message → broadcast global (sin owner) phone={phone}")
                 await self.publish_broadcast(redis_client, notification)
             return 0
 

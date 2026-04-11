@@ -339,6 +339,7 @@ async def _process_message_deferred(
         # Inbox de no-leídos: registrar actividad para el asesor asignado.
         # Se ejecuta ANTES del WS notify para que GET /contacts ya devuelva has_unread=True
         # cuando el panel llama tras recibir el ping.
+        _inbox_meta = None  # Fix-A: inicializar fuera del try para usar en notify_new_message
         try:
             _inbox_meta = await get_state_manager().get_meta(
                 phone_normalized, final_channel or "whatsapp"
@@ -353,15 +354,19 @@ async def _process_message_deferred(
             logger.warning(f"[Inbox][Webhook] Error escribiendo inbox (non-fatal): {_inbox_err}")
 
         # Notificar al panel vía WebSocket (cross-worker via Redis Pub/Sub)
+        # Fix-A: pasar assigned_owner_id para enrutamiento targeted (evita broadcast global)
+        _assigned_owner_def = _inbox_meta.assigned_owner_id if _inbox_meta else None
         await ws_manager.notify_new_message(
             phone=phone_normalized,
             canal=final_channel or "whatsapp",
             message_preview=processed_body[:100] if processed_body else "",
             sender="client",
             contact_name="",
-            redis_client=get_state_manager().redis
+            redis_client=get_state_manager().redis,
+            assigned_owner_id=_assigned_owner_def,
+            state_manager=get_state_manager(),
         )
-        
+
         # ════════════════════════════════════════════════════════════
         # AGREGACIÓN DE MENSAJES: Esperar que el cliente termine de escribir
         # ════════════════════════════════════════════════════════════
@@ -1312,13 +1317,15 @@ async def _whatsapp_webhook_original_DISABLED(
             # muestre el mensaje nuevo inmediatamente con sonido y badge
             try:
                 logger.info(f"[Webhook] Notificando panel (bot silenciado) - phone={phone_normalized}")
+                # Fix-A: state_manager fallback resuelve assigned_owner_id desde Redis meta
                 await ws_manager.notify_new_message(
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                     message_preview=Body[:100] if Body else "",
                     sender="client",
                     contact_name="",
-                    redis_client=get_state_manager().redis
+                    redis_client=get_state_manager().redis,
+                    state_manager=get_state_manager(),
                 )
                 logger.info(f"[Webhook] notify_new_message enviado (bot silenciado, cross-worker)")
             except Exception as ws_err:
@@ -1597,24 +1604,31 @@ async def _whatsapp_webhook_original_DISABLED(
                 ConversationStatus.IN_CONVERSATION
             ]:
                 # Notificación rica con preview del mensaje
+                # Fix-A: state_manager resuelve assigned_owner_id desde Redis meta → targeted
                 await ws_manager.notify_new_message(
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                     message_preview=Body[:100] if Body else "",
                     sender="client",
                     contact_name="",
-                    redis_client=get_state_manager().redis
+                    redis_client=get_state_manager().redis,
+                    state_manager=get_state_manager(),
                 )
-                logger.info(f"[Webhook] notify_new_message enviado (HUMAN_ACTIVE, cross-worker)")
+                logger.info(f"[Webhook] notify_new_message enviado (HUMAN_ACTIVE, cross-worker, targeted)")
             else:
                 # Notificación simple para refrescar la lista
-                await ws_manager.publish_broadcast(get_state_manager().redis, {
-                    "type": "contact_updated",
-                    "phone": phone_normalized,
-                    "action": "new_message",
-                    "canal": final_channel
-                })
-                logger.info(f"[Webhook] contact_updated publish_broadcast enviado (cross-worker)")
+                # Fix-A: usar notify_new_message para que también haga enrutamiento targeted
+                # (antes era publish_broadcast directo → broadcast global a todos los asesores)
+                await ws_manager.notify_new_message(
+                    phone=phone_normalized,
+                    canal=final_channel or "whatsapp",
+                    message_preview="",
+                    sender="client",
+                    contact_name="",
+                    redis_client=get_state_manager().redis,
+                    state_manager=get_state_manager(),
+                )
+                logger.info(f"[Webhook] notify_new_message enviado (BOT_ACTIVE, cross-worker, targeted)")
         except Exception as ws_err:
             logger.error(f"[Webhook] Error notificando WebSocket: {ws_err}")
 
@@ -2288,12 +2302,24 @@ async def _sync_conversation_with_analysis_to_hubspot(
                     await _rc.delete(f"contact_name:{contact_id}")
                     logger.info(f"[Naming] display_name='{_new_name}' sincronizado en Redis para {phone}")
                     # 3. Notificar panel vía WebSocket (fire-and-forget)
-                    await ws_manager.publish_broadcast(_rc, {
+                    # Fix-A: enrutamiento targeted por asesor dueño (evita broadcast global)
+                    _name_notif = {
                         "type": "contact_updated",
                         "phone": phone,
                         "action": "name_updated",
                         "display_name": _new_name
-                    })
+                    }
+                    try:
+                        _name_meta = await get_state_manager().get_meta(phone, "whatsapp")
+                        _name_owner = _name_meta.assigned_owner_id if _name_meta else None
+                        if _name_owner:
+                            await ws_manager.publish_to_advisor(_rc, _name_owner, _name_notif)
+                        else:
+                            # Contacto sin asignar — broadcast (caso excepcional)
+                            await ws_manager.publish_broadcast(_rc, _name_notif)
+                    except Exception as _ne:
+                        logger.warning(f"[Naming] fallback broadcast name_updated: {_ne}")
+                        await ws_manager.publish_broadcast(_rc, _name_notif)
                 except Exception as _redis_err:
                     logger.warning(f"[Naming] Error sincronizando nombre en Redis: {_redis_err}")
             except Exception as name_err:

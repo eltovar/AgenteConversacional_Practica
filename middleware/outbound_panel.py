@@ -4109,22 +4109,41 @@ async def get_active_contacts(
             total_for_advisor = None
             logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
 
+        # ── Pre-calcular has_unread ANTES del sort para usarlo en el ordenamiento.
+        # get_inbox_unread_map() es O(N) con 1 round-trip Redis (ZRANGE) → <5ms.
+        # Fail-safe: si falla, _unread_map={} → sort cae al comportamiento por status.
+        _unread_map = {}
+        if advisor and active_contacts:
+            try:
+                _inbox_pre = [
+                    {"phone": c.get("phone", ""), "canal": c.get("canal") or "whatsapp"}
+                    for c in active_contacts if c.get("phone")
+                ]
+                _unread_map = await state_manager.get_inbox_unread_map(advisor, _inbox_pre)
+                for c in active_contacts:
+                    c["has_unread"] = _unread_map.get(c.get("phone", ""), False)
+            except Exception as _pre_unread_err:
+                logger.warning(f"[Panel] Error pre-calculando has_unread (non-fatal): {_pre_unread_err}")
+
         # ── Pre-limitar ANTES del enriquecimiento con HubSpot.
         # Los contactos de prioridad (ZSET) siempre van; del resto solo los más recientes.
         # Sin esto, 534 contactos × waits de 429 (36s c/u) = timeout de Railway.
         priority_contacts = [c for c in active_contacts if c.get("in_priority_zset", True)]
         bot_contacts = [c for c in active_contacts if not c.get("in_priority_zset", True)]
 
-        # Fix: Ordenar priority_contacts con dos criterios estables:
-        #   1. Status: IN_CONVERSATION / HUMAN_ACTIVE / PENDING_HANDOFF siempre ANTES que BOT_ACTIVE
-        #      → evita que contactos atendidos activamente "bajen" cuando llegan leads nuevos
-        #   2. Dentro del mismo grupo: más reciente primero (ISO string es lexicográfico-correcto)
+        # Ordenar con 3 tiers (estilo WhatsApp):
+        #   Tier 0: has_unread=True → prioridad máxima (necesitan atención)
+        #   Tier 1: IN_CONVERSATION / HUMAN_ACTIVE / PENDING_HANDOFF sin unread
+        #   Tier 2: BOT_ACTIVE sin unread
+        # Dentro de cada tier: más reciente primero (ISO string lexicográfico-correcto)
         def _status_priority(c):
+            if c.get("has_unread", False):
+                return 0
             s = c.get("status") or c.get("conversation_status") or ""
-            return 0 if s in ("IN_CONVERSATION", "HUMAN_ACTIVE", "PENDING_HANDOFF") else 1
+            return 1 if s in ("IN_CONVERSATION", "HUMAN_ACTIVE", "PENDING_HANDOFF") else 2
 
-        # Stable sort: primero por last_activity desc, luego por status asc
-        # (Python sort es estable → dentro del mismo status_order queda orden por actividad)
+        # Stable sort: primero por last_activity desc, luego por tier asc
+        # (Python sort es estable → dentro del mismo tier queda orden por actividad)
         priority_contacts.sort(key=lambda c: c.get("last_activity") or "", reverse=True)
         priority_contacts.sort(key=_status_priority)
 
@@ -4636,21 +4655,19 @@ async def get_active_contacts(
                 c["has_appointment"] = False
 
         # === PASO 7.6: Calcular has_unread desde advisor_inbox ===
-        # Solo cuando hay filtro de advisor para evitar carga extra en vista global.
-        # Fail-safe: si Redis falla, has_unread=False (sin badges) — no romper UI.
-        # Reutiliza state_manager (~l.3540) — evita crear nuevo pool Redis por llamada.
-        # Usa c.get("canal") — coincide con la clave escrita por add_to_advisor_inbox.
-        # canal_origen ("finca_raiz" etc.) != clave ZSET → no usar aquí.
+        # Reutiliza _unread_map pre-calculado antes del sort (evita 2do round-trip Redis).
+        # Si _unread_map está vacío (error en pre-cálculo o branch sin advisor), recalcular.
         if advisor and contacts_sorted:
             try:
-                _inbox_contacts = [
-                    {
-                        "phone": c.get("phone", ""),
-                        "canal": c.get("canal") or "whatsapp",
-                    }
-                    for c in contacts_sorted if c.get("phone")
-                ]
-                _unread_map = await state_manager.get_inbox_unread_map(advisor, _inbox_contacts)
+                if not _unread_map:
+                    _inbox_contacts = [
+                        {
+                            "phone": c.get("phone", ""),
+                            "canal": c.get("canal") or "whatsapp",
+                        }
+                        for c in contacts_sorted if c.get("phone")
+                    ]
+                    _unread_map = await state_manager.get_inbox_unread_map(advisor, _inbox_contacts)
                 for c in contacts_sorted:
                     c["has_unread"] = _unread_map.get(c.get("phone", ""), False)
                 logger.info(

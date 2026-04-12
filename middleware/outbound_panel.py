@@ -1770,6 +1770,19 @@ async def send_template_message(
             detail="Variables JSON inválidas"
         )
 
+    # Safety net: rechazar si template requiere variables pero no se proporcionaron.
+    # Previene envío de placeholders crudos ({fecha}, {hora}) por fallo de extracción.
+    template_vars = template.get("variables", [])
+    if template_vars and not vars_dict:
+        logger.warning(
+            f"[Panel] Template '{template_id}' requiere {len(template_vars)} variables "
+            f"pero vars_dict está vacío — rechazando para evitar placeholders crudos"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Template '{template_id}' requiere variables ({', '.join(template_vars)}) pero no se proporcionaron"
+        )
+
     # Reemplazar variables en el body del template
     template_body = template.get("body", "")
     try:

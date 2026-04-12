@@ -344,18 +344,29 @@ async def _process_message_deferred(
             _inbox_meta = await get_state_manager().get_meta(
                 phone_normalized, final_channel or "whatsapp"
             )
-            if _inbox_meta and _inbox_meta.assigned_owner_id:
+            # FIX: Para contactos nuevos el temp_meta no tiene assigned_owner_id aún.
+            # Usamos hubspot_owner_id de contact_info como fallback para garantizar inbox write
+            # y WS enrutado antes de que ensure_meta_with_channel corra (línea ~589).
+            _hs_owner_early = (
+                contact_info.properties.get("hubspot_owner_id")
+                if contact_info and contact_info.properties else None
+            )
+            _assigned_owner_def = (
+                (_inbox_meta.assigned_owner_id if _inbox_meta else None) or _hs_owner_early
+            )
+            if _assigned_owner_def:
                 await get_state_manager().add_to_advisor_inbox(
-                    advisor_id=_inbox_meta.assigned_owner_id,
+                    advisor_id=_assigned_owner_def,
                     phone=phone_normalized,
                     canal=final_channel or "whatsapp",
                 )
         except Exception as _inbox_err:
             logger.warning(f"[Inbox][Webhook] Error escribiendo inbox (non-fatal): {_inbox_err}")
+            _assigned_owner_def = None
 
         # Notificar al panel vía WebSocket (cross-worker via Redis Pub/Sub)
         # Fix-A: pasar assigned_owner_id para enrutamiento targeted (evita broadcast global)
-        _assigned_owner_def = _inbox_meta.assigned_owner_id if _inbox_meta else None
+        # _assigned_owner_def ya fue calculado en el bloque anterior (con fallback hubspot_owner)
         await ws_manager.notify_new_message(
             phone=phone_normalized,
             canal=final_channel or "whatsapp",

@@ -1371,6 +1371,7 @@ async function loadContacts() {
         _applyFiltersAndRender();
         console.log(`[Filtro] Renderizando ${allContacts.length} contactos en lista.`);
         checkPendingResponseAlerts();
+        checkSilentBotContacts();
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
         if (!deepLinkHandled) {
@@ -3829,14 +3830,27 @@ async function sendMessage(e) {
             setTimeout(() => resultDiv.classList.add('hidden'), 4000);
             return;
         }
-        const vars = extractVariableValues(activeTemplateBody, message, activeTemplateVars) || {};
-        const tplId = activeTemplateId;
-        // Limpiar estado del template antes de enviar
-        activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
-        const hint = document.getElementById('templateHint');
-        if (hint) hint.classList.add('hidden');
-        await sendTemplateFromInput(tplId, vars);
-        return;
+        const _tplData = templatesData.find(t => t.id === activeTemplateId);
+        if (_tplData && !_tplData.content_sid) {
+            // Template sin aprobación Meta (ej: Confirmación de Cita)
+            // → enviar el texto editado directamente como mensaje plano.
+            // El pipeline de extractVariableValues + SafeDict es frágil con emojis/newlines
+            // y causa envío de placeholders crudos ({fecha}, {hora}) cuando falla.
+            console.log('[Panel][Template] Sin content_sid, enviando como texto plano:', activeTemplateId);
+            activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
+            const hint = document.getElementById('templateHint');
+            if (hint) hint.classList.add('hidden');
+            // NO hacer return → continuar al flujo normal de sendMessage() con el texto editado
+        } else {
+            // Template con content_sid → pipeline de extracción (necesario para Twilio Content API)
+            const vars = extractVariableValues(activeTemplateBody, message, activeTemplateVars) || {};
+            const tplId = activeTemplateId;
+            activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
+            const hint = document.getElementById('templateHint');
+            if (hint) hint.classList.add('hidden');
+            await sendTemplateFromInput(tplId, vars);
+            return;
+        }
     }
 
     // Validar que haya contenido (texto o archivo)
@@ -4273,8 +4287,9 @@ function handleVisibilityChange() {
             }
         }
 
-        // Revisar alertas de espera al volver a la pestaña
+        // Revisar alertas de espera + contactos BOT_ACTIVE sin nombre al volver a la pestaña
         checkPendingResponseAlerts();
+        checkSilentBotContacts();
     }
 }
 
@@ -4309,8 +4324,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Iniciar polling
     startPolling();
 
-    // Revisión periódica de alertas de espera (cada 5 min, por si el tab no recibe eventos)
-    setInterval(checkPendingResponseAlerts, 5 * 60 * 1000);
+    // Revisión periódica de alertas de espera + contactos BOT_ACTIVE sin nombre
+    setInterval(() => {
+        checkPendingResponseAlerts();
+        checkSilentBotContacts();
+    }, 5 * 60 * 1000);
 
     // Sin fecha por defecto: el panel arranca mostrando todos los contactos activos.
     // El usuario elige un día específico para filtrar historial.
@@ -5011,6 +5029,76 @@ function checkPendingResponseAlerts() {
         _showPendingResponseAlert(phone, contact.display_name, now - lastTs);
         _pendingAlertShown[phone] = { shownAt: now };
         try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
+    }
+}
+
+// ======================================================
+// checkSilentBotContacts: Safety net de 30 minutos para contactos BOT_ACTIVE sin nombre.
+// Cubre el caso donde la notificación inicial fue perdida (contacto nuevo de portal,
+// Fix-B probation, etc.) y el cliente nunca dio su nombre tras la pregunta de Sofia.
+// Se llama cada 5 minutos junto a checkPendingResponseAlerts.
+function checkSilentBotContacts() {
+    const SILENT_THRESHOLD_MS = 30 * 60 * 1000; // 30 min sin respuesta
+    const COOLDOWN_MS         = 2 * 60 * 60 * 1000; // 2 horas entre re-notificaciones
+    const PHONE_RE = /^\+?[\d\s\-()+]{7,}$/;   // Detecta display_name = teléfono
+
+    if (!allContacts || !allContacts.length) return;
+
+    const now = Date.now();
+    let beepCount = 0;
+    let refreshNeeded = false;
+
+    let silentShown = {};
+    try { silentShown = JSON.parse(sessionStorage.getItem('_silentBotShown') || '{}'); } catch {}
+
+    for (const contact of allContacts) {
+        const phone = contact.phone;
+        if (!phone) continue;
+
+        // Solo BOT_ACTIVE (Sofia está atendiendo, asesor no ha tomado control)
+        const status = contact.conversation_status || contact.status || '';
+        if (status !== 'BOT_ACTIVE') continue;
+
+        // No notificar si el chat está abierto ahora mismo
+        if (phone === currentPhone) continue;
+
+        // Ya tiene badge — no duplicar
+        if (contact.has_unread || (unreadCounts[phone] > 0)) continue;
+
+        // display_name es el teléfono (sin nombre real) — ej: "+573246895528"
+        const dn = contact.display_name || '';
+        const hasNoRealName = !dn || dn === phone || PHONE_RE.test(dn);
+        if (!hasNoRealName) continue;
+
+        // Esperar al menos 30 min desde el último mensaje del cliente
+        const lastActivityTs = contact.last_activity
+            ? new Date(contact.last_activity).getTime() : 0;
+        if (!lastActivityTs || (now - lastActivityTs) < SILENT_THRESHOLD_MS) continue;
+
+        // Cooldown 2 horas por contacto (sessionStorage persiste entre tabs)
+        if (silentShown[phone] && (now - silentShown[phone]) < COOLDOWN_MS) continue;
+
+        // ── Disparar notificación ──
+        unreadCounts[phone] = 1;
+        updateUnreadBadge(phone, 1);
+        refreshNeeded = true;
+
+        // Sonido: máx 3 beeps por invocación para no bombardear
+        if (beepCount < 3) {
+            playNotificationBeep();
+            beepCount++;
+        }
+
+        // Registrar cooldown
+        silentShown[phone] = now;
+        try { sessionStorage.setItem('_silentBotShown', JSON.stringify(silentShown)); } catch {}
+
+        console.log('[Panel][SilentBot] Notificación deferred — BOT_ACTIVE sin nombre 30min+:', phone);
+    }
+
+    // Forzar loadContacts para que el backend actualice has_unread=True → 3-tier sort → índice 0
+    if (refreshNeeded) {
+        scheduleContactsRefresh();
     }
 }
 

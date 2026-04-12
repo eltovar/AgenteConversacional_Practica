@@ -818,9 +818,18 @@ class ConversationStateManager:
                             s_meta = json.loads(s_meta_raw)
                             for fld in ("contact_id", "display_name", "assigned_owner_id",
                                         "assigned_owner_ids", "primary_owner_id", "handoff_reason",
-                                        "deal_id", "deal_stage", "transfer_history", "canal_origen"):
+                                        "deal_id", "deal_stage", "transfer_history"):
                                 if s_meta.get(fld) and not wa_meta.get(fld):
                                     wa_meta[fld] = s_meta[fld]
+                            # canal_origen: preservar portal específico sobre "whatsapp" genérico.
+                            # wa_meta siempre tiene canal_origen (default "whatsapp"), pero si el
+                            # stale tiene un portal real (finca_raiz, instagram, etc.), ese es el
+                            # verdadero origen del lead y debe prevalecer.
+                            s_canal = s_meta.get("canal_origen", "")
+                            wa_canal = wa_meta.get("canal_origen", "whatsapp")
+                            if s_canal and s_canal != "whatsapp" and wa_canal in ("whatsapp", "whatsapp_directo", ""):
+                                wa_meta["canal_origen"] = s_canal
+                                logger.info(f"[P3-D v2] canal_origen preservado: {wa_canal} → {s_canal}")
                             # Preservar created_at más antiguo
                             s_created = s_meta.get("created_at", "")
                             if s_created and (not wa_meta.get("created_at") or s_created < wa_meta["created_at"]):

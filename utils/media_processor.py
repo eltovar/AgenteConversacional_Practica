@@ -80,6 +80,7 @@ BUNNY_PULL_ZONE = _get_bunny_pull_zone()
 # ============================================================================
 
 MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_VIDEO_SIZE_BYTES = 16 * 1024 * 1024  # 16 MB (límite WhatsApp para video)
 
 DOCUMENT_MIME_TYPES = {
     "application/pdf": ("pdf", "📄"),
@@ -244,6 +245,48 @@ def detect_document_format_by_magic_bytes(data: bytes, hint_filename: str = "") 
         return "application/msword"
 
     return "application/octet-stream"
+
+
+def detect_video_format_by_magic_bytes(file_bytes: bytes) -> tuple[str, str]:
+    """
+    Detecta el formato real de un video analizando sus magic bytes.
+
+    Formatos soportados:
+    - MP4/M4V: ISO Base Media File Format (ftyp box con isom/mp4x)
+    - MOV: Apple QuickTime (ftyp box con qt)
+    - 3GP: Video móvil (ftyp box con 3gp)
+    - WebM/MKV: EBML header
+    - AVI: RIFF...AVI
+
+    Returns:
+        Tuple de (formato, content_type). Ej: ("mp4", "video/mp4")
+    """
+    if not file_bytes or len(file_bytes) < 12:
+        logger.warning(f"[MediaProcessor] Video muy pequeño ({len(file_bytes) if file_bytes else 0} bytes), asumiendo MP4")
+        return ("mp4", "video/mp4")
+
+    magic = file_bytes[:12]
+
+    # MP4/MOV/3GP: ISO Base Media File Format (ftyp box)
+    if b"ftyp" in magic:
+        ftyp_data = file_bytes[8:12]
+        if ftyp_data in (b"qt  ", b"mqt "):
+            return ("mov", "video/quicktime")
+        if ftyp_data.startswith(b"3gp"):
+            return ("3gp", "video/3gpp")
+        # Default: MP4 (formato más común de WhatsApp)
+        return ("mp4", "video/mp4")
+
+    # WebM/MKV: EBML header
+    if magic[:4] == b"\x1A\x45\xDF\xA3":
+        return ("webm", "video/webm")
+
+    # AVI: RIFF...AVI
+    if magic[:4] == b"RIFF" and magic[8:12] == b"AVI ":
+        return ("avi", "video/x-msvideo")
+
+    logger.warning(f"[MediaProcessor] Formato video no identificado (bytes: {magic[:12].hex()}), asumiendo MP4")
+    return ("mp4", "video/mp4")
 
 
 class MediaProcessor:
@@ -605,12 +648,20 @@ class MediaProcessor:
             content_lower = content_type.lower()
             is_audio = "audio" in content_lower or "ogg" in content_lower
             is_image = "image" in content_lower
+            is_video = "video" in content_lower
             is_document = content_type in DOCUMENT_MIME_TYPES
 
             # 1. Descargar de Twilio primero (para todos los tipos)
             media_bytes = await self.download_twilio_media(media_url)
 
-            # Validar tamaño máximo para documentos
+            # Validar tamaño máximo para documentos y videos
+            if is_video and len(media_bytes) > MAX_VIDEO_SIZE_BYTES:
+                logger.warning(
+                    f"[MediaProcessor] Video excede 16MB: {len(media_bytes)} bytes"
+                )
+                result["body_for_ai"] = "[El cliente intentó enviar un video pero excede el límite de 16MB]"
+                return result
+
             if is_document and len(media_bytes) > MAX_DOCUMENT_SIZE_BYTES:
                 logger.warning(
                     f"[MediaProcessor] Documento excede 10MB: {len(media_bytes)} bytes"
@@ -634,6 +685,13 @@ class MediaProcessor:
                 img_format, _ = detect_image_format_by_magic_bytes(media_bytes)
                 extension = f".{img_format}"
                 logger.info(f"[MediaProcessor] Imagen cliente detectada: formato={img_format}")
+
+            elif is_video:
+                result["media_type"] = "video"
+                folder = "videos_clientes"
+                vid_format, _ = detect_video_format_by_magic_bytes(media_bytes)
+                extension = f".{vid_format}"
+                logger.info(f"[MediaProcessor] Video cliente detectado: formato={vid_format}")
 
             elif is_document:
                 doc_fmt, doc_icon = DOCUMENT_MIME_TYPES[content_type]
@@ -677,6 +735,9 @@ class MediaProcessor:
                     result["body_for_ai"] = f"[Imagen del cliente]: {analysis}"
                 else:
                     result["body_for_ai"] = "[El cliente envió una imagen]"
+
+            elif is_video:
+                result["body_for_ai"] = "[El cliente envió un video]"
 
             elif is_document:
                 result["body_for_ai"] = (
@@ -872,6 +933,7 @@ class MediaProcessor:
         content_lower = content_type.lower()
 
         # Formatos de audio soportados (webm, ogg, wav, mp4 del panel de asesoras)
+        is_video = "video" in content_lower
         is_audio = "audio" in content_lower or "webm" in content_lower or "ogg" in content_lower or "wav" in content_lower
         is_document = content_type in DOCUMENT_MIME_TYPES
 
@@ -887,6 +949,17 @@ class MediaProcessor:
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
             logger.info(f"[MediaProcessor] Subiendo documento asesor: formato={doc_fmt}")
+            return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
+
+        if is_video:
+            if len(file_bytes) > MAX_VIDEO_SIZE_BYTES:
+                raise ValueError(f"El video excede el límite de 16MB ({len(file_bytes)} bytes)")
+            folder = "videos_asesores"
+            vid_format, final_content_type = detect_video_format_by_magic_bytes(file_bytes)
+            extension = f".{vid_format}"
+            clean_phone = phone.replace("+", "").replace(" ", "")
+            filename = f"{clean_phone}_{int(time.time())}{extension}"
+            logger.info(f"[MediaProcessor] Subiendo video asesor: formato={vid_format}")
             return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_audio:

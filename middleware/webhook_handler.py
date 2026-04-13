@@ -1978,7 +1978,7 @@ async def _sync_message_to_hubspot(
         # Construir contenido para HubSpot incluyendo link multimedia si existe
         hubspot_content = message
         if media_url:
-            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "video": "🎬 Video", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
             hubspot_content = f"{message}\n\n{media_label}: {media_url}" if message else f"{media_label}: {media_url}"
 
         if direction == "incoming":
@@ -2178,7 +2178,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
         # Construir contenido para HubSpot incluyendo link multimedia si existe
         hubspot_client_content = user_message
         if media_url:
-            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
+            media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "video": "🎬 Video", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
             hubspot_client_content = f"{user_message}\n\n{media_label}: {media_url}" if user_message else f"{media_label}: {media_url}"
 
         # 1. Registrar mensaje del cliente en Timeline (con link multimedia si existe)

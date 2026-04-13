@@ -2212,6 +2212,15 @@ function renderChatBubbles(messages) {
                                 <span class="font-medium">Transcripcion:</span> ${escapeHtml(transcription)}
                             </div>`;
                     }
+                } else if (mediaType === 'video') {
+                    mediaHtml = `
+                        <div class="mb-2">
+                            <video src="${mediaUrl}" controls preload="metadata"
+                                   class="max-w-full rounded-lg"
+                                   style="max-height:300px;max-width:100%;">
+                                Tu navegador no soporta video.
+                            </video>
+                        </div>`;
                 } else if (mediaType === 'document' || _isDocUrl(mediaUrl)) {
                     // File Card para documentos (PDF, DOCX, XLSX)
                     const docFormat = msg.media?.doc_format
@@ -2274,7 +2283,7 @@ function renderChatBubbles(messages) {
                 const rpSender = rp.sender_name || rp.sender || '';
                 let rpText = escapeHtml((rp.content || '').substring(0, 80));
                 if (rp.media_type && !rp.content) {
-                    rpText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[rp.media_type] || '📎 Archivo';
+                    rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[rp.media_type] || '📎 Archivo';
                 }
                 const rpColor = rp.sender === 'client' ? '#6B7280' : (rp.sender === 'bot' ? '#D97706' : '#2563EB');
                 quoteHtml = `
@@ -2578,6 +2587,7 @@ function handleFileSelect(input) {
     const validTypes = [
         'image/jpeg', 'image/png', 'image/gif', 'image/webp',
         'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm',
+        'video/mp4', 'video/quicktime', 'video/3gpp', 'video/webm',
         'application/pdf',
         'application/msword',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -2585,16 +2595,19 @@ function handleFileSelect(input) {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ];
     if (!validTypes.includes(file.type)) {
-        alert('Tipo de archivo no soportado. Formatos permitidos: imágenes, audios, PDF, Word, Excel.');
+        alert('Tipo de archivo no soportado. Formatos permitidos: imágenes, audios, videos, PDF, Word, Excel.');
         input.value = '';
         return;
     }
 
-    // Validar tamaño: documentos max 10MB, otros max 16MB
+    // Validar tamaño: documentos max 10MB, videos y otros max 16MB
     const isDocument = file.type.includes('pdf') || file.type.includes('word') || file.type.includes('excel') || file.type.includes('spreadsheet');
+    const isVideo = file.type.startsWith('video/');
     const maxSize = isDocument ? 10 * 1024 * 1024 : 16 * 1024 * 1024;
     if (file.size > maxSize) {
-        alert(isDocument ? 'El documento es demasiado grande. Máximo 10MB.' : 'El archivo es demasiado grande. Máximo 16MB.');
+        if (isDocument) alert('El documento es demasiado grande. Máximo 10MB.');
+        else if (isVideo) alert('El video es demasiado grande. Máximo 16MB.');
+        else alert('El archivo es demasiado grande. Máximo 16MB.');
         input.value = '';
         return;
     }
@@ -2605,7 +2618,7 @@ function handleFileSelect(input) {
     const preview = document.getElementById('mediaPreview');
     const previewName = document.getElementById('mediaPreviewName');
 
-    const icon = file.type.startsWith('image/') ? '&#128247;' : '&#127911;';
+    const icon = file.type.startsWith('image/') ? '&#128247;' : (file.type.startsWith('video/') ? '&#127909;' : '&#127911;');
     previewName.innerHTML = `${icon} ${file.name}`;
     preview.classList.remove('hidden');
 
@@ -2641,9 +2654,9 @@ function selectReplyMessage(msgId) {
 
     let previewText = replyToMessage.content.substring(0, 80);
     if (replyToMessage.media_type && !replyToMessage.content) {
-        previewText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[replyToMessage.media_type] || '📎 Archivo';
+        previewText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[replyToMessage.media_type] || '📎 Archivo';
     } else if (replyToMessage.media_type) {
-        const icon = { image: '📷', audio: '🎵', document: '📄' }[replyToMessage.media_type] || '📎';
+        const icon = { image: '📷', audio: '🎵', video: '🎬', document: '📄' }[replyToMessage.media_type] || '📎';
         previewText = icon + ' ' + previewText;
     }
     document.getElementById('replyPreviewContent').textContent = previewText;
@@ -3918,7 +3931,7 @@ async function sendMessage(e) {
 
             // Mensaje diferente si incluia multimedia
             if (data.media_type) {
-                const mediaLabel = data.media_type === 'image' ? 'imagen' : (data.media_type === 'audio' ? 'audio' : 'archivo');
+                const mediaLabel = data.media_type === 'image' ? 'imagen' : (data.media_type === 'video' ? 'video' : (data.media_type === 'audio' ? 'audio' : 'archivo'));
                 resultDiv.textContent = `Mensaje con ${mediaLabel} enviado correctamente`;
             } else {
                 resultDiv.textContent = 'Mensaje enviado correctamente';
@@ -3942,6 +3955,8 @@ async function sendMessage(e) {
                 let _mediaHtml = '';
                 if (data.media_type === 'image' && data.media_url) {
                     _mediaHtml = `<div class="mb-2"><img src="${data.media_url}" alt="Imagen" class="max-w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity" style="max-height:300px;object-fit:contain;" onclick="window.open('${data.media_url}','_blank')"></div>`;
+                } else if (data.media_type === 'video' && data.media_url) {
+                    _mediaHtml = `<div class="mb-2"><video src="${data.media_url}" controls preload="metadata" class="max-w-full rounded-lg" style="max-height:300px;max-width:100%;">Tu navegador no soporta video.</video></div>`;
                 } else if (data.media_type === 'audio' && data.media_url) {
                     const _optPid = `ap-opt-${Date.now()}`;
                     _mediaHtml = buildAudioPlayerHtml(data.media_url, _detectAudioType(data.media_url), _optPid);
@@ -3956,7 +3971,7 @@ async function sendMessage(e) {
                     const _rpColor = _rp.sender === 'client' ? '#6B7280' : (_rp.sender === 'bot' ? '#D97706' : '#2563EB');
                     let _rpText = escapeHtml((_rp.content || '').substring(0, 80));
                     if (_rp.media_type && !_rp.content) {
-                        _rpText = { image: '📷 Imagen', audio: '🎵 Audio', document: '📄 Documento' }[_rp.media_type] || '📎 Archivo';
+                        _rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[_rp.media_type] || '📎 Archivo';
                     }
                     _quoteHtml = `
                         <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${_rpColor};">

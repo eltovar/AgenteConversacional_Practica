@@ -32,7 +32,7 @@ from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from integrations.hubspot import get_timeline_logger
 from database.mongodb_client import get_mongo_manager
-from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES
+from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 
 
 # Router de FastAPI para el panel de envío
@@ -1297,9 +1297,11 @@ async def send_message(
 
             logger.info(f"[Panel] 📁 Archivo recibido: {media_file.filename}, tipo={content_type}, tamaño={len(file_bytes)} bytes")
 
-            # Validar tamaño máximo para documentos
+            # Validar tamaño máximo para documentos y videos
             if content_type in DOCUMENT_MIME_TYPES and len(file_bytes) > MAX_DOCUMENT_SIZE_BYTES:
                 raise HTTPException(status_code=413, detail="El archivo excede el límite de 10MB")
+            if content_type.startswith("video/") and len(file_bytes) > MAX_VIDEO_SIZE_BYTES:
+                raise HTTPException(status_code=413, detail="El video excede el límite de 16MB")
 
             # Subir a Bunny.net Storage (CDN)
             permanent_media_url = await media_processor.upload_outgoing_media(
@@ -1313,6 +1315,8 @@ async def send_message(
             # Determinar tipo de media (incluir webm como audio)
             if content_type in DOCUMENT_MIME_TYPES:
                 media_type = "document"
+            elif content_type.startswith("video/"):
+                media_type = "video"
             elif content_type.startswith("image/"):
                 media_type = "image"
             elif content_type.startswith("audio/") or "webm" in content_type.lower():
@@ -1393,7 +1397,7 @@ async def send_message(
             # Construir contenido para HubSpot incluyendo link multimedia si existe
             hubspot_content = message_body
             if permanent_media_url:
-                media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
+                media_label = {"image": "📷 Imagen", "audio": "🎵 Audio", "video": "🎬 Video", "file": "📎 Archivo", "document": "📄 Documento"}.get(media_type, "📎 Archivo")
                 hubspot_content = f"{message_body}\n\n{media_label}: {permanent_media_url}" if message_body else f"{media_label}: {permanent_media_url}"
 
             background_tasks.add_task(

@@ -661,8 +661,13 @@ function jumpToNextVariable(textarea, direction, fromStart) {
 
 function extractVariableValues(originalBody, editedText, variables) {
     if (!variables || variables.length === 0) return {};
+
+    // Normalizar: trim + colapsar whitespace múltiple (tolera espacios/newlines extra)
+    const normalizedEdit = editedText.trim().replace(/\s+/g, ' ');
+    const normalizedBody = originalBody.trim().replace(/\s+/g, ' ');
+
     // Escapar caracteres especiales de regex en el template original
-    let pattern = originalBody.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&');
+    let pattern = normalizedBody.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&');
     // Reemplazar cada \{varname\} con un grupo de captura
     variables.forEach(v => {
         pattern = pattern.replace(`\\{${v}\\}`, '([\\s\\S]+?)');
@@ -670,13 +675,17 @@ function extractVariableValues(originalBody, editedText, variables) {
     // El último grupo debe ser greedy para capturar hasta el final
     pattern = pattern.replace(/\(\[\\s\\S\]\+\?\)(?=[^(]*$)/, '([\\s\\S]+)');
     try {
-        const match = editedText.match(new RegExp('^' + pattern + '$'));
+        // Intentar match exacto primero
+        let match = normalizedEdit.match(new RegExp('^' + pattern + '$'));
+        if (!match) {
+            // Fallback: permitir texto extra al inicio/final (asesora agregó algo)
+            match = normalizedEdit.match(new RegExp(pattern));
+        }
         if (!match) return {};
         const result = {};
-        variables.forEach((v, i) => { result[v] = match[i + 1] || ''; });
+        variables.forEach((v, i) => { result[v] = (match[i + 1] || '').trim(); });
         return result;
     } catch (e) {
-        // Si el regex falla, devolver objeto vacío (backend usa SafeDict)
         return {};
     }
 }
@@ -3857,6 +3866,17 @@ async function sendMessage(e) {
         } else {
             // Template con content_sid → pipeline de extracción (necesario para Twilio Content API)
             const vars = extractVariableValues(activeTemplateBody, message, activeTemplateVars) || {};
+            // Verificar que TODAS las variables tienen valor — si no, avisar a la asesora
+            const missingVars = activeTemplateVars.filter(v => !vars[v] || !vars[v].trim());
+            if (missingVars.length > 0) {
+                resultDiv.className = 'mt-2 text-sm text-red-600';
+                resultDiv.textContent =
+                    `No se pudieron extraer las variables: ${missingVars.join(', ')}. ` +
+                    `¿Modificaste el texto fijo de la plantilla? Selecciónala de nuevo con /`;
+                resultDiv.classList.remove('hidden');
+                setTimeout(() => resultDiv.classList.add('hidden'), 6000);
+                return;
+            }
             const tplId = activeTemplateId;
             activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
             const hint = document.getElementById('templateHint');
@@ -4195,7 +4215,7 @@ async function sendTemplateFromInput(templateId, variables) {
     } catch (err) {
         console.error('[Panel] Error en sendTemplateFromInput:', err);
         resultDiv.className = 'mt-2 text-sm text-red-600';
-        resultDiv.textContent = `Error: ${err.message}`;
+        resultDiv.textContent = err.message || 'Error enviando plantilla';
         resultDiv.classList.remove('hidden');
     } finally {
         document.getElementById('sendBtn').disabled = false;

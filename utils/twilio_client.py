@@ -163,6 +163,24 @@ class TwilioClient:
                 else:
                     error_msg = response.text
                     logger.error(f"[TwilioClient] Error enviando mensaje: {response.status_code} - {error_msg}")
+                    # Detectar error 21656 para dar mensaje accionable a la asesora
+                    twilio_error_code = None
+                    try:
+                        ct = response.headers.get("content-type", "")
+                        if "application/json" in ct:
+                            twilio_error_code = response.json().get("code")
+                    except Exception:
+                        pass
+                    if twilio_error_code == 21656:
+                        return {
+                            "status": "error",
+                            "code": 21656,
+                            "message": (
+                                "Las variables de la plantilla son inválidas. "
+                                "Selecciona la plantilla de nuevo con / y solo reemplaza "
+                                "los campos {variable} sin modificar el texto fijo."
+                            )
+                        }
                     return {
                         "status": "error",
                         "code": response.status_code,

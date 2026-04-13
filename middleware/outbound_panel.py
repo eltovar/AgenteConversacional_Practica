@@ -1821,6 +1821,21 @@ async def send_template_message(
                 str(i + 1): vars_dict.get(var_name, "")
                 for i, var_name in enumerate(variables_map)
             }
+        # Validar que ninguna variable esté vacía — evita error 21656 de Twilio
+        empty_vars = [k for k, v in content_variables.items() if not v or not str(v).strip()]
+        if empty_vars:
+            logger.error(
+                f"[Panel] content_variables vacíos: keys={empty_vars} "
+                f"vars_dict={vars_dict} map={variables_map}"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Las variables {', '.join(empty_vars)} están vacías. "
+                    f"Selecciona la plantilla de nuevo con / y solo reemplaza "
+                    f"los campos {{variable}} sin modificar el texto fijo."
+                )
+            )
         logger.info(
             f"[Panel] Usando ContentSid={content_sid} con variables={content_variables}"
         )

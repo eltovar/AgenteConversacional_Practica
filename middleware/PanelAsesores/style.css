@@ -145,6 +145,25 @@
     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
+/* Portal filter chips row — scrollbar fina */
+#portalFilterRow {
+    scrollbar-width: thin;
+    scrollbar-color: #D1D5DB transparent;
+}
+#portalFilterRow::-webkit-scrollbar {
+    height: 3px;
+}
+#portalFilterRow::-webkit-scrollbar-track {
+    background: transparent;
+}
+#portalFilterRow::-webkit-scrollbar-thumb {
+    background: #D1D5DB;
+    border-radius: 999px;
+}
+#portalFilterRow::-webkit-scrollbar-thumb:hover {
+    background: #9CA3AF;
+}
+
 /* Portal filter chips */
 .portal-chip {
     padding: 3px 10px;

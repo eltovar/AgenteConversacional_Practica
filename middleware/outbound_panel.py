@@ -25,7 +25,7 @@ import redis.asyncio as redis
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
-from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now
+from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
@@ -1807,7 +1807,7 @@ async def send_template_message(
     content_sid = template.get("content_sid")
     variables_map = template.get("content_variables_map", [])
     content_variables = None
-    if content_sid and variables_map:
+    if content_sid:
         if isinstance(variables_map, dict):
             # Numeración explícita: {"2": "link_inmueble"} → {"2": valor}
             # Usado cuando el template Meta no empieza en {{1}}

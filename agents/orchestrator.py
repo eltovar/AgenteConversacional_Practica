@@ -150,6 +150,12 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
 # ===== FUNCIONES AUXILIARES (Private Helpers) =====
 
 
+# Máximo de entries en state.history (30 turnos × 2 = 60).
+# Sin límite, conversaciones largas crecen indefinidamente en Redis (TTL 30 días)
+# y se deserializan completas en RAM en cada request del mismo usuario.
+_MAX_HISTORY_ENTRIES = 60
+
+
 def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg: str, now: datetime):
     """
     Centraliza la lógica de guardado de historial y persistencia de estado.
@@ -159,6 +165,10 @@ def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg
         state.history.append(f"User: {user_msg}")
     if agent_msg:
         state.history.append(f"Agent: {agent_msg}")
+
+    # Trim para evitar que el historial crezca sin límite en Redis y en RAM
+    if len(state.history) > _MAX_HISTORY_ENTRIES:
+        state.history = state.history[-_MAX_HISTORY_ENTRIES:]
 
     state.last_interaction_timestamp = now
 

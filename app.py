@@ -60,6 +60,7 @@ import uvicorn
 import os
 import asyncio
 import random
+from typing import Optional
 from datetime import timedelta
 # Scheduler para seguimiento automático
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -106,6 +107,19 @@ if missing := [k for k in REQUIRED if not os.getenv(k)]:
 def get_redis_url() -> str:
     """Obtiene la URL de Redis desde variables de entorno."""
     return os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+
+# Singleton del ConversationStateManager — evita crear una nueva pool Redis por request.
+# Sin esto, process_aggregated_messages() creaba una pool completa por cada mensaje entrante,
+# acumulando cientos de conexiones TCP huérfanas en RAM.
+_global_state_manager: Optional[ConversationStateManager] = None
+
+
+def get_state_manager() -> ConversationStateManager:
+    global _global_state_manager
+    if _global_state_manager is None:
+        _global_state_manager = ConversationStateManager(get_redis_url())
+    return _global_state_manager
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -238,8 +252,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
             logger.error("[BACKGROUND] Error actualizando ventana 24h: %s", window_err)
 
         # 4. Verificar si bot debe responder
-        redis_url = get_redis_url()
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = get_state_manager()
 
         try:
             is_bot_active = await state_manager.is_bot_active(phone_normalized)
@@ -345,9 +358,8 @@ async def check_appointment_reminders():
 
     await apply_jitter()
 
-    redis_url = get_redis_url()
-    apt_manager = AppointmentManager(redis_url)
-    state_manager = ConversationStateManager(redis_url)
+    apt_manager = AppointmentManager(get_redis_url())
+    state_manager = get_state_manager()
     now = get_bogota_now()
 
     logger.info("[Scheduler][Reminder] ▶ Ciclo iniciado — Hora Bogotá: %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
@@ -504,8 +516,7 @@ async def check_conversation_timeouts():
     """
     await apply_jitter()
 
-    redis_url = get_redis_url()
-    state_manager = ConversationStateManager(redis_url)
+    state_manager = get_state_manager()
     now = get_bogota_now()
 
     logger.info("[Scheduler] Verificando timeouts de conversaciones...")
@@ -560,8 +571,6 @@ async def check_conversation_timeouts():
                 await state_manager.activate_bot(phone, canal)
                 timeouts_processed += 1
 
-        await state_manager.close()
-
         logger.info("[Scheduler] Timeouts procesados: %d", timeouts_processed)
 
     except Exception as e:
@@ -603,6 +612,9 @@ async def check_and_send_followups():
         followups_sent = 0
         contacts_checked = 0
 
+        # Una sola instancia CSM para todo el ciclo — evita crear una pool Redis por contacto.
+        followup_state_manager = get_state_manager()
+
         async for key in r.scan_iter(match=f"{LAST_MSG_PREFIX}*"):
             contacts_checked += 1
             phone = key.replace(LAST_MSG_PREFIX, "")
@@ -627,8 +639,7 @@ async def check_and_send_followups():
                     continue
 
                 # 4. Verificar estado de conversación
-                state_manager = ConversationStateManager(redis_url)
-                status = await state_manager.get_status(phone)
+                status = await followup_state_manager.get_status(phone)
 
                 if status in [ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION]:
                     logger.info(
@@ -650,7 +661,7 @@ async def check_and_send_followups():
 
                     # 6. Obtener nombre del contacto
                     contact_name = "cliente"
-                    meta = await state_manager.get_meta(phone)
+                    meta = await followup_state_manager.get_meta(phone)
                     if meta and meta.display_name:
                         contact_name = meta.display_name.split()[0]
 
@@ -700,9 +711,8 @@ async def check_appointment_followups():
 
     await apply_jitter()
 
-    redis_url = get_redis_url()
-    apt_manager = AppointmentManager(redis_url)
-    state_manager = ConversationStateManager(redis_url)
+    apt_manager = AppointmentManager(get_redis_url())
+    state_manager = get_state_manager()
     now = get_bogota_now()
 
     logger.info("[Scheduler][Followup] ▶ Ciclo iniciado — Hora Bogotá: %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
@@ -1019,14 +1029,13 @@ async def shutdown_event():
         scheduler.shutdown(wait=False)
         logger.info("[SHUTDOWN] Schedulers detenidos")
 
-    # 2. Cerrar conexión de Redis (State Manager)
+    # 2. Cerrar el singleton de ConversationStateManager
     try:
-        redis_url = get_redis_url()
-        state_manager = ConversationStateManager(redis_url)
-        await state_manager.close()
-        logger.info("[SHUTDOWN] Conexión a Redis cerrada")
+        if _global_state_manager is not None:
+            await _global_state_manager.close()
+        logger.info("[SHUTDOWN] Conexión a Redis (singleton CSM) cerrada")
     except Exception as e:
-        logger.warning(f"[SHUTDOWN] Error cerrando Redis: {e}")
+        logger.warning(f"[SHUTDOWN] Error cerrando Redis singleton: {e}")
 
     # 3. Cerrar conexión de MongoDB
     try:

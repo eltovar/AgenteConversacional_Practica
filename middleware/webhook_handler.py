@@ -1862,6 +1862,7 @@ async def _check_followup_response(phone_normalized: str) -> tuple:
     Returns:
         Tupla (found: bool, canal: Optional[str]) - True y el canal si hay followup pendiente
     """
+    r = None
     try:
         config = get_config()
         import redis.asyncio as redis_async
@@ -1882,12 +1883,14 @@ async def _check_followup_response(phone_normalized: str) -> tuple:
             logger.info(f"[Webhook] Followup pendiente detectado y eliminado: {key} (canal: {canal})")
             break  # Solo necesitamos encontrar uno
 
-        await r.close()
         return found, canal
 
     except Exception as e:
         logger.error("[Webhook] Error verificando followup response: %s", e)
         return False, None
+    finally:
+        if r:
+            await r.aclose()
 
 
 def _create_twiml_response(message: str) -> Response:

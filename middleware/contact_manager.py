@@ -129,7 +129,8 @@ class ContactManager:
             self._redis = redis.from_url(
                 redis_url,
                 encoding="utf-8",
-                decode_responses=True
+                decode_responses=True,
+                max_connections=10
             )
         return self._redis
 

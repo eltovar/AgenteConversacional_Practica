@@ -377,7 +377,6 @@ async def check_appointment_reminders():
     VALID_STATUSES = {ConversationStatus.BOT_ACTIVE, ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION}
 
     try:
-        # Obtener citas pendientes usando método correcto
         upcoming_appointments = await apt_manager.get_appointments_needing_reminder()
 
         logger.info("[Scheduler][Reminder] Citas encontradas para recordatorio: %d", len(upcoming_appointments))
@@ -502,7 +501,6 @@ async def check_appointment_reminders():
             else:
                 logger.warning("[Scheduler][Reminder] Twilio no disponible para recordatorios")
 
-        await apt_manager.close()
         logger.info(
             "[Scheduler][Reminder] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
             total, sent, skipped
@@ -510,6 +508,8 @@ async def check_appointment_reminders():
 
     except Exception as e:
         logger.error("[Scheduler][Reminder] Error en check_appointment_reminders: %s", e, exc_info=True)
+    finally:
+        await apt_manager.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -607,6 +607,7 @@ async def check_and_send_followups():
     logger.info("[FOLLOWUP] Iniciando verificación de seguimientos pendientes...")
     logger.info("[FOLLOWUP] Hora actual (Bogotá): %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
 
+    r = None
     try:
         import redis.asyncio as redis_async
 
@@ -703,11 +704,13 @@ async def check_and_send_followups():
             except Exception as contact_err:
                 logger.error("[FOLLOWUP] Error procesando %s: %s", phone, contact_err)
 
-        await r.close()
         logger.info("[FOLLOWUP] Completado. Revisados: %d, Enviados: %d", contacts_checked, followups_sent)
 
     except Exception as e:
         logger.error("[FOLLOWUP] Error general: %s", e, exc_info=True)
+    finally:
+        if r:
+            await r.aclose()
 
 
 async def check_appointment_followups():
@@ -842,7 +845,6 @@ async def check_appointment_followups():
             except Exception as apt_err:
                 logger.error("[Scheduler][Followup] Error en followup post-cita %s: %s", apt.phone_normalized, apt_err)
 
-        await apt_manager.close()
         logger.info(
             "[Scheduler][Followup] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
             total, sent, skipped
@@ -850,6 +852,8 @@ async def check_appointment_followups():
 
     except Exception as e:
         logger.error("[Scheduler][Followup] Error en check_appointment_followups: %s", e, exc_info=True)
+    finally:
+        await apt_manager.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -882,9 +886,10 @@ async def health_check():
     }
 
     try:
-        import redis
-        redis_url = get_redis_url()
-        redis.from_url(redis_url, socket_connect_timeout=1).ping()
+        # Reusar singleton — antes creaba redis.from_url() por cada /health call
+        # sin cerrar el pool, generando ~120 pools huérfanos/hora con Railway health checks
+        sm = get_state_manager()
+        await sm.redis.ping()
         status["redis"] = "connected"
     except Exception:
         status["redis"] = "error"

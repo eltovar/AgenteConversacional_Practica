@@ -515,7 +515,9 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 
 
 # Caché temporal para datos de contactos (se llena con batch, se consume en enriquecimiento)
+# Max 500 entradas para evitar crecimiento sin límite en memoria
 _batch_contact_cache: Dict[str, Dict[str, Any]] = {}
+_BATCH_CACHE_MAX = 500
 
 
 # ============================================================================
@@ -5121,19 +5123,21 @@ async def create_appointment(
             phone_normalized = phone_norm_result.normalized if phone_norm_result.is_valid else phone
 
             apt_manager = AppointmentManager(redis_url)
-            await apt_manager.create_appointment(
-                phone_normalized=phone_normalized,
-                canal=body.canal,
-                scheduled_datetime=appt_dt_bogota,
-                contact_name=contact_firstname or None,
-                contact_id=contact_id,
-                notes=body.notes or None,
-            )
-            await apt_manager.close()
-            logger.info(
-                f"[Panel] Cita sincronizada a Redis: phone={phone_normalized}, canal={body.canal}, "
-                f"dt={appt_dt_bogota.isoformat()}"
-            )
+            try:
+                await apt_manager.create_appointment(
+                    phone_normalized=phone_normalized,
+                    canal=body.canal,
+                    scheduled_datetime=appt_dt_bogota,
+                    contact_name=contact_firstname or None,
+                    contact_id=contact_id,
+                    notes=body.notes or None,
+                )
+                logger.info(
+                    f"[Panel] Cita sincronizada a Redis: phone={phone_normalized}, canal={body.canal}, "
+                    f"dt={appt_dt_bogota.isoformat()}"
+                )
+            finally:
+                await apt_manager.close()
         except Exception as redis_err:
             # No falla el endpoint — MongoDB ya tiene la cita
             logger.warning(f"[Panel] No se pudo sincronizar cita a Redis (recordatorios pueden no funcionar): {redis_err}")
@@ -5188,9 +5192,11 @@ async def cancel_appointment(
             from middleware.appointment_manager import AppointmentManager
             redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
             apt_mgr = AppointmentManager(redis_url)
-            await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
-            await apt_mgr.close()
-            logger.info("[Panel] Cita cancelada en Redis: %s", apt_doc["phone"])
+            try:
+                await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
+                logger.info("[Panel] Cita cancelada en Redis: %s", apt_doc["phone"])
+            finally:
+                await apt_mgr.close()
         except Exception as redis_err:
             logger.error("[Panel] Error sincronizando cancelación en Redis: %s", redis_err)
 
@@ -5247,12 +5253,14 @@ async def update_appointment(
                 from middleware.appointment_manager import AppointmentManager
                 redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
                 apt_mgr = AppointmentManager(redis_url)
-                rescheduled = await apt_mgr.reschedule_appointment(
-                    apt_doc["phone"],
-                    apt_doc.get("canal", "whatsapp"),
-                    appt_dt
-                )
-                await apt_mgr.close()
+                try:
+                    rescheduled = await apt_mgr.reschedule_appointment(
+                        apt_doc["phone"],
+                        apt_doc.get("canal", "whatsapp"),
+                        appt_dt
+                    )
+                finally:
+                    await apt_mgr.close()
                 if rescheduled:
                     logger.info("[Panel] Cita reprogramada en Redis: %s → %s", apt_doc["phone"], appt_dt)
                 else:
@@ -5286,9 +5294,11 @@ async def delete_appointment(
             from middleware.appointment_manager import AppointmentManager
             redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
             apt_mgr = AppointmentManager(redis_url)
-            await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
-            await apt_mgr.close()
-            logger.info("[Panel] Cita eliminada de Redis: %s", apt_doc["phone"])
+            try:
+                await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
+                logger.info("[Panel] Cita eliminada de Redis: %s", apt_doc["phone"])
+            finally:
+                await apt_mgr.close()
         except Exception as redis_err:
             logger.error("[Panel] Error limpiando cita eliminada en Redis: %s", redis_err)
 

@@ -188,10 +188,16 @@ class SofiaBrain:
         if session_id in self._history_cache:
             return self._history_cache[session_id]
 
-        # Evict oldest si se excede el límite
+        # Evict oldest si se excede el límite — cerrar Redis pool interno
         if len(self._history_cache) >= self._history_cache_max:
             oldest_key = next(iter(self._history_cache))
-            del self._history_cache[oldest_key]
+            evicted = self._history_cache.pop(oldest_key)
+            try:
+                # RedisChatMessageHistory almacena un redis.Redis client internamente
+                if hasattr(evicted, 'redis_client') and evicted.redis_client:
+                    evicted.redis_client.close()
+            except Exception:
+                pass
 
         history = RedisChatMessageHistory(
             session_id=session_id,

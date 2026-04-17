@@ -330,6 +330,19 @@ def _get_redis_url_str() -> str:
     )
 
 
+# Singleton de ConversationStateManager (evita crear pool Redis por request)
+_state_manager_singleton: Optional[ConversationStateManager] = None
+
+
+def _get_state_manager() -> ConversationStateManager:
+    """Singleton de ConversationStateManager — 1 pool Redis para todo el proceso."""
+    global _state_manager_singleton
+    if _state_manager_singleton is None:
+        _state_manager_singleton = ConversationStateManager(_get_redis_url_str())
+        logger.info("[Panel] ConversationStateManager singleton inicializado")
+    return _state_manager_singleton
+
+
 async def _hubspot_post(client, url: str, payload: dict, api_key: str, max_retries: int = 3):
     """
     POST a HubSpot con retry automático en 429 (rate limit).
@@ -813,7 +826,7 @@ async def _hydrate_contact(
     # ── Paso J: Persistencia opcional ───────────────────────────────────────
     if add_to_zset:
         try:
-            _sm = ConversationStateManager(_get_redis_url_str())
+            _sm = _get_state_manager()
             await _sm.ensure_meta_with_channel(
                 phone=phone_norm,
                 canal=canal_final,
@@ -1237,12 +1250,7 @@ async def send_message(
     # Pausar Sofía y cambiar a IN_CONVERSATION (asesora está chateando activamente)
     # SEGREGACIÓN POR CANAL: Usar el canal proporcionado para operaciones de estado
     try:
-        # Redis URL unificado (Railway interna, local pública)
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         canal_info = f":{canal_final}"
 
@@ -1569,11 +1577,7 @@ async def send_message_json(
 
     # Pausar Sofía y cambiar estado
     try:
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         current_status = await state_manager.get_status(phone_normalized, canal_final)
 
@@ -2293,11 +2297,7 @@ async def create_manual_contact(
 
     # === 6. Activar HUMAN_ACTIVE en Redis ===
     try:
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         display_name = f"{firstname} {lastname}".strip()
 
@@ -2382,11 +2382,7 @@ async def transfer_contact(
         raise HTTPException(status_code=400, detail="Modo debe ser 'exclusive' o 'collaborative'")
 
     # === 1. Transferir en Redis ===
-    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    redis_url = os.getenv("REDIS_URL") if is_railway else (
-        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-    )
-    state_manager = ConversationStateManager(redis_url)
+    state_manager = _get_state_manager()
 
     result = await state_manager.transfer_contact(
         phone=phone_normalized,
@@ -2567,11 +2563,7 @@ async def request_transfer(
     display = contact_name or phone
 
     # 1. Activar contacto en el panel del solicitante inmediatamente
-    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    redis_url = os.getenv("REDIS_URL") if is_railway else (
-        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-    )
-    state_manager = ConversationStateManager(redis_url)
+    state_manager = _get_state_manager()
     try:
         await state_manager.activate_human(
             phone_normalized=phone,
@@ -2613,7 +2605,7 @@ async def request_transfer(
 
     # Inbox: el receptor recibe el contacto como no-leído; el emisor lo pierde
     try:
-        _sm_tr = ConversationStateManager(_get_redis_url_str())
+        _sm_tr = _get_state_manager()
         await _sm_tr.add_to_advisor_inbox(requesting_advisor_id, phone, canal or "whatsapp")
         await _sm_tr.remove_from_advisor_inbox(owner_advisor_id, phone, canal or "whatsapp")
     except Exception as _tr_req_inbox_err:
@@ -2683,7 +2675,7 @@ async def accept_transfer(
 
     # Inbox: el solicitante recibe el contacto como no-leído; el propietario anterior lo pierde
     try:
-        _sm_ta = ConversationStateManager(_get_redis_url_str())
+        _sm_ta = _get_state_manager()
         await _sm_ta.add_to_advisor_inbox(requester_id, phone, None)
         await _sm_ta.remove_from_advisor_inbox(by_advisor_id, phone, None)
     except Exception as _ta_inbox_err:
@@ -2888,12 +2880,7 @@ async def close_conversation(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     try:
-        # Redis URL unificado (Railway interna, local pública)
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         # Transicionar a BOT_ACTIVE para que Sofía retome la conversación con contexto
         await state_manager.activate_bot(phone_normalized, canal=canal)
@@ -2983,7 +2970,7 @@ async def mark_contact_read(
         normalizer = PhoneNormalizer()
         validation = normalizer.normalize(phone)
         phone_norm = validation.normalized if validation.is_valid else phone
-        sm = ConversationStateManager(_get_redis_url_str())
+        sm = _get_state_manager()
         # Si no se recibe advisor_id, inferirlo del meta del contacto
         if not advisor_id:
             _meta = await sm.get_meta(phone_norm, canal or "whatsapp")
@@ -3113,12 +3100,7 @@ async def reset_bot_state(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     try:
-        # Redis URL unificado (Railway interna, local pública)
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         results = []
 
@@ -3640,12 +3622,7 @@ async def take_control_of_conversation(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     try:
-        # Redis URL unificado
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         # Verificar estado actual
         current_status = await state_manager.get_status(phone_normalized, canal or "whatsapp")
@@ -3914,12 +3891,7 @@ async def _get_contacts_by_worker_filter(
     if contact_ids:
         batch_names = await _hubspot_batch_get_contacts(contact_ids)
 
-    # Redis: estado de conversación
-    is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-    redis_url = os.getenv("REDIS_URL") if is_railway else (
-        os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-    )
-    state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
     contacts_out = []
     for rec in unique_records[:limit]:
@@ -4102,13 +4074,7 @@ async def get_active_contacts(
             )
 
         # === PASO 1: Obtener contactos ACTIVOS de Redis ===
-        # Redis URL unificado (Railway interna, local pública)
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        logger.info(f"[Panel] Usando Redis URL: {re.sub(r':[^:@/]+@', ':***@', redis_url)}")
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         # === CACHE: Respuesta completa en Redis (TTL 5s) para colapsar concurrent requests ===
         _cache_params = f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:{date_field}:{page}:{limit}"
@@ -5489,7 +5455,7 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     También remueve el contacto del inbox del asesor (el asesor ya está atendiendo).
     """
     try:
-        state_manager = ConversationStateManager(_get_redis_url_str())
+        state_manager = _get_state_manager()
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
         logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
         # Inbox: el asesor está enviando → ya vio el contacto → remover del inbox
@@ -6320,11 +6286,7 @@ async def restore_panel_from_hubspot(
             }
 
         # 2. Restaurar metas Redis
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-        state_manager = ConversationStateManager(redis_url)
+        state_manager = _get_state_manager()
 
         restored = 0
         already_active = 0

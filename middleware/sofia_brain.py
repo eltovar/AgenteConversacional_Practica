@@ -133,6 +133,10 @@ class SofiaBrain:
         self.redis_url = redis_url
         self.use_single_stream = use_single_stream
 
+        # LRU cache para RedisChatMessageHistory — evita crear pool Redis por mensaje
+        self._history_cache: Dict[str, RedisChatMessageHistory] = {}
+        self._history_cache_max = 100  # máximo 100 sesiones cacheadas
+
         # Inicializar LLM
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -178,20 +182,25 @@ class SofiaBrain:
 
     def _get_message_history(self, session_id: str) -> RedisChatMessageHistory:
         """
-        Obtiene el historial de mensajes de Redis.
-
-        Args:
-            session_id: ID de sesión (formato phone:canal)
-
-        Returns:
-            RedisChatMessageHistory configurado
+        Obtiene el historial de mensajes de Redis (con cache LRU).
+        Reutiliza la misma conexión Redis para el mismo session_id.
         """
-        return RedisChatMessageHistory(
+        if session_id in self._history_cache:
+            return self._history_cache[session_id]
+
+        # Evict oldest si se excede el límite
+        if len(self._history_cache) >= self._history_cache_max:
+            oldest_key = next(iter(self._history_cache))
+            del self._history_cache[oldest_key]
+
+        history = RedisChatMessageHistory(
             session_id=session_id,
             url=self.redis_url,
             key_prefix="message_store:",
             ttl=self.SESSION_TTL,
         )
+        self._history_cache[session_id] = history
+        return history
 
     async def process_message(
         self,

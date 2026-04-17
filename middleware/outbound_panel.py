@@ -31,6 +31,9 @@ from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from integrations.hubspot import get_timeline_logger, hubspot_client as _hs_singleton
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+limiter = Limiter(key_func=get_remote_address)
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 
@@ -98,6 +101,17 @@ _redis_pool: Optional[redis.Redis] = None
 
 # Singleton de cliente HTTP con connection pooling (evita crear conexión por request)
 _httpx_client: Optional[httpx.AsyncClient] = None
+
+# Singleton de ContactManager (evita crear Redis pool + HubSpotClient por request)
+_contact_manager_singleton: Optional[ContactManager] = None
+
+def _get_contact_manager() -> ContactManager:
+    """Singleton de ContactManager — 1 pool Redis + 1 HubSpotClient para todo el proceso."""
+    global _contact_manager_singleton
+    if _contact_manager_singleton is None:
+        _contact_manager_singleton = ContactManager(hubspot_client=_hs_singleton)
+        logger.info("[Panel] ContactManager singleton inicializado")
+    return _contact_manager_singleton
 
 # ============================================================================
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
@@ -658,7 +672,7 @@ async def _hydrate_contact(
     # y saltar directo a HubSpot — reduce presión sobre el pool.
     if not contact_id and redis_ok:
         try:
-            cm = ContactManager()
+            cm = _get_contact_manager()
             contact_id = await cm._search_contact(phone_norm)
         except Exception as e:
             logger.debug(f"[Hydrate] _search_contact falló para {phone_norm}: {e}")
@@ -1148,7 +1162,9 @@ async def _delete_template_by_advisor(advisor_id: str, template_id: str) -> bool
 # ============================================================================
 
 @router.post("/send-message")
+@limiter.limit("20/minute")
 async def send_message(
+    request: Request,
     background_tasks: BackgroundTasks,
     to: Optional[str] = Form(None, description="Número de destino (+573001234567)"),
     phone: Optional[str] = Form(None, description="Alias legacy: 'phone' (compatibilidad)"),
@@ -1235,7 +1251,7 @@ async def send_message(
     # Obtener/crear contacto si no se proporcionó
     if not contact_id:
         try:
-            contact_manager = ContactManager()
+            contact_manager = _get_contact_manager()
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=phone_normalized,  # Usar número normalizado, no 'to' que puede ser None
                 source_channel="panel_asesor"
@@ -1488,9 +1504,11 @@ async def send_message(
 
 
 @router.post("/send-message-json")
+@limiter.limit("20/minute")
 async def send_message_json(
+    request: Request,
     background_tasks: BackgroundTasks,
-    request: SendMessageRequest,
+    msg_request: SendMessageRequest = Body(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -1515,7 +1533,7 @@ async def send_message_json(
         raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
 
     # Obtener mensaje (soportar 'message' o 'body')
-    body = request.message or request.body
+    body = msg_request.message or msg_request.body
     
     # Validar que haya contenido
     if not body or not body.strip():
@@ -1523,7 +1541,7 @@ async def send_message_json(
 
     # Normalizar número
     normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(request.phone)
+    validation = normalizer.normalize(msg_request.phone)
 
     if not validation.is_valid:
         raise HTTPException(
@@ -1534,14 +1552,14 @@ async def send_message_json(
     phone_normalized = validation.normalized
 
     # Normalizar canal
-    canal_final = request.canal.lower().strip() if request.canal else "whatsapp"
+    canal_final = msg_request.canal.lower().strip() if msg_request.canal else "whatsapp"
     if canal_final == "null" or not canal_final:
         canal_final = "whatsapp"
 
     # Verificar ventana de 24 horas
     window_status = await check_24h_window(phone_normalized)
 
-    if not window_status.is_open and not request.force_send:
+    if not window_status.is_open and not msg_request.force_send:
         return JSONResponse(
             status_code=200,
             content={
@@ -1561,10 +1579,10 @@ async def send_message_json(
         )
 
     # Obtener/crear contacto si no se proporcionó
-    contact_id = request.contact_id
+    contact_id = msg_request.contact_id
     if not contact_id:
         try:
-            contact_manager = ContactManager()
+            contact_manager = _get_contact_manager()
             contact_info = await contact_manager.identify_or_create_contact(
                 phone_raw=phone_normalized,
                 source_channel="panel_asesor"
@@ -1622,8 +1640,8 @@ async def send_message_json(
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
                 metadata={"source": "Panel JSON API"},
-                reply_to_id=request.reply_to_id,
-                reply_to_preview=request.reply_to_preview
+                reply_to_id=msg_request.reply_to_id,
+                reply_to_preview=msg_request.reply_to_preview
             )
         except Exception as e:
             logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
@@ -3422,7 +3440,7 @@ async def get_conversation_history(
         # PASO 2: Si MongoDB vacío → Fallback a HubSpot (datos históricos)
         # =====================================================================
         if not messages:
-            contact_manager = ContactManager()
+            contact_manager = _get_contact_manager()
             contact_id = await contact_manager._search_contact(phone_normalized)
 
             if contact_id:
@@ -3996,7 +4014,9 @@ async def _get_contacts_by_worker_filter(
 
 
 @router.get("/contacts")
+@limiter.limit("30/minute")
 async def get_active_contacts(
+    request: Request,
     filter_time: str = Query("24h", description="Filtro de tiempo: 24h, 48h, 1week, custom"),
     date_from: Optional[str] = Query(None, description="Fecha desde (ISO) para filtro custom"),
     date_to: Optional[str] = Query(None, description="Fecha hasta (ISO) para filtro custom"),
@@ -4159,7 +4179,7 @@ async def get_active_contacts(
         )
 
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
-        contact_manager = ContactManager()
+        contact_manager = _get_contact_manager()
         
         # ── PASO 2.1: Batch request para obtener nombres de contactos ──
         # Pre-check Redis cache (4h TTL) antes de llamar HubSpot — reduce 429s aún más

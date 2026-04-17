@@ -760,7 +760,7 @@ def get_contact_manager() -> ContactManager:
     """Obtiene el gestor de contactos (lazy init)."""
     global _contact_manager
     if _contact_manager is None:
-        _contact_manager = ContactManager()
+        _contact_manager = ContactManager(hubspot_client=hubspot_client)
     return _contact_manager
 
 

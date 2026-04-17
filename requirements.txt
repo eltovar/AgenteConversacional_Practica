@@ -29,6 +29,9 @@ python-multipart>=0.0.6  # Requerido para Form() data de Twilio
 twilio>=9.0.0  # Cliente WhatsApp/SMS
 
 
+# Rate Limiting (protección anti-abuso)
+slowapi>=0.1.9
+
 # Redis (para persistencia de estado)
 redis>=5.0.0
 

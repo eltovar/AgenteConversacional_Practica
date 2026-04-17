@@ -22,6 +22,18 @@ def get_contact_manager():
     return ContactManager
 
 
+_contact_manager_instance = None
+
+def get_contact_manager_singleton():
+    """Singleton de ContactManager — 1 pool Redis + 1 HubSpotClient para todo el proceso."""
+    global _contact_manager_instance
+    if _contact_manager_instance is None:
+        from .contact_manager import ContactManager
+        from integrations.hubspot import hubspot_client
+        _contact_manager_instance = ContactManager(hubspot_client=hubspot_client)
+    return _contact_manager_instance
+
+
 def get_contact_info():
     """Lazy import de ContactInfo."""
     from .contact_manager import ContactInfo

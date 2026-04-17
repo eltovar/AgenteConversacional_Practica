@@ -67,7 +67,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 # Importar componentes del middleware (Sesión 1)
-from middleware import get_whatsapp_router, get_outbound_panel_router, get_contact_manager
+from middleware import get_whatsapp_router, get_outbound_panel_router, get_contact_manager, get_contact_manager_singleton
 from middleware.conversation_state import (
     ConversationStateManager,
     ConversationStatus,
@@ -127,6 +127,17 @@ def get_state_manager() -> ConversationStateManager:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(title="Sofía IA - Middleware", version="2.0.0")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RATE LIMITING — protección contra abuso y reducción de carga en hot paths
+# ═══════════════════════════════════════════════════════════════════════════════
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Manejador global de errores para devolver JSON en caso de error 500
 from fastapi.requests import Request
@@ -266,8 +277,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 
                 # Registrar mensaje en HubSpot aunque bot esté silenciado
                 try:
-                    ContactManager = get_contact_manager()
-                    contact_manager = ContactManager()
+                    contact_manager = get_contact_manager_singleton()
                     contact_info = await contact_manager.identify_or_create_contact_safe(
                         phone_raw=phone_normalized,
                         source_channel="whatsapp_directo"
@@ -290,8 +300,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 
         # 5. Registrar mensaje en HubSpot
         try:
-            ContactManager = get_contact_manager()
-            contact_manager = ContactManager()
+            contact_manager = get_contact_manager_singleton()
             contact_info = await contact_manager.identify_or_create_contact_safe(
                 phone_raw=phone_normalized,
                 source_channel="whatsapp_directo"

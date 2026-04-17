@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 from typing import Dict, Any
 from state_manager import ConversationState, ConversationStatus
-from integrations.hubspot.hubspot_client import HubSpotClient
+from integrations.hubspot import hubspot_client as _hs_singleton
 from integrations.hubspot.hubspot_utils import (
     normalize_phone_e164,
     calculate_lead_score,
@@ -39,6 +39,21 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from logging_config import logger
 import json
 
+# Singleton Redis para CRMAgent (evita crear pool por cada sync/handoff)
+_crm_redis: aioredis.Redis = None
+
+def _get_crm_redis() -> aioredis.Redis:
+    """Singleton Redis para operaciones CRM (partial sync, handoff)."""
+    global _crm_redis
+    if _crm_redis is None:
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        _crm_redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        logger.info("[CRMAgent] Redis singleton inicializado")
+    return _crm_redis
+
 
 class CRMAgent:
     """
@@ -48,7 +63,7 @@ class CRMAgent:
 
     def __init__(self):
         """Inicializa el agente con cliente HubSpot y asignador de leads."""
-        self.hubspot = HubSpotClient()
+        self.hubspot = _hs_singleton
         self.assigner = lead_assigner
         logger.info("[CRMAgent] Inicializado con integración HubSpot y LLM conversacional.")
 
@@ -88,7 +103,8 @@ class CRMAgent:
                 lead_name_check = state.lead_data.get('name')
                 will_handoff = bool(lead_name_check) and not is_first_turn
                 if not will_handoff:
-                    asyncio.create_task(self._partial_hubspot_sync(state, dict(metadata)))
+                    task = asyncio.create_task(self._partial_hubspot_sync(state, dict(metadata)))
+                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
             # 2. En el primer turno, SIEMPRE generar respuesta conversacional
             # No intentamos extraer nombre ni enviar al CRM en el primer turno
@@ -768,16 +784,9 @@ class CRMAgent:
             meta_keys_con_valor = [k for k, v in metadata.items() if v and str(v).strip()]
             logger.info("[CRMAgent] Partial sync iniciado. metadata keys con valor: %s", meta_keys_con_valor)
 
-            # Obtener URL de Redis (mismo patrón que _activate_human_in_panel)
-            is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-            redis_url = os.getenv("REDIS_URL") if is_railway else (
-                os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-            )
-
-            r = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            r = _get_crm_redis()
             contact_id = await r.get(f"phone_cache:{phone}")
             deal_id = await r.get(f"deal_id_cache:{phone}")
-            await r.aclose()
 
             if not contact_id:
                 logger.debug("[CRMAgent] Partial sync omitido: contact_id no disponible aún en Redis")
@@ -845,19 +854,11 @@ class CRMAgent:
         HANDOFF_TTL_SECONDS = 72 * 60 * 60  # 72 horas (igual que ConversationStateManager)
         DEFAULT_CANAL = "default"
 
-        # Obtener URL de Redis (UNIFICADO con ConversationStateManager)
-        # En Railway usar REDIS_URL (conexión interna), fuera usar REDIS_PUBLIC_URL
-        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        redis_url = os.getenv("REDIS_URL") if is_railway else (
-            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
-        )
-
         # Usar canal o default
         canal_safe = canal_origen or DEFAULT_CANAL
 
         try:
-            # Conectar a Redis
-            r = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+            r = _get_crm_redis()
 
             # 1. Guardar estado HUMAN_ACTIVE con TTL y CANAL
             # Key con canal: conv_state:{phone}:{canal}
@@ -892,8 +893,6 @@ class CRMAgent:
             index_member = f"{phone_normalized}:{canal_safe}"
             score = now.timestamp()
             await r.zadd(ACTIVE_CONTACTS_ZSET, {index_member: score})
-
-            await r.close()
 
             logger.info(
                 f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized}:{canal_safe} "

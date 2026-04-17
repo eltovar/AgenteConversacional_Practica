@@ -30,7 +30,7 @@ from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
-from integrations.hubspot import get_timeline_logger
+from integrations.hubspot import get_timeline_logger, hubspot_client as _hs_singleton
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 
@@ -673,8 +673,7 @@ async def _hydrate_contact(
     # no depende de nuestro Redis pool.
     if not contact_id and HUBSPOT_API_KEY:
         try:
-            from integrations.hubspot.hubspot_client import HubSpotClient
-            _hc = HubSpotClient()
+            _hc = _hs_singleton
             hs = await _hc.search_contact_by_phone_with_properties(phone_norm)
             if hs:
                 if hs.get("id"):
@@ -726,8 +725,7 @@ async def _hydrate_contact(
     # Último recurso: si aún no hay nombre, intentar search_contact_by_phone_with_properties
     if not display_name and HUBSPOT_API_KEY:
         try:
-            from integrations.hubspot.hubspot_client import HubSpotClient
-            _hc = HubSpotClient()
+            _hc = _hs_singleton
             hs = await _hc.search_contact_by_phone_with_properties(phone_norm)
             if hs:
                 props = hs.get("properties") or {}
@@ -5031,8 +5029,7 @@ async def create_appointment(
     # Crear nota en HubSpot (en background para no bloquear)
     hubspot_note_id = None
     try:
-        from integrations.hubspot.hubspot_client import HubSpotClient
-        hs_client = HubSpotClient()
+        hs_client = _hs_singleton
         hubspot_note_id = await hs_client.create_note(
             contact_id=contact_id,
             body=note_body,

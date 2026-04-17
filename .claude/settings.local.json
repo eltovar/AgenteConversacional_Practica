@@ -4,7 +4,8 @@
       "Bash(test -d:*)",
       "Bash(python:*)",
       "Bash(venv/Scripts/python -m pytest tests/state/test_state_manager.py tests/panel/test_handoff_panel_flow.py tests/panel/test_panel_fixes.py -v -k \"not endpoint and not redis and not close and not requires\")",
-      "Bash(venv/Scripts/python -m pytest \"tests/panel/test_panel_fixes.py::TestIntegration::test_panel_loads_without_errors\" -v)"
+      "Bash(venv/Scripts/python -m pytest \"tests/panel/test_panel_fixes.py::TestIntegration::test_panel_loads_without_errors\" -v)",
+      "Bash(venv/Scripts/python -m pytest tests/state/test_redis_state.py::test_ttl_configuration_default tests/panel/test_panel_fixes.py::TestTemplateVisibility::test_templates_endpoint_returns_list tests/panel/test_panel_fixes.py::TestCloseConversation::test_close_removes_from_redis tests/panel/test_panel_fixes.py::TestIntegration::test_panel_loads_without_errors -v)"
     ],
     "deny": [],
     "ask": []

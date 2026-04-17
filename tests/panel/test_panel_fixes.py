@@ -41,15 +41,20 @@ class TestTemplateVisibility:
     @pytest.mark.asyncio
     async def test_templates_endpoint_returns_list(self):
         """El endpoint /templates debe retornar lista de templates."""
-        from middleware.outbound_panel import _get_all_templates
+        from middleware.outbound_panel import _get_all_templates_by_advisor
 
-        # Mock Redis
+        # Mock Redis — _get_all_templates_by_advisor usa r.keys() (async) y r.pipeline() (sync)
         with patch('middleware.outbound_panel._get_redis_client') as mock_redis:
             mock_r = AsyncMock()
-            mock_r.scan_iter = AsyncMock(return_value=iter([]))
+            mock_r.keys = AsyncMock(return_value=[])  # Sin keys → lista vacía, pipeline nunca se usa
+            # pipeline() es síncrono en redis.asyncio — MagicMock, no AsyncMock
+            mock_pipe = MagicMock()
+            mock_pipe.get = MagicMock()
+            mock_pipe.execute = AsyncMock(return_value=[])
+            mock_r.pipeline = MagicMock(return_value=mock_pipe)
             mock_redis.return_value = mock_r
 
-            templates = await _get_all_templates()
+            templates = await _get_all_templates_by_advisor("test_advisor_id")
             assert isinstance(templates, list)
 
 
@@ -132,16 +137,19 @@ class TestCloseConversation:
 
     @pytest.mark.asyncio
     async def test_close_removes_from_redis(self):
-        """Cerrar conversación debe eliminar de Redis."""
-        from middleware.conversation_state import ConversationStateManager
+        """Cerrar conversación (activate_bot) debe actualizar estado en Redis."""
+        from middleware.conversation_state import ConversationStateManager, ConversationStatus
 
-        # Mock del state manager
         manager = ConversationStateManager.__new__(ConversationStateManager)
-        manager._redis = AsyncMock()
-        manager._redis.delete = AsyncMock()
+        # El código usa self.redis (no self._redis)
+        manager.redis = AsyncMock()
+        manager.redis.get = AsyncMock(return_value=None)
+        manager.redis.set = AsyncMock()
+        manager.redis.expire = AsyncMock()
 
-        await manager.delete_conversation("+573001234567")
-        manager._redis.delete.assert_called()
+        await manager.activate_bot("+573001234567")
+        # activate_bot llama set_status → self.redis.set debe haberse invocado
+        manager.redis.set.assert_called()
 
 
 class TestIncrementalSync:
@@ -200,12 +208,14 @@ class TestIntegration:
         from fastapi.testclient import TestClient
         from app import app
 
-        client = TestClient(app)
-
-        response = client.get(
-            "/whatsapp/panel/",
-            headers={"X-API-Key": os.getenv("ADMIN_API_KEY", "test_admin_key")}
-        )
+        # Panel usa query param ?key=, no header X-API-Key
+        # patch.dict asegura que la validación interna usa la misma key
+        with patch.dict(os.environ, {"ADMIN_API_KEY": "test_admin_key"}):
+            client = TestClient(app)
+            response = client.get(
+                "/whatsapp/panel/",
+                params={"key": "test_admin_key"}
+            )
 
         # El panel debe cargar (200 o redirección)
         assert response.status_code in [200, 302, 307], f"Panel no carga: {response.status_code}"

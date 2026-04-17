@@ -295,7 +295,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
             contact_info = await contact_manager.identify_or_create_contact_safe(
                 phone_raw=phone_normalized,
                 source_channel="whatsapp_directo"
-            )
+            ) 
 
             if contact_info and contact_info.contact_id:
                 logger.info("[BACKGROUND] 📱 Registrando mensaje en HubSpot (contact_id=%s)", contact_info.contact_id)

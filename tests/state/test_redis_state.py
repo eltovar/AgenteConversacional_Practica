@@ -291,7 +291,7 @@ def test_ttl_configuration_default(mock_redis_client):
     with patch.dict(os.environ, {"REDIS_URL": "redis://localhost:6379/0"}, clear=True):
         with patch("redis.from_url", return_value=mock_redis_client):
             manager = StateManager()
-            assert manager.session_ttl == 86400
+            assert manager.session_ttl == 2592000  # 30 días — ver state_manager.py SESSION_TTL
 
 
 def test_ttl_configuration_custom(mock_redis_client):

@@ -768,10 +768,13 @@ class ConversationStateManager:
             # P3-D: Fusionar identidad de canal — cuando llega mensaje WhatsApp, eliminar
             # entradas ZSET de otros canales (ej. phone:instagram) para el mismo teléfono.
             # Evita duplicados en el panel para contactos que cambiaron de canal.
+            # GUARD: Si el canal stale tiene sesión activa de asesor (HUMAN_ACTIVE /
+            # IN_CONVERSATION / PENDING_HANDOFF), NO mergearlo — preservar la sesión.
+            # P3-D solo aplica a canales BOT_ACTIVE o expirados.
             if _did_zadd and canal_safe == "whatsapp":
                 whatsapp_member = f"{phone}:whatsapp"
                 cursor = 0
-                stale_members = []
+                _stale_candidates = []
                 while True:
                     cursor, results = await self.redis.zscan(
                         self.ACTIVE_CONTACTS_ZSET, cursor, match=f"{phone}:*", count=20
@@ -779,13 +782,42 @@ class ConversationStateManager:
                     for member, _ in results:
                         m = member if isinstance(member, str) else member.decode()
                         if m != whatsapp_member:
-                            stale_members.append(m)
+                            _stale_candidates.append(m)
                     if cursor == 0:
                         break
+
+                _SKIP_STATUSES = {
+                    ConversationStatus.HUMAN_ACTIVE.value,
+                    ConversationStatus.IN_CONVERSATION.value,
+                    ConversationStatus.PENDING_HANDOFF.value,
+                }
+                stale_members = []
+                if _stale_candidates:
+                    # Batch-read state keys de todos los candidatos (1 round-trip)
+                    _pipe_check = self.redis.pipeline(transaction=False)
+                    for _cand in _stale_candidates:
+                        _cand_canal = _cand.split(":", 1)[1] if ":" in _cand else "whatsapp"
+                        _pipe_check.get(f"{self.STATE_PREFIX}{phone}:{_cand_canal}")
+                    _cand_states = await _pipe_check.execute()
+
+                    for _cand, _cand_state_raw in zip(_stale_candidates, _cand_states):
+                        _cand_status = _cand_state_raw if isinstance(_cand_state_raw, str) else (
+                            _cand_state_raw.decode() if _cand_state_raw else None
+                        )
+                        if _cand_status in _SKIP_STATUSES:
+                            logger.info(
+                                f"[P3-D] Skip merge {_cand}: canal activo con asesor "
+                                f"({_cand_status}), preservando sesión"
+                            )
+                            continue
+                        stale_members.append(_cand)
+
                 if stale_members:
                     await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, *stale_members)
                     logger.info(
                         f"[ConversationState][P3-D] Canal merge {phone}: zrem {stale_members}"
+                        + (f" (skipped_active={len(_stale_candidates) - len(stale_members)})"
+                           if len(_stale_candidates) > len(stale_members) else "")
                     )
 
                     # ── P3-D v2: Migrar datos, status, markers e inbox de canales stale ──
@@ -879,7 +911,8 @@ class ConversationStateManager:
                     logger.info(
                         f"[P3-D v2] Canal merge completo {phone}: "
                         f"meta={'merged' if wa_meta_raw else 'created'}, "
-                        f"status={best_status}, stale_cleaned={len(stale_members)}"
+                        f"status={best_status}, stale_cleaned={len(stale_members)}, "
+                        f"skipped_active={len(_stale_candidates) - len(stale_members)}"
                     )
 
             return True

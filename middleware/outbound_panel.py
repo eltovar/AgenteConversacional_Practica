@@ -890,13 +890,13 @@ async def _update_contact_to_en_conversacion(contact_id: str) -> None:
 
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
         headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}})
-            if r.status_code == 200:
-                logger.info(f"[Panel] Contacto {contact_id} actualizado a 'En conversación'")
-                await _invalidate_contact_stage_cache(contact_id)
-            else:
-                logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
+        client = get_httpx_client()
+        r = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}})
+        if r.status_code == 200:
+            logger.info(f"[Panel] Contacto {contact_id} actualizado a 'En conversación'")
+            await _invalidate_contact_stage_cache(contact_id)
+        else:
+            logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
     except Exception as e:
         logger.error(f"[Panel] Error en _update_contact_to_en_conversacion: {e}")
 
@@ -2154,67 +2154,67 @@ async def create_manual_contact(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await _hubspot_post(client, search_url, search_payload, hubspot_api_key)
+        client = get_httpx_client()
+        response = await _hubspot_post(client, search_url, search_payload, hubspot_api_key)
 
-            if response.status_code == 200:
-                results = response.json().get("results", [])
-                if results:
-                    # Contacto ya existe — enriquecer respuesta con owner, historial y estado Redis
-                    existing = results[0]
-                    existing_id = existing.get("id")
-                    existing_props = existing.get("properties", {})
-                    _fn = existing_props.get('firstname') or ''
-                    _ln = existing_props.get('lastname') or ''
-                    existing_name = f"{_fn} {_ln}".strip()
-                    existing_owner_id = existing_props.get("hubspot_owner_id") or ""
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            if results:
+                # Contacto ya existe — enriquecer respuesta con owner, historial y estado Redis
+                existing = results[0]
+                existing_id = existing.get("id")
+                existing_props = existing.get("properties", {})
+                _fn = existing_props.get('firstname') or ''
+                _ln = existing_props.get('lastname') or ''
+                existing_name = f"{_fn} {_ln}".strip()
+                existing_owner_id = existing_props.get("hubspot_owner_id") or ""
 
-                    logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
+                logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
 
-                    # Resolver nombre del asesor desde OWNERS_CONFIG (lookup local, sin IO)
-                    from integrations.hubspot.lead_assigner import LeadAssigner
-                    existing_owner_name = "Sin asignar"
-                    if existing_owner_id:
-                        for _team_members in LeadAssigner.OWNERS_CONFIG.values():
-                            for _m in _team_members:
-                                if str(_m.get("id")) == existing_owner_id:
-                                    existing_owner_name = _m.get("name", "Sin asignar")
-                                    break
+                # Resolver nombre del asesor desde OWNERS_CONFIG (lookup local, sin IO)
+                from integrations.hubspot.lead_assigner import LeadAssigner
+                existing_owner_name = "Sin asignar"
+                if existing_owner_id:
+                    for _team_members in LeadAssigner.OWNERS_CONFIG.values():
+                        for _m in _team_members:
+                            if str(_m.get("id")) == existing_owner_id:
+                                existing_owner_name = _m.get("name", "Sin asignar")
+                                break
 
-                    # Contar mensajes en MongoDB (sin bloquear si falla)
-                    try:
-                        message_count = await get_mongo_manager().get_message_count(phone_normalized)
-                    except Exception:
-                        message_count = 0
+                # Contar mensajes en MongoDB (sin bloquear si falla)
+                try:
+                    message_count = await get_mongo_manager().get_message_count(phone_normalized)
+                except Exception:
+                    message_count = 0
 
-                    # Detectar canal activo en Redis (si el contacto está en el panel)
-                    redis_canal = None
-                    try:
-                        _rc = await _get_redis_client()
-                        _meta_keys = await _rc.keys(f"conv_meta:{phone_normalized}:*")
-                        if _meta_keys:
-                            redis_canal = _meta_keys[0].split(":")[-1]
-                    except Exception:
-                        pass
+                # Detectar canal activo en Redis (si el contacto está en el panel)
+                redis_canal = None
+                try:
+                    _rc = await _get_redis_client()
+                    _meta_keys = await _rc.keys(f"conv_meta:{phone_normalized}:*")
+                    if _meta_keys:
+                        redis_canal = _meta_keys[0].split(":")[-1]
+                except Exception:
+                    pass
 
-                    # "Tomar Control" directo si el contacto NO está activo en ningún panel (redis_canal=None).
-                    # Solo se pide permiso ("Solicitar Transferencia") si alguien lo tiene activo en el panel.
-                    can_take_control = not (existing_owner_id and message_count > 0 and redis_canal)
+                # "Tomar Control" directo si el contacto NO está activo en ningún panel (redis_canal=None).
+                # Solo se pide permiso ("Solicitar Transferencia") si alguien lo tiene activo en el panel.
+                can_take_control = not (existing_owner_id and message_count > 0 and redis_canal)
 
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "status": "exists",
-                            "contact_id": existing_id,
-                            "phone": phone_normalized,
-                            "display_name": existing_name or "Sin nombre",
-                            "owner_id": existing_owner_id,
-                            "owner_name": existing_owner_name,
-                            "message_count": message_count,
-                            "redis_canal": redis_canal,
-                            "can_take_control": can_take_control,
-                        }
-                    )
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "status": "exists",
+                        "contact_id": existing_id,
+                        "phone": phone_normalized,
+                        "display_name": existing_name or "Sin nombre",
+                        "owner_id": existing_owner_id,
+                        "owner_name": existing_owner_name,
+                        "message_count": message_count,
+                        "redis_canal": redis_canal,
+                        "can_take_control": can_take_control,
+                    }
+                )
     except Exception as e:
         logger.error(f"[Panel] Error buscando contacto existente: {e}")
         # Continuar con la creación si falla la búsqueda
@@ -2265,28 +2265,28 @@ async def create_manual_contact(
     create_url = "https://api.hubapi.com/crm/v3/objects/contacts"
 
     try:
-        async with httpx.AsyncClient(timeout=40.0) as client:
-            response = await _hubspot_post(
-                client, create_url, {"properties": contact_properties}, hubspot_api_key
-            )
+        client = get_httpx_client()
+        response = await _hubspot_post(
+            client, create_url, {"properties": contact_properties}, hubspot_api_key
+        )
 
-            if response.status_code in [200, 201]:
-                contact_data = response.json()
-                contact_id = contact_data.get("id")
-                logger.info(f"[Panel] Contacto creado exitosamente: {contact_id}")
-            elif response.status_code == 409:
-                # Conflicto - contacto ya existe (race condition)
-                logger.warning(f"[Panel] Conflicto 409 al crear contacto: {response.text}")
-                raise HTTPException(
-                    status_code=409,
-                    detail="El contacto ya existe. Por favor busca en el panel."
-                )
-            else:
-                logger.error(f"[Panel] Error creando contacto: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Error de HubSpot: {response.text}"
-                )
+        if response.status_code in [200, 201]:
+            contact_data = response.json()
+            contact_id = contact_data.get("id")
+            logger.info(f"[Panel] Contacto creado exitosamente: {contact_id}")
+        elif response.status_code == 409:
+            # Conflicto - contacto ya existe (race condition)
+            logger.warning(f"[Panel] Conflicto 409 al crear contacto: {response.text}")
+            raise HTTPException(
+                status_code=409,
+                detail="El contacto ya existe. Por favor busca en el panel."
+            )
+        else:
+            logger.error(f"[Panel] Error creando contacto: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Error de HubSpot: {response.text}"
+            )
 
     except httpx.HTTPError as e:
         logger.error(f"[Panel] Error HTTP creando contacto: {e}")
@@ -2302,14 +2302,14 @@ async def create_manual_contact(
             url_chat = f"{panel_base_url}/whatsapp/panel/?key={admin_api_key}&advisor={owner_id}&phone={phone_encoded}"
             
             # Escribir en contacto
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                contact_patch_url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-                await client.patch(
-                    contact_patch_url,
-                    headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
-                    json={"properties": {"url_chat": url_chat}}
-                )
-                logger.info(f"[Panel] url_chat escrito en contacto {contact_id}")
+            client = get_httpx_client()
+            contact_patch_url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+            await client.patch(
+                contact_patch_url,
+                headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
+                json={"properties": {"url_chat": url_chat}}
+            )
+            logger.info(f"[Panel] url_chat escrito en contacto {contact_id}")
     except Exception as e:
         logger.warning(f"[Panel] Error escribiendo url_chat (no crítico): {e}")
 
@@ -2438,20 +2438,20 @@ async def transfer_contact(
                             f"?key={_admin_key}&advisor={_oid}&phone={_quote(phone_normalized, safe='')}"
                         )
                     url = f"https://api.hubapi.com/crm/v3/objects/contacts/{_cid}"
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        response = await client.patch(
-                            url,
-                            json={"properties": _props},
-                            headers={
-                                "Authorization": f"Bearer {_key}",
-                                "Content-Type": "application/json"
-                            }
-                        )
-                        if response.status_code == 200:
-                            logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}"
-                                        + (" + url_chat actualizado" if "url_chat" in _props else ""))
-                        else:
-                            logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
+                    client = get_httpx_client()
+                    response = await client.patch(
+                        url,
+                        json={"properties": _props},
+                        headers={
+                            "Authorization": f"Bearer {_key}",
+                            "Content-Type": "application/json"
+                        }
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}"
+                                    + (" + url_chat actualizado" if "url_chat" in _props else ""))
+                    else:
+                        logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
                 except Exception as e:
                     logger.warning(f"[Panel] Error actualizando HubSpot (no crítico): {e}")
 
@@ -2535,15 +2535,15 @@ async def _reassign_hubspot_owner(contact_id: str, to_owner_id: str, phone: str 
             )
 
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.patch(
-                url,
-                json={"properties": properties},
-                headers={
-                    "Authorization": f"Bearer {hubspot_api_key}",
-                    "Content-Type": "application/json"
-                }
-            )
+        client = get_httpx_client()
+        response = await client.patch(
+            url,
+            json={"properties": properties},
+            headers={
+                "Authorization": f"Bearer {hubspot_api_key}",
+                "Content-Type": "application/json"
+            }
+        )
         if response.status_code == 200:
             logger.info(f"[Panel] HubSpot owner reasignado: {contact_id} -> {to_owner_id}"
                         + (" + url_chat actualizado" if "url_chat" in properties else ""))
@@ -4867,17 +4867,17 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
     try:
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await _hubspot_get(
-                client, url, hubspot_api_key,
-                params={"properties": "firstname,lastname,email,phone"}
-            )
+        client = get_httpx_client()
+        response = await _hubspot_get(
+            client, url, hubspot_api_key,
+            params={"properties": "firstname,lastname,email,phone"}
+        )
 
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("properties", {})
-            elif response.status_code == 429:
-                logger.warning(f"[Panel] HubSpot 429 persistente al obtener contacto {contact_id}")
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("properties", {})
+        elif response.status_code == 429:
+            logger.warning(f"[Panel] HubSpot 429 persistente al obtener contacto {contact_id}")
 
     except Exception as e:
         logger.debug(f"[Panel] Error obteniendo info de HubSpot: {e}")
@@ -5748,32 +5748,32 @@ async def get_social_media_metrics(
 
         contacts = []
         after = None
-        async with httpx.AsyncClient() as client:
-            while True:
-                page_payload = dict(payload)
-                if after:
-                    page_payload["after"] = after
+        client = get_httpx_client()
+        while True:
+            page_payload = dict(payload)
+            if after:
+                page_payload["after"] = after
 
-                response = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {hubspot_api_key}"},
-                    json=page_payload,
-                    timeout=15.0
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {hubspot_api_key}"},
+                json=page_payload,
+                timeout=15.0
+            )
+
+            if response.status_code != 200:
+                logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
                 )
 
-                if response.status_code != 200:
-                    logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
-                    )
+            data = response.json()
+            contacts.extend(data.get("results", []))
 
-                data = response.json()
-                contacts.extend(data.get("results", []))
-
-                after = data.get("paging", {}).get("next", {}).get("after")
-                if not after:
-                    break
+            after = data.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
 
         logger.info(f"[Metrics] Total contactos obtenidos de HubSpot: {len(contacts)}")
 

@@ -193,8 +193,10 @@ class SofiaBrain:
             oldest_key = next(iter(self._history_cache))
             evicted = self._history_cache.pop(oldest_key)
             try:
-                # RedisChatMessageHistory almacena un redis.Redis client internamente
+                # RedisChatMessageHistory almacena un redis.Redis client internamente.
+                # .close() NO destruye el ConnectionPool — disconnect() libera TCP sockets.
                 if hasattr(evicted, 'redis_client') and evicted.redis_client:
+                    evicted.redis_client.connection_pool.disconnect()
                     evicted.redis_client.close()
             except Exception:
                 pass

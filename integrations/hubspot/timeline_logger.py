@@ -130,7 +130,23 @@ class TimelineLogger:
         self._redis: Optional[aioredis.Redis] = None
         self._redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
 
+        # Singleton httpx client — evita crear/destruir AsyncClient por cada llamada API
+        self._http_client: Optional[httpx.AsyncClient] = None
+
         logger.info("[TimelineLogger] Inicializado con Notes API (Rate Limiting + Cache)")
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Singleton httpx.AsyncClient para todas las llamadas HubSpot."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=20.0,
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._http_client
 
     async def _get_redis(self) -> aioredis.Redis:
         """Lazy initialization de conexión Redis para caché."""
@@ -408,34 +424,34 @@ class TimelineLogger:
         # ═══════════════════════════════════════════════════════════════════
         # PASO 3: Crear nota con rate limiting y retry para 429
         # ═══════════════════════════════════════════════════════════════════
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await self._rate_limited_request(
-                client, "POST", endpoint,
-                headers=self.headers,
-                json=payload
+        client = self._get_http_client()
+        response = await self._rate_limited_request(
+            client, "POST", endpoint,
+            headers=self.headers,
+            json=payload
+        )
+
+        if response.status_code == 201:
+            # Marcar como procesada para idempotencia futura
+            if event.external_id:
+                await self._mark_note_as_processed(event.external_id)
+
+            # IMPORTANTE: Invalidar caché para que el panel muestre el mensaje inmediatamente
+            # Esto resuelve el problema de sincronización donde los mensajes no aparecían
+            await self.invalidate_cache_for_contact(event.contact_id)
+
+            logger.info(
+                f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, "
+                f"sender={event.sender.value}, external_id={event.external_id or 'N/A'}"
             )
+            return True
 
-            if response.status_code == 201:
-                # Marcar como procesada para idempotencia futura
-                if event.external_id:
-                    await self._mark_note_as_processed(event.external_id)
-
-                # IMPORTANTE: Invalidar caché para que el panel muestre el mensaje inmediatamente
-                # Esto resuelve el problema de sincronización donde los mensajes no aparecían
-                await self.invalidate_cache_for_contact(event.contact_id)
-
-                logger.info(
-                    f"[TimelineLogger] ✅ Nota creada: contact={event.contact_id}, "
-                    f"sender={event.sender.value}, external_id={event.external_id or 'N/A'}"
-                )
-                return True
-
-            else:
-                logger.error(
-                    f"[TimelineLogger] ❌ Error creando nota para contact={event.contact_id}: "
-                    f"{response.status_code} - {response.text[:200]}"
-                )
-                return False
+        else:
+            logger.error(
+                f"[TimelineLogger] ❌ Error creando nota para contact={event.contact_id}: "
+                f"{response.status_code} - {response.text[:200]}"
+            )
+            return False
 
     async def is_sofia_active(self, contact_id: str) -> bool:
         """
@@ -449,33 +465,33 @@ class TimelineLogger:
         params = {"properties": "sofia_activa"}
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    endpoint,
-                    headers=self.headers,
-                    params=params
-                )
+            client = self._get_http_client()
+            response = await client.get(
+                endpoint,
+                headers=self.headers,
+                params=params
+            )
 
-                if response.status_code == 200:
-                    data = response.json()
-                    sofia_activa = data.get("properties", {}).get("sofia_activa", "true")
+            if response.status_code == 200:
+                data = response.json()
+                sofia_activa = data.get("properties", {}).get("sofia_activa", "true")
 
-                    # Si es "false" (string), Sofía está desactivada
-                    if sofia_activa == "false":
-                        logger.info(
-                            f"[TimelineLogger] Sofía DESACTIVADA para contacto {contact_id}"
-                        )
-                        return False
-
-                    return True
-
-                else:
-                    logger.warning(
-                        f"[TimelineLogger] Error consultando sofia_activa: "
-                        f"{response.status_code}"
+                # Si es "false" (string), Sofía está desactivada
+                if sofia_activa == "false":
+                    logger.info(
+                        f"[TimelineLogger] Sofía DESACTIVADA para contacto {contact_id}"
                     )
-                    # Por defecto, Sofía responde si hay error
-                    return True
+                    return False
+
+                return True
+
+            else:
+                logger.warning(
+                    f"[TimelineLogger] Error consultando sofia_activa: "
+                    f"{response.status_code}"
+                )
+                # Por defecto, Sofía responde si hay error
+                return True
 
         except Exception as e:
             logger.error(f"[TimelineLogger] Error verificando sofia_activa: {e}")
@@ -495,26 +511,26 @@ class TimelineLogger:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.patch(
-                    endpoint,
-                    headers=self.headers,
-                    json=payload
+            client = self._get_http_client()
+            response = await client.patch(
+                endpoint,
+                headers=self.headers,
+                json=payload
+            )
+
+            if response.status_code == 200:
+                estado = "ACTIVADA" if active else "DESACTIVADA"
+                logger.info(
+                    f"[TimelineLogger] Sofía {estado} para contacto {contact_id}"
                 )
+                return True
 
-                if response.status_code == 200:
-                    estado = "ACTIVADA" if active else "DESACTIVADA"
-                    logger.info(
-                        f"[TimelineLogger] Sofía {estado} para contacto {contact_id}"
-                    )
-                    return True
-
-                else:
-                    logger.error(
-                        f"[TimelineLogger] Error actualizando sofia_activa: "
-                        f"{response.status_code} - {response.text}"
-                    )
-                    return False
+            else:
+                logger.error(
+                    f"[TimelineLogger] Error actualizando sofia_activa: "
+                    f"{response.status_code} - {response.text}"
+                )
+                return False
 
         except Exception as e:
             logger.error(f"[TimelineLogger] Error en set_sofia_active: {e}")
@@ -749,7 +765,8 @@ class TimelineLogger:
             # 1. Verificar caché de asociaciones primero
             note_ids = await self._get_cached_associations(contact_id)
 
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            client = self._get_http_client()
+            if True:
                 # Si no está en caché, obtener de HubSpot con rate limiting
                 if note_ids is None:
                     assoc_endpoint = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/notes"
@@ -1085,7 +1102,8 @@ class TimelineLogger:
             payload["after"] = after
 
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            client = self._get_http_client()
+            if True:
                 # Búsqueda con rate limiting
                 response = await self._rate_limited_request(
                     client, "POST", endpoint,

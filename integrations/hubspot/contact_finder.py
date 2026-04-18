@@ -86,7 +86,7 @@ class ContactFinder:
         """Obtiene el cliente Redis con lazy initialization."""
         if self._redis_client is None and self.redis_url:
             try:
-                self._redis_client = redis.from_url(self.redis_url)
+                self._redis_client = redis.from_url(self.redis_url, max_connections=5)
                 self._redis_client.ping()
             except Exception as e:
                 logger.warning(f"[ContactFinder] Redis no disponible para caché: {e}")

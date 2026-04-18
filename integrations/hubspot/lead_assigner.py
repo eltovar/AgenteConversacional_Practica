@@ -551,10 +551,11 @@ class OrphanLeadMonitor:
             # Construir mensaje
             message = self._format_webhook_message(orphan_leads, hours_window)
 
-            # Enviar POST al webhook
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(self.webhook_url, json=message)
-                response.raise_for_status()
+            # Reusar singleton si existe, sino crear uno efímero (cold path)
+            if not hasattr(self, '_http_client') or self._http_client is None:
+                self._http_client = httpx.AsyncClient(timeout=10.0)
+            response = await self._http_client.post(self.webhook_url, json=message)
+            response.raise_for_status()
 
             logger.info(f"[OrphanLeadMonitor] ✅ Alerta enviada a webhook ({response.status_code})")
 

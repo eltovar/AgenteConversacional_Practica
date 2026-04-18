@@ -2790,6 +2790,25 @@ async def hubspot_webhook(
         return {"status": "error", "message": str(e)}
 
 
+_hubspot_http_client: Optional["httpx.AsyncClient"] = None
+
+
+def _get_hubspot_http_client():
+    """Singleton httpx.AsyncClient para llamadas a HubSpot desde webhook_handler."""
+    global _hubspot_http_client
+    import httpx
+    if _hubspot_http_client is None:
+        _hubspot_http_client = httpx.AsyncClient(
+            timeout=10.0,
+            limits=httpx.Limits(
+                max_keepalive_connections=5,
+                max_connections=10,
+                keepalive_expiry=30.0,
+            ),
+        )
+    return _hubspot_http_client
+
+
 async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
     """
     Obtiene el teléfono de un contacto de HubSpot.
@@ -2800,8 +2819,6 @@ async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
     Returns:
         Teléfono normalizado o None si no se encuentra
     """
-    import httpx
-
     hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
     if not hubspot_api_key:
         logger.warning("[HubSpot Webhook] HUBSPOT_API_KEY no configurada")
@@ -2811,37 +2828,34 @@ async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
         params = {"properties": "phone,whatsapp_id"}
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {hubspot_api_key}"},
-                params=params,
-                timeout=10.0
+        client = _get_hubspot_http_client()
+        response = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {hubspot_api_key}"},
+            params=params,
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            props = data.get("properties", {})
+
+            phone = props.get("whatsapp_id") or props.get("phone")
+
+            if phone:
+                normalizer = PhoneNormalizer()
+                validation = normalizer.normalize(phone)
+                if validation.is_valid:
+                    return validation.normalized
+
+            logger.warning(f"[HubSpot Webhook] Contacto {contact_id} sin teléfono válido")
+            return None
+
+        else:
+            logger.warning(
+                f"[HubSpot Webhook] Error obteniendo contacto {contact_id}: "
+                f"{response.status_code}"
             )
-
-            if response.status_code == 200:
-                data = response.json()
-                props = data.get("properties", {})
-
-                # Preferir whatsapp_id, luego phone
-                phone = props.get("whatsapp_id") or props.get("phone")
-
-                if phone:
-                    # Normalizar teléfono
-                    normalizer = PhoneNormalizer()
-                    validation = normalizer.normalize(phone)
-                    if validation.is_valid:
-                        return validation.normalized
-
-                logger.warning(f"[HubSpot Webhook] Contacto {contact_id} sin teléfono válido")
-                return None
-
-            else:
-                logger.warning(
-                    f"[HubSpot Webhook] Error obteniendo contacto {contact_id}: "
-                    f"{response.status_code}"
-                )
-                return None
+            return None
 
     except Exception as e:
         logger.error(f"[HubSpot Webhook] Error consultando HubSpot: {e}")

@@ -31,6 +31,20 @@ class TwilioClient:
         self.auth_token = TWILIO_AUTH_TOKEN
         self.from_number = TWILIO_PHONE_NUMBER
         self._available = self._check_config()
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Singleton httpx.AsyncClient — evita crear pool por mensaje."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._http_client
 
     def _check_config(self) -> bool:
         """Verifica que la configuración de Twilio esté completa."""
@@ -88,104 +102,103 @@ class TwilioClient:
         url = TWILIO_API_URL.format(account_sid=self.account_sid)
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                # Construir payload base
-                payload = {
-                    "From": from_number,
-                    "To": to,
-                }
+            client = self._get_http_client()
+            # Construir payload base
+            payload = {
+                "From": from_number,
+                "To": to,
+            }
 
-                if content_sid:
-                    # Template aprobado por Meta → usa ContentSid (funciona fuera de ventana 24h)
-                    payload["ContentSid"] = content_sid
-                    if content_variables:
-                        payload["ContentVariables"] = json.dumps(content_variables)
-                    logger.info(
-                        f"[TwilioClient] Enviando con ContentSid={content_sid} "
-                        f"vars={content_variables}"
-                    )
-                else:
-                    # Texto libre (solo funciona con ventana de 24h abierta)
-                    payload["Body"] = body
-
-                # Agregar MediaUrl si se proporciona
-                if media_url:
-                    # VALIDACIÓN CRÍTICA: Twilio requiere URLs con https://
-                    if not media_url.startswith("https://"):
-                        logger.error(
-                            f"[TwilioClient] ❌ URL de media inválida (falta https://): "
-                            f"{media_url[:80]}... - Twilio rechazará esta URL"
-                        )
-                        return {
-                            "status": "error",
-                            "code": 400,
-                            "message": f"URL de media debe comenzar con https://. Recibido: {media_url[:50]}..."
-                        }
-                    
-                    payload["MediaUrl"] = media_url
-                    logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {media_url[:80]}...")
-                else:
-                    logger.debug(f"[TwilioClient] Enviando mensaje de texto (sin multimedia)")
-
-                response = await client.post(
-                    url,
-                    auth=(self.account_sid, self.auth_token),
-                    data=payload
+            if content_sid:
+                # Template aprobado por Meta → usa ContentSid (funciona fuera de ventana 24h)
+                payload["ContentSid"] = content_sid
+                if content_variables:
+                    payload["ContentVariables"] = json.dumps(content_variables)
+                logger.info(
+                    f"[TwilioClient] Enviando con ContentSid={content_sid} "
+                    f"vars={content_variables}"
                 )
+            else:
+                # Texto libre (solo funciona con ventana de 24h abierta)
+                payload["Body"] = body
 
-                if response.status_code in (200, 201):
-                    data = response.json()
-                    msg_status = data.get('status', 'unknown')
-                    error_code = data.get('error_code')
-                    error_message = data.get('error_message')
-
-                    # Log detallado del estado
-                    if error_code:
-                        logger.warning(
-                            f"[TwilioClient] ⚠️ Mensaje aceptado pero con error: "
-                            f"SID={data.get('sid')}, status={msg_status}, "
-                            f"error_code={error_code}, error_message={error_message}"
-                        )
-                    else:
-                        logger.info(
-                            f"[TwilioClient] Mensaje enviado exitosamente. "
-                            f"SID: {data.get('sid')}, status: {msg_status}"
-                        )
-
-                    return {
-                        "status": "success",
-                        "message_sid": data.get("sid"),
-                        "message_status": msg_status,
-                        "to": to,
-                        "error_code": error_code,
-                        "error_message": error_message
-                    }
-                else:
-                    error_msg = response.text
-                    logger.error(f"[TwilioClient] Error enviando mensaje: {response.status_code} - {error_msg}")
-                    # Detectar error 21656 para dar mensaje accionable a la asesora
-                    twilio_error_code = None
-                    try:
-                        ct = response.headers.get("content-type", "")
-                        if "application/json" in ct:
-                            twilio_error_code = response.json().get("code")
-                    except Exception:
-                        pass
-                    if twilio_error_code == 21656:
-                        return {
-                            "status": "error",
-                            "code": 21656,
-                            "message": (
-                                "Las variables de la plantilla son inválidas. "
-                                "Selecciona la plantilla de nuevo con / y solo reemplaza "
-                                "los campos {variable} sin modificar el texto fijo."
-                            )
-                        }
+            # Agregar MediaUrl si se proporciona
+            if media_url:
+                # VALIDACIÓN CRÍTICA: Twilio requiere URLs con https://
+                if not media_url.startswith("https://"):
+                    logger.error(
+                        f"[TwilioClient] ❌ URL de media inválida (falta https://): "
+                        f"{media_url[:80]}... - Twilio rechazará esta URL"
+                    )
                     return {
                         "status": "error",
-                        "code": response.status_code,
-                        "message": error_msg
+                        "code": 400,
+                        "message": f"URL de media debe comenzar con https://. Recibido: {media_url[:50]}..."
                     }
+
+                payload["MediaUrl"] = media_url
+                logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {media_url[:80]}...")
+            else:
+                logger.debug(f"[TwilioClient] Enviando mensaje de texto (sin multimedia)")
+
+            response = await client.post(
+                url,
+                auth=(self.account_sid, self.auth_token),
+                data=payload
+            )
+
+            if response.status_code in (200, 201):
+                data = response.json()
+                msg_status = data.get('status', 'unknown')
+                error_code = data.get('error_code')
+                error_message = data.get('error_message')
+
+                # Log detallado del estado
+                if error_code:
+                    logger.warning(
+                        f"[TwilioClient] ⚠️ Mensaje aceptado pero con error: "
+                        f"SID={data.get('sid')}, status={msg_status}, "
+                        f"error_code={error_code}, error_message={error_message}"
+                    )
+                else:
+                    logger.info(
+                        f"[TwilioClient] Mensaje enviado exitosamente. "
+                        f"SID: {data.get('sid')}, status: {msg_status}"
+                    )
+
+                return {
+                    "status": "success",
+                    "message_sid": data.get("sid"),
+                    "message_status": msg_status,
+                    "to": to,
+                    "error_code": error_code,
+                    "error_message": error_message
+                }
+            else:
+                error_msg = response.text
+                logger.error(f"[TwilioClient] Error enviando mensaje: {response.status_code} - {error_msg}")
+                twilio_error_code = None
+                try:
+                    ct = response.headers.get("content-type", "")
+                    if "application/json" in ct:
+                        twilio_error_code = response.json().get("code")
+                except Exception:
+                    pass
+                if twilio_error_code == 21656:
+                    return {
+                        "status": "error",
+                        "code": 21656,
+                        "message": (
+                            "Las variables de la plantilla son inválidas. "
+                            "Selecciona la plantilla de nuevo con / y solo reemplaza "
+                            "los campos {variable} sin modificar el texto fijo."
+                        )
+                    }
+                return {
+                    "status": "error",
+                    "code": response.status_code,
+                    "message": error_msg
+                }
 
         except Exception as e:
             logger.error(f"[TwilioClient] Excepción enviando mensaje: {e}")

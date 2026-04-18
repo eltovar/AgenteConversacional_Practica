@@ -302,6 +302,21 @@ class MediaProcessor:
         """Inicializa el procesador con credenciales de Twilio."""
         self.twilio_auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Singleton httpx.AsyncClient — evita crear pool por descarga/subida."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=60.0,
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._http_client
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Semáforo para limitar procesamiento concurrente de media (máx 3).
@@ -320,15 +335,15 @@ class MediaProcessor:
 
         Twilio requiere autenticación básica y puede usar redirecciones 302.
         """
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url, auth=self.twilio_auth)
+        client = self._get_http_client()
+        response = await client.get(url, auth=self.twilio_auth, timeout=30.0)
 
-            if response.status_code != 200:
-                logger.error(f"[MediaProcessor] Error descargando de Twilio: {response.status_code}")
-                raise Exception(f"Error descargando media de Twilio: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"[MediaProcessor] Error descargando de Twilio: {response.status_code}")
+            raise Exception(f"Error descargando media de Twilio: {response.status_code}")
 
-            logger.info(f"[MediaProcessor] Media descargada de Twilio: {len(response.content)} bytes")
-            return response.content
+        logger.info(f"[MediaProcessor] Media descargada de Twilio: {len(response.content)} bytes")
+        return response.content
 
     # =========================================================================
     # UTILIDADES PARA CONTENT-TYPE Y DETECCIÓN DE FORMATO
@@ -433,71 +448,66 @@ class MediaProcessor:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.put(storage_url, content=file_bytes, headers=headers)
+            client = self._get_http_client()
+            response = await client.put(storage_url, content=file_bytes, headers=headers, timeout=60.0)
 
-                if response.status_code in [200, 201]:
-                    # URL pública del Pull Zone (CDN - desde donde se sirve)
-                    public_url = f"{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
-                    logger.info(f"[BunnyStorage] Archivo subido exitosamente: {public_url}")
+            if response.status_code in [200, 201]:
+                # URL pública del Pull Zone (CDN - desde donde se sirve)
+                public_url = f"{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
+                logger.info(f"[BunnyStorage] Archivo subido exitosamente: {public_url}")
 
-                    # =========================================================
-                    # VERIFICAR DISPONIBILIDAD EN CDN (evita Error 63019)
-                    # =========================================================
-                    # Bunny.net puede tardar unos segundos en propagar al Pull Zone
-                    # Verificamos con HEAD request antes de dar la URL a Twilio
+                # =========================================================
+                # VERIFICAR DISPONIBILIDAD EN CDN (evita Error 63019)
+                # =========================================================
+                max_retries = 5
+                retry_delay = 1.0  # segundos
 
-                    max_retries = 5
-                    retry_delay = 1.0  # segundos
+                for attempt in range(max_retries):
+                    try:
+                        head_response = await client.head(
+                            public_url,
+                            timeout=5.0,
+                            follow_redirects=True
+                        )
 
-                    for attempt in range(max_retries):
-                        try:
-                            head_response = await client.head(
-                                public_url,
-                                timeout=5.0,
-                                follow_redirects=True
+                        if head_response.status_code == 200:
+                            logger.info(
+                                f"[BunnyStorage] ✅ CDN verificado (intento {attempt + 1}): "
+                                f"{public_url} - status={head_response.status_code}"
                             )
-
-                            if head_response.status_code == 200:
-                                logger.info(
-                                    f"[BunnyStorage] ✅ CDN verificado (intento {attempt + 1}): "
-                                    f"{public_url} - status={head_response.status_code}"
-                                )
-                                return public_url
-                            elif head_response.status_code == 404:
-                                logger.warning(
-                                    f"[BunnyStorage] ⏳ CDN aún no disponible (intento {attempt + 1}/{max_retries}), "
-                                    f"esperando {retry_delay}s..."
-                                )
-                                await asyncio.sleep(retry_delay)
-                                retry_delay *= 1.5  # Backoff exponencial
-                            else:
-                                logger.warning(
-                                    f"[BunnyStorage] CDN respuesta inesperada: {head_response.status_code}"
-                                )
-                                # Continuar de todas formas, Twilio puede tener éxito
-                                return public_url
-
-                        except Exception as verify_err:
+                            return public_url
+                        elif head_response.status_code == 404:
                             logger.warning(
-                                f"[BunnyStorage] Error verificando CDN (intento {attempt + 1}): {verify_err}"
+                                f"[BunnyStorage] ⏳ CDN aún no disponible (intento {attempt + 1}/{max_retries}), "
+                                f"esperando {retry_delay}s..."
                             )
                             await asyncio.sleep(retry_delay)
-                            retry_delay *= 1.5
+                            retry_delay *= 1.5  # Backoff exponencial
+                        else:
+                            logger.warning(
+                                f"[BunnyStorage] CDN respuesta inesperada: {head_response.status_code}"
+                            )
+                            return public_url
 
-                    # Si llegamos aquí, no pudimos verificar pero el upload fue exitoso
-                    # Retornamos la URL de todas formas y dejamos que Twilio lo intente
-                    logger.warning(
-                        f"[BunnyStorage] ⚠️ No se pudo verificar CDN después de {max_retries} intentos. "
-                        f"Retornando URL de todas formas: {public_url}"
-                    )
-                    return public_url
-                else:
-                    logger.error(
-                        f"[BunnyStorage] Error subiendo archivo: "
-                        f"status={response.status_code}, response={response.text[:200]}"
-                    )
-                    raise Exception(f"Error en Bunny Storage: {response.status_code}")
+                    except Exception as verify_err:
+                        logger.warning(
+                            f"[BunnyStorage] Error verificando CDN (intento {attempt + 1}): {verify_err}"
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 1.5
+
+                # Si llegamos aquí, no pudimos verificar pero el upload fue exitoso
+                logger.warning(
+                    f"[BunnyStorage] ⚠️ No se pudo verificar CDN después de {max_retries} intentos. "
+                    f"Retornando URL de todas formas: {public_url}"
+                )
+                return public_url
+            else:
+                logger.error(
+                    f"[BunnyStorage] Error subiendo archivo: "
+                    f"status={response.status_code}, response={response.text[:200]}"
+                )
+                raise Exception(f"Error en Bunny Storage: {response.status_code}")
 
         except httpx.TimeoutException:
             logger.error("[BunnyStorage] Timeout subiendo archivo a Bunny.net")

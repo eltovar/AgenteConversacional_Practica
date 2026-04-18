@@ -13,6 +13,8 @@ import hashlib
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+
+import httpx
 from middleware.conversation_state import get_bogota_now
 
 import redis
@@ -84,9 +86,25 @@ class OutboundHandler:
         # Configuración de HubSpot (para verificación de firma)
         self.hubspot_client_secret = os.getenv("HUBSPOT_CLIENT_SECRET")
 
+        # Singleton httpx client para HubSpot API
+        self._http_client: Optional[httpx.AsyncClient] = None
+
         # Configuración de Redis
         self.redis_url = redis_url or os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL")
         self._redis_client: Optional[redis.Redis] = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Singleton httpx.AsyncClient — evita crear pool por request."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=10.0,
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._http_client
 
     def _get_redis(self) -> Optional[redis.Redis]:
         """Obtiene el cliente Redis con lazy initialization."""
@@ -381,8 +399,6 @@ class OutboundHandler:
         """
         Obtiene el teléfono de un contacto por su ID.
         """
-        import httpx
-
         api_key = os.getenv("HUBSPOT_API_KEY")
         endpoint = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
         headers = {
@@ -393,18 +409,17 @@ class OutboundHandler:
             "properties": "phone,mobilephone,whatsapp_id,hs_whatsapp_phone_number"
         }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(endpoint, headers=headers, params=params)
+        client = self._get_http_client()
+        response = await client.get(endpoint, headers=headers, params=params)
 
-            if response.status_code == 200:
-                props = response.json().get("properties", {})
-                # Prioridad: whatsapp_id > hs_whatsapp > mobilephone > phone
-                return (
-                    props.get("whatsapp_id") or
-                    props.get("hs_whatsapp_phone_number") or
-                    props.get("mobilephone") or
-                    props.get("phone")
-                )
+        if response.status_code == 200:
+            props = response.json().get("properties", {})
+            return (
+                props.get("whatsapp_id") or
+                props.get("hs_whatsapp_phone_number") or
+                props.get("mobilephone") or
+                props.get("phone")
+            )
 
         return None
 

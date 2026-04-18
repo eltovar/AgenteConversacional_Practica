@@ -78,6 +78,9 @@ class ContactFinder:
             "Content-Type": "application/json"
         }
 
+        # Singleton httpx client
+        self._http_client: Optional[httpx.AsyncClient] = None
+
         # Configurar Redis para caché
         self.redis_url = redis_url or os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL")
         self._redis_client: Optional[redis.Redis] = None
@@ -92,6 +95,20 @@ class ContactFinder:
                 logger.warning(f"[ContactFinder] Redis no disponible para caché: {e}")
                 self._redis_client = None
         return self._redis_client
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Singleton httpx.AsyncClient — evita crear pool por request."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=15.0,
+                headers=self.headers,
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._http_client
 
     def _cache_key(self, phone: str) -> str:
         """Genera la clave de caché para un número de teléfono."""
@@ -199,25 +216,25 @@ class ContactFinder:
             "limit": 1
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(endpoint, headers=self.headers, json=payload)
+        client = self._get_http_client()
+        response = await client.post(endpoint, json=payload)
 
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get("results", [])
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
 
-                if results:
-                    return results[0]
+            if results:
+                return results[0]
 
-            elif response.status_code == 429:
-                logger.warning("[ContactFinder] Rate limit alcanzado")
-                raise httpx.NetworkError("Rate Limit", request=response.request)
+        elif response.status_code == 429:
+            logger.warning("[ContactFinder] Rate limit alcanzado")
+            raise httpx.NetworkError("Rate Limit", request=response.request)
 
-            elif response.status_code >= 400:
-                logger.warning(
-                    f"[ContactFinder] Error buscando por {property_name}: "
-                    f"{response.status_code} - {response.text}"
-                )
+        elif response.status_code >= 400:
+            logger.warning(
+                f"[ContactFinder] Error buscando por {property_name}: "
+                f"{response.status_code} - {response.text}"
+            )
 
         return None
 
@@ -309,35 +326,34 @@ class ContactFinder:
 
         endpoint = f"{self.base_url}/crm/v3/objects/contacts"
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                endpoint,
-                headers=self.headers,
-                json={"properties": properties}
+        client = self._get_http_client()
+        response = await client.post(
+            endpoint,
+            json={"properties": properties}
+        )
+
+        if response.status_code == 201:
+            data = response.json()
+            contact = ContactInfo(
+                vid=data.get("id"),
+                phone=phone_e164,
+                whatsapp_id=phone_e164,
+                sofia_status="activa",
+                found_by="created"
             )
 
-            if response.status_code == 201:
-                data = response.json()
-                contact = ContactInfo(
-                    vid=data.get("id"),
-                    phone=phone_e164,
-                    whatsapp_id=phone_e164,
-                    sofia_status="activa",
-                    found_by="created"
-                )
+            # Guardar en caché
+            self._save_to_cache(phone_e164, contact)
 
-                # Guardar en caché
-                self._save_to_cache(phone_e164, contact)
+            logger.info(f"[ContactFinder] Contacto creado: vid={contact.vid}")
+            return contact
 
-                logger.info(f"[ContactFinder] Contacto creado: vid={contact.vid}")
-                return contact
-
-            else:
-                logger.error(
-                    f"[ContactFinder] Error creando contacto: "
-                    f"{response.status_code} - {response.text}"
-                )
-                raise Exception(f"Error creando contacto: {response.status_code}")
+        else:
+            logger.error(
+                f"[ContactFinder] Error creando contacto: "
+                f"{response.status_code} - {response.text}"
+            )
+            raise Exception(f"Error creando contacto: {response.status_code}")
 
     async def update_sofia_status(
         self,
@@ -357,24 +373,24 @@ class ContactFinder:
             }
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.patch(endpoint, headers=self.headers, json=payload)
+        client = self._get_http_client()
+        response = await client.patch(endpoint, json=payload)
 
-            if response.status_code == 200:
-                logger.info(f"[ContactFinder] Estado de Sofía actualizado: vid={vid}, status={status}")
+        if response.status_code == 200:
+            logger.info(f"[ContactFinder] Estado de Sofía actualizado: vid={vid}, status={status}")
 
-                # Invalidar caché
-                if phone_e164:
-                    self._invalidate_cache(phone_e164)
+            # Invalidar caché
+            if phone_e164:
+                self._invalidate_cache(phone_e164)
 
-                return True
+            return True
 
-            else:
-                logger.error(
-                    f"[ContactFinder] Error actualizando estado: "
-                    f"{response.status_code} - {response.text}"
-                )
-                return False
+        else:
+            logger.error(
+                f"[ContactFinder] Error actualizando estado: "
+                f"{response.status_code} - {response.text}"
+            )
+            return False
 
 
 # Instancia singleton para uso global

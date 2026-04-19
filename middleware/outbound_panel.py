@@ -4111,7 +4111,7 @@ async def get_active_contacts(
             # Cuando hay filtro de advisor: escanear todo el ZSET para no perder contactos
             # del advisor en páginas posteriores (problema cuando todos tienen el mismo score,
             # e.g. tras restore-panel — Redis ordena lex inverso y los del advisor quedan en p2+).
-            _all = await state_manager.get_all_human_active_contacts(limit=1000, offset=0)
+            _all = await state_manager.get_all_human_active_contacts(limit=300, offset=0)
             advisor_contacts = [
                 c for c in _all
                 if c.get("owner_id") == advisor

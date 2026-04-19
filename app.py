@@ -1002,6 +1002,52 @@ async def startup_event():
         )
         logger.info("[STARTUP] Scheduler de timeouts HABILITADO (cada 2 horas)")
 
+        # ── Memory Watchdog: fuerza reciclaje del worker si RSS > umbral ──
+        # Python no devuelve arenas de memoria al OS (fragmentación).
+        # --max-requests de gunicorn no recicla si hay WebSockets abiertos.
+        # Este watchdog es la red de seguridad definitiva.
+        _MEM_LIMIT_MB = int(os.getenv("WORKER_MEM_LIMIT_MB", "4096"))  # 4 GB default
+
+        async def _memory_watchdog():
+            try:
+                import resource
+                rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024  # Linux: KB → bytes
+                rss_mb = rss_bytes / (1024 * 1024)
+            except ImportError:
+                # Fallback: leer /proc/self/status (Linux Docker)
+                try:
+                    with open("/proc/self/status") as f:
+                        for line in f:
+                            if line.startswith("VmRSS:"):
+                                rss_mb = int(line.split()[1]) / 1024  # KB → MB
+                                break
+                        else:
+                            return
+                except Exception:
+                    return
+
+            if rss_mb > _MEM_LIMIT_MB:
+                logger.warning(
+                    "[MEMORY WATCHDOG] RSS=%.0f MB excede límite de %d MB — "
+                    "forzando reciclaje del worker",
+                    rss_mb, _MEM_LIMIT_MB
+                )
+                import signal
+                os.kill(os.getpid(), signal.SIGTERM)
+            else:
+                logger.info("[MEMORY WATCHDOG] RSS=%.0f MB (límite: %d MB)", rss_mb, _MEM_LIMIT_MB)
+
+        scheduler.add_job(
+            _memory_watchdog,
+            trigger=IntervalTrigger(minutes=2),
+            id="memory_watchdog",
+            replace_existing=True
+        )
+        logger.info(
+            "[STARTUP] Memory watchdog HABILITADO (cada 2 min, límite %d MB)",
+            _MEM_LIMIT_MB
+        )
+
         scheduler.start()
         logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)
 

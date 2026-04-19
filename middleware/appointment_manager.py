@@ -188,9 +188,10 @@ class AppointmentManager:
         return self._redis
 
     async def close(self):
-        """Cierra la conexión de Redis."""
+        """Cierra la conexión de Redis y destruye el pool."""
         if self._redis:
-            await self._redis.close()
+            # aclose() destruye el ConnectionPool; close() solo marca el client como cerrado.
+            await self._redis.aclose()
             self._redis = None
 
     def _build_key(self, phone: str, canal: str) -> str:

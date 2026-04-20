@@ -57,6 +57,21 @@ class TwilioClient:
         logger.info("[TwilioClient] Cliente inicializado correctamente")
         return True
 
+    def _resolve_credentials(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        # Why: Railway puede inyectar env vars con latencia tras un spawn post-SIGKILL;
+        # si el singleton se construyó con None, reintentamos leer y backfillamos el cache.
+        sid = self.account_sid or os.getenv("TWILIO_ACCOUNT_SID")
+        token = self.auth_token or os.getenv("TWILIO_AUTH_TOKEN")
+        phone = self.from_number or os.getenv("TWILIO_PHONE_NUMBER")
+        if sid and not self.account_sid:
+            self.account_sid = sid
+        if token and not self.auth_token:
+            self.auth_token = token
+        if phone and not self.from_number:
+            self.from_number = phone
+        self._available = bool(self.account_sid and self.auth_token and self.from_number)
+        return sid, token, phone
+
     @property
     def is_available(self) -> bool:
         """Indica si el cliente está disponible para enviar mensajes."""
@@ -86,6 +101,7 @@ class TwilioClient:
         Returns:
             dict con status y mensaje_sid o error
         """
+        sid, token, phone = self._resolve_credentials()
         if not self._available:
             logger.error("[TwilioClient] Cliente no disponible - configuración incompleta")
             return {"status": "error", "message": "Twilio no configurado"}
@@ -95,11 +111,11 @@ class TwilioClient:
             to = f"whatsapp:{to}"
 
         # Asegurar formato correcto del from_number
-        from_number = self.from_number
+        from_number = phone
         if not from_number.startswith("whatsapp:"):
             from_number = f"whatsapp:{from_number}"
 
-        url = TWILIO_API_URL.format(account_sid=self.account_sid)
+        url = TWILIO_API_URL.format(account_sid=sid)
 
         try:
             client = self._get_http_client()
@@ -143,7 +159,7 @@ class TwilioClient:
 
             response = await client.post(
                 url,
-                auth=(self.account_sid, self.auth_token),
+                auth=(sid, token),
                 data=payload
             )
 

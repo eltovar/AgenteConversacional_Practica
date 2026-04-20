@@ -23,14 +23,14 @@ class LeadAssigner:
     # Este es el ÚNICO lugar donde se definen los nombres — mongodb_client.py y
     # outbound_panel.py los leen automáticamente desde aquí.
     OWNERS_CONFIG = {
-        # === PORTALES INMOBILIARIOS (ID: 89096378) ===
-        # Portales: Mercado Libre, LinkedIn, Facebook, Instagram, Ciencuadras, TikTok, Charly
+        # === PORTALES INMOBILIARIOS + WHATSAPP DIRECTO (ID: 89096378) ===
+        # Portales: Mercado Libre, LinkedIn, Facebook, Instagram, Ciencuadras, TikTok, Charly + WhatsApp Directo
         "equipo_portales": [
             {"name": "Jubeny", "id": "89096378", "active": True},
         ],
 
         # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
-        # Directo: Página Web, WhatsApp, YouTube + Portales: MetroCuadrado, Finca Raíz
+        # Directo: Página Web, YouTube + Portales: MetroCuadrado, Finca Raíz
         "equipo_directo": [
             {"name": "Luisa", "id": "89096380", "active": True},
         ],
@@ -58,14 +58,14 @@ class LeadAssigner:
     # Clave: identificador del canal (se detecta del mensaje o metadata)
     # Valor: nombre del equipo en OWNERS_CONFIG
     CHANNEL_TO_TEAM = {
-        # === PORTALES INMOBILIARIOS (ID: 89096378) ===
+        # === PORTALES INMOBILIARIOS + WHATSAPP DIRECTO (ID: 89096378) ===
         "mercado_libre": "equipo_portales",
         "linkedin": "equipo_portales",
+        "whatsapp_directo": "equipo_portales",
+        "whatsapp": "equipo_portales",  # Alias para compatibilidad con webhook
 
         # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
         "pagina_web": "equipo_directo",
-        "whatsapp_directo": "equipo_directo",
-        "whatsapp": "equipo_directo",  # Alias para compatibilidad con webhook
         "youtube": "equipo_directo",
         "finca_raiz": "equipo_directo",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
         "metrocuadrado": "equipo_directo",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)
@@ -87,14 +87,14 @@ class LeadAssigner:
     # MAPEO DIRECTO CANAL → OWNER ID (para filtro del panel)
     # ═══════════════════════════════════════════════════════════════════════════
     CHANNEL_TO_OWNER = {
-        # Asesor Portales (89096378)
+        # Asesor Portales + WhatsApp Directo (89096378)
         "mercado_libre": "89096378",
         "linkedin": "89096378",
+        "whatsapp_directo": "89096378",
+        "whatsapp": "89096378",  # Alias para compatibilidad con webhook
 
         # Asesor Directo + Portales Especiales (89096380)
         "pagina_web": "89096380",
-        "whatsapp_directo": "89096380",
-        "whatsapp": "89096380",  # Alias para compatibilidad
         "youtube": "89096380",
         "finca_raiz": "89096380",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
         "metrocuadrado": "89096380",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)

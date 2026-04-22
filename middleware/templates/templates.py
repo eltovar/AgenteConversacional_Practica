@@ -75,21 +75,24 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": [],
         "is_default": True,
     },
-    "experiencia_post_cita": {
-        "id": "experiencia_post_cita",
-        "name": "Experiencia después de la cita",
-        "category": "agradecimiento",
+    "seguimiento_cita": {
+        "id": "seguimiento_cita",
+        "name": "Seguimiento Post-Cita",
+        "category": "seguimiento",
         "body": (
-            "Para nosotros es muy importante conocer tu experiencia para seguir "
+            "¡Hola {nombre}! 😊 Esperamos que la visita haya sido de tu agrado. "
+            "Cuéntanos, ¿Te ha gustado el inmueble?\n"
+            "Para nosotros es importante conocer tu experiencia y seguir "
             "mejorando la calidad de nuestro servicio. 📈\n"
             "¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
             "Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
-            "únicamente para optimizar nuestros procesos de atención. 💪\n\n"
+            "para optimizar nuestros procesos de atención. 💪\n\n"
             "¡Gracias por confiar en Inmobiliaria Proteger! 💛"
         ),
-        "variables": [],
-        "content_sid": None,
-        "content_variables_map": [],
+        "variables": ["nombre"],
+        # {{1}}=nombre — Twilio: seguimiento_cita (aprobado Meta)
+        "content_sid": "HX9696fc73c9dbb5f76382bd77b5f410c8",
+        "content_variables_map": ["nombre"],
         "is_default": True,
     },
     "reactivacion_inmueble_link": {

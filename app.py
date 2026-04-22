@@ -774,13 +774,23 @@ async def check_appointment_followups():
                 )
 
                 message = (
-                    f"¡Hola {contact_name}! 😊 Esperamos que tu visita haya sido de tu agrado. "
-                    f"¿Tienes alguna pregunta sobre el inmueble que visitaste? "
-                    f"Estamos aquí para ayudarte."
+                    f"¡Hola {contact_name}! 😊 Esperamos que la visita haya sido de tu agrado. "
+                    f"Cuéntanos, ¿Te ha gustado el inmueble?\n"
+                    f"Para nosotros es importante conocer tu experiencia y seguir "
+                    f"mejorando la calidad de nuestro servicio. 📈\n"
+                    f"¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
+                    f"Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
+                    f"para optimizar nuestros procesos de atención. 💪\n\n"
+                    f"¡Gracias por confiar en Inmobiliaria Proteger! 💛"
                 )
 
                 if twilio_client.is_available:
-                    _followup_sid = os.getenv("TWILIO_FOLLOWUP_TEMPLATE_SID")
+                    # Template seguimiento_cita (aprobado Meta). Env var mantiene precedencia
+                    # por compatibilidad, pero si está ausente usamos el SID oficial.
+                    _followup_sid = os.getenv(
+                        "TWILIO_FOLLOWUP_TEMPLATE_SID",
+                        "HX9696fc73c9dbb5f76382bd77b5f410c8",
+                    )
                     if _followup_sid:
                         result = await twilio_client.send_whatsapp_message(
                             to=apt.phone_normalized,
@@ -821,7 +831,7 @@ async def check_appointment_followups():
                                 channel=canal_apt,
                                 hubspot_contact_id=apt.contact_id,
                                 message_sid=result.get("message_sid"),
-                                metadata={"source": "Seguimiento post-cita automático"}
+                                metadata={"source": "Seguimiento post-cita automático", "template_id": "seguimiento_cita"}
                             )
                             await state_manager.update_activity(apt.phone_normalized, canal=canal_apt)
                             await ws_manager.publish_broadcast(state_manager.redis, {

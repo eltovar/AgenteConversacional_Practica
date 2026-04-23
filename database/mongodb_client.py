@@ -7,7 +7,7 @@ import asyncio
 import os
 import time
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -25,6 +25,22 @@ from logging_config import logger
 
 # Timezone Colombia
 TIMEZONE = ZoneInfo("America/Bogota")
+
+
+def _iso_bogota(dt_val: Optional[datetime]) -> Optional[str]:
+    """
+    Serializa un datetime a ISO 8601 con offset explícito de Bogotá (-05:00).
+
+    Motor/PyMongo devuelve datetimes naive (cuando tz_aware=False) que BSON
+    guardó en UTC. Sin offset en el ISO, JavaScript los interpreta como hora
+    local del navegador → desfase de 5h en el panel. Normalizar aquí garantiza
+    que el frontend reciba un instante inequívoco.
+    """
+    if not dt_val:
+        return None
+    if dt_val.tzinfo is None:
+        dt_val = dt_val.replace(tzinfo=timezone.utc)
+    return dt_val.astimezone(TIMEZONE).isoformat()
 
 # Retry config para save_message
 _MAX_SAVE_RETRIES = 3
@@ -1102,10 +1118,10 @@ class MongoDBManager:
                 {
                     "id": str(a["_id"]),
                     "worker_name": a.get("worker_name", ""),
-                    "appointment_dt": a["appointment_dt"].isoformat() if a.get("appointment_dt") else None,
+                    "appointment_dt": _iso_bogota(a.get("appointment_dt")),
                     "notes": a.get("notes", ""),
                     "status": a.get("status", "scheduled"),
-                    "created_at": a["created_at"].isoformat() if a.get("created_at") else None,
+                    "created_at": _iso_bogota(a.get("created_at")),
                 }
                 for a in appts
             ]
@@ -1179,7 +1195,7 @@ class MongoDBManager:
                 result.append({
                     "contact_id": d.get("contact_id", ""),
                     "phone": d.get("phone", ""),
-                    "appointment_dt": d["appointment_dt"].isoformat() if d.get("appointment_dt") else None,
+                    "appointment_dt": _iso_bogota(d.get("appointment_dt")),
                     "worker_name": d.get("worker_name", ""),
                 })
             return result

@@ -6213,7 +6213,10 @@ function editAppointment(apptId) {
 
     if (appt.appointment_dt) {
         const dt = new Date(appt.appointment_dt);
-        document.getElementById('apptDatetime').value = dt.toISOString().slice(0, 16);
+        const pad = n => String(n).padStart(2, '0');
+        document.getElementById('apptDatetime').value =
+            `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}` +
+            `T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
     }
 
     document.getElementById('apptNotes').value = appt.notes || '';

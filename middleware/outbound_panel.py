@@ -95,6 +95,12 @@ DEFAULT_TEMPLATE_PREFIX = "whatsapp_template:default:"
 HUBSPOT_PIPELINE_ID = "854756009"
 HUBSPOT_STAGE_NUEVO_LEAD = "1326631578"
 HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"
+HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
+HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
+# Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
+PROTECTED_STAGES_POST_VISITA = {
+    "salesqualifiedlead", "opportunity", "customer", "evangelist"
+}
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
@@ -899,6 +905,57 @@ async def _update_contact_to_en_conversacion(contact_id: str) -> None:
             logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
     except Exception as e:
         logger.error(f"[Panel] Error en _update_contact_to_en_conversacion: {e}")
+
+
+async def _update_contact_to_visita_realizada(contact_id: str) -> None:
+    """
+    Avanza lifecyclestage 'marketingqualifiedlead' (Visita agendada)
+    → 'salesqualifiedlead' (Visita realizada) cuando se completa la visita
+    (scheduler post-cita 1h30min). Background — no bloquea envío WhatsApp.
+
+    Replica el patrón de _update_contact_to_en_conversacion:
+    - PATCH single-step con current_stage guard
+    - Invalida caché Redis contact_stage:{id} en éxito
+    - Try/except amplio — fire-and-forget desde el scheduler
+    """
+    import httpx
+    if not HUBSPOT_API_KEY or not contact_id:
+        return
+    try:
+        current_stage = await _get_contact_lifecyclestage(contact_id)
+
+        # Guard 1: stage protegido (ya avanzó manualmente) → no revertir
+        if current_stage in PROTECTED_STAGES_POST_VISITA:
+            logger.info(
+                f"[Lifecycle] Contacto {contact_id} ya en '{current_stage}' — no se sobreescribe"
+            )
+            return
+
+        # Guard 2: solo avanzar desde 'Visita agendada' (nunca saltar stages)
+        if current_stage != HUBSPOT_STAGE_VISITA_AGENDADA:
+            logger.info(
+                f"[Lifecycle] Contacto {contact_id} en '{current_stage}' — no es 'Visita agendada', skip"
+            )
+            return
+
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+        client = get_httpx_client()
+        r = await client.patch(
+            url, headers=headers,
+            json={"properties": {"lifecyclestage": HUBSPOT_STAGE_VISITA_REALIZADA}},
+        )
+        if r.status_code == 200:
+            logger.info(
+                f"[Lifecycle] Contacto {contact_id}: marketingqualifiedlead → salesqualifiedlead"
+            )
+            await _invalidate_contact_stage_cache(contact_id)
+        else:
+            logger.warning(
+                f"[Lifecycle] Error actualizando lifecyclestage: {r.status_code} - {r.text}"
+            )
+    except Exception as e:
+        logger.error(f"[Lifecycle] Error en _update_contact_to_visita_realizada: {e}")
 
 
 async def check_24h_window(phone_normalized: str) -> WindowStatus:
@@ -5087,7 +5144,9 @@ async def create_appointment(
         worker_name=body.worker_name,
         appointment_dt=appt_dt_utc,
         notes=body.notes,
-        hubspot_note_id=hubspot_note_id
+        hubspot_note_id=hubspot_note_id,
+        contact_name=contact_firstname or None,
+        canal=body.canal,
     )
 
     if not appointment_id:
@@ -5131,6 +5190,7 @@ async def create_appointment(
                     contact_name=contact_firstname or None,
                     contact_id=contact_id,
                     notes=body.notes or None,
+                    advisor_id=body.advisor_id or None,
                 )
                 logger.info(
                     f"[Panel] Cita sincronizada a Redis: phone={phone_normalized}, canal={body.canal}, "
@@ -5835,12 +5895,14 @@ async def get_social_media_metrics(
                 "score": score,                     # Sanitizado
             })
 
-            # Por día
+            # Por día — convertir a zona Bogotá para que el gráfico coincida con
+            # la percepción local (leads de 7pm-11pm no aparecen al día siguiente)
             createdate = props.get("createdate")
             if createdate:
                 try:
-                    dt = datetime.fromisoformat(createdate.replace("Z", "+00:00"))
-                    day_key = dt.strftime("%Y-%m-%d")
+                    dt_utc = datetime.fromisoformat(createdate.replace("Z", "+00:00"))
+                    dt_bog = dt_utc.astimezone(TIMEZONE)
+                    day_key = dt_bog.strftime("%Y-%m-%d")
                     leads_by_day[day_key] += 1
                 except Exception:
                     pass
@@ -5865,7 +5927,7 @@ async def get_social_media_metrics(
             "total_leads": total_leads,
             "leads_by_channel": dict(leads_by_channel),
             "leads_by_day": leads_by_day_sorted,
-            "contacts_by_channel": dict(contacts_by_channel),  # Lista de contactos
+            "_contacts_by_channel": dict(contacts_by_channel),  # Interno: solo usado por export-excel
             "channels_tracked": SOCIAL_MEDIA_CHANNELS
         }
 
@@ -5930,7 +5992,7 @@ async def export_metrics_csv(
 
     # Sección: Contactos por canal (con todas las columnas)
     writer.writerow(["=== DETALLE DE CONTACTOS POR CANAL ==="])
-    contacts_by_channel = metrics_data.get("contacts_by_channel", {})
+    contacts_by_channel = metrics_data.get("_contacts_by_channel", {})
 
     for canal in sorted(contacts_by_channel.keys()):
         contactos = contacts_by_channel[canal]
@@ -6044,7 +6106,7 @@ async def export_metrics_excel(
 
             # ========== HOJA 2: DETALLE DE CONTACTOS ==========
             all_contacts = []
-            contacts_by_channel = metrics_data.get('contacts_by_channel', {})
+            contacts_by_channel = metrics_data.get('_contacts_by_channel', {})
 
             for canal, contactos in contacts_by_channel.items():
                 for c in contactos:
@@ -6094,13 +6156,13 @@ async def export_metrics_excel(
                 if len(contactos) > 5:
                     canal_data = []
                     for c in contactos:
-                        # Datos ya sanitizados desde get_social_media_metrics
                         canal_data.append({
                             'Fecha': format_date_excel(c.get('fecha', '')),
                             'Nombre': c.get('nombre', 'Sin nombre'),
                             'Teléfono': c.get('telefono', 'Sin teléfono'),
                             'Motivo': c.get('motivo', 'Consulta general'),
                             'Status': c.get('status', 'Lead'),
+                            'Score': c.get('score', '-'),
                         })
 
                     df_canal = pd.DataFrame(canal_data)
@@ -6115,13 +6177,18 @@ async def export_metrics_excel(
                     ws_canal.autofilter(0, 0, len(df_canal), len(df_canal.columns) - 1)
 
         # Preparar respuesta
+        from urllib.parse import quote as _url_quote
         output.seek(0)
         filename = f"metricas_redes_{days}d_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        content_disposition = (
+            f'attachment; filename="{filename}"; '
+            f"filename*=UTF-8''{_url_quote(filename)}"
+        )
 
         return Response(
             content=output.getvalue(),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+            headers={"Content-Disposition": content_disposition}
         )
 
     except HTTPException:
@@ -6129,6 +6196,311 @@ async def export_metrics_excel(
     except Exception as e:
         logger.error(f"[Metrics] Error exportando Excel: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error generando Excel: {str(e)}")
+
+
+# ============================================================================
+# MÉTRICAS DE CITAS REALIZADAS (dashboard mercadeo)
+# ============================================================================
+
+def _build_advisor_id_to_name_map() -> Dict[str, str]:
+    """Aplana OWNERS_CONFIG a dict {advisor_id: name} para enriquecer métricas."""
+    try:
+        from integrations.hubspot.lead_assigner import OWNERS_CONFIG
+    except Exception as e:
+        logger.warning(f"[Metrics] No se pudo cargar OWNERS_CONFIG: {e}")
+        return {}
+    mapping: Dict[str, str] = {}
+    for _team, team_data in OWNERS_CONFIG.items():
+        for owner in team_data.get("owners", []):
+            if owner.get("id") and owner.get("name"):
+                mapping[str(owner["id"])] = owner["name"]
+    return mapping
+
+
+@router.get("/advisors")
+async def list_advisors(x_api_key: str = Header(None, alias="X-API-Key")):
+    """Lista plana de asesores para poblar filtros del panel."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    try:
+        from integrations.hubspot.lead_assigner import OWNERS_CONFIG
+    except ImportError:
+        return {"advisors": []}
+    advisors = []
+    for team, team_data in OWNERS_CONFIG.items():
+        for owner in team_data.get("owners", []):
+            advisors.append({
+                "id": str(owner.get("id", "")),
+                "name": owner.get("name", ""),
+                "team": team,
+            })
+    return {"advisors": advisors}
+
+
+@router.get("/metrics/appointments")
+async def get_appointments_metrics(
+    date_from: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
+    date_to: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
+    advisor_id: Optional[str] = Query(None),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Métricas de citas completadas — para dashboard mercadeo.
+    Filtra por status='completed' y visit_completed_at en rango.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        from zoneinfo import ZoneInfo
+        from collections import defaultdict
+        TZ = ZoneInfo("America/Bogota")
+
+        try:
+            from_dt = datetime.fromisoformat(date_from).replace(tzinfo=TZ)
+            to_dt = (datetime.fromisoformat(date_to).replace(tzinfo=TZ)
+                     + timedelta(days=1))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usa YYYY-MM-DD")
+
+        if from_dt >= to_dt:
+            raise HTTPException(status_code=400, detail="date_from debe ser < date_to")
+
+        period_days = (to_dt - from_dt).days
+        if period_days > 90:
+            raise HTTPException(status_code=400, detail="Rango máximo: 90 días")
+
+        mongo = get_mongo_manager()
+        appointments = await mongo.get_completed_appointments(
+            from_dt, to_dt, advisor_id
+        )
+
+        total = len(appointments)
+        by_day: Dict[str, int] = defaultdict(int)
+        by_advisor: Dict[str, int] = defaultdict(int)
+        details = []
+        ADVISOR_MAP = _build_advisor_id_to_name_map()
+        now_bog = datetime.now(TZ)
+        week_threshold = now_bog - timedelta(days=7)
+        week_count = 0
+
+        for apt in appointments:
+            completed_at = apt.get("visit_completed_at")
+            if completed_at is None:
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=ZoneInfo("UTC"))
+            dt_bog = completed_at.astimezone(TZ)
+            day_key = dt_bog.strftime("%Y-%m-%d")
+            by_day[day_key] += 1
+
+            if dt_bog >= week_threshold:
+                week_count += 1
+
+            advisor_id_raw = apt.get("advisor_id") or ""
+            advisor_name = ADVISOR_MAP.get(str(advisor_id_raw), "") or "Sin asignar"
+            by_advisor[advisor_name] += 1
+
+            apt_dt = apt.get("appointment_dt")
+            if apt_dt and apt_dt.tzinfo is None:
+                apt_dt = apt_dt.replace(tzinfo=ZoneInfo("UTC"))
+
+            details.append({
+                "fecha_cita": apt_dt.astimezone(TZ).isoformat() if apt_dt else "",
+                "nombre": apt.get("contact_name") or "Sin nombre",
+                "telefono": apt.get("phone", ""),
+                "asesor": advisor_name,
+                "canal": apt.get("canal") or "whatsapp",
+            })
+
+        # Delta vs período anterior
+        prev_from = from_dt - timedelta(days=period_days)
+        prev_to = from_dt
+        prev_count = await mongo.count_completed_appointments(
+            prev_from, prev_to, advisor_id
+        )
+        if prev_count > 0:
+            delta_pct = round((total - prev_count) / prev_count * 100, 1)
+        else:
+            delta_pct = None
+
+        top_advisor = (
+            max(by_advisor.items(), key=lambda x: x[1])[0]
+            if by_advisor else "—"
+        )
+        avg_per_day = round(total / period_days, 1) if period_days else 0
+
+        return {
+            "period": {"from": date_from, "to": date_to, "days": period_days},
+            "total": total,
+            "delta_pct": delta_pct,
+            "week_count": week_count,
+            "avg_per_day": avg_per_day,
+            "top_advisor": top_advisor,
+            "by_day": dict(sorted(by_day.items())),
+            "by_advisor": dict(by_advisor),
+            "_details": details,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[AppointmentsMetrics] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/metrics/appointments/export-excel")
+async def export_appointments_excel(
+    date_from: str = Query(..., description="YYYY-MM-DD"),
+    date_to: str = Query(..., description="YYYY-MM-DD"),
+    advisor_id: Optional[str] = Query(None),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Exporta citas completadas a Excel para el área de mercadeo.
+    3 hojas: Resumen, Citas (5 columnas), Por Asesor (si >5 citas).
+    """
+    from fastapi.responses import Response
+    from urllib.parse import quote as _url_quote
+    import pandas as pd
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        metrics_data = await get_appointments_metrics(
+            date_from=date_from,
+            date_to=date_to,
+            advisor_id=advisor_id,
+            x_api_key=x_api_key,
+        )
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            header_format = workbook.add_format({
+                'bold': True, 'font_color': 'white', 'bg_color': '#1F4E79',
+                'border': 1, 'align': 'center', 'valign': 'vcenter',
+                'text_wrap': True,
+            })
+            title_format = workbook.add_format({
+                'bold': True, 'font_size': 14, 'font_color': 'white',
+                'bg_color': '#1F4E79', 'align': 'center', 'valign': 'vcenter',
+            })
+
+            # Hoja 1: Resumen
+            delta_display = (
+                f"{metrics_data['delta_pct']:+.1f}%"
+                if metrics_data.get('delta_pct') is not None else "N/A"
+            )
+            summary_data = {
+                'Métrica': [
+                    'Período Analizado',
+                    'Total Citas Realizadas',
+                    'Esta Semana',
+                    'Promedio por Día',
+                    'Top Asesor',
+                    'Δ vs. Período Anterior',
+                ],
+                'Valor': [
+                    f"{date_from} a {date_to}",
+                    metrics_data['total'],
+                    metrics_data['week_count'],
+                    metrics_data['avg_per_day'],
+                    metrics_data['top_advisor'],
+                    delta_display,
+                ],
+            }
+            df_summary = pd.DataFrame(summary_data)
+            df_summary.to_excel(writer, sheet_name='Resumen', index=False, startrow=1)
+            ws_summary = writer.sheets['Resumen']
+            ws_summary.merge_range(
+                'A1:B1',
+                'RESUMEN DE CITAS REALIZADAS',
+                title_format,
+            )
+            ws_summary.set_column('A:A', 28)
+            ws_summary.set_column('B:B', 25)
+            ws_summary.freeze_panes(2, 0)
+            for col_num, col_name in enumerate(df_summary.columns):
+                ws_summary.write(1, col_num, col_name, header_format)
+
+            # Hoja 2: Citas (5 columnas)
+            details = metrics_data.get('_details', [])
+            if details:
+                rows = [{
+                    'Fecha Cita': _format_datetime_bogota(d.get('fecha_cita', '')),
+                    'Nombre': d.get('nombre', 'Sin nombre'),
+                    'Teléfono': d.get('telefono', ''),
+                    'Asesor': d.get('asesor', 'Sin asignar'),
+                    'Canal': d.get('canal', 'whatsapp').capitalize(),
+                } for d in details]
+                df_citas = pd.DataFrame(rows)
+                df_citas.to_excel(writer, sheet_name='Citas', index=False)
+                ws_citas = writer.sheets['Citas']
+                for col_num, col_name in enumerate(df_citas.columns):
+                    ws_citas.write(0, col_num, col_name, header_format)
+                    try:
+                        max_len = max(
+                            df_citas[col_name].astype(str).map(len).max(),
+                            len(col_name),
+                        ) + 2
+                        ws_citas.set_column(col_num, col_num, min(max_len, 40))
+                    except Exception:
+                        ws_citas.set_column(col_num, col_num, 18)
+                ws_citas.freeze_panes(1, 0)
+                ws_citas.autofilter(0, 0, len(df_citas), len(df_citas.columns) - 1)
+
+                # Hojas por asesor si >5 citas
+                by_advisor_groups: Dict[str, list] = {}
+                for row in rows:
+                    by_advisor_groups.setdefault(row['Asesor'], []).append(row)
+                for asesor_name, asesor_rows in by_advisor_groups.items():
+                    if len(asesor_rows) > 5:
+                        sheet_name = asesor_name[:31] or "Sin asignar"
+                        df_asesor = pd.DataFrame(asesor_rows)
+                        df_asesor.to_excel(writer, sheet_name=sheet_name, index=False)
+                        ws_asesor = writer.sheets[sheet_name]
+                        for col_num, col_name in enumerate(df_asesor.columns):
+                            ws_asesor.write(0, col_num, col_name, header_format)
+                            ws_asesor.set_column(col_num, col_num, 22)
+                        ws_asesor.freeze_panes(1, 0)
+                        ws_asesor.autofilter(
+                            0, 0, len(df_asesor), len(df_asesor.columns) - 1
+                        )
+
+        output.seek(0)
+        filename = (
+            f"citas_realizadas_{date_from}_a_{date_to}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        )
+        content_disposition = (
+            f'attachment; filename="{filename}"; '
+            f"filename*=UTF-8''{_url_quote(filename)}"
+        )
+        return Response(
+            content=output.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": content_disposition},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[AppointmentsMetrics] Error export Excel: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _format_datetime_bogota(iso_str: str) -> str:
+    """Formatea ISO datetime a 'DD/MM/YYYY HH:mm' en Bogotá."""
+    if not iso_str:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo("America/Bogota")).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return iso_str[:16]
 
 
 @router.get("/metrics/", response_class=HTMLResponse)
@@ -6141,17 +6513,15 @@ async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, al
     # Validar API Key via query param para acceso web
     if not _validate_api_key(x_api_key):
         return HTMLResponse(
-            content="""
-            <!DOCTYPE html>`x
-            <html>
-            <head><title>Acceso Denegado</title></head>
-            <body style="font-family: Arial; padding: 50px; text-align: center;">
-                <h1>Acceso Denegado</h1>
-                <p>Se requiere API Key valida.</p>
-                <p>Uso: /whatsapp/panel/metrics/?key=TU_API_KEY</p>
-            </body>
-            </html>
-            """,
+            content="""<!DOCTYPE html>
+<html lang="es">
+<head><title>Acceso Denegado</title></head>
+<body style="font-family: Arial; padding: 50px; text-align: center;">
+    <h1>Acceso Denegado</h1>
+    <p>Se requiere API Key válida.</p>
+    <p>Uso: /whatsapp/panel/metrics/?key=TU_API_KEY</p>
+</body>
+</html>""",
             status_code=401
         )
 

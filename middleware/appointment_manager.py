@@ -122,6 +122,9 @@ class Appointment:
     reminder_sent_at: Optional[str] = None
     followup_sent_at: Optional[str] = None
 
+    # Asesor asignado (HubSpot owner_id) — requerido para métricas post-cita
+    advisor_id: Optional[str] = None
+
     def to_dict(self) -> dict:
         data = asdict(self)
         data["status"] = self.status.value
@@ -212,7 +215,8 @@ class AppointmentManager:
         scheduled_datetime: datetime,
         contact_name: Optional[str] = None,
         contact_id: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        advisor_id: Optional[str] = None,
     ) -> Appointment:
         """
         Crea una nueva cita.
@@ -236,7 +240,8 @@ class AppointmentManager:
             created_at=get_bogota_now_iso(),
             contact_name=contact_name,
             contact_id=contact_id,
-            notes=notes
+            notes=notes,
+            advisor_id=advisor_id,
         )
 
         key = self._build_key(phone_normalized, canal)

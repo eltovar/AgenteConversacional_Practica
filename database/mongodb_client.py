@@ -208,6 +208,11 @@ class MongoDBManager:
                 "appointment_dt",
                 name="appointment_dt_idx"
             )
+            # Índice compuesto para métricas de citas completadas (dashboard mercadeo)
+            await self.db.appointments.create_index(
+                [("status", ASCENDING), ("visit_completed_at", DESCENDING)],
+                name="appointment_completed_metrics_idx"
+            )
 
             # Índice para panel_advisors — evita table scan en lookups por advisor_id
             await self.db.panel_advisors.create_index(
@@ -974,7 +979,9 @@ class MongoDBManager:
         worker_name: str,
         appointment_dt: datetime,
         notes: str,
-        hubspot_note_id: Optional[str] = None
+        hubspot_note_id: Optional[str] = None,
+        contact_name: Optional[str] = None,
+        canal: Optional[str] = None,
     ) -> Optional[str]:
         """Crea una cita y la persiste en MongoDB."""
         if not await self.connect():
@@ -989,13 +996,97 @@ class MongoDBManager:
                 "appointment_dt": appointment_dt,
                 "notes": notes,
                 "hubspot_note_id": hubspot_note_id,
+                "contact_name": contact_name,
+                "canal": canal or "whatsapp",
                 "status": "scheduled",
-                "created_at": datetime.now(TIMEZONE)
+                "created_at": datetime.now(TIMEZONE),
             })
             return str(result.inserted_id)
         except Exception as e:
             logger.error(f"[MongoDB] Error creando cita: {e}")
             return None
+
+    async def mark_visit_completed(
+        self, contact_id: str, phone: Optional[str] = None
+    ) -> bool:
+        """
+        Marca la cita 'scheduled' más reciente del contacto como 'completed'.
+        Idempotente: si no hay cita scheduled, no hace nada.
+        """
+        if not await self.connect():
+            return False
+        try:
+            now = datetime.now(TIMEZONE)
+            result = await self.db.appointments.find_one_and_update(
+                {"contact_id": contact_id, "status": "scheduled"},
+                {"$set": {
+                    "status": "completed",
+                    "visit_completed_at": now,
+                    "status_updated_at": now,
+                }},
+                sort=[("appointment_dt", DESCENDING)],
+            )
+            if result:
+                logger.info(
+                    f"[MongoDB] Cita marcada como completada: contact={contact_id}, "
+                    f"appointment_id={result.get('_id')}"
+                )
+                return True
+            logger.debug(
+                f"[MongoDB] No hay cita 'scheduled' para completar: contact={contact_id}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"[MongoDB] Error marcando cita completada: {e}")
+            return False
+
+    async def get_completed_appointments(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        advisor_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna citas completadas (status='completed') en el rango
+        [date_from, date_to] por visit_completed_at.
+        """
+        if not await self.connect():
+            return []
+        try:
+            query: Dict[str, Any] = {
+                "status": "completed",
+                "visit_completed_at": {"$gte": date_from, "$lte": date_to},
+            }
+            if advisor_id:
+                query["advisor_id"] = advisor_id
+            cursor = self.db.appointments.find(query).sort(
+                "visit_completed_at", DESCENDING
+            )
+            return await cursor.to_list(length=None)
+        except Exception as e:
+            logger.error(f"[MongoDB] Error consultando citas completadas: {e}")
+            return []
+
+    async def count_completed_appointments(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        advisor_id: Optional[str] = None,
+    ) -> int:
+        """Conteo de citas completadas en rango — útil para deltas."""
+        if not await self.connect():
+            return 0
+        try:
+            query: Dict[str, Any] = {
+                "status": "completed",
+                "visit_completed_at": {"$gte": date_from, "$lte": date_to},
+            }
+            if advisor_id:
+                query["advisor_id"] = advisor_id
+            return await self.db.appointments.count_documents(query)
+        except Exception as e:
+            logger.error(f"[MongoDB] Error contando citas completadas: {e}")
+            return 0
 
     async def get_appointments(self, contact_id: str) -> List[Dict[str, Any]]:
         """Obtiene todas las citas de un contacto, ordenadas por fecha."""

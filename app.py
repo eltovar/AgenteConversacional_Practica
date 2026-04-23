@@ -807,6 +807,27 @@ async def check_appointment_followups():
                     if result.get("status") == "success":
                         await apt_manager.mark_followup_sent(apt.phone_normalized, apt.canal)
 
+                        # Transición automática de ciclo de vida (fire-and-forget)
+                        # Replica el patrón de _update_contact_to_en_conversacion
+                        if apt.contact_id:
+                            try:
+                                from middleware.outbound_panel import (
+                                    _update_contact_to_visita_realizada,
+                                )
+                                asyncio.create_task(
+                                    _update_contact_to_visita_realizada(apt.contact_id)
+                                )
+                                asyncio.create_task(
+                                    get_mongo_manager().mark_visit_completed(
+                                        apt.contact_id, apt.phone_normalized
+                                    )
+                                )
+                            except Exception as lc_err:
+                                logger.error(
+                                    "[Scheduler][Followup] Error disparando transición lifecycle: %s",
+                                    lc_err,
+                                )
+
                         if apt.contact_id:
                             try:
                                 timeline = get_timeline_logger()

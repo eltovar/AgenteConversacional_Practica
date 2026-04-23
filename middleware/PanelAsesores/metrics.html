@@ -3,30 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Metricas Redes Sociales - Inmobiliaria Proteger</title>
+    <title>Dashboard de Métricas - Inmobiliaria Proteger</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="/whatsapp/panel/static/metrics.css">
+    <link rel="stylesheet" href="/whatsapp/panel/static/metrics.css?v=2">
 </head>
 <body class="bg-gray-100 min-h-screen">
     <!-- Header -->
     <header class="bg-purple-700 text-white p-4 shadow-lg">
         <div class="container mx-auto">
-            <div class="flex items-center justify-between">
+            <div class="flex items-center justify-between flex-wrap gap-3">
                 <div>
-                    <h1 class="text-2xl font-bold">Dashboard Redes Sociales</h1>
-                    <p class="text-purple-200 text-sm">Inmobiliaria Proteger - Analitica</p>
+                    <h1 id="dashboardTitle" class="text-2xl font-bold">Dashboard Redes Sociales</h1>
+                    <p class="text-purple-200 text-sm">Inmobiliaria Proteger - Analítica</p>
                 </div>
-                <div class="flex items-center gap-4">
-                    <select id="periodSelect" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
-                        <option value="7">Ultimos 7 dias</option>
-                        <option value="14">Ultimos 14 dias</option>
-                        <option value="30">Ultimos 30 dias</option>
+                <div class="view-controls">
+                    <!-- Selector de vista (siempre visible) -->
+                    <select id="viewSelector" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
+                        <option value="social">Redes Sociales</option>
+                        <option value="appointments">Citas Realizadas</option>
                     </select>
+
+                    <!-- Filtros Redes Sociales -->
+                    <div id="filtersSocial" class="view-controls" data-view="social">
+                        <select id="periodSelect" class="bg-purple-600 text-white border border-purple-400 rounded px-3 py-1">
+                            <option value="7">Ultimos 7 dias</option>
+                            <option value="14">Ultimos 14 dias</option>
+                            <option value="30">Ultimos 30 dias</option>
+                        </select>
+                    </div>
+
+                    <!-- Filtros Citas Realizadas -->
+                    <div id="filtersAppointments" class="view-controls hidden" data-view="appointments">
+                        <input type="date" id="dateFrom" class="text-gray-900 rounded px-2 py-1 text-sm" title="Desde">
+                        <input type="date" id="dateTo" class="text-gray-900 rounded px-2 py-1 text-sm" title="Hasta">
+                        <select id="advisorFilter" class="bg-purple-600 text-white border border-purple-400 rounded px-2 py-1 text-sm">
+                            <option value="">Todos los asesores</option>
+                        </select>
+                        <input type="search" id="searchBox" placeholder="Nombre o teléfono…" class="text-gray-900 rounded px-2 py-1 text-sm">
+                    </div>
+
                     <button id="refreshBtn" class="bg-purple-500 hover:bg-purple-400 px-4 py-2 rounded">
                         &#10227; Actualizar
                     </button>
-                    <button id="exportBtn" onclick="exportExcel()" class="bg-green-500 hover:bg-green-400 px-4 py-2 rounded">
+                    <button id="exportBtn" class="bg-green-500 hover:bg-green-400 px-4 py-2 rounded">
                         &#128202; Exportar Excel
                     </button>
                 </div>
@@ -35,78 +55,144 @@
     </header>
 
     <main class="container mx-auto p-6">
-        <!-- Stat Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div class="stat-card rounded-lg p-6 text-white shadow-lg">
-                <p class="text-sm opacity-80">Total Leads</p>
-                <p id="totalLeads" class="text-4xl font-bold">-</p>
-                <p class="text-sm opacity-80 mt-2">Redes sociales</p>
+        <!-- ============================================================= -->
+        <!-- VISTA: Redes Sociales (original)                               -->
+        <!-- ============================================================= -->
+        <section id="viewSocial" class="view" data-view="social">
+            <!-- Stat Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="stat-card rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Total Leads</p>
+                    <p id="totalLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">Redes sociales</p>
+                </div>
+                <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Instagram</p>
+                    <p id="instagramLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">leads</p>
+                </div>
+                <div class="stat-card-facebook rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Facebook</p>
+                    <p id="facebookLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">leads</p>
+                </div>
+                <div class="stat-card-tiktok rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">TikTok</p>
+                    <p id="tiktokLeads" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">leads</p>
+                </div>
             </div>
-            <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
-                <p class="text-sm opacity-80">Instagram</p>
-                <p id="instagramLeads" class="text-4xl font-bold">-</p>
-                <p class="text-sm opacity-80 mt-2">leads</p>
-            </div>
-            <div class="stat-card-green rounded-lg p-6 text-white shadow-lg">
-                <p class="text-sm opacity-80">Facebook</p>
-                <p id="facebookLeads" class="text-4xl font-bold">-</p>
-                <p class="text-sm opacity-80 mt-2">leads</p>
-            </div>
-            <div class="stat-card-tiktok rounded-lg p-6 text-white shadow-lg">
-                <p class="text-sm opacity-80">TikTok</p>
-                <p id="tiktokLeads" class="text-4xl font-bold">-</p>
-                <p class="text-sm opacity-80 mt-2">leads</p>
-            </div>
-        </div>
 
-        <!-- Charts -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <!-- Chart: Leads por Canal -->
+            <!-- Charts -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Leads por Canal</h3>
+                    <canvas id="channelChart"></canvas>
+                </div>
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia Diaria</h3>
+                    <canvas id="dailyChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Tabla de resumen -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Resumen por Canal</h3>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b">
+                            <th class="text-left py-2 text-gray-600">Canal</th>
+                            <th class="text-right py-2 text-gray-600">Leads</th>
+                            <th class="text-right py-2 text-gray-600">%</th>
+                        </tr>
+                    </thead>
+                    <tbody id="channelTable">
+                        <tr><td colspan="3" class="text-center py-4 text-gray-400">Cargando...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <p class="text-blue-700 text-sm">
+                    <strong>&#8505;&#65039; Nota:</strong> Este dashboard muestra métricas de leads provenientes de
+                    redes sociales (Facebook, Instagram, LinkedIn, YouTube, TikTok).
+                </p>
+            </div>
+        </section>
+
+        <!-- ============================================================= -->
+        <!-- VISTA: Citas Realizadas (NUEVA)                                -->
+        <!-- ============================================================= -->
+        <section id="viewAppointments" class="view hidden" data-view="appointments">
+            <!-- Stat Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="stat-card rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Total Citas</p>
+                    <p id="totalAppointments" class="text-4xl font-bold">-</p>
+                    <p id="deltaPct" class="text-sm opacity-80 mt-2">vs. período anterior</p>
+                </div>
+                <div class="stat-card-alt rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Esta Semana</p>
+                    <p id="weekAppointments" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">últimos 7 días</p>
+                </div>
+                <div class="stat-card-facebook rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Promedio/Día</p>
+                    <p id="avgDayAppointments" class="text-4xl font-bold">-</p>
+                    <p class="text-sm opacity-80 mt-2">en el período</p>
+                </div>
+                <div class="stat-card-tiktok rounded-lg p-6 text-white shadow-lg">
+                    <p class="text-sm opacity-80">Top Asesor</p>
+                    <p id="topAdvisor" class="text-2xl font-bold truncate">-</p>
+                    <p class="text-sm opacity-80 mt-2">con más citas</p>
+                </div>
+            </div>
+
+            <!-- Chart tendencia -->
+            <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia de Citas Realizadas</h3>
+                <canvas id="appointmentsDailyChart"></canvas>
+            </div>
+
+            <!-- Tabla detalle -->
             <div class="bg-white rounded-lg shadow-lg p-6">
-                <h3 class="text-lg font-semibold mb-4 text-gray-700">Leads por Canal</h3>
-                <canvas id="channelChart"></canvas>
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-gray-700">Detalle de Citas</h3>
+                    <span id="appointmentsCount" class="text-sm text-gray-500"></span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead>
+                            <tr class="border-b bg-gray-50">
+                                <th class="text-left py-2 px-3 text-gray-600 text-sm">Fecha Cita</th>
+                                <th class="text-left py-2 px-3 text-gray-600 text-sm">Cliente</th>
+                                <th class="text-left py-2 px-3 text-gray-600 text-sm">Teléfono</th>
+                                <th class="text-left py-2 px-3 text-gray-600 text-sm">Asesor</th>
+                                <th class="text-left py-2 px-3 text-gray-600 text-sm">Canal</th>
+                            </tr>
+                        </thead>
+                        <tbody id="appointmentsTable">
+                            <tr><td colspan="5" class="text-center py-4 text-gray-400">Cargando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
-            <!-- Chart: Leads por Dia -->
-            <div class="bg-white rounded-lg shadow-lg p-6">
-                <h3 class="text-lg font-semibold mb-4 text-gray-700">Tendencia Diaria</h3>
-                <canvas id="dailyChart"></canvas>
+            <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <p class="text-blue-700 text-sm">
+                    <strong>&#8505;&#65039; Nota:</strong> Este dashboard muestra citas que ya fueron realizadas
+                    (transicionadas automáticamente 1h30min después del horario agendado).
+                    Usa los filtros de fecha y asesor para segmentar, o la búsqueda para filtrar por nombre/teléfono.
+                </p>
             </div>
-        </div>
-
-        <!-- Tabla de resumen -->
-        <div class="bg-white rounded-lg shadow-lg p-6 mt-6">
-            <h3 class="text-lg font-semibold mb-4 text-gray-700">Resumen por Canal</h3>
-            <table class="w-full">
-                <thead>
-                    <tr class="border-b">
-                        <th class="text-left py-2 text-gray-600">Canal</th>
-                        <th class="text-right py-2 text-gray-600">Leads</th>
-                        <th class="text-right py-2 text-gray-600">%</th>
-                    </tr>
-                </thead>
-                <tbody id="channelTable">
-                    <tr><td colspan="3" class="text-center py-4 text-gray-400">Cargando...</td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- Info box -->
-        <div class="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p class="text-blue-700 text-sm">
-                <strong>&#8505;&#65039; Nota:</strong> Este dashboard muestra metricas de leads provenientes de
-                redes sociales (Facebook, Instagram, LinkedIn, YouTube, TikTok).
-                Para ver conversaciones detalladas o enviar mensajes, contacte a las asesoras.
-            </p>
-        </div>
+        </section>
     </main>
 
-    <!-- Script con variables inyectadas desde el servidor -->
     <script>
         // Variables inyectadas por Jinja2
         const API_KEY = '{{ api_key }}';
         const BASE_URL = '{{ base_url }}';
     </script>
-    <script src="/whatsapp/panel/static/metrics.js"></script>
+    <script src="/whatsapp/panel/static/metrics.js?v=2"></script>
 </body>
 </html>

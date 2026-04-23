@@ -5,9 +5,45 @@
 .stat-card-alt {
     background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
 }
-.stat-card-green {
-    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+.stat-card-facebook {
+    background: linear-gradient(135deg, #4267B2 0%, #365899 100%);
 }
 .stat-card-tiktok {
     background: linear-gradient(135deg, #000000 0%, #25f4ee 50%, #fe2c55 100%);
+}
+
+/* Dashboard routing / layout */
+.hidden {
+    display: none !important;
+}
+.view-controls {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* Deltas de métricas (variación vs período anterior) */
+.stat-delta-positive {
+    color: #a7f3d0;
+    font-weight: 600;
+}
+.stat-delta-negative {
+    color: #fecaca;
+    font-weight: 600;
+}
+.stat-delta-neutral {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+/* Filas de tabla citas */
+#appointmentsTable tr {
+    border-bottom: 1px solid #f3f4f6;
+}
+#appointmentsTable tr:hover {
+    background-color: #f9fafb;
+}
+#appointmentsTable td {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
 }

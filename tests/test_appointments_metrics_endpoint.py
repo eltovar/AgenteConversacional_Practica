@@ -18,6 +18,8 @@ def _make_appointment(
     contact_id="C1",
     phone="+573001234567",
     advisor_id="89096378",
+    worker_id="W1",
+    worker_name="Carlos Trabajador",
     contact_name="Juan Pérez",
     canal="whatsapp",
     visit_completed_at=None,
@@ -29,6 +31,8 @@ def _make_appointment(
         "contact_id": contact_id,
         "phone": phone,
         "advisor_id": advisor_id,
+        "worker_id": worker_id,
+        "worker_name": worker_name,
         "contact_name": contact_name,
         "canal": canal,
         "status": "completed",
@@ -133,16 +137,18 @@ async def test_endpoint_returns_empty_on_no_data(mock_mongo):
 
 @pytest.mark.asyncio
 async def test_endpoint_aggregates_correctly(mock_mongo):
-    """3 citas → total=3, by_advisor cuenta correcto, _details poblado."""
+    """3 citas → total=3, by_worker cuenta correcto, _details poblado."""
     from middleware.outbound_panel import get_appointments_metrics
 
     now = datetime.now(TZ_BOG)
     mock_mongo.get_completed_appointments = AsyncMock(return_value=[
-        _make_appointment(contact_name="Cliente A", advisor_id="89096378",
-                          visit_completed_at=now),
-        _make_appointment(contact_name="Cliente B", advisor_id="89096378",
+        _make_appointment(contact_name="Cliente A", worker_id="W1",
+                          worker_name="Carlos", visit_completed_at=now),
+        _make_appointment(contact_name="Cliente B", worker_id="W1",
+                          worker_name="Carlos",
                           visit_completed_at=now - timedelta(days=1)),
-        _make_appointment(contact_name="Cliente C", advisor_id="89096380",
+        _make_appointment(contact_name="Cliente C", worker_id="W2",
+                          worker_name="Maria",
                           visit_completed_at=now - timedelta(days=2)),
     ])
     mock_mongo.count_completed_appointments = AsyncMock(return_value=2)
@@ -157,17 +163,19 @@ async def test_endpoint_aggregates_correctly(mock_mongo):
 
     assert result["total"] == 3
     assert len(result["_details"]) == 3
-    # delta_pct = (3 - 2) / 2 * 100 = 50.0
     assert result["delta_pct"] == 50.0
-    # avg_per_day = 3 / 22 (días del período)
     assert result["avg_per_day"] > 0
-    # by_day debe tener al menos 1 entrada
     assert len(result["by_day"]) >= 1
+    # by_worker debe contar: Carlos=2, Maria=1
+    assert result["by_worker"]["Carlos"] == 2
+    assert result["by_worker"]["Maria"] == 1
+    # top_advisor fue eliminado del contrato
+    assert "top_advisor" not in result
 
 
 @pytest.mark.asyncio
-async def test_endpoint_filters_by_advisor(mock_mongo):
-    """Filtro advisor_id se propaga a mongo query."""
+async def test_endpoint_filters_by_worker(mock_mongo):
+    """Filtro worker_id se propaga a mongo query."""
     from middleware.outbound_panel import get_appointments_metrics
 
     mock_mongo.get_completed_appointments = AsyncMock(return_value=[])
@@ -178,15 +186,14 @@ async def test_endpoint_filters_by_advisor(mock_mongo):
         await get_appointments_metrics(
             date_from="2026-04-01",
             date_to="2026-04-22",
-            advisor_id="89096378",
+            worker_id="W123",
             x_api_key="valid",
         )
 
-    # Verificar que el advisor_id llegó a las calls
     call_args = mock_mongo.get_completed_appointments.await_args
-    assert call_args.args[2] == "89096378"
+    assert call_args.args[2] == "W123"
     count_args = mock_mongo.count_completed_appointments.await_args
-    assert count_args.args[2] == "89096378"
+    assert count_args.args[2] == "W123"
 
 
 @pytest.mark.asyncio
@@ -212,29 +219,6 @@ async def test_endpoint_handles_missing_visit_completed_at(mock_mongo):
     # total=2 (raw) pero by_day/_details solo cuentan 1 válida
     assert result["total"] == 2
     assert len(result["_details"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_list_advisors_endpoint():
-    """/advisors retorna dict con lista."""
-    from middleware.outbound_panel import list_advisors
-
-    with patch('middleware.outbound_panel._validate_api_key', return_value=True):
-        result = await list_advisors(x_api_key="valid")
-
-    assert "advisors" in result
-    assert isinstance(result["advisors"], list)
-
-
-@pytest.mark.asyncio
-async def test_list_advisors_rejects_invalid_key():
-    """/advisors → 401 sin key."""
-    from middleware.outbound_panel import list_advisors
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc:
-        await list_advisors(x_api_key="bad")
-    assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio

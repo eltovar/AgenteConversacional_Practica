@@ -194,7 +194,7 @@ function getAppointmentDateRange() {
 
 function setAppointmentLoadingState(loading) {
     const refreshBtn = document.getElementById('refreshBtn');
-    const cards = ['totalAppointments', 'weekAppointments', 'avgDayAppointments', 'topAdvisor'];
+    const cards = ['totalAppointments', 'weekAppointments', 'avgDayAppointments'];
     if (loading) {
         refreshBtn.disabled = true;
         refreshBtn.textContent = 'Cargando...';
@@ -211,11 +211,11 @@ async function loadAppointmentsMetrics() {
         console.warn('[Métricas/Citas] Rango de fechas incompleto');
         return;
     }
-    const advisorId = document.getElementById('advisorFilter').value;
+    const workerId = document.getElementById('workerFilter').value;
     const qs = new URLSearchParams({ date_from: from, date_to: to });
-    if (advisorId) qs.append('advisor_id', advisorId);
+    if (workerId) qs.append('worker_id', workerId);
 
-    console.log(`[Métricas/Citas] Cargando → ${from} a ${to}, asesor=${advisorId || 'todos'}`);
+    console.log(`[Métricas/Citas] Cargando → ${from} a ${to}, worker=${workerId || 'todos'}`);
     setAppointmentLoadingState(true);
 
     try {
@@ -245,7 +245,6 @@ function renderAppointmentsDashboard(data) {
     document.getElementById('totalAppointments').textContent = data.total ?? 0;
     document.getElementById('weekAppointments').textContent = data.week_count ?? 0;
     document.getElementById('avgDayAppointments').textContent = data.avg_per_day ?? 0;
-    document.getElementById('topAdvisor').textContent = data.top_advisor || '—';
 
     // Delta con color
     const deltaEl = document.getElementById('deltaPct');
@@ -348,9 +347,9 @@ async function exportAppointmentsExcel() {
         alert('Selecciona un rango de fechas antes de exportar');
         return;
     }
-    const advisorId = document.getElementById('advisorFilter').value;
+    const workerId = document.getElementById('workerFilter').value;
     const qs = new URLSearchParams({ date_from: from, date_to: to });
-    if (advisorId) qs.append('advisor_id', advisorId);
+    if (workerId) qs.append('worker_id', workerId);
 
     const exportBtn = document.getElementById('exportBtn');
     exportBtn.disabled = true;
@@ -371,22 +370,40 @@ async function exportAppointmentsExcel() {
     }
 }
 
-async function loadAdvisors() {
+// Cargar trabajadores de campo (appointment_workers) una sola vez al montar.
+// Construye el HTML completo en memoria antes de asignarlo al DOM para evitar
+// reflows intermedios — el usuario nunca ve un dropdown parcialmente poblado.
+let _workersLoaded = false;
+
+async function loadWorkers() {
+    if (_workersLoaded) return;
+    const select = document.getElementById('workerFilter');
+    const previousValue = select.value;
     try {
-        const response = await fetch(`${BASE_URL}/advisors`, {
+        const response = await fetch(`${BASE_URL}/workers`, {
             headers: { 'X-API-Key': API_KEY }
         });
         if (!response.ok) return;
         const data = await response.json();
-        const select = document.getElementById('advisorFilter');
-        (data.advisors || []).forEach(a => {
+        const workers = (data.workers || []).filter(w => w && w.id && w.name);
+
+        // Construir opciones en un DocumentFragment — una sola inserción al DOM
+        const frag = document.createDocumentFragment();
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Todos los trabajadores';
+        frag.appendChild(placeholder);
+        workers.forEach(w => {
             const opt = document.createElement('option');
-            opt.value = a.id;
-            opt.textContent = a.name;
-            select.appendChild(opt);
+            opt.value = w.id;
+            opt.textContent = w.name;
+            frag.appendChild(opt);
         });
+        select.replaceChildren(frag);
+        select.value = previousValue || '';
+        _workersLoaded = true;
     } catch (error) {
-        console.warn('[Métricas/Citas] No se pudo cargar lista de asesores:', error);
+        console.warn('[Métricas/Citas] No se pudo cargar lista de trabajadores:', error);
     }
 }
 
@@ -445,12 +462,22 @@ function initAppointmentDateDefaults() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initAppointmentDateDefaults();
-    loadAdvisors();
+    // Cargar workers en paralelo sin bloquear la vista inicial.
+    // loadWorkers() es idempotente (guardia _workersLoaded), así que llamarlo
+    // antes de que el usuario abra la vista "Citas" no genera re-fetch.
+    loadWorkers();
     switchView('social');  // vista inicial
 });
 
 document.getElementById('viewSelector').addEventListener('change', (e) => {
-    switchView(e.target.value);
+    // Al abrir la vista "appointments" por primera vez, garantizamos que
+    // el dropdown ya esté poblado — si la carga inicial aún no terminó,
+    // este await evita el flash "Todos los trabajadores" → lista completa.
+    if (e.target.value === 'appointments') {
+        loadWorkers().then(() => switchView(e.target.value));
+    } else {
+        switchView(e.target.value);
+    }
 });
 
 document.getElementById('periodSelect').addEventListener('change', () => {
@@ -463,7 +490,7 @@ document.getElementById('dateFrom').addEventListener('change', () => {
 document.getElementById('dateTo').addEventListener('change', () => {
     if (currentView === 'appointments') loadAppointmentsMetrics();
 });
-document.getElementById('advisorFilter').addEventListener('change', () => {
+document.getElementById('workerFilter').addEventListener('change', () => {
     if (currentView === 'appointments') loadAppointmentsMetrics();
 });
 document.getElementById('searchBox').addEventListener('input', debounce(() => {

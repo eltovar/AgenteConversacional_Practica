@@ -144,18 +144,6 @@ async def test_transition_swallows_exceptions(httpx_client_mock):
         await _update_contact_to_visita_realizada('123456')
 
 
-def test_advisor_map_builds_from_owners_config():
-    """_build_advisor_id_to_name_map retorna dict sin explotar."""
-    from middleware.outbound_panel import _build_advisor_id_to_name_map
-    # Debe retornar dict aunque OWNERS_CONFIG no cargue (env sin HUBSPOT_API_KEY)
-    mapping = _build_advisor_id_to_name_map()
-    assert isinstance(mapping, dict)
-    # Valores (si los hay) son strings
-    for k, v in mapping.items():
-        assert isinstance(k, str)
-        assert isinstance(v, str)
-
-
 def test_protected_stages_includes_visita_realizada():
     """La constante protege salesqualifiedlead (evita doble transición)."""
     from middleware.outbound_panel import PROTECTED_STAGES_POST_VISITA

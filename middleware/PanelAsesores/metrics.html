@@ -37,8 +37,8 @@
                     <div id="filtersAppointments" class="view-controls hidden" data-view="appointments">
                         <input type="date" id="dateFrom" class="text-gray-900 rounded px-2 py-1 text-sm" title="Desde">
                         <input type="date" id="dateTo" class="text-gray-900 rounded px-2 py-1 text-sm" title="Hasta">
-                        <select id="advisorFilter" class="bg-purple-600 text-white border border-purple-400 rounded px-2 py-1 text-sm">
-                            <option value="">Todos los asesores</option>
+                        <select id="workerFilter" class="bg-purple-600 text-white border border-purple-400 rounded px-2 py-1 text-sm">
+                            <option value="">Todos los trabajadores</option>
                         </select>
                         <input type="search" id="searchBox" placeholder="Nombre o teléfono…" class="text-gray-900 rounded px-2 py-1 text-sm">
                     </div>
@@ -125,7 +125,7 @@
         <!-- ============================================================= -->
         <section id="viewAppointments" class="view hidden" data-view="appointments">
             <!-- Stat Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div class="stat-card rounded-lg p-6 text-white shadow-lg">
                     <p class="text-sm opacity-80">Total Citas</p>
                     <p id="totalAppointments" class="text-4xl font-bold">-</p>
@@ -140,11 +140,6 @@
                     <p class="text-sm opacity-80">Promedio/Día</p>
                     <p id="avgDayAppointments" class="text-4xl font-bold">-</p>
                     <p class="text-sm opacity-80 mt-2">en el período</p>
-                </div>
-                <div class="stat-card-tiktok rounded-lg p-6 text-white shadow-lg">
-                    <p class="text-sm opacity-80">Top Asesor</p>
-                    <p id="topAdvisor" class="text-2xl font-bold truncate">-</p>
-                    <p class="text-sm opacity-80 mt-2">con más citas</p>
                 </div>
             </div>
 

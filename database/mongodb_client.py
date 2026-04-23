@@ -1044,11 +1044,12 @@ class MongoDBManager:
         self,
         date_from: datetime,
         date_to: datetime,
-        advisor_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Retorna citas completadas (status='completed') en el rango
         [date_from, date_to] por visit_completed_at.
+        Filtra por worker_id (trabajador de campo que realizó la visita).
         """
         if not await self.connect():
             return []
@@ -1057,8 +1058,8 @@ class MongoDBManager:
                 "status": "completed",
                 "visit_completed_at": {"$gte": date_from, "$lte": date_to},
             }
-            if advisor_id:
-                query["advisor_id"] = advisor_id
+            if worker_id:
+                query["worker_id"] = worker_id
             cursor = self.db.appointments.find(query).sort(
                 "visit_completed_at", DESCENDING
             )
@@ -1071,7 +1072,7 @@ class MongoDBManager:
         self,
         date_from: datetime,
         date_to: datetime,
-        advisor_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
     ) -> int:
         """Conteo de citas completadas en rango — útil para deltas."""
         if not await self.connect():
@@ -1081,8 +1082,8 @@ class MongoDBManager:
                 "status": "completed",
                 "visit_completed_at": {"$gte": date_from, "$lte": date_to},
             }
-            if advisor_id:
-                query["advisor_id"] = advisor_id
+            if worker_id:
+                query["worker_id"] = worker_id
             return await self.db.appointments.count_documents(query)
         except Exception as e:
             logger.error(f"[MongoDB] Error contando citas completadas: {e}")

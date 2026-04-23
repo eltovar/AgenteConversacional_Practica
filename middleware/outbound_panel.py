@@ -6202,51 +6202,17 @@ async def export_metrics_excel(
 # MÉTRICAS DE CITAS REALIZADAS (dashboard mercadeo)
 # ============================================================================
 
-def _build_advisor_id_to_name_map() -> Dict[str, str]:
-    """Aplana OWNERS_CONFIG a dict {advisor_id: name} para enriquecer métricas."""
-    try:
-        from integrations.hubspot.lead_assigner import OWNERS_CONFIG
-    except Exception as e:
-        logger.warning(f"[Metrics] No se pudo cargar OWNERS_CONFIG: {e}")
-        return {}
-    mapping: Dict[str, str] = {}
-    for _team, team_data in OWNERS_CONFIG.items():
-        for owner in team_data.get("owners", []):
-            if owner.get("id") and owner.get("name"):
-                mapping[str(owner["id"])] = owner["name"]
-    return mapping
-
-
-@router.get("/advisors")
-async def list_advisors(x_api_key: str = Header(None, alias="X-API-Key")):
-    """Lista plana de asesores para poblar filtros del panel."""
-    if not _validate_api_key(x_api_key):
-        raise HTTPException(status_code=401, detail="API Key inválida")
-    try:
-        from integrations.hubspot.lead_assigner import OWNERS_CONFIG
-    except ImportError:
-        return {"advisors": []}
-    advisors = []
-    for team, team_data in OWNERS_CONFIG.items():
-        for owner in team_data.get("owners", []):
-            advisors.append({
-                "id": str(owner.get("id", "")),
-                "name": owner.get("name", ""),
-                "team": team,
-            })
-    return {"advisors": advisors}
-
-
 @router.get("/metrics/appointments")
 async def get_appointments_metrics(
     date_from: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
     date_to: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
-    advisor_id: Optional[str] = Query(None),
+    worker_id: Optional[str] = Query(None, description="ID del trabajador de campo"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Métricas de citas completadas — para dashboard mercadeo.
     Filtra por status='completed' y visit_completed_at en rango.
+    Segmenta por worker_id (trabajador de campo que realizó la visita).
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -6272,14 +6238,13 @@ async def get_appointments_metrics(
 
         mongo = get_mongo_manager()
         appointments = await mongo.get_completed_appointments(
-            from_dt, to_dt, advisor_id
+            from_dt, to_dt, worker_id
         )
 
         total = len(appointments)
         by_day: Dict[str, int] = defaultdict(int)
-        by_advisor: Dict[str, int] = defaultdict(int)
+        by_worker: Dict[str, int] = defaultdict(int)
         details = []
-        ADVISOR_MAP = _build_advisor_id_to_name_map()
         now_bog = datetime.now(TZ)
         week_threshold = now_bog - timedelta(days=7)
         week_count = 0
@@ -6297,9 +6262,8 @@ async def get_appointments_metrics(
             if dt_bog >= week_threshold:
                 week_count += 1
 
-            advisor_id_raw = apt.get("advisor_id") or ""
-            advisor_name = ADVISOR_MAP.get(str(advisor_id_raw), "") or "Sin asignar"
-            by_advisor[advisor_name] += 1
+            worker_name = apt.get("worker_name") or "Sin asignar"
+            by_worker[worker_name] += 1
 
             apt_dt = apt.get("appointment_dt")
             if apt_dt and apt_dt.tzinfo is None:
@@ -6309,7 +6273,7 @@ async def get_appointments_metrics(
                 "fecha_cita": apt_dt.astimezone(TZ).isoformat() if apt_dt else "",
                 "nombre": apt.get("contact_name") or "Sin nombre",
                 "telefono": apt.get("phone", ""),
-                "asesor": advisor_name,
+                "asesor": worker_name,
                 "canal": apt.get("canal") or "whatsapp",
             })
 
@@ -6317,17 +6281,13 @@ async def get_appointments_metrics(
         prev_from = from_dt - timedelta(days=period_days)
         prev_to = from_dt
         prev_count = await mongo.count_completed_appointments(
-            prev_from, prev_to, advisor_id
+            prev_from, prev_to, worker_id
         )
         if prev_count > 0:
             delta_pct = round((total - prev_count) / prev_count * 100, 1)
         else:
             delta_pct = None
 
-        top_advisor = (
-            max(by_advisor.items(), key=lambda x: x[1])[0]
-            if by_advisor else "—"
-        )
         avg_per_day = round(total / period_days, 1) if period_days else 0
 
         return {
@@ -6336,9 +6296,8 @@ async def get_appointments_metrics(
             "delta_pct": delta_pct,
             "week_count": week_count,
             "avg_per_day": avg_per_day,
-            "top_advisor": top_advisor,
             "by_day": dict(sorted(by_day.items())),
-            "by_advisor": dict(by_advisor),
+            "by_worker": dict(by_worker),
             "_details": details,
         }
 
@@ -6353,12 +6312,12 @@ async def get_appointments_metrics(
 async def export_appointments_excel(
     date_from: str = Query(..., description="YYYY-MM-DD"),
     date_to: str = Query(..., description="YYYY-MM-DD"),
-    advisor_id: Optional[str] = Query(None),
+    worker_id: Optional[str] = Query(None),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Exporta citas completadas a Excel para el área de mercadeo.
-    3 hojas: Resumen, Citas (5 columnas), Por Asesor (si >5 citas).
+    3 hojas: Resumen, Citas (5 columnas), Por Trabajador (si >5 citas).
     """
     from fastapi.responses import Response
     from urllib.parse import quote as _url_quote
@@ -6371,7 +6330,7 @@ async def export_appointments_excel(
         metrics_data = await get_appointments_metrics(
             date_from=date_from,
             date_to=date_to,
-            advisor_id=advisor_id,
+            worker_id=worker_id,
             x_api_key=x_api_key,
         )
 
@@ -6399,7 +6358,6 @@ async def export_appointments_excel(
                     'Total Citas Realizadas',
                     'Esta Semana',
                     'Promedio por Día',
-                    'Top Asesor',
                     'Δ vs. Período Anterior',
                 ],
                 'Valor': [
@@ -6407,7 +6365,6 @@ async def export_appointments_excel(
                     metrics_data['total'],
                     metrics_data['week_count'],
                     metrics_data['avg_per_day'],
-                    metrics_data['top_advisor'],
                     delta_display,
                 ],
             }
@@ -6452,21 +6409,22 @@ async def export_appointments_excel(
                 ws_citas.autofilter(0, 0, len(df_citas), len(df_citas.columns) - 1)
 
                 # Hojas por asesor si >5 citas
-                by_advisor_groups: Dict[str, list] = {}
+                # Hojas por trabajador de campo (si >5 citas)
+                by_worker_groups: Dict[str, list] = {}
                 for row in rows:
-                    by_advisor_groups.setdefault(row['Asesor'], []).append(row)
-                for asesor_name, asesor_rows in by_advisor_groups.items():
-                    if len(asesor_rows) > 5:
-                        sheet_name = asesor_name[:31] or "Sin asignar"
-                        df_asesor = pd.DataFrame(asesor_rows)
-                        df_asesor.to_excel(writer, sheet_name=sheet_name, index=False)
-                        ws_asesor = writer.sheets[sheet_name]
-                        for col_num, col_name in enumerate(df_asesor.columns):
-                            ws_asesor.write(0, col_num, col_name, header_format)
-                            ws_asesor.set_column(col_num, col_num, 22)
-                        ws_asesor.freeze_panes(1, 0)
-                        ws_asesor.autofilter(
-                            0, 0, len(df_asesor), len(df_asesor.columns) - 1
+                    by_worker_groups.setdefault(row['Asesor'], []).append(row)
+                for worker_name, worker_rows in by_worker_groups.items():
+                    if len(worker_rows) > 5:
+                        sheet_name = (worker_name or "Sin asignar")[:31]
+                        df_worker = pd.DataFrame(worker_rows)
+                        df_worker.to_excel(writer, sheet_name=sheet_name, index=False)
+                        ws_worker = writer.sheets[sheet_name]
+                        for col_num, col_name in enumerate(df_worker.columns):
+                            ws_worker.write(0, col_num, col_name, header_format)
+                            ws_worker.set_column(col_num, col_num, 22)
+                        ws_worker.freeze_panes(1, 0)
+                        ws_worker.autofilter(
+                            0, 0, len(df_worker), len(df_worker.columns) - 1
                         )
 
         output.seek(0)

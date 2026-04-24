@@ -5111,6 +5111,13 @@ function handleWebSocketMessage(data) {
             }
             // Si el chat activo es el que recibió el mensaje, refrescar historial y estado de ventana
             if (currentPhone && data.phone && data.phone === currentPhone) {
+                // P3-D canal fix: si el backend hizo merge de canal (ej: ciencuadras → whatsapp),
+                // el evento WS lleva el canal real. Actualizamos currentCanal ANTES de recargar
+                // para que loadChatHistory use el canal correcto y muestre el mensaje nuevo.
+                if (data.canal && data.canal !== currentCanal) {
+                    console.log(`[Panel][P3-D] Canal corregido antes de recargar historial: ${currentCanal} → ${data.canal}`);
+                    currentCanal = data.canal;
+                }
                 loadChatHistory(currentContactId);
                 checkWindowStatus(currentPhone);
             }

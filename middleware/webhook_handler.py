@@ -62,6 +62,15 @@ from utils.message_aggregator import message_aggregator
 from .appointment_manager import get_appointment_manager
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONVERSATIONS API — Feature flag
+# Cuando TWILIO_CONVERSATIONS_ENABLED=true el webhook parsea JSON (Conversations).
+# Cuando es false (default) sigue usando form-encoded (Programmable Messaging).
+# Activar SOLO después de mover el número al Messaging Service en Twilio Console.
+# ─────────────────────────────────────────────────────────────────────────────
+CONVERSATIONS_ENABLED = os.getenv("TWILIO_CONVERSATIONS_ENABLED", "false").lower() == "true"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESPUESTA DIFERIDA PARA EVITAR TIMEOUT DE TWILIO (15 segundos)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -139,7 +148,8 @@ async def _process_message_deferred(
     media_content_type: Optional[str],
     early_channel: str,
     original_replied_message_sid: Optional[str] = None,
-    incoming_channel: Optional[str] = None
+    incoming_channel: Optional[str] = None,
+    conversation_sid: Optional[str] = None,
 ):
     """
     Procesa un mensaje de WhatsApp de forma diferida (background task).
@@ -298,7 +308,8 @@ async def _process_message_deferred(
             message_sid=message_sid,
             media=media_dict,
             reply_to_id=reply_to_id,
-            reply_to_preview=reply_to_preview
+            reply_to_preview=reply_to_preview,
+            conversation_sid=conversation_sid,
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
 
@@ -931,64 +942,92 @@ async def should_bot_respond(
 
 
 @router.post("/webhook")
-async def whatsapp_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    From: str = Form(...),
-    Body: str = Form(""),
-    ProfileName: Optional[str] = Form(None),
-    MessageSid: Optional[str] = Form(None),
-    # Parámetros de multimedia (Twilio envía NumMedia, MediaUrl0, MediaContentType0)
-    NumMedia: int = Form(0),
-    MediaUrl0: Optional[str] = Form(None),
-    MediaContentType0: Optional[str] = Form(None),
-    # Parámetros de reply context (Twilio envía cuando el cliente cita un mensaje)
-    OriginalRepliedMessageSid: Optional[str] = Form(None),
-    OriginalRepliedMessageSender: Optional[str] = Form(None),
-):
+async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Endpoint principal del webhook de Twilio.
-    
+
     PATRÓN DE RESPUESTA DIFERIDA:
-    - Twilio cierra la conexión después de 15 segundos
-    - Responder inmediatamente con 200 OK (TwiML vacío)
-    - Procesar el mensaje en background
+    - Responder inmediatamente con 200 OK (TwiML vacío) — siempre < 1 segundo
+    - Procesar el mensaje en background (sin límite de tiempo)
     - Enviar respuesta de Sofia via Twilio REST API
-    
-    Esto evita errores 422 por retry y timeouts.
+
+    DUAL-PARSER:
+    - Si Content-Type es application/json → Twilio Conversations API (nuevo)
+    - Si Content-Type es application/x-www-form-urlencoded → Programmable Messaging (legacy)
+    El flag CONVERSATIONS_ENABLED activa el path JSON pero el parser detecta automáticamente
+    el formato real, actuando como safety net durante la transición.
     """
+    # ════════════════════════════════════════════════════════════
+    # PASO 0: Parsear request — dual-parser JSON / form-encoded
+    # ════════════════════════════════════════════════════════════
+    content_type = request.headers.get("content-type", "").lower()
+    is_json_request = "application/json" in content_type
+
+    From: str = ""
+    Body: str = ""
+    ProfileName: Optional[str] = None
+    MessageSid: Optional[str] = None
+    NumMedia: int = 0
+    MediaUrl0: Optional[str] = None
+    MediaContentType0: Optional[str] = None
+    OriginalRepliedMessageSid: Optional[str] = None
+    OriginalRepliedMessageSender: Optional[str] = None
+    conversation_sid: Optional[str] = None
+
+    if is_json_request:
+        # ── Path Conversations API (JSON) ──────────────────────────────────
+        try:
+            data = await request.json()
+        except Exception as e:
+            logger.error(f"[Webhook] Error parseando JSON de Conversations API: {e}")
+            return Response(content="", media_type="text/xml")
+
+        From             = data.get("Author") or data.get("From", "")
+        Body             = data.get("Body", "")
+        ProfileName      = data.get("ProfileName") or data.get("AuthorAttributes", {}).get("name")
+        MessageSid       = data.get("MessageSid") or data.get("Sid")
+        conversation_sid = data.get("ConversationSid")
+        NumMedia         = int(data.get("NumMedia", 0))
+        MediaUrl0        = data.get("MediaUrl0")
+        MediaContentType0 = data.get("MediaContentType0")
+        OriginalRepliedMessageSid    = data.get("OriginalRepliedMessageSid")
+        OriginalRepliedMessageSender = data.get("OriginalRepliedMessageSender")
+
+        logger.info(
+            f"[Webhook][JSON] Conversations API | From={From} | "
+            f"ConversationSid={conversation_sid} | MessageSid={MessageSid}"
+        )
+    else:
+        # ── Path Legacy — Programmable Messaging (form-encoded) ───────────
+        try:
+            form_data = await request.form()
+        except Exception as e:
+            logger.error(f"[Webhook] Error parseando form data: {e}")
+            return Response(content="", media_type="text/xml")
+
+        From              = form_data.get("From", "")
+        Body              = form_data.get("Body", "")
+        ProfileName       = form_data.get("ProfileName")
+        MessageSid        = form_data.get("MessageSid")
+        NumMedia          = int(form_data.get("NumMedia", 0))
+        MediaUrl0         = form_data.get("MediaUrl0")
+        MediaContentType0 = form_data.get("MediaContentType0")
+        OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
+        OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
+        conversation_sid  = None  # No existe en Programmable Messaging
+
+        # Diagnóstico: log campos de reply para debugging
+        all_keys   = list(form_data.keys())
+        reply_keys = [k for k in all_keys if any(x in k.lower() for x in ("original", "reply", "context"))]
+        logger.info(f"[Webhook][Form] Todos los campos: {all_keys}")
+        if reply_keys:
+            logger.info(f"[Webhook][Form] Campos reply: { {k: form_data.get(k) for k in reply_keys} }")
+
     body_preview = Body[:50] if Body else "[Sin texto]"
     logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")
 
-    # Diagnóstico: log ALL form field keys from Twilio
-    form_data = None
-    try:
-        form_data = await request.form()
-        all_keys = list(form_data.keys())
-        reply_keys = [k for k in all_keys if 'original' in k.lower() or 'reply' in k.lower() or 'context' in k.lower()]
-        logger.info(f"[Webhook][FormKeys] Todos los campos: {all_keys}")
-        if reply_keys:
-            logger.info(f"[Webhook][FormKeys] Campos reply encontrados: {reply_keys}")
-            for rk in reply_keys:
-                logger.info(f"[Webhook][FormKeys] {rk} = {form_data.get(rk)}")
-    except Exception as e:
-        logger.warning(f"[Webhook][FormKeys] Error leyendo form data: {e}")
-
-    # Capturar OriginalRepliedMessageSid — puede venir via Form() o via raw form
-    if not OriginalRepliedMessageSid and form_data:
-        try:
-            raw_reply_sid = form_data.get("OriginalRepliedMessageSid")
-            if raw_reply_sid:
-                OriginalRepliedMessageSid = raw_reply_sid
-                OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
-                logger.info(f"[Webhook][Reply] Reply SID capturado via raw form: {raw_reply_sid}")
-        except Exception:
-            pass
-
     if OriginalRepliedMessageSid:
         logger.info(f"[Webhook][Reply] ✅ Cliente citó mensaje: SID={OriginalRepliedMessageSid}")
-    else:
-        logger.debug(f"[Webhook][Reply] No reply context en este mensaje")
 
     try:
         # ════════════════════════════════════════════════════════════
@@ -1011,20 +1050,17 @@ async def whatsapp_webhook(
         # ════════════════════════════════════════════════════════════
         early_channel = detect_channel_dynamic(Body, None)
         logger.info(f"[Webhook] Canal detectado tempranamente: {early_channel}")
-        # Canal real del mensaje según prefijo Twilio ('whatsapp:+...' = WhatsApp directo)
-        # No depende del contenido del mensaje — es el canal de transporte real
+        # Canal real según prefijo Twilio ('whatsapp:+...' = WhatsApp directo)
         incoming_channel = "whatsapp" if From.lower().startswith("whatsapp:") else early_channel
         logger.info(f"[Webhook] Canal entrante real (From prefix): {incoming_channel}")
 
         # ════════════════════════════════════════════════════════════
         # PASO 3: Encolar procesamiento en background y retornar OK
         # ════════════════════════════════════════════════════════════
-        # CRÍTICO: Retornar 200 OK inmediatamente para evitar timeout de Twilio
-        # Checkpoint: log pre-BackgroundTask para recovery manual si el worker muere (OOM)
         logger.info(
             f"[Checkpoint] MSG_PRE_PROCESS | phone={phone_normalized} | "
             f"sid={MessageSid or 'N/A'} | channel={incoming_channel or early_channel} | "
-            f"body={Body[:80]!r}"
+            f"conv={conversation_sid or 'N/A'} | body={Body[:80]!r}"
         )
         background_tasks.add_task(
             _process_message_deferred,
@@ -1038,16 +1074,17 @@ async def whatsapp_webhook(
             MediaContentType0,
             early_channel,
             OriginalRepliedMessageSid,
-            incoming_channel
+            incoming_channel,
+            conversation_sid,
         )
-        
+
         # Actualizar timestamps en background
         background_tasks.add_task(update_last_client_message, phone_normalized)
         background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
-        
+
         logger.info(f"[Webhook] ✅ Procesamiento encolado, retornando 200 OK inmediatamente")
-        
-        # Retornar TwiML vacío - la respuesta real se envía via REST API
+
+        # TwiML vacío — la respuesta real se envía via Twilio REST API
         return Response(content="", media_type="text/xml")
 
     except Exception as e:

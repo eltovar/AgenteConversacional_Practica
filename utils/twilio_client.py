@@ -18,6 +18,7 @@ from logging_config import logger
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # Número de WhatsApp (whatsapp:+1234567890)
+TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxxx — Conversations API
 
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
@@ -30,6 +31,7 @@ class TwilioClient:
         self.account_sid = TWILIO_ACCOUNT_SID
         self.auth_token = TWILIO_AUTH_TOKEN
         self.from_number = TWILIO_PHONE_NUMBER
+        self.messaging_service_sid = TWILIO_MESSAGING_SERVICE_SID
         self._available = self._check_config()
         self._http_client: Optional[httpx.AsyncClient] = None
 
@@ -48,13 +50,21 @@ class TwilioClient:
 
     def _check_config(self) -> bool:
         """Verifica que la configuración de Twilio esté completa."""
-        if not all([self.account_sid, self.auth_token, self.from_number]):
+        if not all([self.account_sid, self.auth_token]):
             logger.warning(
                 "[TwilioClient] Configuración incompleta. "
-                "Necesitas: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER"
+                "Necesitas: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN"
             )
             return False
-        logger.info("[TwilioClient] Cliente inicializado correctamente")
+        # Requiere TWILIO_PHONE_NUMBER o TWILIO_MESSAGING_SERVICE_SID (uno de los dos)
+        if not self.from_number and not self.messaging_service_sid:
+            logger.warning(
+                "[TwilioClient] Configuración incompleta. "
+                "Necesitas TWILIO_PHONE_NUMBER o TWILIO_MESSAGING_SERVICE_SID"
+            )
+            return False
+        mode = "MessagingService" if self.messaging_service_sid else "PhoneNumber"
+        logger.info(f"[TwilioClient] Cliente inicializado correctamente (modo: {mode})")
         return True
 
     def _resolve_credentials(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -63,13 +73,16 @@ class TwilioClient:
         sid = self.account_sid or os.getenv("TWILIO_ACCOUNT_SID")
         token = self.auth_token or os.getenv("TWILIO_AUTH_TOKEN")
         phone = self.from_number or os.getenv("TWILIO_PHONE_NUMBER")
+        msg_svc = self.messaging_service_sid or os.getenv("TWILIO_MESSAGING_SERVICE_SID")
         if sid and not self.account_sid:
             self.account_sid = sid
         if token and not self.auth_token:
             self.auth_token = token
         if phone and not self.from_number:
             self.from_number = phone
-        self._available = bool(self.account_sid and self.auth_token and self.from_number)
+        if msg_svc and not self.messaging_service_sid:
+            self.messaging_service_sid = msg_svc
+        self._available = bool(self.account_sid and self.auth_token and (self.from_number or self.messaging_service_sid))
         return sid, token, phone
 
     @property
@@ -106,24 +119,33 @@ class TwilioClient:
             logger.error("[TwilioClient] Cliente no disponible - configuración incompleta")
             return {"status": "error", "message": "Twilio no configurado"}
 
-        # Asegurar formato correcto del número
+        # Asegurar formato correcto del número destino
         if not to.startswith("whatsapp:"):
             to = f"whatsapp:{to}"
-
-        # Asegurar formato correcto del from_number
-        from_number = phone
-        if not from_number.startswith("whatsapp:"):
-            from_number = f"whatsapp:{from_number}"
 
         url = TWILIO_API_URL.format(account_sid=sid)
 
         try:
             client = self._get_http_client()
-            # Construir payload base
-            payload = {
-                "From": from_number,
-                "To": to,
-            }
+
+            # Construir payload base:
+            # Si hay MessagingServiceSid (Conversations API), usarlo como origen.
+            # Si no, usar From con el número de WhatsApp (modo legacy).
+            msg_svc = self.messaging_service_sid or os.getenv("TWILIO_MESSAGING_SERVICE_SID")
+            if msg_svc:
+                payload = {
+                    "MessagingServiceSid": msg_svc,
+                    "To": to,
+                }
+                logger.debug(f"[TwilioClient] Usando MessagingServiceSid={msg_svc[:12]}...")
+            else:
+                from_number = phone
+                if not from_number.startswith("whatsapp:"):
+                    from_number = f"whatsapp:{from_number}"
+                payload = {
+                    "From": from_number,
+                    "To": to,
+                }
 
             if content_sid:
                 # Template aprobado por Meta → usa ContentSid (funciona fuera de ventana 24h)

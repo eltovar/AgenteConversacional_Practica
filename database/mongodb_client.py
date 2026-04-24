@@ -275,7 +275,8 @@ class MongoDBManager:
         metadata: Optional[Dict[str, Any]] = None,
         media: Optional[Dict[str, Any]] = None,
         reply_to_id: Optional[str] = None,
-        reply_to_preview: Optional[Dict[str, Any]] = None
+        reply_to_preview: Optional[Dict[str, Any]] = None,
+        conversation_sid: Optional[str] = None,
     ) -> Optional[str]:
         """
         Guarda un mensaje para visualización inmediata en el panel.
@@ -325,6 +326,8 @@ class MongoDBManager:
             "metadata": metadata or {},
             "synced_to_hubspot": False,
         }
+        if conversation_sid:
+            message_doc["conversation_sid"] = conversation_sid
         if media:
             message_doc["media"] = media
         if reply_to_id:

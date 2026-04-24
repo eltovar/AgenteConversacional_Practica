@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"},{"v":{"$numberInt":"2"},"key":{"advisor_id":{"$numberInt":"1"}},"name":"panel_advisor_id_idx","unique":true}],"uuid":"672028980a2e4a94ba25d51ea3e7b00f","collectionName":"panel_advisors","type":"collection"}

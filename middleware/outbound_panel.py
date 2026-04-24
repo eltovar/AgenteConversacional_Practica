@@ -6641,7 +6641,7 @@ async def export_appointments_excel(
             for col_num, col_name in enumerate(df_summary.columns):
                 ws_summary.write(1, col_num, col_name, header_format)
 
-            # Hoja 2: Citas (5 columnas)
+            # Hoja 2: Citas (4 columnas)
             details = metrics_data.get('_details', [])
             if details:
                 rows = [{
@@ -6649,7 +6649,6 @@ async def export_appointments_excel(
                     'Nombre': d.get('nombre', 'Sin nombre'),
                     'Teléfono': d.get('telefono', ''),
                     'Asesor': d.get('asesor', 'Sin asignar'),
-                    'Canal': d.get('canal', 'whatsapp').capitalize(),
                 } for d in details]
                 df_citas = pd.DataFrame(rows)
                 df_citas.to_excel(writer, sheet_name='Citas', index=False)

@@ -3673,13 +3673,16 @@ function _updateDetailsPanel(contact) {
         scheduleBtn.classList.toggle('hidden', !contact.contact_id);
     }
 
-    // Cargar próxima cita y notas de forma asíncrona (no bloquean el render del panel)
+    // Cargar próxima cita, mensaje programado y notas de forma asíncrona
     if (contact.contact_id) {
         loadNextAppointmentForPanel(contact.contact_id);
+        loadScheduledMessageForPanel(contact.contact_id);
         loadNotes(contact.contact_id);
     } else {
         const apptEl = document.getElementById('nextAppointmentContent');
         if (apptEl) apptEl.innerHTML = '<p class="text-sm text-gray-400">Sin cita programada</p>';
+        const smEl = document.getElementById('scheduledMessageContent');
+        if (smEl) smEl.innerHTML = '<p class="text-sm text-gray-400">Sin mensaje programado</p>';
         const notesEl = document.getElementById('notesList');
         if (notesEl) notesEl.innerHTML = '<p class="text-xs text-gray-400 px-1">Sin contactId disponible</p>';
     }

@@ -1079,6 +1079,75 @@ async def startup_event():
             _MEM_LIMIT_MB
         )
 
+        # ── Mensajes programados: envío de plantillas WhatsApp en fecha específica ──
+        async def check_scheduled_messages():
+            """
+            Detecta mensajes de plantilla programados que ya vencieron y los envía vía Twilio.
+            Corre cada 1 minuto. Usa Redis SET NX como lock de idempotencia (TTL 24h)
+            para garantizar un único envío aunque el job se solape.
+            """
+            from datetime import datetime as _dt, timezone as _utc_tz
+            import redis.asyncio as _redis_async
+
+            now_utc = _dt.now(_utc_tz.utc)
+            mongo_mgr = get_mongo_manager()
+
+            pending = await mongo_mgr.get_pending_messages_due(now_utc)
+            if not pending:
+                return
+
+            logger.info("[SchedMsg] %d mensaje(s) pendiente(s) para enviar", len(pending))
+
+            r = None
+            try:
+                r = _redis_async.from_url(
+                    get_redis_url(), encoding="utf-8", decode_responses=True
+                )
+                for msg in pending:
+                    msg_id = msg["_id"]
+                    lock_key = f"sched_msg_lock:{msg_id}"
+
+                    acquired = await r.set(lock_key, "1", nx=True, ex=86400)
+                    if not acquired:
+                        logger.debug("[SchedMsg] Lock ya existe para %s — skip", msg_id)
+                        continue
+
+                    try:
+                        if not twilio_client.is_available:
+                            logger.warning("[SchedMsg] Twilio no disponible, skip %s", msg_id)
+                            continue
+
+                        await twilio_client.send_whatsapp_message(
+                            to=msg["phone"],
+                            body="",
+                            content_sid=msg["template_sid"],
+                            content_variables=msg["template_variables"],
+                        )
+                        await mongo_mgr.mark_scheduled_message_sent(msg_id)
+                        logger.info(
+                            "[SchedMsg] Enviado: id=%s template=%s phone=%s",
+                            msg_id, msg["template_name"], msg["phone"]
+                        )
+                    except Exception as send_err:
+                        await mongo_mgr.mark_scheduled_message_failed(msg_id, str(send_err))
+                        logger.error("[SchedMsg] Error enviando %s: %s", msg_id, send_err)
+
+                    await asyncio.sleep(0.1)
+
+            except Exception as e:
+                logger.error("[SchedMsg] Error en ciclo: %s", e, exc_info=True)
+            finally:
+                if r:
+                    await r.aclose()
+
+        scheduler.add_job(
+            check_scheduled_messages,
+            trigger=IntervalTrigger(minutes=1),
+            id="scheduled_messages",
+            replace_existing=True
+        )
+        logger.info("[STARTUP] Scheduler de mensajes programados HABILITADO (cada 1 min)")
+
         scheduler.start()
         logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)
 

@@ -371,6 +371,21 @@
                     </div>
                 </div>
 
+                <!-- Mensaje Programado -->
+                <div class="details-section" id="scheduledMsgSection">
+                    <div class="flex items-center justify-between mb-2">
+                        <p class="details-section-title" style="margin-bottom:0;">Mensaje Programado</p>
+                        <button id="scheduleMessagePanelBtn"
+                                onclick="openScheduleMessageModal()"
+                                class="hidden text-xs font-semibold text-[#1A1A1A] bg-[#F5C400] hover:bg-[#D4A800] px-2 py-0.5 rounded transition-colors">
+                            + Programar
+                        </button>
+                    </div>
+                    <div id="scheduledMessageContent">
+                        <p class="text-sm text-gray-400">Sin mensaje programado</p>
+                    </div>
+                </div>
+
                 <!-- Notas Internas -->
                 <div class="details-section flex-1" style="min-height:0;">
                     <div class="flex items-center justify-between mb-2">

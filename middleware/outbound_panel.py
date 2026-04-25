@@ -1562,6 +1562,145 @@ async def send_message(
         )
 
 
+# =============================================================================
+# Edición y eliminación de mensajes propios del asesor (Conversations API)
+# =============================================================================
+
+# Twilio limita la edición/eliminación de mensajes a una ventana corta.
+# Conservador: 15 min para edit, 60 min para delete (cliente puede ya haberlo visto).
+EDIT_WINDOW_SECONDS = 15 * 60
+DELETE_WINDOW_SECONDS = 60 * 60
+
+
+def _msg_age_seconds(msg_doc: Dict[str, Any]) -> float:
+    ts = msg_doc.get("timestamp_utc") or msg_doc.get("timestamp")
+    if not ts:
+        return 0.0
+    try:
+        if ts.tzinfo is None:
+            return (datetime.utcnow() - ts).total_seconds()
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return 0.0
+
+
+@router.patch("/messages/{mongo_id}")
+@limiter.limit("20/minute")
+async def edit_advisor_message(
+    request: Request,
+    mongo_id: str,
+    advisor_id: str = Query(..., description="ID del asesor que solicita editar"),
+    new_content: str = Form(..., description="Nuevo contenido del mensaje"),
+):
+    """Edita un mensaje propio del asesor en Twilio + MongoDB + WS broadcast."""
+    new_content = (new_content or "").strip()
+    if not new_content:
+        raise HTTPException(status_code=400, detail="Contenido vacío")
+
+    mongo_manager = get_mongo_manager()
+    msg = await mongo_manager.get_message_by_id(mongo_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+
+    if msg.get("sender") != "advisor":
+        raise HTTPException(status_code=403, detail="Solo se pueden editar mensajes propios del asesor")
+
+    if msg.get("deleted"):
+        raise HTTPException(status_code=410, detail="Mensaje ya eliminado")
+
+    if _msg_age_seconds(msg) > EDIT_WINDOW_SECONDS:
+        raise HTTPException(status_code=422, detail="Ventana de edición vencida (>15 min)")
+
+    conv_sid = msg.get("conversation_sid")
+    im_sid   = msg.get("conversations_message_sid")
+    if not conv_sid or not im_sid:
+        raise HTTPException(
+            status_code=409,
+            detail="Mensaje aún no propagado por Twilio (reintenta en unos segundos)",
+        )
+
+    tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content)
+    if tw.get("status") != "success":
+        raise HTTPException(status_code=502, detail=f"Twilio rechazó la edición: {tw.get('message')}")
+
+    updated = await mongo_manager.update_message_content(mongo_id, new_content)
+    if not updated:
+        raise HTTPException(status_code=500, detail="No se pudo persistir la edición")
+
+    # Broadcast a otras pestañas / asesores
+    try:
+        rc = await _get_redis_client()
+        await ws_manager.publish_broadcast(rc, {
+            "type": "message_edited",
+            "message_id": str(updated["_id"]),
+            "phone": updated.get("phone", ""),
+            "new_content": new_content,
+        })
+    except Exception as _we:
+        logger.warning(f"[Panel] WS broadcast edit fallo: {_we}")
+
+    return JSONResponse(content={
+        "status": "success",
+        "message_id": str(updated["_id"]),
+        "new_content": new_content,
+    })
+
+
+@router.delete("/messages/{mongo_id}")
+@limiter.limit("20/minute")
+async def delete_advisor_message(
+    request: Request,
+    mongo_id: str,
+    advisor_id: str = Query(..., description="ID del asesor que solicita eliminar"),
+):
+    """Elimina un mensaje propio del asesor: Twilio + soft-delete MongoDB + WS."""
+    mongo_manager = get_mongo_manager()
+    msg = await mongo_manager.get_message_by_id(mongo_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+
+    if msg.get("sender") != "advisor":
+        raise HTTPException(status_code=403, detail="Solo se pueden eliminar mensajes propios del asesor")
+
+    if msg.get("deleted"):
+        return JSONResponse(content={"status": "success", "already_deleted": True})
+
+    if _msg_age_seconds(msg) > DELETE_WINDOW_SECONDS:
+        raise HTTPException(status_code=422, detail="Ventana de eliminación vencida (>60 min)")
+
+    conv_sid = msg.get("conversation_sid")
+    im_sid   = msg.get("conversations_message_sid")
+
+    twilio_ok = True
+    if conv_sid and im_sid:
+        tw = await twilio_client.delete_conversation_message(conv_sid, im_sid)
+        twilio_ok = (tw.get("status") == "success")
+        if not twilio_ok:
+            # Continuamos con soft-delete local aunque Twilio falle (el mensaje
+            # desaparece del panel; en WhatsApp puede quedar visible si Twilio rechazó).
+            logger.warning(f"[Panel] Twilio delete fallo conv={conv_sid} im={im_sid}: {tw.get('message')}")
+
+    deleted = await mongo_manager.soft_delete_message(mongo_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="No se pudo soft-delete en MongoDB")
+
+    try:
+        rc = await _get_redis_client()
+        await ws_manager.publish_broadcast(rc, {
+            "type": "message_deleted",
+            "message_id": str(deleted["_id"]),
+            "phone": deleted.get("phone", ""),
+        })
+    except Exception as _we:
+        logger.warning(f"[Panel] WS broadcast delete fallo: {_we}")
+
+    return JSONResponse(content={
+        "status": "success",
+        "message_id": str(deleted["_id"]),
+        "twilio_propagated": twilio_ok,
+    })
+
+
 @router.post("/send-message-json")
 @limiter.limit("20/minute")
 async def send_message_json(

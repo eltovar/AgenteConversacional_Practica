@@ -2311,6 +2311,18 @@ function renderChatBubbles(messages) {
                     </svg>
                 </button>`;
 
+            // Menú ⋯ Editar/Eliminar — solo en mensajes propios del asesor (sender=advisor)
+            const _isAdvisorMsg = (msg.sender === 'advisor');
+            const ownerMenuHtml = _isAdvisorMsg ? `
+                <button class="msg-menu-btn"
+                        onclick="event.stopPropagation();toggleMsgMenu('${msg.id}', this)"
+                        title="Más opciones"
+                        style="position:absolute;top:6px;right:6px;background:transparent;border:none;cursor:pointer;padding:2px 4px;">
+                    <svg class="w-4 h-4 text-gray-400 hover:text-gray-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M10 3a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3z"/>
+                    </svg>
+                </button>` : '';
+
             const _safeContent = (msg.message || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
             // Mensajes eliminados: burbuja neutra sin contenido
@@ -2344,10 +2356,11 @@ function renderChatBubbles(messages) {
                      data-timestamp="${msg.timestamp || ''}">
                     <div class="${bubbleClass} p-3 shadow-sm relative">
                         ${replyBtnHtml}
+                        ${ownerMenuHtml}
                         <p class="text-xs font-semibold text-gray-600 mb-1">${msg.sender_name || msg.sender}</p>
                         ${quoteHtml}
                         ${mediaHtml}
-                        ${_displayMsg ? `<p class="text-gray-800 whitespace-pre-wrap">${escapeHtml(_displayMsg)}</p>` : ''}
+                        <p class="text-gray-800 whitespace-pre-wrap" data-msg-body="1" style="${_displayMsg ? '' : 'display:none;'}">${escapeHtml(_displayMsg || '')}</p>
                         <p class="text-xs text-gray-500 text-right mt-1">${timestamp}${_editedChip}</p>
                     </div>
                 </div>
@@ -2697,6 +2710,139 @@ function selectReplyMessage(msgId) {
 function cancelReply() {
     replyToMessage = null;
     document.getElementById('replyPreview').classList.add('hidden');
+}
+
+// =========================================================================
+// MENÚ EDITAR / ELIMINAR — mensajes propios del asesor
+// =========================================================================
+
+function _closeAllMsgMenus() {
+    document.querySelectorAll('.msg-menu-popup').forEach(el => el.remove());
+}
+
+document.addEventListener('click', (e) => {
+    if (!e.target.closest('.msg-menu-popup') && !e.target.closest('.msg-menu-btn')) {
+        _closeAllMsgMenus();
+    }
+});
+
+function toggleMsgMenu(msgId, btnEl) {
+    const existing = document.querySelector(`.msg-menu-popup[data-for="${msgId}"]`);
+    _closeAllMsgMenus();
+    if (existing) return;
+
+    const popup = document.createElement('div');
+    popup.className = 'msg-menu-popup';
+    popup.setAttribute('data-for', msgId);
+    popup.style.cssText = 'position:absolute;top:24px;right:6px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.1);z-index:50;min-width:140px;overflow:hidden;';
+    popup.innerHTML = `
+        <button onclick="event.stopPropagation();_closeAllMsgMenus();startEditMessage('${msgId}')"
+                style="display:block;width:100%;text-align:left;padding:8px 12px;background:transparent;border:none;cursor:pointer;font-size:13px;color:#374151;"
+                onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='transparent'">
+            ✏️ Editar
+        </button>
+        <button onclick="event.stopPropagation();_closeAllMsgMenus();confirmDeleteMessage('${msgId}')"
+                style="display:block;width:100%;text-align:left;padding:8px 12px;background:transparent;border:none;cursor:pointer;font-size:13px;color:#dc2626;"
+                onmouseover="this.style.background='#fee2e2'" onmouseout="this.style.background='transparent'">
+            🗑️ Eliminar
+        </button>
+    `;
+    btnEl.parentElement.appendChild(popup);
+}
+
+function _getAdvisorIdQS() {
+    return (typeof currentAdvisorId !== 'undefined' && currentAdvisorId)
+        ? currentAdvisorId
+        : (new URLSearchParams(window.location.search)).get('advisor_id') || '';
+}
+
+function startEditMessage(msgId) {
+    const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!bubble) return;
+    const bodyP = bubble.querySelector('p[data-msg-body]');
+    if (!bodyP) return;
+
+    const currentText = bubble.dataset.content || bodyP.textContent || '';
+    const editorHtml = `
+        <div class="edit-msg-wrap" style="margin-top:4px;">
+            <textarea class="edit-msg-input" rows="2"
+                      style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:6px;font-size:14px;resize:vertical;">${escapeHtml(currentText)}</textarea>
+            <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px;">
+                <button onclick="cancelEditMessage('${msgId}')"
+                        style="padding:4px 10px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;">Cancelar</button>
+                <button onclick="submitEditMessage('${msgId}', this)"
+                        style="padding:4px 10px;font-size:12px;border:none;border-radius:4px;background:#2563eb;color:#fff;cursor:pointer;">Guardar</button>
+            </div>
+        </div>`;
+    bodyP.style.display = 'none';
+    bodyP.insertAdjacentHTML('afterend', editorHtml);
+    bubble.querySelector('.edit-msg-input').focus();
+}
+
+function cancelEditMessage(msgId) {
+    const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!bubble) return;
+    const wrap = bubble.querySelector('.edit-msg-wrap');
+    if (wrap) wrap.remove();
+    const bodyP = bubble.querySelector('p[data-msg-body]');
+    if (bodyP) bodyP.style.display = '';
+}
+
+async function submitEditMessage(msgId, btn) {
+    const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!bubble) return;
+    const ta = bubble.querySelector('.edit-msg-input');
+    const newContent = (ta?.value || '').trim();
+    if (!newContent) { alert('El contenido no puede estar vacío'); return; }
+
+    btn.disabled = true; btn.textContent = 'Guardando...';
+    try {
+        const advisorId = _getAdvisorIdQS();
+        const fd = new FormData();
+        fd.append('new_content', newContent);
+        const resp = await fetch(`/whatsapp/panel/messages/${encodeURIComponent(msgId)}?advisor_id=${encodeURIComponent(advisorId)}`, {
+            method: 'PATCH',
+            body: fd,
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        // El WS broadcast actualizará la UI; aplicamos cambio optimista local
+        const bodyP = bubble.querySelector('p[data-msg-body]');
+        if (bodyP) { bodyP.textContent = newContent; bodyP.style.display = ''; }
+        bubble.dataset.content = newContent;
+        const timeP = bubble.querySelector('p.text-xs.text-gray-500.text-right');
+        if (timeP && !timeP.querySelector('span')) {
+            timeP.insertAdjacentHTML('beforeend', '<span class="text-xs text-gray-400 ml-1">(editado)</span>');
+        }
+        cancelEditMessage(msgId);
+    } catch (e) {
+        alert('Error editando mensaje: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Guardar';
+    }
+}
+
+async function confirmDeleteMessage(msgId) {
+    if (!confirm('¿Eliminar este mensaje? Se borrará tanto en el panel como en WhatsApp del cliente (si la ventana de Twilio lo permite).')) return;
+    try {
+        const advisorId = _getAdvisorIdQS();
+        const resp = await fetch(`/whatsapp/panel/messages/${encodeURIComponent(msgId)}?advisor_id=${encodeURIComponent(advisorId)}`, {
+            method: 'DELETE',
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${resp.status}`);
+        }
+        // WS broadcast actualizará la UI; aplicamos cambio optimista local
+        const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+        if (bubble) {
+            const isRight = bubble.classList.contains('justify-end');
+            bubble.outerHTML = `<div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${msgId}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">🚫 Este mensaje fue eliminado</p></div></div>`;
+        }
+    } catch (e) {
+        alert('Error eliminando mensaje: ' + e.message);
+    }
 }
 
 function scrollToMessage(msgId) {

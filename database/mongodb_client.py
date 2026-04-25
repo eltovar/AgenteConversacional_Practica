@@ -277,6 +277,7 @@ class MongoDBManager:
         reply_to_id: Optional[str] = None,
         reply_to_preview: Optional[Dict[str, Any]] = None,
         conversation_sid: Optional[str] = None,
+        conversations_message_sid: Optional[str] = None,
     ) -> Optional[str]:
         """
         Guarda un mensaje para visualización inmediata en el panel.
@@ -328,6 +329,8 @@ class MongoDBManager:
         }
         if conversation_sid:
             message_doc["conversation_sid"] = conversation_sid
+        if conversations_message_sid:
+            message_doc["conversations_message_sid"] = conversations_message_sid
         if media:
             message_doc["media"] = media
         if reply_to_id:
@@ -513,12 +516,20 @@ class MongoDBManager:
             return []
 
     async def get_message_by_sid(self, message_sid: str) -> Optional[Dict[str, Any]]:
-        """Busca un mensaje por su Twilio message_sid. Usado para reply context."""
+        """Busca un mensaje por su Twilio message_sid. Usado para reply context.
+
+        Why: outbound del asesor guarda SMxxxx (Programmable Messaging response),
+        pero Conversations API referencia el mismo mensaje como IMxxxx. Buscamos en
+        ambos campos para que las citaciones del cliente resuelvan correctamente.
+        """
         if not message_sid or not await self.connect():
             return None
         try:
             msg = await self.db.messages.find_one(
-                {"message_sid": message_sid},
+                {"$or": [
+                    {"message_sid": message_sid},
+                    {"conversations_message_sid": message_sid},
+                ]},
                 {"_id": 1, "content": 1, "sender": 1, "media": 1, "timestamp": 1}
             )
             if msg:
@@ -688,50 +699,114 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error actualizando delivery status: {e}")
             return False
 
-    async def update_message_content(self, message_sid: str, new_content: str) -> Optional[Dict]:
+    def _build_msg_filter(self, identifier: str) -> Dict[str, Any]:
+        """Filtro que matchea por _id, message_sid (SMxxx) o conversations_message_sid (IMxxx)."""
+        ors: List[Dict[str, Any]] = [
+            {"message_sid": identifier},
+            {"conversations_message_sid": identifier},
+        ]
+        try:
+            ors.append({"_id": ObjectId(identifier)})
+        except Exception:
+            pass
+        return {"$or": ors}
+
+    async def update_message_content(self, identifier: str, new_content: str) -> Optional[Dict]:
         """
-        Actualiza el contenido de un mensaje editado por el cliente en WhatsApp.
+        Actualiza el contenido de un mensaje (editado por cliente vía WhatsApp o
+        por asesor vía panel). `identifier` puede ser mongo _id, SMxxx o IMxxx.
         Retorna el documento actualizado (con phone e _id) para el broadcast WS.
         """
         if not await self.connect():
             return None
         try:
             result = await self.db.messages.find_one_and_update(
-                {"message_sid": message_sid},
+                self._build_msg_filter(identifier),
                 {"$set": {"content": new_content, "edited": True, "edited_at": datetime.utcnow()}},
                 return_document=True,
-                projection={"_id": 1, "phone": 1, "content": 1}
+                projection={"_id": 1, "phone": 1, "content": 1, "sender": 1, "timestamp": 1, "conversation_sid": 1, "conversations_message_sid": 1, "message_sid": 1}
             )
             if result:
-                logger.info(f"[MongoDB] Mensaje editado: message_sid={message_sid}")
+                logger.info(f"[MongoDB] Mensaje editado: id={identifier}")
             else:
-                logger.warning(f"[MongoDB] Mensaje no encontrado para edición: {message_sid}")
+                logger.warning(f"[MongoDB] Mensaje no encontrado para edición: {identifier}")
             return result
         except Exception as e:
             logger.error(f"[MongoDB] Error actualizando contenido de mensaje: {e}")
             return None
 
-    async def soft_delete_message(self, message_sid: str) -> Optional[Dict]:
+    async def soft_delete_message(self, identifier: str) -> Optional[Dict]:
         """
-        Marca un mensaje como eliminado (soft-delete) cuando el cliente lo borra en WhatsApp.
-        Retorna el documento actualizado para el broadcast WS.
+        Soft-delete de mensaje. `identifier` acepta mongo _id, SMxxx o IMxxx.
         """
         if not await self.connect():
             return None
         try:
             result = await self.db.messages.find_one_and_update(
-                {"message_sid": message_sid},
+                self._build_msg_filter(identifier),
                 {"$set": {"deleted": True, "deleted_at": datetime.utcnow()}},
                 return_document=True,
-                projection={"_id": 1, "phone": 1}
+                projection={"_id": 1, "phone": 1, "sender": 1, "timestamp": 1, "conversation_sid": 1, "conversations_message_sid": 1, "message_sid": 1}
             )
             if result:
-                logger.info(f"[MongoDB] Mensaje eliminado (soft): message_sid={message_sid}")
+                logger.info(f"[MongoDB] Mensaje eliminado (soft): id={identifier}")
             else:
-                logger.warning(f"[MongoDB] Mensaje no encontrado para soft-delete: {message_sid}")
+                logger.warning(f"[MongoDB] Mensaje no encontrado para soft-delete: {identifier}")
             return result
         except Exception as e:
             logger.error(f"[MongoDB] Error en soft-delete de mensaje: {e}")
+            return None
+
+    async def get_message_by_id(self, mongo_id: str) -> Optional[Dict[str, Any]]:
+        """Recupera un doc completo por _id (para validaciones de auth/edad/etc)."""
+        if not await self.connect():
+            return None
+        try:
+            return await self.db.messages.find_one({"_id": ObjectId(mongo_id)})
+        except Exception as e:
+            logger.warning(f"[MongoDB] get_message_by_id fallo {mongo_id}: {e}")
+            return None
+
+    async def backfill_conversations_sid(
+        self,
+        conversation_sid: str,
+        body: str,
+        im_sid: str,
+        max_age_seconds: int = 300,
+    ) -> Optional[str]:
+        """
+        Backfill: cuando llega onMessageAdded(Source=API) con MessageSid=IMxxx,
+        encontramos el doc del asesor recién enviado (matcheado por
+        conversation_sid + body + sender=advisor en últimos 5min) y le
+        agregamos el IMxxx.
+
+        Returns: mongo _id (str) si se hizo backfill; None si no hubo match.
+        """
+        if not await self.connect() or not conversation_sid or not im_sid:
+            return None
+        try:
+            cutoff = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+            result = await self.db.messages.find_one_and_update(
+                {
+                    "conversation_sid": conversation_sid,
+                    "sender": "advisor",
+                    "content": body or "",
+                    "timestamp_utc": {"$gte": cutoff},
+                    "conversations_message_sid": {"$in": [None, ""]},
+                },
+                {"$set": {"conversations_message_sid": im_sid}},
+                sort=[("timestamp_utc", -1)],
+                return_document=True,
+                projection={"_id": 1},
+            )
+            if result:
+                _id = str(result["_id"])
+                logger.info(f"[MongoDB] Backfill IM SID OK: conv={conversation_sid} im={im_sid} -> {_id}")
+                return _id
+            logger.debug(f"[MongoDB] Backfill IM SID sin match: conv={conversation_sid} body={body[:40]!r}")
+            return None
+        except Exception as e:
+            logger.warning(f"[MongoDB] Error en backfill_conversations_sid: {e}")
             return None
 
     # =========================================================================

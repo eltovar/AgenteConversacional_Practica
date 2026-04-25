@@ -23,6 +23,11 @@ TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxx
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
+# Conversations API (necesaria para edit/delete de mensajes outbound desde el panel)
+TWILIO_CONV_MSG_URL = (
+    "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages/{msg_sid}"
+)
+
 
 class TwilioClient:
     """Cliente para enviar mensajes WhatsApp via Twilio API."""
@@ -244,6 +249,80 @@ class TwilioClient:
                 "status": "error",
                 "message": str(e)
             }
+
+
+    async def update_conversation_message(
+        self,
+        conversation_sid: str,
+        message_sid: str,
+        new_body: str,
+    ) -> dict:
+        """Edita un mensaje en Conversations API.
+
+        Endpoint: POST /v1/Conversations/{CHsid}/Messages/{IMsid}
+        Twilio limita la edición a mensajes con < ~15 min de antigüedad.
+        """
+        sid, token, _ = self._resolve_credentials()
+        if not self._available:
+            return {"status": "error", "message": "Twilio no configurado"}
+        if not conversation_sid or not message_sid:
+            return {"status": "error", "message": "conversation_sid y message_sid requeridos"}
+
+        url = TWILIO_CONV_MSG_URL.format(conv_sid=conversation_sid, msg_sid=message_sid)
+        try:
+            client = self._get_http_client()
+            resp = await client.post(
+                url,
+                auth=(sid, token),
+                data={"Body": new_body},
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                logger.info(
+                    f"[TwilioClient] Mensaje editado conv={conversation_sid} im={message_sid}"
+                )
+                return {"status": "success", "message_sid": data.get("sid"), "body": data.get("body")}
+            logger.error(
+                f"[TwilioClient] Error editando mensaje: {resp.status_code} - {resp.text}"
+            )
+            return {"status": "error", "code": resp.status_code, "message": resp.text}
+        except Exception as e:
+            logger.error(f"[TwilioClient] Excepción editando mensaje: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def delete_conversation_message(
+        self,
+        conversation_sid: str,
+        message_sid: str,
+    ) -> dict:
+        """Elimina un mensaje en Conversations API.
+
+        Endpoint: DELETE /v1/Conversations/{CHsid}/Messages/{IMsid}
+        WhatsApp removerá el mensaje del cliente si está dentro de la ventana
+        permitida por Meta (~ poco después del envío).
+        """
+        sid, token, _ = self._resolve_credentials()
+        if not self._available:
+            return {"status": "error", "message": "Twilio no configurado"}
+        if not conversation_sid or not message_sid:
+            return {"status": "error", "message": "conversation_sid y message_sid requeridos"}
+
+        url = TWILIO_CONV_MSG_URL.format(conv_sid=conversation_sid, msg_sid=message_sid)
+        try:
+            client = self._get_http_client()
+            resp = await client.delete(url, auth=(sid, token))
+            if resp.status_code in (200, 204):
+                logger.info(
+                    f"[TwilioClient] Mensaje eliminado conv={conversation_sid} im={message_sid}"
+                )
+                return {"status": "success"}
+            logger.error(
+                f"[TwilioClient] Error eliminando mensaje: {resp.status_code} - {resp.text}"
+            )
+            return {"status": "error", "code": resp.status_code, "message": resp.text}
+        except Exception as e:
+            logger.error(f"[TwilioClient] Excepción eliminando mensaje: {e}")
+            return {"status": "error", "message": str(e)}
 
 
 # Instancia global (singleton)

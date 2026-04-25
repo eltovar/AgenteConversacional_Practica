@@ -1065,10 +1065,23 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 logger.debug(f"[Webhook][Conversations] Evento ignorado: {event_type}")
                 return Response(content="", media_type="text/xml")
 
-            # Ignorar mensajes outbound que envió el bot via API
+            # Mensajes outbound que envió el panel/bot via API:
+            # NO seguir el pipeline (no respuesta, no doble save), pero SÍ
+            # backfillar el conversations_message_sid (IMxxx) en el doc del asesor
+            # para que las citaciones del cliente y los edit/delete funcionen.
             source = form_data.get("Source", "")
             if source == "API":
-                logger.debug("[Webhook][Conversations] Mensaje outbound API ignorado")
+                _conv_sid = form_data.get("ConversationSid")
+                _im_sid   = form_data.get("MessageSid") or form_data.get("Sid")
+                _body     = form_data.get("Body", "") or ""
+                if _conv_sid and _im_sid:
+                    try:
+                        _mm = get_mongo_manager()
+                        await _mm.backfill_conversations_sid(_conv_sid, _body, _im_sid)
+                    except Exception as _be:
+                        logger.warning(f"[Webhook][Backfill] Error: {_be}")
+                else:
+                    logger.debug("[Webhook][Conversations] Source=API sin ConversationSid/IM — skip backfill")
                 return Response(content="", media_type="text/xml")
 
             From             = form_data.get("Author", "")

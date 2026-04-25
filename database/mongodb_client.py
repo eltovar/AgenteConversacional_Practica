@@ -761,6 +761,20 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error en soft-delete de mensaje: {e}")
             return None
 
+    async def update_message_fields(self, mongo_id: str, fields: Dict[str, Any]) -> bool:
+        """Update arbitrario de campos por _id. Retorna True si se modificó/encontró."""
+        if not await self.connect():
+            return False
+        try:
+            res = await self.db.messages.update_one(
+                {"_id": ObjectId(mongo_id)},
+                {"$set": fields},
+            )
+            return res.matched_count > 0
+        except Exception as e:
+            logger.warning(f"[MongoDB] update_message_fields {mongo_id} fallo: {e}")
+            return False
+
     async def get_message_by_id(self, mongo_id: str) -> Optional[Dict[str, Any]]:
         """Recupera un doc completo por _id (para validaciones de auth/edad/etc)."""
         if not await self.connect():

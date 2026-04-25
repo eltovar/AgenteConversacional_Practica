@@ -963,6 +963,20 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     content_type = request.headers.get("content-type", "").lower()
     is_json_request = "application/json" in content_type
 
+    try:
+        _raw_peek = await request.body()
+        _peek_str = _raw_peek[:500].decode("utf-8", errors="replace")
+        _twilio_sig = request.headers.get("x-twilio-signature", "")[:16]
+        logger.info(
+            f"[Webhook][RAW] ct='{content_type}' sig='{_twilio_sig}...' "
+            f"len={len(_raw_peek)} body[:500]={_peek_str!r}"
+        )
+        async def _replay_body():
+            return {"type": "http.request", "body": _raw_peek, "more_body": False}
+        request._receive = _replay_body
+    except Exception as _diag_e:
+        logger.warning(f"[Webhook][RAW] No se pudo leer body para diagnóstico: {_diag_e}")
+
     From: str = ""
     Body: str = ""
     ProfileName: Optional[str] = None

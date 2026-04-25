@@ -1470,6 +1470,15 @@ async def send_message(
             logger.error(f"[Panel] Error guardando en MongoDB: {e}")
             # No bloquear el flujo si MongoDB falla
 
+        if mongo_message_id:
+            background_tasks.add_task(
+                _backfill_im_sid_after_send,
+                phone_normalized,
+                message_body or "📎",
+                str(mongo_message_id),
+                None,
+            )
+
         # =====================================================================
         # PASO 2: Registrar en HubSpot Timeline (BACKGROUND - no bloqueante)
         # HubSpot es archivo histórico, no afecta la experiencia del panel
@@ -1570,6 +1579,99 @@ async def send_message(
 # Conservador: 15 min para edit, 60 min para delete (cliente puede ya haberlo visto).
 EDIT_WINDOW_SECONDS = 15 * 60
 DELETE_WINDOW_SECONDS = 60 * 60
+
+
+async def _resolve_conversation_sid_for_phone(phone: str) -> Optional[str]:
+    """Busca el conversation_sid más reciente para este phone en MongoDB."""
+    try:
+        mm = get_mongo_manager()
+        if not await mm.connect():
+            return None
+        doc = await mm.db.messages.find_one(
+            {"phone": phone, "conversation_sid": {"$nin": [None, ""]}},
+            sort=[("timestamp_utc", -1)],
+            projection={"conversation_sid": 1},
+        )
+        return doc.get("conversation_sid") if doc else None
+    except Exception as e:
+        logger.warning(f"[Panel][Backfill] resolve conv_sid fallo: {e}")
+        return None
+
+
+async def _backfill_im_sid_after_send(
+    phone: str,
+    body: str,
+    mongo_message_id: Optional[str],
+    conversation_sid: Optional[str] = None,
+) -> None:
+    """Backfill activo del IM SID tras un envío del panel.
+
+    Why: el rebote `Source=API` del webhook de Conversations puede no llegar
+    (config Global Webhook variable). Sin IM SID el panel no puede editar/borrar.
+    Esta tarea consulta directamente la API de Twilio 1.5s después del envío
+    y persiste el `conversations_message_sid` en MongoDB.
+    """
+    if not mongo_message_id:
+        return
+    try:
+        await asyncio.sleep(1.5)
+        if not conversation_sid:
+            conversation_sid = await _resolve_conversation_sid_for_phone(phone)
+        if not conversation_sid:
+            logger.info(
+                f"[Panel][Backfill] Sin conversation_sid conocido para phone={phone} "
+                f"(probablemente primera interacción saliente — esperar webhook)"
+            )
+            return
+        result = await twilio_client.list_conversation_messages(conversation_sid, limit=5)
+        if result.get("status") != "success":
+            logger.warning(
+                f"[Panel][Backfill] No se pudo listar mensajes conv={conversation_sid}: "
+                f"{result.get('message')}"
+            )
+            return
+
+        messages = result.get("messages", [])
+        target_body = (body or "").strip()
+        match = None
+        for m in messages:
+            m_body = (m.get("body") or "").strip()
+            m_sid = m.get("sid") or ""
+            if not m_sid.startswith("IM"):
+                continue
+            if m_body == target_body:
+                match = m
+                break
+        if not match and messages:
+            for m in messages:
+                m_sid = m.get("sid") or ""
+                if m_sid.startswith("IM"):
+                    match = m
+                    break
+
+        if not match:
+            logger.warning(
+                f"[Panel][Backfill] Sin match IM en conv={conversation_sid} "
+                f"para body={target_body[:40]!r}"
+            )
+            return
+
+        im_sid = match.get("sid")
+        mongo_manager = get_mongo_manager()
+        ok = await mongo_manager.update_message_fields(
+            mongo_message_id,
+            {"conversations_message_sid": im_sid, "conversation_sid": conversation_sid},
+        )
+        if ok:
+            logger.info(
+                f"[Panel][Backfill] IM SID {im_sid} asignado a mongo_id={mongo_message_id}"
+            )
+        else:
+            logger.warning(
+                f"[Panel][Backfill] No se pudo persistir IM SID para mongo_id={mongo_message_id}"
+            )
+    except Exception as e:
+        logger.error(f"[Panel][Backfill] Excepción: {e}")
 
 
 def _msg_age_seconds(msg_doc: Dict[str, Any]) -> float:
@@ -1844,6 +1946,15 @@ async def send_message_json(
         except Exception as e:
             logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
 
+        if mongo_message_id:
+            background_tasks.add_task(
+                _backfill_im_sid_after_send,
+                phone_normalized,
+                body,
+                str(mongo_message_id),
+                None,
+            )
+
         # Registrar en HubSpot Timeline
         if contact_id:
             background_tasks.add_task(
@@ -2100,6 +2211,15 @@ async def send_template_message(
                 logger.info(f"[Panel] Template guardado en MongoDB: {mongo_message_id}")
         except Exception as e:
             logger.error(f"[Panel] Error guardando template en MongoDB: {e}")
+
+        if mongo_message_id:
+            background_tasks.add_task(
+                _backfill_im_sid_after_send,
+                phone_normalized,
+                template_message,
+                str(mongo_message_id),
+                None,
+            )
 
         # =====================================================================
         # PASO 2: Registrar en HubSpot Timeline (BACKGROUND)

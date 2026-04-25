@@ -27,6 +27,9 @@ TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messa
 TWILIO_CONV_MSG_URL = (
     "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages/{msg_sid}"
 )
+TWILIO_CONV_MSG_LIST_URL = (
+    "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages"
+)
 
 
 class TwilioClient:
@@ -322,6 +325,43 @@ class TwilioClient:
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
             logger.error(f"[TwilioClient] Excepción eliminando mensaje: {e}")
+            return {"status": "error", "message": str(e)}
+
+
+    async def list_conversation_messages(
+        self,
+        conversation_sid: str,
+        limit: int = 5,
+        order: str = "desc",
+    ) -> dict:
+        """Lista los últimos mensajes de una conversación.
+
+        Usado para backfill activo del IM SID después de un envío del panel,
+        cuando el rebote Source=API del webhook no está disponible.
+        """
+        sid, token, _ = self._resolve_credentials()
+        if not self._available:
+            return {"status": "error", "message": "Twilio no configurado"}
+        if not conversation_sid:
+            return {"status": "error", "message": "conversation_sid requerido"}
+
+        url = TWILIO_CONV_MSG_LIST_URL.format(conv_sid=conversation_sid)
+        try:
+            client = self._get_http_client()
+            resp = await client.get(
+                url,
+                auth=(sid, token),
+                params={"Order": order, "PageSize": str(limit)},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"status": "success", "messages": data.get("messages", [])}
+            logger.error(
+                f"[TwilioClient] Error listando mensajes: {resp.status_code} - {resp.text}"
+            )
+            return {"status": "error", "code": resp.status_code, "message": resp.text}
+        except Exception as e:
+            logger.error(f"[TwilioClient] Excepción listando mensajes: {e}")
             return {"status": "error", "message": str(e)}
 
 

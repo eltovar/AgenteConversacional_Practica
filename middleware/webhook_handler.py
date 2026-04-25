@@ -998,30 +998,65 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             f"ConversationSid={conversation_sid} | MessageSid={MessageSid}"
         )
     else:
-        # ── Path Legacy — Programmable Messaging (form-encoded) ───────────
+        # ── Path form-encoded: Legacy Programmable Messaging O Conversations ──
         try:
             form_data = await request.form()
         except Exception as e:
             logger.error(f"[Webhook] Error parseando form data: {e}")
             return Response(content="", media_type="text/xml")
 
-        From              = form_data.get("From", "")
-        Body              = form_data.get("Body", "")
-        ProfileName       = form_data.get("ProfileName")
-        MessageSid        = form_data.get("MessageSid")
-        NumMedia          = int(form_data.get("NumMedia", 0))
-        MediaUrl0         = form_data.get("MediaUrl0")
-        MediaContentType0 = form_data.get("MediaContentType0")
-        OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
-        OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
-        conversation_sid  = None  # No existe en Programmable Messaging
+        event_type = form_data.get("EventType", "")
 
-        # Diagnóstico: log campos de reply para debugging
-        all_keys   = list(form_data.keys())
-        reply_keys = [k for k in all_keys if any(x in k.lower() for x in ("original", "reply", "context"))]
-        logger.info(f"[Webhook][Form] Todos los campos: {all_keys}")
-        if reply_keys:
-            logger.info(f"[Webhook][Form] Campos reply: { {k: form_data.get(k) for k in reply_keys} }")
+        if event_type:
+            # ── Conversations API — form-encoded (onMessageAdd pre-webhook) ──
+            # Ignorar eventos que no son mensajes entrantes
+            if event_type not in ("onMessageAdd", "onMessageAdded"):
+                logger.debug(f"[Webhook][Conversations] Evento ignorado: {event_type}")
+                return Response(content="", media_type="text/xml")
+
+            # Ignorar mensajes outbound que envió el bot via API
+            source = form_data.get("Source", "")
+            if source == "API":
+                logger.debug("[Webhook][Conversations] Mensaje outbound API ignorado")
+                return Response(content="", media_type="text/xml")
+
+            From             = form_data.get("Author", "")
+            Body             = form_data.get("Body", "")
+            ProfileName      = None  # Conversations no provee ProfileName directamente
+            MessageSid       = form_data.get("MessageSid") or form_data.get("Sid")
+            conversation_sid = form_data.get("ConversationSid")
+            NumMedia         = int(form_data.get("NumMedia", 0))
+            MediaUrl0        = form_data.get("MediaUrl0")
+            MediaContentType0 = form_data.get("MediaContentType0")
+            OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
+            OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
+
+            logger.info(
+                f"[Webhook][Conversations/Form] EventType={event_type} | "
+                f"Author={From} | ConversationSid={conversation_sid} | "
+                f"MessageSid={MessageSid} | Source={source} | "
+                f"AllFields={list(form_data.keys())}"
+            )
+
+        else:
+            # ── Legacy Programmable Messaging (form-encoded) ──────────────────
+            From              = form_data.get("From", "")
+            Body              = form_data.get("Body", "")
+            ProfileName       = form_data.get("ProfileName")
+            MessageSid        = form_data.get("MessageSid")
+            NumMedia          = int(form_data.get("NumMedia", 0))
+            MediaUrl0         = form_data.get("MediaUrl0")
+            MediaContentType0 = form_data.get("MediaContentType0")
+            OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
+            OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
+            conversation_sid  = None  # No existe en Programmable Messaging
+
+            # Diagnóstico: log campos de reply para debugging
+            all_keys   = list(form_data.keys())
+            reply_keys = [k for k in all_keys if any(x in k.lower() for x in ("original", "reply", "context"))]
+            logger.info(f"[Webhook][Form] Todos los campos: {all_keys}")
+            if reply_keys:
+                logger.info(f"[Webhook][Form] Campos reply: { {k: form_data.get(k) for k in reply_keys} }")
 
     body_preview = Body[:50] if Body else "[Sin texto]"
     logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")

@@ -688,6 +688,52 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error actualizando delivery status: {e}")
             return False
 
+    async def update_message_content(self, message_sid: str, new_content: str) -> Optional[Dict]:
+        """
+        Actualiza el contenido de un mensaje editado por el cliente en WhatsApp.
+        Retorna el documento actualizado (con phone e _id) para el broadcast WS.
+        """
+        if not await self.connect():
+            return None
+        try:
+            result = await self.db.messages.find_one_and_update(
+                {"message_sid": message_sid},
+                {"$set": {"content": new_content, "edited": True, "edited_at": datetime.utcnow()}},
+                return_document=True,
+                projection={"_id": 1, "phone": 1, "content": 1}
+            )
+            if result:
+                logger.info(f"[MongoDB] Mensaje editado: message_sid={message_sid}")
+            else:
+                logger.warning(f"[MongoDB] Mensaje no encontrado para edición: {message_sid}")
+            return result
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando contenido de mensaje: {e}")
+            return None
+
+    async def soft_delete_message(self, message_sid: str) -> Optional[Dict]:
+        """
+        Marca un mensaje como eliminado (soft-delete) cuando el cliente lo borra en WhatsApp.
+        Retorna el documento actualizado para el broadcast WS.
+        """
+        if not await self.connect():
+            return None
+        try:
+            result = await self.db.messages.find_one_and_update(
+                {"message_sid": message_sid},
+                {"$set": {"deleted": True, "deleted_at": datetime.utcnow()}},
+                return_document=True,
+                projection={"_id": 1, "phone": 1}
+            )
+            if result:
+                logger.info(f"[MongoDB] Mensaje eliminado (soft): message_sid={message_sid}")
+            else:
+                logger.warning(f"[MongoDB] Mensaje no encontrado para soft-delete: {message_sid}")
+            return result
+        except Exception as e:
+            logger.error(f"[MongoDB] Error en soft-delete de mensaje: {e}")
+            return None
+
     # =========================================================================
     # OPERACIONES DE CONTACTOS
     # =========================================================================

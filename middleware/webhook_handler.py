@@ -1008,6 +1008,57 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         event_type = form_data.get("EventType", "")
 
         if event_type:
+            # ── Edición de mensaje (cliente editó en WhatsApp) ─────────────────
+            if event_type == "onMessageUpdated":
+                message_sid = form_data.get("MessageSid") or form_data.get("Sid")
+                new_body    = form_data.get("Body", "")
+                logger.info(
+                    f"[Webhook][Conversations] onMessageUpdated | "
+                    f"MessageSid={message_sid} | NewBody={new_body[:80]!r} | "
+                    f"AllFields={list(form_data.keys())}"
+                )
+                if message_sid and new_body:
+                    try:
+                        mongo_manager = get_mongo_manager()
+                        updated = await mongo_manager.update_message_content(message_sid, new_body)
+                        if updated:
+                            await ws_manager.publish_broadcast(
+                                get_state_manager().redis,
+                                {
+                                    "type": "message_edited",
+                                    "message_id": str(updated["_id"]),
+                                    "phone": updated.get("phone", ""),
+                                    "new_content": new_body,
+                                }
+                            )
+                    except Exception as _e:
+                        logger.error(f"[Webhook][onMessageUpdated] Error: {_e}")
+                return Response(content="", media_type="text/xml")
+
+            # ── Eliminación de mensaje (cliente borró en WhatsApp) ────────────
+            if event_type == "onMessageRemoved":
+                message_sid = form_data.get("MessageSid") or form_data.get("Sid")
+                logger.info(
+                    f"[Webhook][Conversations] onMessageRemoved | "
+                    f"MessageSid={message_sid} | AllFields={list(form_data.keys())}"
+                )
+                if message_sid:
+                    try:
+                        mongo_manager = get_mongo_manager()
+                        deleted = await mongo_manager.soft_delete_message(message_sid)
+                        if deleted:
+                            await ws_manager.publish_broadcast(
+                                get_state_manager().redis,
+                                {
+                                    "type": "message_deleted",
+                                    "message_id": str(deleted["_id"]),
+                                    "phone": deleted.get("phone", ""),
+                                }
+                            )
+                    except Exception as _e:
+                        logger.error(f"[Webhook][onMessageRemoved] Error: {_e}")
+                return Response(content="", media_type="text/xml")
+
             # ── Conversations API — form-encoded (onMessageAdd pre-webhook) ──
             # Ignorar eventos que no son mensajes entrantes
             if event_type not in ("onMessageAdd", "onMessageAdded"):

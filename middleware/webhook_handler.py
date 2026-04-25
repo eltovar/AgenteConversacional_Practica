@@ -1945,12 +1945,53 @@ async def whatsapp_status_callback(
                 error_message=ErrorMessage
             )
             
-            # Log adicional para alertar sobre mensajes no entregados
             logger.warning(
                 f"[StatusCallback] ⚠️ ALERTA: Mensaje a {phone_normalized or To} NO entregado. "
                 f"El panel puede mostrar mensaje que el cliente NO recibió."
             )
-            
+
+            # Notificar al asesor en tiempo real para que sepa que la plantilla no llegó
+            if phone_normalized:
+                try:
+                    state_mgr = get_state_manager()
+                    advisor_id = None
+                    for canal_hint in ("whatsapp", "finca_raiz", "metrocuadrado", "pagina_web",
+                                       "whatsapp_directo", "ciencuadras", "mercado_libre",
+                                       "facebook", "instagram", "linkedin", "tiktok", "youtube"):
+                        meta = await state_mgr.get_meta(phone_normalized, canal_hint)
+                        if meta and getattr(meta, "assigned_owner_id", None):
+                            advisor_id = meta.assigned_owner_id
+                            break
+
+                    if ErrorCode == "63024":
+                        user_msg = f"⚠️ Plantilla NO entregada: el número {phone_normalized} no tiene WhatsApp activo."
+                    else:
+                        user_msg = (
+                            f"⚠️ Plantilla NO entregada al número {phone_normalized}. "
+                            f"Error Twilio: {ErrorCode or 'desconocido'}."
+                        )
+
+                    notification = {
+                        "type": "template_delivery_failed",
+                        "phone": phone_normalized,
+                        "message_sid": MessageSid,
+                        "error_code": ErrorCode,
+                        "user_message": user_msg,
+                    }
+
+                    redis_client = state_mgr.redis
+                    if advisor_id:
+                        await ws_manager.publish_to_advisor(redis_client, advisor_id, notification)
+                    else:
+                        await ws_manager.publish_broadcast(redis_client, notification)
+
+                    logger.info(
+                        f"[StatusCallback] Notificación WS enviada a asesor={advisor_id or 'broadcast'} "
+                        f"por fallo en {phone_normalized} (error {ErrorCode})"
+                    )
+                except Exception as ws_err:
+                    logger.error(f"[StatusCallback] Error enviando notificación WS: {ws_err}")
+
     except Exception as e:
         # No fallar el callback por errores de MongoDB
         logger.error(f"[StatusCallback] Error actualizando delivery status: {e}")

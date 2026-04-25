@@ -23,6 +23,11 @@ TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxx
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
+# Twilio llamará esta URL cuando el estado del mensaje cambie (delivered/undelivered/failed).
+# Sin esto, Twilio no tiene a dónde reportar errores como el 63024.
+_PANEL_BASE_URL = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+STATUS_CALLBACK_URL = f"{_PANEL_BASE_URL}/whatsapp/status" if _PANEL_BASE_URL else None
+
 # Conversations API (necesaria para edit/delete de mensajes outbound desde el panel)
 TWILIO_CONV_MSG_URL = (
     "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages/{msg_sid}"
@@ -154,6 +159,8 @@ class TwilioClient:
                     "From": from_number,
                     "To": to,
                 }
+            if STATUS_CALLBACK_URL:
+                payload["StatusCallback"] = STATUS_CALLBACK_URL
 
             if content_sid:
                 # Template aprobado por Meta → usa ContentSid (funciona fuera de ventana 24h)

@@ -5152,6 +5152,10 @@ function handleWebSocketMessage(data) {
             showToast('El asesor rechazó la transferencia', 'warning');
             break;
 
+        case 'template_delivery_failed':
+            handleTemplateDeliveryFailed(data);
+            break;
+
         case 'message_edited': {
             // Cliente editó un mensaje en WhatsApp → actualizar burbuja sin recargar historial
             const _editEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
@@ -5202,6 +5206,37 @@ function handleWebSocketMessage(data) {
 
         default:
             console.log('[Panel] Mensaje WS desconocido:', data);
+    }
+}
+
+function handleTemplateDeliveryFailed(data) {
+    const msg = data.user_message || `⚠️ Plantilla no entregada al número ${data.phone}.`;
+    console.warn('[Panel] Template delivery failed:', data);
+
+    const div = document.createElement('div');
+    div.className = 'fixed top-4 right-4 z-50 px-4 py-3 rounded-lg text-sm font-medium toast-error';
+    div.style.maxWidth = '360px';
+    div.style.lineHeight = '1.4';
+    div.textContent = msg;
+    document.body.appendChild(div);
+    setTimeout(() => {
+        div.style.transition = 'opacity 0.4s';
+        div.style.opacity = '0';
+        setTimeout(() => div.remove(), 400);
+    }, 7000);
+
+    if (data.phone && data.phone === currentPhone) {
+        const chatContainer = document.getElementById('chat-messages');
+        if (chatContainer) {
+            const errBubble = document.createElement('div');
+            errBubble.className = 'flex justify-end mb-2';
+            errBubble.innerHTML = `
+                <div class="bg-red-100 border border-red-400 text-red-700 rounded-lg px-3 py-2 text-xs max-w-xs">
+                    ❌ Mensaje no entregado — este número no tiene WhatsApp activo.
+                </div>`;
+            chatContainer.appendChild(errBubble);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
     }
 }
 

@@ -234,7 +234,7 @@ async function loadAppointmentsMetrics() {
         console.error('[Métricas/Citas] Error:', error);
         document.getElementById('totalAppointments').textContent = '—';
         document.getElementById('appointmentsTable').innerHTML =
-            '<tr><td colspan="5" class="text-center py-4 text-red-400">Error cargando datos.</td></tr>';
+            '<tr><td colspan="4" class="text-center py-4 text-red-400">Error cargando datos.</td></tr>';
     } finally {
         setAppointmentLoadingState(false);
     }
@@ -313,7 +313,7 @@ function renderAppointmentsTable(details) {
         : `${filtered.length} de ${details.length} citas`;
 
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-400">Sin citas que coincidan</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-gray-400">Sin citas que coincidan</td></tr>';
         return;
     }
 
@@ -324,14 +324,12 @@ function renderAppointmentsTable(details) {
                 hour: '2-digit', minute: '2-digit'
               })
             : '—';
-        const canal = (d.canal || 'whatsapp');
         return `
             <tr>
                 <td>${escapeHtml(fecha)}</td>
                 <td class="font-medium">${escapeHtml(d.nombre || 'Sin nombre')}</td>
                 <td class="text-gray-600">${escapeHtml(d.telefono || '')}</td>
                 <td>${escapeHtml(d.asesor || 'Sin asignar')}</td>
-                <td class="capitalize text-gray-500">${escapeHtml(canal)}</td>
             </tr>`;
     }).join('');
 }

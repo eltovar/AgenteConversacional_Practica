@@ -243,6 +243,16 @@ class MongoDBManager:
                 name="note_contact_created_idx"
             )
 
+            # Índices para scheduled_messages (mensajes programados)
+            await self.db.scheduled_messages.create_index(
+                [("status", ASCENDING), ("scheduled_dt", ASCENDING)],
+                name="idx_sched_status_dt"
+            )
+            await self.db.scheduled_messages.create_index(
+                [("contact_id", ASCENDING), ("scheduled_dt", ASCENDING)],
+                name="idx_sched_contact_dt"
+            )
+
             self._indexes_created = True
             logger.info("[MongoDB] Índices creados/verificados")
 
@@ -1490,6 +1500,144 @@ class MongoDBManager:
             return result.modified_count > 0
         except Exception as e:
             logger.error(f"[MongoDB] Error eliminando nota {note_id}: {e}")
+            return False
+
+    # =========================================================================
+    # SCHEDULED MESSAGES — Mensajes WhatsApp programados por asesoras
+    # =========================================================================
+
+    async def create_scheduled_message(
+        self,
+        contact_id: str,
+        phone: str,
+        canal: str,
+        template_sid: str,
+        template_name: str,
+        template_variables: dict,
+        scheduled_dt: datetime,
+        advisor_id: str = "",
+        notes: str = "",
+    ) -> Optional[str]:
+        """Persiste un mensaje programado. Retorna el _id como string."""
+        if not await self.connect():
+            return None
+        try:
+            doc = {
+                "contact_id": contact_id,
+                "phone": phone,
+                "canal": canal,
+                "template_sid": template_sid,
+                "template_name": template_name,
+                "template_variables": template_variables,
+                "scheduled_dt": scheduled_dt,
+                "status": "pending",
+                "advisor_id": advisor_id,
+                "notes": notes,
+                "created_at": datetime.now(TIMEZONE),
+                "sent_at": None,
+                "error": None,
+            }
+            result = await self.db.scheduled_messages.insert_one(doc)
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"[MongoDB] Error creando scheduled_message: {e}")
+            return None
+
+    async def get_scheduled_messages(self, contact_id: str) -> List[Dict[str, Any]]:
+        """Lista todos los mensajes programados de un contacto, ASC por fecha."""
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.scheduled_messages.find(
+                {"contact_id": contact_id}
+            ).sort("scheduled_dt", ASCENDING)
+            docs = await cursor.to_list(length=50)
+            return [
+                {
+                    "id": str(d["_id"]),
+                    "template_name": d.get("template_name", ""),
+                    "template_sid": d.get("template_sid", ""),
+                    "template_variables": d.get("template_variables", {}),
+                    "scheduled_dt": _iso_bogota(d.get("scheduled_dt")),
+                    "status": d.get("status", "pending"),
+                    "notes": d.get("notes", ""),
+                    "created_at": _iso_bogota(d.get("created_at")),
+                    "sent_at": _iso_bogota(d.get("sent_at")),
+                    "error": d.get("error"),
+                }
+                for d in docs
+            ]
+        except Exception as e:
+            logger.error(f"[MongoDB] Error obteniendo scheduled_messages de {contact_id}: {e}")
+            return []
+
+    async def cancel_scheduled_message(self, message_id: str) -> bool:
+        """Cancela un mensaje programado (status → cancelled)."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.scheduled_messages.update_one(
+                {"_id": ObjectId(message_id), "status": "pending"},
+                {"$set": {"status": "cancelled"}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error cancelando scheduled_message {message_id}: {e}")
+            return False
+
+    async def get_pending_messages_due(self, now_utc: datetime) -> List[Dict[str, Any]]:
+        """
+        Retorna mensajes pending cuya scheduled_dt ya pasó (para el scheduler).
+        now_utc debe ser tz-aware UTC.
+        """
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.scheduled_messages.find(
+                {"status": "pending", "scheduled_dt": {"$lte": now_utc}}
+            ).sort("scheduled_dt", ASCENDING)
+            docs = await cursor.to_list(length=100)
+            return [
+                {
+                    "_id": str(d["_id"]),
+                    "phone": d.get("phone", ""),
+                    "template_sid": d.get("template_sid", ""),
+                    "template_variables": d.get("template_variables", {}),
+                    "template_name": d.get("template_name", ""),
+                    "contact_id": d.get("contact_id", ""),
+                }
+                for d in docs
+            ]
+        except Exception as e:
+            logger.error(f"[MongoDB] Error buscando mensajes vencidos: {e}")
+            return []
+
+    async def mark_scheduled_message_sent(self, message_id: str) -> bool:
+        """Marca un mensaje como enviado."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.scheduled_messages.update_one(
+                {"_id": ObjectId(message_id)},
+                {"$set": {"status": "sent", "sent_at": datetime.now(TIMEZONE), "error": None}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error marcando sent {message_id}: {e}")
+            return False
+
+    async def mark_scheduled_message_failed(self, message_id: str, error: str) -> bool:
+        """Marca un mensaje como fallido con el mensaje de error."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.scheduled_messages.update_one(
+                {"_id": ObjectId(message_id)},
+                {"$set": {"status": "failed", "error": error, "sent_at": datetime.now(TIMEZONE)}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error marcando failed {message_id}: {e}")
             return False
 
     async def close(self):

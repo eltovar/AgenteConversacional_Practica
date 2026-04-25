@@ -3673,13 +3673,16 @@ function _updateDetailsPanel(contact) {
         scheduleBtn.classList.toggle('hidden', !contact.contact_id);
     }
 
-    // Cargar próxima cita y notas de forma asíncrona (no bloquean el render del panel)
+    // Cargar próxima cita, mensaje programado y notas de forma asíncrona
     if (contact.contact_id) {
         loadNextAppointmentForPanel(contact.contact_id);
+        loadScheduledMessageForPanel(contact.contact_id);
         loadNotes(contact.contact_id);
     } else {
         const apptEl = document.getElementById('nextAppointmentContent');
         if (apptEl) apptEl.innerHTML = '<p class="text-sm text-gray-400">Sin cita programada</p>';
+        const smEl = document.getElementById('scheduledMessageContent');
+        if (smEl) smEl.innerHTML = '<p class="text-sm text-gray-400">Sin mensaje programado</p>';
         const notesEl = document.getElementById('notesList');
         if (notesEl) notesEl.innerHTML = '<p class="text-xs text-gray-400 px-1">Sin contactId disponible</p>';
     }
@@ -3835,6 +3838,250 @@ async function loadNotes(contactId) {
     } catch (err) {
         console.warn('[Panel] Error cargando notas:', err);
         container.innerHTML = '<p class="text-xs text-red-400 px-1">Error al cargar notas</p>';
+    }
+}
+
+// =========================================================================
+// MENSAJES PROGRAMADOS — Plantillas WhatsApp en fecha específica
+// =========================================================================
+
+const SCHEDULABLE_TEMPLATES = [
+    {
+        sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
+        name: 'Aun_interesado',
+        label: '¿Aún estás interesado?',
+        preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
+        vars: [{ key: '1', label: 'Nombre del contacto' }]
+    },
+    {
+        sid: 'HX015a4c21c7aeb082448aeaa97396dbbf',
+        name: 'Seguimiento_Personalizado',
+        label: 'Seguimiento Personalizado',
+        preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
+        vars: [
+            { key: '1', label: 'Nombre del contacto' },
+            { key: '2', label: 'Mensaje personalizado' }
+        ]
+    }
+];
+
+async function loadScheduledMessageForPanel(contactId) {
+    const container = document.getElementById('scheduledMessageContent');
+    const btn = document.getElementById('scheduleMessagePanelBtn');
+    if (!container || !contactId) return;
+
+    container.innerHTML = '<p class="text-sm text-gray-400 animate-pulse">Cargando...</p>';
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(contactId)}/scheduled-messages`,
+            { headers: { 'X-API-Key': API_KEY } }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        const now = new Date();
+        const pending = (data.messages || []).filter(
+            m => m.status === 'pending' && new Date(m.scheduled_dt) >= now
+        ).sort((a, b) => new Date(a.scheduled_dt) - new Date(b.scheduled_dt));
+
+        if (btn) btn.classList.remove('hidden');
+
+        if (pending.length === 0) {
+            container.innerHTML = '<p class="text-sm text-gray-400">Sin mensaje programado</p>';
+            return;
+        }
+
+        const next = pending[0];
+        const dt = new Date(next.scheduled_dt);
+        const dateStr = dt.toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Bogota' });
+        const timeStr = dt.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/Bogota' });
+
+        container.innerHTML = `
+            <div class="appt-card">
+                <div class="flex items-start justify-between gap-2">
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-semibold text-gray-800">📅 ${dateStr}</p>
+                        <p class="text-xs text-gray-600 mt-0.5">⏰ ${timeStr}</p>
+                        <p class="text-xs text-gray-500 mt-0.5 truncate">📋 ${next.template_name || 'Plantilla'}</p>
+                        ${next.notes ? `<p class="text-xs text-gray-400 mt-1 italic truncate">${next.notes}</p>` : ''}
+                    </div>
+                    <button onclick="cancelScheduledMessage('${next.id}', '${contactId}')"
+                        class="text-gray-400 hover:text-red-500 transition-colors flex-shrink-0 mt-0.5" title="Cancelar mensaje">🗑</button>
+                </div>
+                ${pending.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${pending.length - 1} mensaje(s) más</p>` : ''}
+            </div>`;
+
+    } catch (err) {
+        console.warn('[Panel] Error cargando mensaje programado:', err);
+        container.innerHTML = '<p class="text-xs text-red-400">Error al cargar</p>';
+        if (btn) btn.classList.remove('hidden');
+    }
+}
+
+function openScheduleMessageModal() {
+    if (!currentContactId) return;
+
+    const modal = document.getElementById('scheduleMessageModal');
+    if (!modal) return;
+
+    // Reset form
+    document.getElementById('scheduleMessageForm').reset();
+    document.getElementById('smResult').classList.add('hidden');
+    document.getElementById('smSubmitBtn').disabled = false;
+    document.getElementById('smSubmitBtn').textContent = 'Programar Envío';
+
+    // Poblar dropdown de templates
+    const select = document.getElementById('smTemplateSelect');
+    select.innerHTML = SCHEDULABLE_TEMPLATES.map(t =>
+        `<option value="${t.name}">${t.label}</option>`
+    ).join('');
+
+    // Renderizar campos de variables para la primera plantilla + pre-llenar nombre
+    onSmTemplateChange();
+
+    modal.classList.remove('hidden');
+}
+
+function closeScheduleMessageModal() {
+    document.getElementById('scheduleMessageModal')?.classList.add('hidden');
+}
+
+function onSmTemplateChange() {
+    const select = document.getElementById('smTemplateSelect');
+    const previewBox = document.getElementById('smPreviewBox');
+    const varsContainer = document.getElementById('smVarsContainer');
+    if (!select || !previewBox || !varsContainer) return;
+
+    const tpl = SCHEDULABLE_TEMPLATES.find(t => t.name === select.value);
+    if (!tpl) return;
+
+    // Renderizar inputs dinámicos para cada variable de la plantilla
+    varsContainer.innerHTML = tpl.vars.map((v, i) => {
+        const existingVal = document.getElementById(`smVar_${v.key}`)?.value || '';
+        const defaultVal = v.key === '1' && currentName && !existingVal
+            ? currentName.split(' ')[0]
+            : existingVal;
+        return `
+        <div>
+            <label class="block text-sm font-medium mb-1">
+                ${v.label} <span class="text-red-500">*</span>
+            </label>
+            <input type="text" id="smVar_${v.key}" required oninput="updateSmPreview()"
+                class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                placeholder="${v.key === '1' ? 'Ej: Carlos' : 'Ej: te escribo para saber si aún estás buscando'}"
+                value="${defaultVal}">
+        </div>`;
+    }).join('');
+
+    updateSmPreview();
+}
+
+function updateSmPreview() {
+    const select = document.getElementById('smTemplateSelect');
+    const previewBox = document.getElementById('smPreviewBox');
+    if (!select || !previewBox) return;
+
+    const tpl = SCHEDULABLE_TEMPLATES.find(t => t.name === select.value);
+    if (!tpl) return;
+
+    let rendered = tpl.preview;
+    tpl.vars.forEach(v => {
+        const val = document.getElementById(`smVar_${v.key}`)?.value.trim() || `{{${v.key}}}`;
+        rendered = rendered.replace(`{${v.key}}`, val);
+    });
+
+    previewBox.textContent = `"${rendered}"`;
+    previewBox.classList.remove('hidden');
+}
+
+async function submitScheduleMessage(event) {
+    event.preventDefault();
+    if (!currentContactId) return;
+
+    const select = document.getElementById('smTemplateSelect');
+    const datetimeInput = document.getElementById('smDatetime');
+    const notesInput = document.getElementById('smNotes');
+    const submitBtn = document.getElementById('smSubmitBtn');
+    const resultDiv = document.getElementById('smResult');
+
+    const tpl = SCHEDULABLE_TEMPLATES.find(t => t.name === select.value);
+    if (!tpl || !datetimeInput.value) return;
+
+    // Recoger todas las variables dinámicas
+    const templateVariables = {};
+    for (const v of tpl.vars) {
+        const val = document.getElementById(`smVar_${v.key}`)?.value.trim() || '';
+        if (!val) return;
+        templateVariables[v.key] = val;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Programando...';
+    resultDiv.classList.add('hidden');
+
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/contacts/${encodeURIComponent(currentContactId)}/scheduled-messages`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+                body: JSON.stringify({
+                    template_sid: tpl.sid,
+                    template_name: tpl.name,
+                    template_variables: templateVariables,
+                    scheduled_dt: datetimeInput.value,
+                    advisor_id: ADVISOR_ID || null,
+                    canal: currentCanal || 'whatsapp',
+                    notes: notesInput.value.trim()
+                })
+            }
+        );
+
+        const data = await resp.json();
+        const content = resultDiv.querySelector('div');
+
+        if (resp.ok) {
+            content.className = 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
+            const dt = new Date(data.scheduled_dt);
+            const dateStr = dt.toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Bogota' });
+            const timeStr = dt.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/Bogota' });
+            content.textContent = `✅ Mensaje programado para ${dateStr} a las ${timeStr}`;
+            resultDiv.classList.remove('hidden');
+
+            await loadScheduledMessageForPanel(currentContactId);
+
+            setTimeout(() => closeScheduleMessageModal(), 2000);
+        } else {
+            content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
+            content.textContent = `❌ ${data.detail || 'Error al programar el mensaje'}`;
+            resultDiv.classList.remove('hidden');
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Programar Envío';
+        }
+    } catch (err) {
+        console.error('[SchedMsg] Error:', err);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Programar Envío';
+    }
+}
+
+async function cancelScheduledMessage(messageId, contactId) {
+    if (!confirm('¿Cancelar este mensaje programado?')) return;
+
+    try {
+        const resp = await fetch(`${BASE_URL}/scheduled-messages/${messageId}`, {
+            method: 'DELETE',
+            headers: { 'X-API-Key': API_KEY }
+        });
+        if (resp.ok) {
+            showToast('Mensaje cancelado', 'success');
+            await loadScheduledMessageForPanel(contactId);
+        } else {
+            showToast('Error al cancelar el mensaje', 'error');
+        }
+    } catch (err) {
+        showToast('Error de conexión', 'error');
     }
 }
 
@@ -4867,6 +5114,13 @@ function handleWebSocketMessage(data) {
             }
             // Si el chat activo es el que recibió el mensaje, refrescar historial y estado de ventana
             if (currentPhone && data.phone && data.phone === currentPhone) {
+                // P3-D canal fix: si el backend hizo merge de canal (ej: ciencuadras → whatsapp),
+                // el evento WS lleva el canal real. Actualizamos currentCanal ANTES de recargar
+                // para que loadChatHistory use el canal correcto y muestre el mensaje nuevo.
+                if (data.canal && data.canal !== currentCanal) {
+                    console.log(`[Panel][P3-D] Canal corregido antes de recargar historial: ${currentCanal} → ${data.canal}`);
+                    currentCanal = data.canal;
+                }
                 loadChatHistory(currentContactId);
                 checkWindowStatus(currentPhone);
             }

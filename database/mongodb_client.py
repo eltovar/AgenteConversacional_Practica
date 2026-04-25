@@ -447,6 +447,8 @@ class MongoDBManager:
                     } if media else None,
                     "reply_to_id": msg.get("reply_to_id"),
                     "reply_to_preview": msg.get("reply_to_preview"),
+                    "deleted": bool(msg.get("deleted", False)),
+                    "edited": bool(msg.get("edited", False)),
                 })
 
             logger.debug(f"[MongoDB] Historial obtenido: {len(formatted_messages)} mensajes para {phone}")
@@ -504,7 +506,9 @@ class MongoDBManager:
                         "original_filename": (msg.get("media") or {}).get("original_filename"),
                     },
                     "reply_to_id": msg.get("reply_to_id"),
-                    "reply_to_preview": msg.get("reply_to_preview")
+                    "reply_to_preview": msg.get("reply_to_preview"),
+                    "deleted": bool(msg.get("deleted", False)),
+                    "edited": bool(msg.get("edited", False)),
                 })
 
             return formatted_messages

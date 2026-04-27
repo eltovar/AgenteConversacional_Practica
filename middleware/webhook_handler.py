@@ -13,7 +13,8 @@ Flujo:
 """
 
 import os
-from typing import Optional
+import json
+from typing import Any, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, Form, Request, BackgroundTasks
@@ -988,6 +989,37 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     OriginalRepliedMessageSender: Optional[str] = None
     conversation_sid: Optional[str] = None
 
+    def _extract_reply_sid_from_attrs(attrs_raw: Any) -> Optional[str]:
+        """Extrae el SID del mensaje citado desde el campo Attributes (JSON).
+
+        Conversations API empaqueta el contexto de reply en el campo
+        `Attributes` como JSON. La forma exacta varía (WhatsApp Business):
+        - {"original_replied_message_sid": "SMxxx" | "IMxxx"}
+        - {"context": {"id": "wamid.xxx" | "SMxxx"}}
+        - {"referral": {"id": "..."}}
+        - {"reply_to": {"message_sid": "..."}}
+        Probamos las variantes conocidas y devolvemos la primera que matchee.
+        """
+        if not attrs_raw:
+            return None
+        try:
+            attrs = attrs_raw if isinstance(attrs_raw, dict) else json.loads(attrs_raw)
+        except Exception:
+            return None
+        if not isinstance(attrs, dict):
+            return None
+        sid = (
+            attrs.get("original_replied_message_sid")
+            or attrs.get("OriginalRepliedMessageSid")
+            or (attrs.get("context") or {}).get("id")
+            or (attrs.get("context") or {}).get("message_sid")
+            or (attrs.get("referral") or {}).get("id")
+            or (attrs.get("referral") or {}).get("body_sid")
+            or (attrs.get("reply_to") or {}).get("message_sid")
+            or (attrs.get("reply_to") or {}).get("id")
+        )
+        return sid or None
+
     if is_json_request:
         # ── Path Conversations API (JSON) ──────────────────────────────────
         try:
@@ -1006,6 +1038,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         MediaContentType0 = data.get("MediaContentType0")
         OriginalRepliedMessageSid    = data.get("OriginalRepliedMessageSid")
         OriginalRepliedMessageSender = data.get("OriginalRepliedMessageSender")
+        if not OriginalRepliedMessageSid:
+            OriginalRepliedMessageSid = _extract_reply_sid_from_attrs(data.get("Attributes"))
 
         logger.info(
             f"[Webhook][JSON] Conversations API | From={From} | "
@@ -1109,10 +1143,28 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
             OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
 
+            # Conversations API: el contexto de reply viene dentro del JSON de Attributes,
+            # NO como campo plano en el form. Si OriginalRepliedMessageSid no llegó suelto,
+            # parsear Attributes para extraerlo.
+            attrs_raw = form_data.get("Attributes")
+            if not OriginalRepliedMessageSid and attrs_raw:
+                OriginalRepliedMessageSid = _extract_reply_sid_from_attrs(attrs_raw)
+                if OriginalRepliedMessageSid:
+                    logger.info(
+                        f"[Webhook][Conversations/Form][Reply] SID extraído de Attributes: "
+                        f"{OriginalRepliedMessageSid}"
+                    )
+                else:
+                    logger.debug(
+                        f"[Webhook][Conversations/Form][Reply] Attributes presente pero sin SID reconocido: "
+                        f"{str(attrs_raw)[:200]}"
+                    )
+
             logger.info(
                 f"[Webhook][Conversations/Form] EventType={event_type} | "
                 f"Author={From} | ConversationSid={conversation_sid} | "
                 f"MessageSid={MessageSid} | Source={source} | "
+                f"HasAttributes={bool(attrs_raw)} | "
                 f"AllFields={list(form_data.keys())}"
             )
 

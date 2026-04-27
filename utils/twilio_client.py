@@ -103,6 +103,90 @@ class TwilioClient:
         """Indica si el cliente está disponible para enviar mensajes."""
         return self._available
 
+    async def _resolve_conv_sid_for_phone(self, to: str) -> Optional[str]:
+        """Busca el conversation_sid más reciente en MongoDB para este número.
+
+        Why: el endpoint Conversations cobra por sesión 24h en lugar de por
+        mensaje individual. Si ya tenemos un CHsid activo para el destinatario,
+        enviar por allí ahorra ~70% del costo en clientes recurrentes.
+        """
+        try:
+            from database.mongodb_client import get_mongo_manager
+            from middleware.phone_normalizer import normalize_phone
+
+            phone = to.replace("whatsapp:", "").strip()
+            try:
+                phone = normalize_phone(phone)
+            except Exception:
+                pass
+
+            mm = get_mongo_manager()
+            if not await mm.connect():
+                return None
+            doc = await mm.db.messages.find_one(
+                {"phone": phone, "conversation_sid": {"$nin": [None, ""]}},
+                sort=[("timestamp_utc", -1)],
+                projection={"conversation_sid": 1},
+            )
+            return doc.get("conversation_sid") if doc else None
+        except Exception as e:
+            logger.warning(f"[TwilioClient] resolve conv_sid fallo para {to}: {e}")
+            return None
+
+    async def _send_via_conversations(
+        self,
+        conversation_sid: str,
+        body: Optional[str] = None,
+        content_sid: Optional[str] = None,
+        content_variables: Optional[dict] = None,
+    ) -> dict:
+        """Envía mensaje vía endpoint Conversations (billing por sesión 24h).
+
+        Endpoint: POST /v1/Conversations/{CHsid}/Messages
+        Reduce costo de $0.005/mensaje a $0.005/sesión-24h ilimitada.
+        No soporta MediaUrl directo (requiere upload previo a Media Content Service).
+        """
+        sid, token, _ = self._resolve_credentials()
+        if not self._available:
+            return {"status": "error", "message": "Twilio no configurado"}
+
+        url = TWILIO_CONV_MSG_LIST_URL.format(conv_sid=conversation_sid)
+        payload: dict = {}
+        if content_sid:
+            payload["ContentSid"] = content_sid
+            if content_variables:
+                payload["ContentVariables"] = json.dumps(content_variables)
+        elif body:
+            payload["Body"] = body
+        else:
+            return {"status": "error", "message": "Sin body ni content_sid"}
+
+        try:
+            client = self._get_http_client()
+            resp = await client.post(url, auth=(sid, token), data=payload)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                im_sid = data.get("sid")
+                logger.info(
+                    f"[TwilioClient][Conv] Enviado conv={conversation_sid[:12]}... "
+                    f"IM={im_sid} (billing por sesión 24h)"
+                )
+                return {
+                    "status": "success",
+                    "message_sid": im_sid,
+                    "conversations_message_sid": im_sid,
+                    "conversation_sid": conversation_sid,
+                    "via": "conversations",
+                }
+            logger.warning(
+                f"[TwilioClient][Conv] Error {resp.status_code} send conv={conversation_sid}: "
+                f"{resp.text[:200]}"
+            )
+            return {"status": "error", "code": resp.status_code, "message": resp.text}
+        except Exception as e:
+            logger.error(f"[TwilioClient][Conv] Excepción: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def send_whatsapp_message(
         self,
         to: str,
@@ -110,9 +194,16 @@ class TwilioClient:
         media_url: Optional[str] = None,
         content_sid: Optional[str] = None,
         content_variables: Optional[dict] = None,
+        conversation_sid: Optional[str] = None,
     ) -> dict:
         """
         Envía un mensaje de WhatsApp usando la API de Twilio.
+
+        Routing:
+        - Si NO hay media_url Y se conoce conv_sid (param o resolvible): usa
+          endpoint /v1/Conversations/{CHsid}/Messages → billing por sesión 24h.
+        - Caso contrario (media o primera interacción saliente): usa
+          /Messages.json con MessagingServiceSid → autocrea conv (legacy).
 
         Args:
             to: Número de destino (puede ser con o sin prefijo whatsapp:)
@@ -123,6 +214,8 @@ class TwilioClient:
                          lo que permite enviar fuera de la ventana de 24h.
             content_variables: Dict con variables numeradas para el template,
                                ej: {"1": "Carlos", "2": "Monica"}.
+            conversation_sid: Si se conoce, evita lookup en Mongo y fuerza
+                              ruteo por endpoint Conversations.
 
         Returns:
             dict con status y mensaje_sid o error
@@ -135,6 +228,26 @@ class TwilioClient:
         # Asegurar formato correcto del número destino
         if not to.startswith("whatsapp:"):
             to = f"whatsapp:{to}"
+
+        # Ruta preferida: Conversations endpoint (billing por sesión 24h)
+        # Solo aplica si no hay media (Conversations requiere MCS upload para MediaSid).
+        if not media_url:
+            conv_sid = conversation_sid or await self._resolve_conv_sid_for_phone(to)
+            if conv_sid:
+                conv_result = await self._send_via_conversations(
+                    conversation_sid=conv_sid,
+                    body=body if not content_sid else None,
+                    content_sid=content_sid,
+                    content_variables=content_variables,
+                )
+                if conv_result.get("status") == "success":
+                    conv_result.setdefault("to", to)
+                    conv_result.setdefault("message_status", "queued")
+                    return conv_result
+                logger.warning(
+                    f"[TwilioClient] Conversations endpoint falló "
+                    f"(code={conv_result.get('code')}), fallback a /Messages.json"
+                )
 
         url = TWILIO_API_URL.format(account_sid=sid)
 

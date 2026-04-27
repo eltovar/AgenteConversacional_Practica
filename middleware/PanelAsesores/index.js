@@ -2767,6 +2767,12 @@ function startEditMessage(msgId) {
         <div class="edit-msg-wrap" style="margin-top:4px;">
             <textarea class="edit-msg-input" rows="2"
                       style="width:100%;border:1px solid #d1d5db;border-radius:6px;padding:6px;font-size:14px;resize:vertical;">${escapeHtml(currentText)}</textarea>
+            <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:#374151;cursor:pointer;">
+                <input type="checkbox" class="edit-notify-checkbox" style="margin:0;">
+                <span>Notificar corrección al cliente</span>
+                <span title="Si lo activas, se enviará un mensaje nuevo al cliente con el texto: ✏️ Corrección: …. Si lo dejas desactivado, la edición es solo interna en este panel."
+                      style="color:#9ca3af;cursor:help;">ⓘ</span>
+            </label>
             <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px;">
                 <button onclick="cancelEditMessage('${msgId}')"
                         style="padding:4px 10px;font-size:12px;border:1px solid #d1d5db;border-radius:4px;background:#fff;cursor:pointer;">Cancelar</button>
@@ -2794,12 +2800,14 @@ async function submitEditMessage(msgId, btn) {
     const ta = bubble.querySelector('.edit-msg-input');
     const newContent = (ta?.value || '').trim();
     if (!newContent) { alert('El contenido no puede estar vacío'); return; }
+    const notifyClient = !!bubble.querySelector('.edit-notify-checkbox')?.checked;
 
     btn.disabled = true; btn.textContent = 'Guardando...';
     try {
         const advisorId = _getAdvisorIdQS();
         const fd = new FormData();
         fd.append('new_content', newContent);
+        fd.append('notify_client', notifyClient ? 'true' : 'false');
         const resp = await fetch(`/whatsapp/panel/messages/${encodeURIComponent(msgId)}?advisor_id=${encodeURIComponent(advisorId)}`, {
             method: 'PATCH',
             body: fd,
@@ -2808,13 +2816,27 @@ async function submitEditMessage(msgId, btn) {
             const err = await resp.json().catch(() => ({}));
             throw new Error(err.detail || `HTTP ${resp.status}`);
         }
-        // El WS broadcast actualizará la UI; aplicamos cambio optimista local
+        // Aplicamos cambio optimista local. Visualización depende del modo:
+        // - Interno (default): tag "[Editado]"
+        // - Notificar: strikethrough + el mensaje "✏️ Corrección" llega via WS
         const bodyP = bubble.querySelector('p[data-msg-body]');
-        if (bodyP) { bodyP.textContent = newContent; bodyP.style.display = ''; }
+        if (bodyP) {
+            if (notifyClient) {
+                // Strikethrough sobre el contenido viejo
+                bodyP.innerHTML = `<s style="color:#9ca3af;">${escapeHtml(bubble.dataset.content || '')}</s>`;
+                bodyP.style.display = '';
+            } else {
+                bodyP.textContent = newContent;
+                bodyP.style.display = '';
+            }
+        }
         bubble.dataset.content = newContent;
         const timeP = bubble.querySelector('p.text-xs.text-gray-500.text-right');
-        if (timeP && !timeP.querySelector('span')) {
-            timeP.insertAdjacentHTML('beforeend', '<span class="text-xs text-gray-400 ml-1">(editado)</span>');
+        if (timeP && !timeP.querySelector('.edit-tag')) {
+            const tag = notifyClient
+                ? '<span class="edit-tag text-xs text-amber-600 ml-1" title="Edición notificada al cliente">[Corregido]</span>'
+                : '<span class="edit-tag text-xs text-gray-400 ml-1" title="Edición solo en este panel">[Editado]</span>';
+            timeP.insertAdjacentHTML('beforeend', tag);
         }
         cancelEditMessage(msgId);
     } catch (e) {
@@ -2823,25 +2845,85 @@ async function submitEditMessage(msgId, btn) {
     }
 }
 
-async function confirmDeleteMessage(msgId) {
-    if (!confirm('¿Eliminar este mensaje? Se borrará tanto en el panel como en WhatsApp del cliente (si la ventana de Twilio lo permite).')) return;
-    try {
-        const advisorId = _getAdvisorIdQS();
-        const resp = await fetch(`/whatsapp/panel/messages/${encodeURIComponent(msgId)}?advisor_id=${encodeURIComponent(advisorId)}`, {
-            method: 'DELETE',
-        });
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.detail || `HTTP ${resp.status}`);
+// Modal de confirmación de eliminación con opción A (interno) / D (notificar)
+function confirmDeleteMessage(msgId) {
+    // Eliminar modal existente si lo hay
+    document.getElementById('delete-msg-modal-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'delete-msg-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML = `
+        <div role="dialog" aria-modal="true" style="background:#fff;border-radius:12px;max-width:440px;width:92%;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,0.25);">
+            <h3 style="margin:0 0 8px 0;font-size:16px;font-weight:600;color:#111827;">¿Eliminar este mensaje?</h3>
+            <p style="margin:0 0 14px 0;font-size:13px;color:#6b7280;line-height:1.4;">
+                WhatsApp no permite borrar mensajes del celular del cliente.
+                Elige cómo manejar la eliminación:
+            </p>
+            <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;">
+                <label style="display:flex;gap:8px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;align-items:flex-start;">
+                    <input type="radio" name="delete-mode" value="internal" checked style="margin:3px 0 0 0;">
+                    <span>
+                        <strong style="color:#111827;">Solo en este panel</strong><br>
+                        <span style="color:#6b7280;">Oculta el mensaje aquí. El cliente sigue viéndolo en su WhatsApp.</span>
+                    </span>
+                </label>
+                <label style="display:flex;gap:8px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;cursor:pointer;font-size:13px;align-items:flex-start;">
+                    <input type="radio" name="delete-mode" value="notify" style="margin:3px 0 0 0;">
+                    <span>
+                        <strong style="color:#111827;">Notificar anulación al cliente</strong><br>
+                        <span style="color:#6b7280;">Envía un mensaje nuevo: 🚫 "Mensaje anterior anulado".</span>
+                    </span>
+                </label>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button id="delete-msg-cancel" style="padding:8px 14px;font-size:13px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#374151;cursor:pointer;">Cancelar</button>
+                <button id="delete-msg-confirm" style="padding:8px 14px;font-size:13px;border:none;border-radius:6px;background:#dc2626;color:#fff;cursor:pointer;">Eliminar</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) overlay.remove();
+    });
+    document.getElementById('delete-msg-cancel').onclick = () => overlay.remove();
+    document.getElementById('delete-msg-confirm').onclick = async () => {
+        const mode = overlay.querySelector('input[name="delete-mode"]:checked')?.value || 'internal';
+        const notifyClient = mode === 'notify';
+        const btn = document.getElementById('delete-msg-confirm');
+        btn.disabled = true; btn.textContent = 'Eliminando...';
+        try {
+            await _executeDeleteMessage(msgId, notifyClient);
+            overlay.remove();
+        } catch (e) {
+            alert('Error eliminando mensaje: ' + e.message);
+            btn.disabled = false; btn.textContent = 'Eliminar';
         }
-        // WS broadcast actualizará la UI; aplicamos cambio optimista local
-        const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
-        if (bubble) {
-            const isRight = bubble.classList.contains('justify-end');
-            bubble.outerHTML = `<div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${msgId}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">🚫 Este mensaje fue eliminado</p></div></div>`;
-        }
-    } catch (e) {
-        alert('Error eliminando mensaje: ' + e.message);
+    };
+}
+
+async function _executeDeleteMessage(msgId, notifyClient) {
+    const advisorId = _getAdvisorIdQS();
+    const qs = new URLSearchParams({
+        advisor_id: advisorId,
+        notify_client: notifyClient ? 'true' : 'false',
+    }).toString();
+    const resp = await fetch(`/whatsapp/panel/messages/${encodeURIComponent(msgId)}?${qs}`, {
+        method: 'DELETE',
+    });
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+    }
+    // Cambio optimista local. El WS también disparará message_deleted.
+    const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (bubble) {
+        const isRight = bubble.classList.contains('justify-end');
+        const note = notifyClient
+            ? '🚫 Mensaje anulado y notificación enviada al cliente'
+            : '🚫 Mensaje eliminado solo en este panel';
+        bubble.outerHTML = `<div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${msgId}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">${note}</p></div></div>`;
     }
 }
 

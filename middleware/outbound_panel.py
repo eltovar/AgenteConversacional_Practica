@@ -1426,6 +1426,9 @@ async def send_message(
 
     if result["status"] == "success":
         message_sid = result.get("message_sid")
+        sent_via = result.get("via")
+        conv_sid_from_send = result.get("conversation_sid")
+        im_sid_from_send = result.get("conversations_message_sid")
 
         # =====================================================================
         # PASO 1: Guardar en MongoDB INMEDIATAMENTE (~5ms)
@@ -1459,10 +1462,12 @@ async def send_message(
                 channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
-                metadata={"source": "Manual via Panel"},
+                metadata={"source": "Manual via Panel", "send_via": sent_via or "legacy"},
                 media=media_dict,
                 reply_to_id=reply_to_id,
-                reply_to_preview=parsed_reply_preview
+                reply_to_preview=parsed_reply_preview,
+                conversation_sid=conv_sid_from_send,
+                conversations_message_sid=im_sid_from_send,
             )
             if mongo_message_id:
                 logger.info(f"[Panel] Mensaje guardado en MongoDB: {mongo_message_id}, media_type={media_type}")
@@ -1470,7 +1475,8 @@ async def send_message(
             logger.error(f"[Panel] Error guardando en MongoDB: {e}")
             # No bloquear el flujo si MongoDB falla
 
-        if mongo_message_id:
+        # Backfill solo si NO enviamos vía Conversations (sin IM SID en mano)
+        if mongo_message_id and not im_sid_from_send:
             background_tasks.add_task(
                 _backfill_im_sid_after_send,
                 phone_normalized,
@@ -1693,8 +1699,19 @@ async def edit_advisor_message(
     mongo_id: str,
     advisor_id: str = Query(..., description="ID del asesor que solicita editar"),
     new_content: str = Form(..., description="Nuevo contenido del mensaje"),
+    notify_client: bool = Form(False, description="Si True, envía mensaje '✏️ Corrección' al cliente"),
 ):
-    """Edita un mensaje propio del asesor en Twilio + MongoDB + WS broadcast."""
+    """Edita un mensaje del asesor.
+
+    Modos:
+    - notify_client=False (default, modo A): edición SOLO interna en panel.
+      Marca el mensaje como `edited` y actualiza el body. NO se envía nada al
+      WhatsApp del cliente (Meta no soporta editar mensajes ya entregados).
+      Best-effort: actualiza también el record en Twilio Conversations Store
+      (para el log/auditoría), si está dentro de la ventana de 15 min.
+    - notify_client=True (modo D): además envía un mensaje nuevo
+      "✏️ Corrección: {nuevo}" al cliente, que SÍ ve en su WhatsApp.
+    """
     new_content = (new_content or "").strip()
     if not new_content:
         raise HTTPException(status_code=400, detail="Contenido vacío")
@@ -1710,24 +1727,64 @@ async def edit_advisor_message(
     if msg.get("deleted"):
         raise HTTPException(status_code=410, detail="Mensaje ya eliminado")
 
-    if _msg_age_seconds(msg) > EDIT_WINDOW_SECONDS:
-        raise HTTPException(status_code=422, detail="Ventana de edición vencida (>15 min)")
-
+    age = _msg_age_seconds(msg)
     conv_sid = msg.get("conversation_sid")
     im_sid   = msg.get("conversations_message_sid")
-    if not conv_sid or not im_sid:
-        raise HTTPException(
-            status_code=409,
-            detail="Mensaje aún no propagado por Twilio (reintenta en unos segundos)",
-        )
 
-    tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content)
-    if tw.get("status") != "success":
-        raise HTTPException(status_code=502, detail=f"Twilio rechazó la edición: {tw.get('message')}")
+    # Best-effort: sincronizar Twilio Conversations Store (solo dentro de 15min)
+    twilio_store_synced = False
+    if conv_sid and im_sid and age <= EDIT_WINDOW_SECONDS:
+        tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content)
+        twilio_store_synced = tw.get("status") == "success"
+        if not twilio_store_synced:
+            logger.warning(
+                f"[Panel][Edit] Twilio store update fallo conv={conv_sid} im={im_sid}: "
+                f"{tw.get('message')} (continúa con edición local)"
+            )
 
+    # Persistir edición local (siempre, fuente de verdad del panel)
     updated = await mongo_manager.update_message_content(mongo_id, new_content)
     if not updated:
         raise HTTPException(status_code=500, detail="No se pudo persistir la edición")
+
+    # Modo D: notificar al cliente con mensaje nuevo "✏️ Corrección: ..."
+    correction_sid = None
+    correction_mongo_id = None
+    if notify_client:
+        phone = msg.get("phone")
+        if not phone:
+            logger.warning(f"[Panel][Edit-Notify] msg sin phone, no se puede notificar")
+        else:
+            correction_body = f"✏️ Corrección: {new_content}"
+            snd = await twilio_client.send_whatsapp_message(
+                to=phone,
+                body=correction_body,
+                conversation_sid=conv_sid,
+            )
+            if snd.get("status") == "success":
+                correction_sid = snd.get("message_sid")
+                try:
+                    correction_mongo_id = await mongo_manager.save_message(
+                        phone=phone,
+                        content=correction_body,
+                        sender="advisor",
+                        channel=msg.get("channel", "whatsapp"),
+                        hubspot_contact_id=msg.get("hubspot_contact_id"),
+                        message_sid=correction_sid,
+                        metadata={
+                            "source": "Edit Notify",
+                            "ref_message_id": str(mongo_id),
+                            "send_via": snd.get("via") or "legacy",
+                        },
+                        conversation_sid=snd.get("conversation_sid"),
+                        conversations_message_sid=snd.get("conversations_message_sid"),
+                    )
+                except Exception as _se:
+                    logger.error(f"[Panel][Edit-Notify] save_message fallo: {_se}")
+            else:
+                logger.warning(
+                    f"[Panel][Edit-Notify] envío fallo a {phone}: {snd.get('message')}"
+                )
 
     # Broadcast a otras pestañas / asesores
     try:
@@ -1737,6 +1794,8 @@ async def edit_advisor_message(
             "message_id": str(updated["_id"]),
             "phone": updated.get("phone", ""),
             "new_content": new_content,
+            "notified": bool(notify_client and correction_sid),
+            "correction_message_id": correction_mongo_id,
         })
     except Exception as _we:
         logger.warning(f"[Panel] WS broadcast edit fallo: {_we}")
@@ -1745,6 +1804,9 @@ async def edit_advisor_message(
         "status": "success",
         "message_id": str(updated["_id"]),
         "new_content": new_content,
+        "twilio_store_synced": twilio_store_synced,
+        "notified_client": bool(notify_client and correction_sid),
+        "correction_message_id": correction_mongo_id,
     })
 
 
@@ -1754,8 +1816,18 @@ async def delete_advisor_message(
     request: Request,
     mongo_id: str,
     advisor_id: str = Query(..., description="ID del asesor que solicita eliminar"),
+    notify_client: bool = Query(False, description="Si True, envía '🚫 Mensaje anterior anulado' al cliente"),
 ):
-    """Elimina un mensaje propio del asesor: Twilio + soft-delete MongoDB + WS."""
+    """Elimina un mensaje del asesor.
+
+    Modos:
+    - notify_client=False (default, modo A): borrado SOLO interno en panel.
+      Marca el mensaje como `deleted` (soft-delete). NO se borra del WhatsApp
+      del cliente (Meta no expone API de borrar-para-todos).
+      Best-effort: borra también el record en Twilio Conversations Store.
+    - notify_client=True (modo D): además envía un nuevo mensaje
+      "🚫 Mensaje anterior anulado" al cliente.
+    """
     mongo_manager = get_mongo_manager()
     msg = await mongo_manager.get_message_by_id(mongo_id)
     if not msg:
@@ -1773,18 +1845,60 @@ async def delete_advisor_message(
     conv_sid = msg.get("conversation_sid")
     im_sid   = msg.get("conversations_message_sid")
 
-    twilio_ok = True
+    # Best-effort: borrar del Twilio Conversations Store (no afecta WhatsApp del cliente)
+    twilio_store_deleted = False
     if conv_sid and im_sid:
         tw = await twilio_client.delete_conversation_message(conv_sid, im_sid)
-        twilio_ok = (tw.get("status") == "success")
-        if not twilio_ok:
-            # Continuamos con soft-delete local aunque Twilio falle (el mensaje
-            # desaparece del panel; en WhatsApp puede quedar visible si Twilio rechazó).
-            logger.warning(f"[Panel] Twilio delete fallo conv={conv_sid} im={im_sid}: {tw.get('message')}")
+        twilio_store_deleted = (tw.get("status") == "success")
+        if not twilio_store_deleted:
+            logger.warning(
+                f"[Panel][Delete] Twilio store delete fallo conv={conv_sid} im={im_sid}: "
+                f"{tw.get('message')} (continúa con soft-delete local)"
+            )
 
+    # Soft-delete local (siempre)
     deleted = await mongo_manager.soft_delete_message(mongo_id)
     if not deleted:
         raise HTTPException(status_code=500, detail="No se pudo soft-delete en MongoDB")
+
+    # Modo D: notificar al cliente con mensaje nuevo "🚫 Mensaje anulado"
+    cancel_sid = None
+    cancel_mongo_id = None
+    if notify_client:
+        phone = msg.get("phone")
+        if not phone:
+            logger.warning(f"[Panel][Delete-Notify] msg sin phone, no se puede notificar")
+        else:
+            cancel_body = "🚫 Mensaje anterior anulado"
+            snd = await twilio_client.send_whatsapp_message(
+                to=phone,
+                body=cancel_body,
+                conversation_sid=conv_sid,
+            )
+            if snd.get("status") == "success":
+                cancel_sid = snd.get("message_sid")
+                try:
+                    cancel_mongo_id = await mongo_manager.save_message(
+                        phone=phone,
+                        content=cancel_body,
+                        sender="advisor",
+                        channel=msg.get("channel", "whatsapp"),
+                        hubspot_contact_id=msg.get("hubspot_contact_id"),
+                        message_sid=cancel_sid,
+                        metadata={
+                            "source": "Delete Notify",
+                            "ref_message_id": str(mongo_id),
+                            "send_via": snd.get("via") or "legacy",
+                        },
+                        conversation_sid=snd.get("conversation_sid"),
+                        conversations_message_sid=snd.get("conversations_message_sid"),
+                    )
+                except Exception as _se:
+                    logger.error(f"[Panel][Delete-Notify] save_message fallo: {_se}")
+            else:
+                logger.warning(
+                    f"[Panel][Delete-Notify] envío fallo a {phone}: {snd.get('message')}"
+                )
 
     try:
         rc = await _get_redis_client()
@@ -1792,6 +1906,8 @@ async def delete_advisor_message(
             "type": "message_deleted",
             "message_id": str(deleted["_id"]),
             "phone": deleted.get("phone", ""),
+            "notified": bool(notify_client and cancel_sid),
+            "cancel_message_id": cancel_mongo_id,
         })
     except Exception as _we:
         logger.warning(f"[Panel] WS broadcast delete fallo: {_we}")
@@ -1799,7 +1915,9 @@ async def delete_advisor_message(
     return JSONResponse(content={
         "status": "success",
         "message_id": str(deleted["_id"]),
-        "twilio_propagated": twilio_ok,
+        "twilio_store_deleted": twilio_store_deleted,
+        "notified_client": bool(notify_client and cancel_sid),
+        "cancel_message_id": cancel_mongo_id,
     })
 
 
@@ -1926,7 +2044,10 @@ async def send_message_json(
 
     if result["status"] == "success":
         message_sid = result.get("message_sid")
-        logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {message_sid} a {phone_normalized}")
+        sent_via = result.get("via")
+        conv_sid_from_send = result.get("conversation_sid")
+        im_sid_from_send = result.get("conversations_message_sid")
+        logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {message_sid} a {phone_normalized} (via={sent_via or 'legacy'})")
 
         # Guardar en MongoDB
         mongo_message_id = None
@@ -1939,14 +2060,16 @@ async def send_message_json(
                 channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
-                metadata={"source": "Panel JSON API"},
+                metadata={"source": "Panel JSON API", "send_via": sent_via or "legacy"},
                 reply_to_id=msg_request.reply_to_id,
-                reply_to_preview=msg_request.reply_to_preview
+                reply_to_preview=msg_request.reply_to_preview,
+                conversation_sid=conv_sid_from_send,
+                conversations_message_sid=im_sid_from_send,
             )
         except Exception as e:
             logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
 
-        if mongo_message_id:
+        if mongo_message_id and not im_sid_from_send:
             background_tasks.add_task(
                 _backfill_im_sid_after_send,
                 phone_normalized,
@@ -2190,6 +2313,9 @@ async def send_template_message(
 
     if result["status"] == "success":
         message_sid = result.get("message_sid")
+        sent_via = result.get("via")
+        conv_sid_from_send = result.get("conversation_sid")
+        im_sid_from_send = result.get("conversations_message_sid")
         template_content = f"[TEMPLATE: {template.get('name', template_id)}] {template_message}"
 
         # =====================================================================
@@ -2205,14 +2331,16 @@ async def send_template_message(
                 channel=canal_final,
                 hubspot_contact_id=contact_id,
                 message_sid=message_sid,
-                metadata={"source": "Template via Panel", "template_id": template_id}
+                metadata={"source": "Template via Panel", "template_id": template_id, "send_via": sent_via or "legacy"},
+                conversation_sid=conv_sid_from_send,
+                conversations_message_sid=im_sid_from_send,
             )
             if mongo_message_id:
                 logger.info(f"[Panel] Template guardado en MongoDB: {mongo_message_id}")
         except Exception as e:
             logger.error(f"[Panel] Error guardando template en MongoDB: {e}")
 
-        if mongo_message_id:
+        if mongo_message_id and not im_sid_from_send:
             background_tasks.add_task(
                 _backfill_im_sid_after_send,
                 phone_normalized,

@@ -15,11 +15,13 @@ WHATSAPP_CAPTION_MAX = 1024
 # Truncado del preview de la cita
 QUOTE_PREVIEW_MAX_CHARS = 80
 
-# Etiquetas de sender
+# Etiquetas de sender — desde la perspectiva del CLIENTE que recibe el mensaje.
+# Si el mensaje citado lo envió el cliente, para él es "Tú".
+# Si lo envió el asesor o el bot, lo ve como "Asesor" / "Asistente".
 SENDER_LABELS = {
-    "client": "Cliente",
-    "advisor": "Tú",
-    "bot": "SofIA",
+    "client": "Tú",
+    "advisor": "Asesor",
+    "bot": "Asistente",
 }
 
 # Iconos por tipo de mensaje original
@@ -67,11 +69,13 @@ def format_quote_prefix(reply_to_preview: Optional[dict]) -> str:
         return ""
 
     sender = reply_to_preview.get("sender") or "client"
-    msg_type = (reply_to_preview.get("type") or "text").lower()
-    body = reply_to_preview.get("body") or ""
+    # Frontend usa `media_type`, otros callers pueden enviar `type`
+    msg_type = (reply_to_preview.get("media_type") or reply_to_preview.get("type") or "text").lower()
+    # Frontend usa `content`, otros callers pueden enviar `body`
+    body = reply_to_preview.get("content") or reply_to_preview.get("body") or ""
     filename = reply_to_preview.get("media_filename") or reply_to_preview.get("filename")
 
-    sender_label = SENDER_LABELS.get(sender, "Cliente")
+    sender_label = SENDER_LABELS.get(sender, "Tú")
     header = f"👤 {sender_label}:"
 
     if msg_type == "text":

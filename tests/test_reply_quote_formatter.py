@@ -14,7 +14,7 @@ from utils.reply_quote_formatter import (
 def test_text_quote_format():
     preview = {"sender": "client", "type": "text", "body": "Hola, quería más info sobre el apartamento"}
     out = format_quote_prefix(preview)
-    assert out.startswith("> 👤 Cliente:\n")
+    assert out.startswith("> 👤 Tú:\n")
     assert "Hola, quería más info" in out
     assert out.endswith("\n\n")
 
@@ -31,7 +31,7 @@ def test_video_quote_no_caption():
     preview = {"sender": "client", "type": "video"}
     out = format_quote_prefix(preview)
     assert "🎥 Video" in out
-    assert out.startswith("> 👤 Cliente:")
+    assert out.startswith("> 👤 Tú:")
 
 
 def test_audio_quote_format():
@@ -43,7 +43,7 @@ def test_audio_quote_format():
 def test_document_quote_with_filename():
     preview = {"sender": "advisor", "type": "document", "media_filename": "contrato.pdf"}
     out = format_quote_prefix(preview)
-    assert "Tú" in out
+    assert "Asesor" in out
     assert "📄" in out
     assert "contrato.pdf" in out
 
@@ -90,17 +90,18 @@ def test_missing_preview_returns_body_intact():
 
 
 def test_sender_labels():
-    assert "Cliente" in format_quote_prefix({"sender": "client", "type": "text", "body": "x"})
-    assert "Tú" in format_quote_prefix({"sender": "advisor", "type": "text", "body": "x"})
-    assert "SofIA" in format_quote_prefix({"sender": "bot", "type": "text", "body": "x"})
-    # Sender desconocido fallback a Cliente
-    assert "Cliente" in format_quote_prefix({"sender": "alien", "type": "text", "body": "x"})
+    # Perspectiva del cliente que recibe el mensaje
+    assert "Tú" in format_quote_prefix({"sender": "client", "type": "text", "body": "x"})
+    assert "Asesor" in format_quote_prefix({"sender": "advisor", "type": "text", "body": "x"})
+    assert "Asistente" in format_quote_prefix({"sender": "bot", "type": "text", "body": "x"})
+    # Sender desconocido fallback a Tú (cliente)
+    assert "Tú" in format_quote_prefix({"sender": "alien", "type": "text", "body": "x"})
 
 
 def test_inject_quote_empty_body_returns_only_quote():
     preview = {"sender": "client", "type": "text", "body": "hola"}
     out = inject_quote("", preview)
-    assert out.startswith("> 👤 Cliente:")
+    assert out.startswith("> 👤 Tú:")
     # Sin trailing body, pero el separador \n\n se mantiene
 
 
@@ -123,10 +124,25 @@ def test_text_quote_no_body_fallback():
     assert "(mensaje sin texto)" in out
 
 
+def test_frontend_field_names_supported():
+    """Frontend envía `content` y `media_type` (no `body`/`type`)."""
+    preview = {"sender": "client", "media_type": "text", "content": "Hhhhhhhh"}
+    out = format_quote_prefix(preview)
+    assert "Hhhhhhhh" in out
+    assert "(mensaje sin texto)" not in out
+
+
+def test_frontend_image_with_content_field():
+    preview = {"sender": "client", "media_type": "image", "content": "esta cocina"}
+    out = format_quote_prefix(preview)
+    assert "📷 Imagen" in out
+    assert "esta cocina" in out
+
+
 def test_inject_quote_combines_correctly():
     preview = {"sender": "client", "type": "text", "body": "¿precio?"}
     out = inject_quote("Cuesta 350M", preview)
-    assert "> 👤 Cliente:" in out
+    assert "> 👤 Tú:" in out
     assert "¿precio?" in out
     assert "Cuesta 350M" in out
     # El body real va después del separador \n\n

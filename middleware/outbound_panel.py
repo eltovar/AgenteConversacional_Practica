@@ -1421,6 +1421,9 @@ async def send_message(
     # ── Citación inline (compensa que Twilio Conversations API no soporta ReplyTo) ──
     # Para audio: WhatsApp NO acepta caption; enviamos primero un texto-cita y
     # luego el audio. Para texto/imagen/video/documento: inyectamos quote en body/caption.
+    # IMPORTANTE: el body con `>` SOLO va a Twilio. En Mongo guardamos el body original
+    # porque el panel ya renderiza la cita usando reply_to_preview (evita doble display).
+    body_for_twilio = message_body
     audio_intro_sid = None
     if parsed_reply_preview:
         if media_type == "audio":
@@ -1439,13 +1442,13 @@ async def send_message(
                     )
         else:
             is_caption = bool(permanent_media_url)
-            message_body = inject_quote(message_body, parsed_reply_preview, is_caption=is_caption)
+            body_for_twilio = inject_quote(message_body, parsed_reply_preview, is_caption=is_caption)
             logger.info(f"[Panel][QuoteInject] Quote inyectada (is_caption={is_caption})")
 
     # Enviar mensaje con multimedia si corresponde
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
-        body=message_body or "📎",  # Twilio requiere body, usar emoji si solo hay media
+        body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
         media_url=permanent_media_url
     )
 
@@ -2067,11 +2070,11 @@ async def send_message_json(
     except Exception as e:
         logger.error(f"[Panel-JSON] Error actualizando estado: {e}")
 
-    # ── Citación inline: prepend quote al body (no hay media en este endpoint) ──
+    # ── Citación inline: prepend quote SOLO para Twilio. Mongo guarda body original. ──
     body_to_send = body
     if msg_request.reply_to_id and msg_request.reply_to_preview:
         body_to_send = inject_quote(body, msg_request.reply_to_preview, is_caption=False)
-        logger.info(f"[Panel-JSON][QuoteInject] Quote inyectada en body")
+        logger.info(f"[Panel-JSON][QuoteInject] Quote inyectada en body (solo Twilio)")
 
     # Enviar mensaje vía Twilio
     result = await twilio_client.send_whatsapp_message(

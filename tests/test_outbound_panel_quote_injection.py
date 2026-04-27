@@ -19,7 +19,7 @@ def test_text_send_with_reply_prepends_quote():
     """Endpoint JSON: body llega a Twilio con `> ...` prefix."""
     preview = {"sender": "client", "type": "text", "body": "¿precio del apto?"}
     result = inject_quote("Cuesta 350M", preview, is_caption=False)
-    assert result.startswith("> 👤 Cliente:\n")
+    assert result.startswith("> 👤 Tú:\n")
     assert "¿precio del apto?" in result
     assert result.endswith("Cuesta 350M")
 
@@ -90,15 +90,15 @@ def test_multiline_quoted_body_each_line_prefixed():
         assert line.startswith(">")
 
 
-def test_advisor_self_quote_uses_tu_label():
-    """Cuando el asesor cita su propio mensaje previo."""
+def test_advisor_self_quote_uses_asesor_label():
+    """Cuando el asesor cita un mensaje previo, el cliente lo ve como "Asesor"."""
     preview = {"sender": "advisor", "type": "text", "body": "lo confirmé"}
     result = inject_quote("y agendé visita", preview)
-    assert "Tú" in result
+    assert "Asesor" in result
     assert "lo confirmé" in result
 
 
-def test_bot_quote_uses_sofia_label():
+def test_bot_quote_uses_asistente_label():
     preview = {"sender": "bot", "type": "text", "body": "Bienvenido"}
     result = inject_quote("¡Hola!", preview)
-    assert "SofIA" in result
+    assert "Asistente" in result

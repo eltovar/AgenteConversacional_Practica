@@ -2330,8 +2330,8 @@ function renderChatBubbles(messages) {
                 const _deletedHtml = `
                     <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3"
                          data-msg-id="${msg.id}">
-                        <div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;">
-                            <p class="text-xs text-gray-400 italic">🚫 Este mensaje fue eliminado</p>
+                        <div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border-radius:12px;max-width:70%;">
+                            <p class="text-xs text-gray-400 italic">Mensaje eliminado</p>
                             <p class="text-xs text-gray-400 text-right mt-1">${timestamp}</p>
                         </div>
                     </div>`;
@@ -2809,16 +2809,19 @@ async function submitEditMessage(msgId, btn) {
             const err = await resp.json().catch(() => ({}));
             throw new Error(err.detail || `HTTP ${resp.status}`);
         }
-        // Cambio optimista: strikethrough sobre texto viejo; "✏️ Corrección" llega via WS
+        // Cambio optimista: mostrar nuevo contenido + etiqueta "editado HH:MM"
         const bodyP = bubble.querySelector('p[data-msg-body]');
         if (bodyP) {
-            bodyP.innerHTML = `<s style="color:#9ca3af;">${escapeHtml(bubble.dataset.content || '')}</s>`;
+            bodyP.textContent = newContent;
             bodyP.style.display = '';
         }
         bubble.dataset.content = newContent;
         const timeP = bubble.querySelector('p.text-xs.text-gray-500.text-right');
-        if (timeP && !timeP.querySelector('.edit-tag')) {
-            timeP.insertAdjacentHTML('beforeend', '<span class="edit-tag text-xs text-amber-600 ml-1" title="Corrección enviada al cliente">[Corregido]</span>');
+        if (timeP) {
+            timeP.querySelector('.edit-tag')?.remove();
+            const now = new Date();
+            const hhmm = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            timeP.insertAdjacentHTML('beforeend', `<span class="edit-tag text-xs text-gray-400 ml-1">editado ${hhmm}</span>`);
         }
         cancelEditMessage(msgId);
     } catch (e) {
@@ -2853,10 +2856,7 @@ async function _executeDeleteMessage(msgId, notifyClient) {
     const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
     if (bubble) {
         const isRight = bubble.classList.contains('justify-end');
-        const note = notifyClient
-            ? '🚫 Mensaje anulado y notificación enviada al cliente'
-            : '🚫 Mensaje eliminado solo en este panel';
-        bubble.outerHTML = `<div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${msgId}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">${note}</p></div></div>`;
+        bubble.outerHTML = `<div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${msgId}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">Mensaje eliminado</p></div></div>`;
     }
 }
 
@@ -5172,36 +5172,28 @@ function handleWebSocketMessage(data) {
             break;
 
         case 'message_edited': {
-            // Cliente editó un mensaje en WhatsApp → actualizar burbuja sin recargar historial
             const _editEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
             if (_editEl && currentPhone && data.phone === currentPhone) {
-                const _editBody = _editEl.querySelector('p.text-gray-800');
-                if (_editBody) _editBody.textContent = data.new_content || '';
+                const _editBody = _editEl.querySelector('p[data-msg-body], p.text-gray-800');
+                if (_editBody) { _editBody.textContent = data.new_content || ''; _editBody.style.display = ''; }
                 const _editTime = _editEl.querySelector('p.text-xs.text-gray-500.text-right');
-                if (_editTime && !_editTime.querySelector('span')) {
-                    _editTime.insertAdjacentHTML('beforeend', '<span class="text-xs text-gray-400 ml-1">(editado)</span>');
+                if (_editTime) {
+                    _editTime.querySelector('.edit-tag')?.remove();
+                    const _now = new Date();
+                    const _hhmm = _now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    _editTime.insertAdjacentHTML('beforeend', `<span class="edit-tag text-xs text-gray-400 ml-1">editado ${_hhmm}</span>`);
                 }
-                console.log('[Panel] Mensaje editado en DOM:', data.message_id);
             } else if (currentPhone && data.phone === currentPhone) {
-                // Burbuja no en DOM todavía → recargar historial completo
                 loadChatHistory(currentContactId);
             }
             break;
         }
 
         case 'message_deleted': {
-            // Cliente eliminó un mensaje en WhatsApp → reemplazar burbuja
             const _delEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
             if (_delEl && currentPhone && data.phone === currentPhone) {
                 const _isRight = _delEl.classList.contains('justify-end');
-                _delEl.outerHTML = `
-                    <div class="flex ${_isRight ? 'justify-end' : 'justify-start'} mb-3"
-                         data-msg-id="${data.message_id}">
-                        <div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border:1px dashed #d1d5db;border-radius:12px;max-width:70%;">
-                            <p class="text-xs text-gray-400 italic">🚫 Este mensaje fue eliminado</p>
-                        </div>
-                    </div>`;
-                console.log('[Panel] Mensaje eliminado en DOM:', data.message_id);
+                _delEl.outerHTML = `<div class="flex ${_isRight ? 'justify-end' : 'justify-start'} mb-3" data-msg-id="${data.message_id}"><div class="bubble-deleted p-3 shadow-sm" style="background:#f3f4f6;border-radius:12px;max-width:70%;"><p class="text-xs text-gray-400 italic">Mensaje eliminado</p></div></div>`;
             } else if (currentPhone && data.phone === currentPhone) {
                 loadChatHistory(currentContactId);
             }

@@ -183,7 +183,7 @@ async def _fetch_reply_context_deferred(
         )
 
         if not replied_sid:
-            logger.debug(f"[ReplyFetch] Attributes sin reply context para {im_sid}")
+            logger.info(f"[ReplyFetch] ⚠️ Attributes vacíos en REST API para {im_sid} — Twilio no expone reply context")
             return
 
         mongo_manager = get_mongo_manager()
@@ -1350,13 +1350,20 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"[Webhook][Conversations/Form][Reply] Attributes sin SID resoluble: "
                         f"{str(attrs_raw)[:300]}"
                     )
-            # Diagnóstico ChannelMetadata (loguear cuando hay context de reply)
-            if channel_metadata_raw:
-                _extract_reply_sid_from_channel_metadata(channel_metadata_raw)
+            # Fallback ChannelMetadata: si Attributes no resolvió el SID,
+            # extraer WAMid del context y usarlo como identificador (Mongo busca por wamid).
+            if not OriginalRepliedMessageSid and channel_metadata_raw:
+                _wamid_from_cm = _extract_reply_sid_from_channel_metadata(channel_metadata_raw)
+                if _wamid_from_cm:
+                    OriginalRepliedMessageSid = _wamid_from_cm
+                    logger.info(
+                        f"[Webhook][Conversations/Form][Reply] WAMid usado como reply SID: "
+                        f"{_wamid_from_cm[:60]} (lookup en Mongo por campo wamid)"
+                    )
                 try:
                     _cm = json.loads(channel_metadata_raw) if isinstance(channel_metadata_raw, str) else channel_metadata_raw
                     _ctx = (_cm.get("data") or {}).get("context") or {}
-                    if len(_ctx) > 2:  # más que solo ProfileName y WaId → hay reply context
+                    if len(_ctx) > 2:
                         logger.info(
                             f"[Webhook][Conversations/Form][Reply] ChannelMetadata.context: {_ctx}"
                         )

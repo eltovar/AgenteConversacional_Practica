@@ -212,6 +212,76 @@ class TwilioClient:
         except Exception as e:
             logger.warning(f"[TwilioClient] Error limpiando stale conv_sid: {e}")
 
+    async def _capture_outbound_wamid_deferred(
+        self,
+        conversation_sid: str,
+        im_sid: str,
+        chat_service_sid: Optional[str] = None,
+        delay: float = 6.0,
+        retries: int = 3,
+    ) -> None:
+        """Captura el WAMid de un mensaje saliente vía GET diferido.
+
+        Why: Twilio Conversations API devuelve solo el IM SID al enviar.
+        El WAMid (id que WhatsApp usa cuando el cliente cita) se asigna
+        después del envío y queda expuesto en `channel_metadata.data.MessageSid`
+        del mensaje en la Conversation. Sin guardarlo, no podemos resolver
+        citaciones cliente→asesor (Twilio no traduce WAMid→IM SID en webhooks).
+
+        Espera `delay`s y reintenta `retries` veces (Twilio asigna el WAMid
+        async después de que WhatsApp acepta el mensaje).
+        """
+        try:
+            from database.mongodb_client import get_mongo_manager
+        except Exception:
+            return
+        for attempt in range(retries):
+            await asyncio.sleep(delay if attempt == 0 else 4.0)
+            try:
+                result = await self.get_conversation_message(
+                    conversation_sid=conversation_sid,
+                    message_sid=im_sid,
+                    chat_service_sid=chat_service_sid,
+                )
+                if result.get("status") != "success":
+                    if attempt == retries - 1:
+                        logger.debug(
+                            f"[WAMidCapture] GET fallido para IM={im_sid[:20]} "
+                            f"tras {retries} intentos: {result.get('message')}"
+                        )
+                    continue
+                msg = result.get("message") or {}
+                cm  = msg.get("channel_metadata") or {}
+                if isinstance(cm, str):
+                    try:
+                        cm = json.loads(cm)
+                    except Exception:
+                        cm = {}
+                data = cm.get("data") or {}
+                wamid = (
+                    data.get("MessageSid")
+                    or data.get("WaMessageId")
+                    or data.get("message_id")
+                    or data.get("id")
+                )
+                if wamid and isinstance(wamid, str) and wamid.startswith("wamid."):
+                    mm = get_mongo_manager()
+                    await mm.store_wamid_for_im_sid(im_sid, wamid)
+                    logger.info(
+                        f"[WAMidCapture] ✅ Outbound WAMid capturado: "
+                        f"IM={im_sid[:20]} wamid={wamid[:40]} (intento {attempt+1})"
+                    )
+                    return
+                if attempt == retries - 1:
+                    logger.info(
+                        f"[WAMidCapture] ⚠️ ChannelMetadata sin WAMid resoluble para "
+                        f"IM={im_sid[:20]} tras {retries} intentos. data_keys={list(data.keys())}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[WAMidCapture] Excepción intento {attempt+1} para IM={im_sid[:20]}: {e}"
+                )
+
     async def _send_via_conversations(
         self,
         conversation_sid: str,
@@ -251,6 +321,16 @@ class TwilioClient:
                     f"[TwilioClient][Conv] Enviado conv={conversation_sid[:12]}... "
                     f"IM={im_sid} (billing por sesión 24h)"
                 )
+                # Captura diferida del WAMid asignado por WhatsApp.
+                # Necesario para que las citaciones cliente→asesor funcionen.
+                if im_sid:
+                    asyncio.create_task(
+                        self._capture_outbound_wamid_deferred(
+                            conversation_sid=conversation_sid,
+                            im_sid=im_sid,
+                            chat_service_sid=chat_service_sid,
+                        )
+                    )
                 return {
                     "status": "success",
                     "message_sid": im_sid,

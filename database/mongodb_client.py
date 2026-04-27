@@ -188,6 +188,15 @@ class MongoDBManager:
                 partialFilterExpression={"message_sid": {"$type": "string"}}
             )
 
+            # Índice para resolución de citaciones cliente→asesor:
+            # ChannelMetadata.data.context.MessageId del webhook entrante es un WAMid;
+            # buscamos el mensaje saliente por wamid para resolver reply_to_id.
+            await self.db.messages.create_index(
+                "wamid",
+                name="wamid_idx",
+                partialFilterExpression={"wamid": {"$type": "string"}},
+            )
+
             # Índice de texto para búsqueda fulltext en contenido de mensajes
             await self.db.messages.create_index(
                 [("content", "text")],

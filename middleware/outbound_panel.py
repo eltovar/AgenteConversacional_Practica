@@ -36,6 +36,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
+from utils.reply_quote_formatter import inject_quote, reply_audio_intro
 
 
 # Router de FastAPI para el panel de envío
@@ -1417,6 +1418,30 @@ async def send_message(
     # Preparar body para envío
     message_body = body.strip() if body else ""
 
+    # ── Citación inline (compensa que Twilio Conversations API no soporta ReplyTo) ──
+    # Para audio: WhatsApp NO acepta caption; enviamos primero un texto-cita y
+    # luego el audio. Para texto/imagen/video/documento: inyectamos quote en body/caption.
+    audio_intro_sid = None
+    if parsed_reply_preview:
+        if media_type == "audio":
+            intro_text = reply_audio_intro(parsed_reply_preview)
+            if intro_text:
+                intro_result = await twilio_client.send_whatsapp_message(
+                    to=phone_normalized,
+                    body=intro_text,
+                )
+                if intro_result.get("status") == "success":
+                    audio_intro_sid = intro_result.get("message_sid")
+                    logger.info(f"[Panel][QuoteInject] Audio intro enviado: {audio_intro_sid}")
+                else:
+                    logger.warning(
+                        f"[Panel][QuoteInject] Falló intro de audio: {intro_result.get('message')}"
+                    )
+        else:
+            is_caption = bool(permanent_media_url)
+            message_body = inject_quote(message_body, parsed_reply_preview, is_caption=is_caption)
+            logger.info(f"[Panel][QuoteInject] Quote inyectada (is_caption={is_caption})")
+
     # Enviar mensaje con multimedia si corresponde
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
@@ -2042,10 +2067,16 @@ async def send_message_json(
     except Exception as e:
         logger.error(f"[Panel-JSON] Error actualizando estado: {e}")
 
+    # ── Citación inline: prepend quote al body (no hay media en este endpoint) ──
+    body_to_send = body
+    if msg_request.reply_to_id and msg_request.reply_to_preview:
+        body_to_send = inject_quote(body, msg_request.reply_to_preview, is_caption=False)
+        logger.info(f"[Panel-JSON][QuoteInject] Quote inyectada en body")
+
     # Enviar mensaje vía Twilio
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
-        body=body
+        body=body_to_send
     )
 
     if result["status"] == "success":

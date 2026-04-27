@@ -3304,6 +3304,11 @@ function confirmAndSendAudio(audioFile) {
 
     console.log('[Panel] Audio listo para enviar:', audioFile.name, audioFile.type, audioFile.size);
 
+    // Aviso: WhatsApp no permite caption en audio. Si hay cita activa, irá como mensaje de texto previo.
+    if (replyToMessage) {
+        showToast('Tu cita aparecerá como mensaje de texto antes del audio.', 'info');
+    }
+
     // Preguntar si desea enviar inmediatamente o agregar texto
     const sendNow = confirm('Audio grabado. ¿Deseas enviarlo ahora?\n\nPresiona "Cancelar" para agregar un mensaje de texto antes de enviar.');
 

@@ -1457,6 +1457,7 @@ async def send_message(
         sent_via = result.get("via")
         conv_sid_from_send = result.get("conversation_sid")
         im_sid_from_send = result.get("conversations_message_sid")
+        chat_svc_sid_from_send = result.get("chat_service_sid")
 
         # =====================================================================
         # PASO 1: Guardar en MongoDB INMEDIATAMENTE (~5ms)
@@ -1496,6 +1497,7 @@ async def send_message(
                 reply_to_preview=parsed_reply_preview,
                 conversation_sid=conv_sid_from_send,
                 conversations_message_sid=im_sid_from_send,
+                chat_service_sid=chat_svc_sid_from_send,
             )
             if mongo_message_id:
                 logger.info(f"[Panel] Mensaje guardado en MongoDB: {mongo_message_id}, media_type={media_type}")
@@ -2087,6 +2089,7 @@ async def send_message_json(
         sent_via = result.get("via")
         conv_sid_from_send = result.get("conversation_sid")
         im_sid_from_send = result.get("conversations_message_sid")
+        chat_svc_sid_from_send = result.get("chat_service_sid")
         logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {message_sid} a {phone_normalized} (via={sent_via or 'legacy'})")
 
         # Guardar en MongoDB
@@ -2105,6 +2108,7 @@ async def send_message_json(
                 reply_to_preview=msg_request.reply_to_preview,
                 conversation_sid=conv_sid_from_send,
                 conversations_message_sid=im_sid_from_send,
+                chat_service_sid=chat_svc_sid_from_send,
             )
         except Exception as e:
             logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
@@ -2356,6 +2360,7 @@ async def send_template_message(
         sent_via = result.get("via")
         conv_sid_from_send = result.get("conversation_sid")
         im_sid_from_send = result.get("conversations_message_sid")
+        chat_svc_sid_from_send = result.get("chat_service_sid")
         template_content = f"[TEMPLATE: {template.get('name', template_id)}] {template_message}"
 
         # =====================================================================
@@ -2374,6 +2379,7 @@ async def send_template_message(
                 metadata={"source": "Template via Panel", "template_id": template_id, "send_via": sent_via or "legacy"},
                 conversation_sid=conv_sid_from_send,
                 conversations_message_sid=im_sid_from_send,
+                chat_service_sid=chat_svc_sid_from_send,
             )
             if mongo_message_id:
                 logger.info(f"[Panel] Template guardado en MongoDB: {mongo_message_id}")

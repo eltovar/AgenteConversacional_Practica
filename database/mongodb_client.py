@@ -288,6 +288,7 @@ class MongoDBManager:
         reply_to_preview: Optional[Dict[str, Any]] = None,
         conversation_sid: Optional[str] = None,
         conversations_message_sid: Optional[str] = None,
+        chat_service_sid: Optional[str] = None,
     ) -> Optional[str]:
         """
         Guarda un mensaje para visualización inmediata en el panel.
@@ -341,6 +342,8 @@ class MongoDBManager:
             message_doc["conversation_sid"] = conversation_sid
         if conversations_message_sid:
             message_doc["conversations_message_sid"] = conversations_message_sid
+        if chat_service_sid:
+            message_doc["chat_service_sid"] = chat_service_sid
         if media:
             message_doc["media"] = media
         if reply_to_id:

@@ -151,6 +151,7 @@ async def _process_message_deferred(
     original_replied_message_sid: Optional[str] = None,
     incoming_channel: Optional[str] = None,
     conversation_sid: Optional[str] = None,
+    chat_service_sid: Optional[str] = None,
 ):
     """
     Procesa un mensaje de WhatsApp de forma diferida (background task).
@@ -311,6 +312,7 @@ async def _process_message_deferred(
             reply_to_id=reply_to_id,
             reply_to_preview=reply_to_preview,
             conversation_sid=conversation_sid,
+            chat_service_sid=chat_service_sid,
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
 
@@ -1060,6 +1062,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         ProfileName      = data.get("ProfileName") or data.get("AuthorAttributes", {}).get("name")
         MessageSid       = data.get("MessageSid") or data.get("Sid")
         conversation_sid = data.get("ConversationSid")
+        chat_service_sid_inbound = data.get("ChatServiceSid")
         NumMedia         = int(data.get("NumMedia", 0))
         MediaUrl0        = data.get("MediaUrl0")
         MediaContentType0 = data.get("MediaContentType0")
@@ -1164,6 +1167,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             ProfileName      = None  # Conversations no provee ProfileName directamente
             MessageSid       = form_data.get("MessageSid") or form_data.get("Sid")
             conversation_sid = form_data.get("ConversationSid")
+            chat_service_sid_inbound = form_data.get("ChatServiceSid")
             NumMedia         = int(form_data.get("NumMedia", 0))
             MediaUrl0        = form_data.get("MediaUrl0")
             MediaContentType0 = form_data.get("MediaContentType0")
@@ -1248,6 +1252,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
             OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
             conversation_sid  = None  # No existe en Programmable Messaging
+            chat_service_sid_inbound = None
 
             # Diagnóstico: log campos de reply para debugging
             all_keys   = list(form_data.keys())
@@ -1309,6 +1314,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             OriginalRepliedMessageSid,
             incoming_channel,
             conversation_sid,
+            chat_service_sid_inbound,
         )
 
         # Actualizar timestamps en background

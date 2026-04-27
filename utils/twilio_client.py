@@ -30,13 +30,20 @@ TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messa
 _PANEL_BASE_URL = os.getenv("PANEL_BASE_URL", "").rstrip("/")
 STATUS_CALLBACK_URL = f"{_PANEL_BASE_URL}/whatsapp/status" if _PANEL_BASE_URL else None
 
-# Conversations API (necesaria para edit/delete de mensajes outbound desde el panel)
-TWILIO_CONV_MSG_URL = (
-    "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages/{msg_sid}"
-)
-TWILIO_CONV_MSG_LIST_URL = (
-    "https://conversations.twilio.com/v1/Conversations/{conv_sid}/Messages"
-)
+# Conversations API (necesaria para edit/delete de mensajes outbound desde el panel).
+# Service-aware: si la conv vive en una Conversations Service específica (ChatServiceSid),
+# las URLs deben incluir /Services/{ISxxx}/. Sin esto las llamadas a convs de servicios
+# distintos al Default devuelven 404, causando split-brain.
+TWILIO_CONV_BASE = "https://conversations.twilio.com/v1"
+
+
+def _conv_url(conv_sid: str, chat_service_sid: Optional[str] = None, suffix: str = "") -> str:
+    """Construye URL Conversations API respetando ChatServiceSid si se conoce."""
+    if chat_service_sid:
+        base = f"{TWILIO_CONV_BASE}/Services/{chat_service_sid}/Conversations/{conv_sid}"
+    else:
+        base = f"{TWILIO_CONV_BASE}/Conversations/{conv_sid}"
+    return f"{base}{suffix}" if suffix else base
 
 
 class TwilioClient:
@@ -105,12 +112,12 @@ class TwilioClient:
         """Indica si el cliente está disponible para enviar mensajes."""
         return self._available
 
-    async def _resolve_conv_sid_for_phone(self, to: str) -> Optional[str]:
-        """Busca el conversation_sid activo (< 23h) en MongoDB para este número.
+    async def _resolve_conv_sid_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
+        """Busca el (conversation_sid, chat_service_sid) activo (< 23h) en MongoDB.
 
-        Filtra por timestamp_utc < 23h: las conversaciones de Twilio son sesiones
-        de 24h; si el último mensaje con conv_sid tiene más de 23h, la sesión
-        probablemente ya cerró → no intentar reusarla (evita 404s repetidos).
+        Retorna ambos campos porque Conversations API requiere el ChatServiceSid
+        para resolver convs de Services no-Default. Sin esto, las URLs apuntan
+        al Default y devuelven 404 para convs de otros services.
         """
         try:
             from database.mongodb_client import get_mongo_manager
@@ -125,7 +132,7 @@ class TwilioClient:
             cutoff = datetime.utcnow() - timedelta(hours=23)
             mm = get_mongo_manager()
             if not await mm.connect():
-                return None
+                return None, None
             doc = await mm.db.messages.find_one(
                 {
                     "phone": phone,
@@ -133,31 +140,35 @@ class TwilioClient:
                     "timestamp_utc": {"$gte": cutoff},
                 },
                 sort=[("timestamp_utc", -1)],
-                projection={"conversation_sid": 1},
+                projection={"conversation_sid": 1, "chat_service_sid": 1},
             )
-            return doc.get("conversation_sid") if doc else None
+            if not doc:
+                return None, None
+            return doc.get("conversation_sid"), doc.get("chat_service_sid")
         except Exception as e:
             logger.warning(f"[TwilioClient] resolve conv_sid fallo para {to}: {e}")
-            return None
+            return None, None
 
-    async def _invalidate_stale_conv_sid(self, conversation_sid: str) -> None:
+    async def _invalidate_stale_conv_sid(
+        self,
+        conversation_sid: str,
+        chat_service_sid: Optional[str] = None,
+    ) -> None:
         """Limpia un conversation_sid stale.
 
         Dos pasos críticos para evitar split-brain (conversaciones paralelas
         para el mismo número, lo que rompe la resolución WAMid→IM SID):
-        1. Cerrar la conversación en Twilio (State=closed). Sin esto, Twilio
-           sigue enrutando inbound del cliente a la conv vieja mientras
-           nuestros outbound crean una nueva → citaciones imposibles.
+        1. Cerrar la conversación en Twilio (State=closed). Si la conv vive en
+           un Conversations Service no-Default, debe usarse la URL namespaced
+           con ChatServiceSid o el cierre devuelve 404.
         2. Limpiar referencias en MongoDB para que el próximo outbound no
            reintente con un SID muerto.
         """
-        # Paso 1: cerrar en Twilio
+        # Paso 1: cerrar en Twilio (service-aware)
         try:
             sid, token, _ = self._resolve_credentials()
             if sid and token:
-                close_url = (
-                    f"https://conversations.twilio.com/v1/Conversations/{conversation_sid}"
-                )
+                close_url = _conv_url(conversation_sid, chat_service_sid)
                 client = self._get_http_client()
                 resp = await client.post(
                     close_url,
@@ -207,10 +218,11 @@ class TwilioClient:
         body: Optional[str] = None,
         content_sid: Optional[str] = None,
         content_variables: Optional[dict] = None,
+        chat_service_sid: Optional[str] = None,
     ) -> dict:
         """Envía mensaje vía endpoint Conversations (billing por sesión 24h).
 
-        Endpoint: POST /v1/Conversations/{CHsid}/Messages
+        Endpoint: POST /v1/[Services/{ISxxx}/]Conversations/{CHsid}/Messages
         Reduce costo de $0.005/mensaje a $0.005/sesión-24h ilimitada.
         No soporta MediaUrl directo (requiere upload previo a Media Content Service).
         """
@@ -218,7 +230,7 @@ class TwilioClient:
         if not self._available:
             return {"status": "error", "message": "Twilio no configurado"}
 
-        url = TWILIO_CONV_MSG_LIST_URL.format(conv_sid=conversation_sid)
+        url = _conv_url(conversation_sid, chat_service_sid, suffix="/Messages")
         payload: dict = {}
         if content_sid:
             payload["ContentSid"] = content_sid
@@ -248,7 +260,9 @@ class TwilioClient:
                 }
             if resp.status_code == 404:
                 # Conversación expirada/cerrada en Twilio → limpiar para no reintentar
-                asyncio.create_task(self._invalidate_stale_conv_sid(conversation_sid))
+                asyncio.create_task(
+                    self._invalidate_stale_conv_sid(conversation_sid, chat_service_sid)
+                )
             logger.warning(
                 f"[TwilioClient][Conv] Error {resp.status_code} send conv={conversation_sid}: "
                 f"{resp.text[:200]}"
@@ -266,6 +280,7 @@ class TwilioClient:
         content_sid: Optional[str] = None,
         content_variables: Optional[dict] = None,
         conversation_sid: Optional[str] = None,
+        chat_service_sid: Optional[str] = None,
     ) -> dict:
         """
         Envía un mensaje de WhatsApp usando la API de Twilio.
@@ -303,17 +318,23 @@ class TwilioClient:
         # Ruta preferida: Conversations endpoint (billing por sesión 24h)
         # Solo aplica si no hay media (Conversations requiere MCS upload para MediaSid).
         if not media_url:
-            conv_sid = conversation_sid or await self._resolve_conv_sid_for_phone(to)
+            if conversation_sid:
+                conv_sid = conversation_sid
+                svc_sid = chat_service_sid
+            else:
+                conv_sid, svc_sid = await self._resolve_conv_sid_for_phone(to)
             if conv_sid:
                 conv_result = await self._send_via_conversations(
                     conversation_sid=conv_sid,
                     body=body if not content_sid else None,
                     content_sid=content_sid,
                     content_variables=content_variables,
+                    chat_service_sid=svc_sid,
                 )
                 if conv_result.get("status") == "success":
                     conv_result.setdefault("to", to)
                     conv_result.setdefault("message_status", "queued")
+                    conv_result.setdefault("chat_service_sid", svc_sid)
                     return conv_result
                 logger.warning(
                     f"[TwilioClient] Conversations endpoint falló "
@@ -450,10 +471,11 @@ class TwilioClient:
         conversation_sid: str,
         message_sid: str,
         new_body: str,
+        chat_service_sid: Optional[str] = None,
     ) -> dict:
         """Edita un mensaje en Conversations API.
 
-        Endpoint: POST /v1/Conversations/{CHsid}/Messages/{IMsid}
+        Endpoint: POST /v1/[Services/{ISxxx}/]Conversations/{CHsid}/Messages/{IMsid}
         Twilio limita la edición a mensajes con < ~15 min de antigüedad.
         """
         sid, token, _ = self._resolve_credentials()
@@ -462,7 +484,7 @@ class TwilioClient:
         if not conversation_sid or not message_sid:
             return {"status": "error", "message": "conversation_sid y message_sid requeridos"}
 
-        url = TWILIO_CONV_MSG_URL.format(conv_sid=conversation_sid, msg_sid=message_sid)
+        url = _conv_url(conversation_sid, chat_service_sid, suffix=f"/Messages/{message_sid}")
         try:
             client = self._get_http_client()
             resp = await client.post(
@@ -488,10 +510,11 @@ class TwilioClient:
         self,
         conversation_sid: str,
         message_sid: str,
+        chat_service_sid: Optional[str] = None,
     ) -> dict:
         """Elimina un mensaje en Conversations API.
 
-        Endpoint: DELETE /v1/Conversations/{CHsid}/Messages/{IMsid}
+        Endpoint: DELETE /v1/[Services/{ISxxx}/]Conversations/{CHsid}/Messages/{IMsid}
         WhatsApp removerá el mensaje del cliente si está dentro de la ventana
         permitida por Meta (~ poco después del envío).
         """
@@ -501,7 +524,7 @@ class TwilioClient:
         if not conversation_sid or not message_sid:
             return {"status": "error", "message": "conversation_sid y message_sid requeridos"}
 
-        url = TWILIO_CONV_MSG_URL.format(conv_sid=conversation_sid, msg_sid=message_sid)
+        url = _conv_url(conversation_sid, chat_service_sid, suffix=f"/Messages/{message_sid}")
         try:
             client = self._get_http_client()
             resp = await client.delete(url, auth=(sid, token))
@@ -524,6 +547,7 @@ class TwilioClient:
         conversation_sid: str,
         limit: int = 5,
         order: str = "desc",
+        chat_service_sid: Optional[str] = None,
     ) -> dict:
         """Lista los últimos mensajes de una conversación.
 
@@ -536,7 +560,7 @@ class TwilioClient:
         if not conversation_sid:
             return {"status": "error", "message": "conversation_sid requerido"}
 
-        url = TWILIO_CONV_MSG_LIST_URL.format(conv_sid=conversation_sid)
+        url = _conv_url(conversation_sid, chat_service_sid, suffix="/Messages")
         try:
             client = self._get_http_client()
             resp = await client.get(

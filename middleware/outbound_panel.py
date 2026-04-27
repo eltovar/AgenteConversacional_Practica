@@ -1766,11 +1766,12 @@ async def edit_advisor_message(
     age = _msg_age_seconds(msg)
     conv_sid = msg.get("conversation_sid")
     im_sid   = msg.get("conversations_message_sid")
+    chat_svc_sid = msg.get("chat_service_sid")
 
     # Best-effort: sincronizar Twilio Conversations Store (solo dentro de 15min)
     twilio_store_synced = False
     if conv_sid and im_sid and age <= EDIT_WINDOW_SECONDS:
-        tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content)
+        tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content, chat_service_sid=chat_svc_sid)
         twilio_store_synced = tw.get("status") == "success"
         if not twilio_store_synced:
             logger.warning(
@@ -1796,6 +1797,7 @@ async def edit_advisor_message(
                 to=phone,
                 body=correction_body,
                 conversation_sid=conv_sid,
+                chat_service_sid=chat_svc_sid,
             )
             if snd.get("status") == "success":
                 correction_sid = snd.get("message_sid")
@@ -1880,11 +1882,12 @@ async def delete_advisor_message(
 
     conv_sid = msg.get("conversation_sid")
     im_sid   = msg.get("conversations_message_sid")
+    chat_svc_sid = msg.get("chat_service_sid")
 
     # Best-effort: borrar del Twilio Conversations Store (no afecta WhatsApp del cliente)
     twilio_store_deleted = False
     if conv_sid and im_sid:
-        tw = await twilio_client.delete_conversation_message(conv_sid, im_sid)
+        tw = await twilio_client.delete_conversation_message(conv_sid, im_sid, chat_service_sid=chat_svc_sid)
         twilio_store_deleted = (tw.get("status") == "success")
         if not twilio_store_deleted:
             logger.warning(
@@ -1910,6 +1913,7 @@ async def delete_advisor_message(
                 to=phone,
                 body=cancel_body,
                 conversation_sid=conv_sid,
+                chat_service_sid=chat_svc_sid,
             )
             if snd.get("status") == "success":
                 cancel_sid = snd.get("message_sid")

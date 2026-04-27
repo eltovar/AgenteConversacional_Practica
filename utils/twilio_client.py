@@ -141,7 +141,49 @@ class TwilioClient:
             return None
 
     async def _invalidate_stale_conv_sid(self, conversation_sid: str) -> None:
-        """Limpia un conversation_sid que devolvió 404 para evitar loops."""
+        """Limpia un conversation_sid stale.
+
+        Dos pasos críticos para evitar split-brain (conversaciones paralelas
+        para el mismo número, lo que rompe la resolución WAMid→IM SID):
+        1. Cerrar la conversación en Twilio (State=closed). Sin esto, Twilio
+           sigue enrutando inbound del cliente a la conv vieja mientras
+           nuestros outbound crean una nueva → citaciones imposibles.
+        2. Limpiar referencias en MongoDB para que el próximo outbound no
+           reintente con un SID muerto.
+        """
+        # Paso 1: cerrar en Twilio
+        try:
+            sid, token, _ = self._resolve_credentials()
+            if sid and token:
+                close_url = (
+                    f"https://conversations.twilio.com/v1/Conversations/{conversation_sid}"
+                )
+                client = self._get_http_client()
+                resp = await client.post(
+                    close_url,
+                    auth=(sid, token),
+                    data={"State": "closed"},
+                )
+                if resp.status_code in (200, 201):
+                    logger.info(
+                        f"[TwilioClient] Conversación {conversation_sid[:12]}... "
+                        f"cerrada en Twilio (State=closed)"
+                    )
+                elif resp.status_code == 404:
+                    # Ya no existe en Twilio, OK
+                    logger.info(
+                        f"[TwilioClient] Conversación {conversation_sid[:12]}... "
+                        f"ya inexistente en Twilio (404)"
+                    )
+                else:
+                    logger.warning(
+                        f"[TwilioClient] No se pudo cerrar conv {conversation_sid[:12]}...: "
+                        f"{resp.status_code} - {resp.text[:200]}"
+                    )
+        except Exception as e:
+            logger.warning(f"[TwilioClient] Error cerrando conv en Twilio: {e}")
+
+        # Paso 2: limpiar MongoDB
         try:
             from database.mongodb_client import get_mongo_manager
             mm = get_mongo_manager()

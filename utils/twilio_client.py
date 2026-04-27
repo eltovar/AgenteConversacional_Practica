@@ -542,6 +542,31 @@ class TwilioClient:
             return {"status": "error", "message": str(e)}
 
 
+    async def get_conversation_message(
+        self,
+        conversation_sid: str,
+        message_sid: str,
+        chat_service_sid: Optional[str] = None,
+    ) -> dict:
+        """Fetches a single Conversations message by IM SID via REST API.
+
+        Usado para obtener Attributes completos después del webhook (resolución
+        asíncrona de WAMid → IM SID que Twilio hace post-entrega).
+        """
+        sid, token, _ = self._resolve_credentials()
+        if not self._available:
+            return {"status": "error", "message": "Twilio no configurado"}
+        url = _conv_url(conversation_sid, chat_service_sid, suffix=f"/Messages/{message_sid}")
+        try:
+            client = self._get_http_client()
+            resp = await client.get(url, auth=(sid, token))
+            if resp.status_code == 200:
+                return {"status": "success", "message": resp.json()}
+            return {"status": "error", "code": resp.status_code, "message": resp.text}
+        except Exception as e:
+            logger.error(f"[TwilioClient] Excepción fetching message {message_sid}: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def list_conversation_messages(
         self,
         conversation_sid: str,

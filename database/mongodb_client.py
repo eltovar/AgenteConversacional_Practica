@@ -564,6 +564,32 @@ class MongoDBManager:
             logger.warning(f"[MongoDB] Error buscando mensaje por SID {message_sid}: {e}")
             return None
 
+    async def update_message_reply_context(
+        self,
+        message_sid: str,
+        reply_to_id: str,
+        reply_to_preview: dict,
+    ) -> bool:
+        """Actualiza reply_to_id y reply_to_preview en un mensaje ya guardado.
+
+        Usado por el fetch diferido post-webhook cuando Twilio resuelve
+        el reply context de forma asíncrona.
+        """
+        if not message_sid or not await self.connect():
+            return False
+        try:
+            result = await self.db.messages.update_one(
+                {"$or": [
+                    {"message_sid": message_sid},
+                    {"conversations_message_sid": message_sid},
+                ]},
+                {"$set": {"reply_to_id": reply_to_id, "reply_to_preview": reply_to_preview}},
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.warning(f"[MongoDB] Error actualizando reply context para {message_sid}: {e}")
+            return False
+
     async def store_wamid_for_im_sid(self, im_sid: str, wamid: str) -> None:
         """Almacena el WAMid de WhatsApp para un mensaje ya guardado por IM SID."""
         if not im_sid or not wamid or not await self.connect():

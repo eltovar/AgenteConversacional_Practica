@@ -5194,6 +5194,36 @@ function handleWebSocketMessage(data) {
             break;
         }
 
+        case 'message_updated': {
+            // Reply context resuelto de forma asíncrona por fetch diferido Twilio API
+            if (!currentPhone || data.phone !== currentPhone) break;
+            const _updEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
+            if (!_updEl) {
+                // Mensaje no visible aún → recargar historial completo
+                loadChatHistory(currentContactId);
+                break;
+            }
+            if (data.reply_to_preview) {
+                const rp = data.reply_to_preview;
+                const rpColor = rp.sender === 'advisor' ? '#3b82f6' : '#6b7280';
+                const rpLabel = rp.sender === 'advisor' ? 'Asesor' : 'Tú';
+                const rpText  = rp.media_type ? `[${rp.media_type}]` : (rp.content || '');
+                const quoteHtml = `<div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${rpColor};" data-injected-quote>
+                    <p class="text-xs font-semibold" style="color:${rpColor}">${rpLabel}</p>
+                    <p class="text-xs text-gray-600 truncate">${rpText.substring(0, 80)}</p>
+                </div>`;
+                // Insertar o reemplazar quote existente
+                const existingQuote = _updEl.querySelector('[data-injected-quote]');
+                if (existingQuote) {
+                    existingQuote.outerHTML = quoteHtml;
+                } else {
+                    const bubble = _updEl.querySelector('.bubble-client, .bubble-advisor, [class*="bubble"]');
+                    if (bubble) bubble.insertAdjacentHTML('afterbegin', quoteHtml);
+                }
+            }
+            break;
+        }
+
         case 'message_deleted': {
             const _delEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
             if (_delEl && currentPhone && data.phone === currentPhone) {

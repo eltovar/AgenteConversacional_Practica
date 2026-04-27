@@ -138,6 +138,106 @@ async def _get_historical_channel(
     return detected_channel
 
 
+async def _fetch_reply_context_deferred(
+    im_sid: str,
+    conversation_sid: str,
+    chat_service_sid: Optional[str],
+    mongo_message_sid: str,
+    phone: str,
+    advisor_id: Optional[str],
+    delay: float = 3.0,
+) -> None:
+    """Fetch diferido de reply context desde Twilio Conversations REST API.
+
+    Twilio resuelve el WAMid → IM SID de forma asíncrona post-entrega.
+    Esperamos `delay` segundos y consultamos el mensaje directamente;
+    si Attributes tiene originalRepliedMessageSid, actualizamos Mongo
+    y emitimos message_updated por WebSocket.
+    """
+    import asyncio
+    await asyncio.sleep(delay)
+    try:
+        result = await twilio_client.get_conversation_message(
+            conversation_sid=conversation_sid,
+            message_sid=im_sid,
+            chat_service_sid=chat_service_sid,
+        )
+        if result.get("status") != "success":
+            logger.debug(f"[ReplyFetch] Fetch fallo: {result.get('message')}")
+            return
+
+        msg_data  = result["message"]
+        attrs_raw = msg_data.get("attributes") or "{}"
+        try:
+            attrs = attrs_raw if isinstance(attrs_raw, dict) else json.loads(attrs_raw)
+        except Exception:
+            attrs = {}
+
+        # Intentar extraer IM SID del mensaje citado desde Attributes
+        replied_sid = (
+            attrs.get("originalRepliedMessageSid")
+            or attrs.get("original_replied_message_sid")
+            or (attrs.get("replyTo") or {}).get("messageSid")
+            or (attrs.get("replyTo") or {}).get("sid")
+            or (attrs.get("reply_to") or {}).get("message_sid")
+        )
+
+        if not replied_sid:
+            logger.debug(f"[ReplyFetch] Attributes sin reply context para {im_sid}")
+            return
+
+        mongo_manager = get_mongo_manager()
+        replied_msg = await mongo_manager.get_message_by_sid(replied_sid)
+        if not replied_msg:
+            logger.warning(f"[ReplyFetch] SID citado {replied_sid} no en Mongo")
+            return
+
+        reply_to_id      = replied_msg["id"]
+        reply_to_preview = {
+            "sender":      replied_msg["sender"],
+            "sender_name": replied_msg["sender_name"],
+            "content":     replied_msg["content"],
+            "media_type":  replied_msg["media_type"],
+            "timestamp":   replied_msg["timestamp"],
+        }
+
+        updated = await mongo_manager.update_message_reply_context(
+            message_sid=mongo_message_sid,
+            reply_to_id=reply_to_id,
+            reply_to_preview=reply_to_preview,
+        )
+        if not updated:
+            logger.warning(f"[ReplyFetch] Mongo no actualizó {mongo_message_sid}")
+            return
+
+        logger.info(
+            f"[ReplyFetch] ✅ Reply context resuelto: {im_sid} cita {replied_sid} → mongo:{reply_to_id}"
+        )
+
+        # Notificar al panel via WebSocket para que refresque el mensaje
+        try:
+            import redis.asyncio as aioredis
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+            rc = aioredis.from_url(redis_url, decode_responses=True)
+            payload = {
+                "type":       "message_updated",
+                "phone":      phone,
+                "message_id": mongo_message_sid,
+                "reply_to_id":      reply_to_id,
+                "reply_to_preview": reply_to_preview,
+            }
+            if advisor_id:
+                await ws_manager.publish_to_advisor(rc, advisor_id, payload)
+            else:
+                await ws_manager.publish_broadcast(rc, payload)
+            await rc.aclose()
+        except Exception as ws_err:
+            logger.warning(f"[ReplyFetch] WS notify fallo: {ws_err}")
+
+    except Exception as e:
+        logger.warning(f"[ReplyFetch] Error inesperado para {im_sid}: {e}")
+
+
 async def _process_message_deferred(
     phone_normalized: str,
     phone_raw: str,
@@ -315,6 +415,21 @@ async def _process_message_deferred(
             chat_service_sid=chat_service_sid,
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
+
+        # Fetch diferido de reply context: si el mensaje tiene conv_sid pero
+        # aún no resolvimos reply_to_id, consultamos Twilio API en background
+        # tras 3 segundos (tiempo para que Twilio resuelva WAMid → IM SID async).
+        if conversation_sid and message_sid and not reply_to_id:
+            import asyncio
+            asyncio.create_task(_fetch_reply_context_deferred(
+                im_sid=message_sid,
+                conversation_sid=conversation_sid,
+                chat_service_sid=chat_service_sid,
+                mongo_message_sid=message_sid,
+                phone=phone_normalized,
+                advisor_id=None,  # broadcast; el panel filtra por phone
+                delay=3.0,
+            ))
 
         # P1-A FIX FASE 2: Escribir key de idempotencia DESPUÉS del save exitoso.
         # Si el worker muere aquí, el retry de Twilio procesará el mensaje de nuevo

@@ -968,11 +968,11 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
 
     try:
         _raw_peek = await request.body()
-        _peek_str = _raw_peek[:500].decode("utf-8", errors="replace")
+        _peek_str = _raw_peek[:1500].decode("utf-8", errors="replace")
         _twilio_sig = request.headers.get("x-twilio-signature", "")[:16]
         logger.info(
             f"[Webhook][RAW] ct='{content_type}' sig='{_twilio_sig}...' "
-            f"len={len(_raw_peek)} body[:500]={_peek_str!r}"
+            f"len={len(_raw_peek)} body[:1500]={_peek_str!r}"
         )
         async def _replay_body():
             return {"type": "http.request", "body": _raw_peek, "more_body": False}
@@ -1007,15 +1007,16 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         if not isinstance(attrs, dict) or not attrs:
             return None
         sid = (
-            attrs.get("originalRepliedMessageSid")         # camelCase Twilio actual
-            or attrs.get("original_replied_message_sid")   # snake_case alternativo
-            or attrs.get("OriginalRepliedMessageSid")      # PascalCase
+            attrs.get("originalRepliedMessageSid")           # camelCase Twilio Conversations
+            or attrs.get("original_replied_message_sid")     # snake_case alternativo
+            or attrs.get("OriginalRepliedMessageSid")        # PascalCase legacy
+            or (attrs.get("replyTo") or {}).get("messageSid")   # camelCase nested (Conversations API docs)
+            or (attrs.get("replyTo") or {}).get("sid")
+            or (attrs.get("reply_to") or {}).get("message_sid")
+            or (attrs.get("reply_to") or {}).get("id")
             or (attrs.get("context") or {}).get("id")
             or (attrs.get("context") or {}).get("message_sid")
             or (attrs.get("referral") or {}).get("id")
-            or (attrs.get("referral") or {}).get("body_sid")
-            or (attrs.get("reply_to") or {}).get("message_sid")
-            or (attrs.get("reply_to") or {}).get("id")
         )
         return sid or None
 
@@ -1036,18 +1037,20 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         except Exception:
             return None
         data_ctx = (meta.get("data") or {}).get("context") or {}
-        # WAMid del mensaje citado — no es un Twilio SID pero lo logueamos
+        # WAMid del mensaje citado (PascalCase en WhatsApp native metadata)
         wamid = (
-            data_ctx.get("quoted_message_id")
+            data_ctx.get("MessageId")          # PascalCase — campo real de Twilio/WhatsApp
+            or data_ctx.get("quoted_message_id")
             or data_ctx.get("message_id")
             or data_ctx.get("id")
         )
-        if wamid and wamid.startswith("wamid."):
-            logger.debug(
-                f"[Webhook][Reply] WAMid encontrado en ChannelMetadata: {wamid[:40]} "
-                f"(no mapeable a Twilio SID directamente)"
+        if wamid:
+            logger.info(
+                f"[Webhook][Reply] WAMid en ChannelMetadata: {wamid[:60]} "
+                f"(se intentará lookup en Mongo por wamid)"
             )
-        return None  # WAMid no es resoluble sin tabla de mapeo
+            return wamid  # devolver WAMid para intento de lookup en Mongo
+        return None
 
     if is_json_request:
         # ── Path Conversations API (JSON) ──────────────────────────────────
@@ -1156,6 +1159,19 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                     try:
                         _mm = get_mongo_manager()
                         await _mm.backfill_conversations_sid(_conv_sid, _body, _im_sid)
+                        # Intentar extraer WAMid del ChannelMetadata para mensajes outbound
+                        # (Twilio a veces incluye el WAMid asignado por WhatsApp aquí)
+                        _cm_raw = form_data.get("ChannelMetadata")
+                        if _cm_raw:
+                            try:
+                                _cm = json.loads(_cm_raw) if isinstance(_cm_raw, str) else _cm_raw
+                                _ctx = (_cm.get("data") or {}).get("context") or {}
+                                _wamid = _ctx.get("MessageId") or _ctx.get("message_id") or _ctx.get("id")
+                                if _wamid:
+                                    await _mm.store_wamid_for_im_sid(_im_sid, _wamid)
+                                    logger.info(f"[Webhook][Backfill] WAMid almacenado: IM={_im_sid[:20]} wamid={_wamid[:40]}")
+                            except Exception:
+                                pass
                     except Exception as _be:
                         logger.warning(f"[Webhook][Backfill] Error: {_be}")
                 else:

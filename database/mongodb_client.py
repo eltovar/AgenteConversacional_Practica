@@ -546,6 +546,7 @@ class MongoDBManager:
                 {"$or": [
                     {"message_sid": message_sid},
                     {"conversations_message_sid": message_sid},
+                    {"wamid": message_sid},  # fallback: WAMid de ChannelMetadata
                 ]},
                 {"_id": 1, "content": 1, "sender": 1, "media": 1, "timestamp": 1}
             )
@@ -562,6 +563,18 @@ class MongoDBManager:
         except Exception as e:
             logger.warning(f"[MongoDB] Error buscando mensaje por SID {message_sid}: {e}")
             return None
+
+    async def store_wamid_for_im_sid(self, im_sid: str, wamid: str) -> None:
+        """Almacena el WAMid de WhatsApp para un mensaje ya guardado por IM SID."""
+        if not im_sid or not wamid or not await self.connect():
+            return
+        try:
+            await self.db.messages.update_one(
+                {"$or": [{"message_sid": im_sid}, {"conversations_message_sid": im_sid}]},
+                {"$set": {"wamid": wamid}},
+            )
+        except Exception as e:
+            logger.warning(f"[MongoDB] Error almacenando WAMid para IM={im_sid}: {e}")
 
     async def search_messages_fulltext(
         self,

@@ -992,13 +992,9 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     def _extract_reply_sid_from_attrs(attrs_raw: Any) -> Optional[str]:
         """Extrae el SID del mensaje citado desde el campo Attributes (JSON).
 
-        Conversations API empaqueta el contexto de reply en el campo
-        `Attributes` como JSON. La forma exacta varía (WhatsApp Business):
-        - {"original_replied_message_sid": "SMxxx" | "IMxxx"}
-        - {"context": {"id": "wamid.xxx" | "SMxxx"}}
-        - {"referral": {"id": "..."}}
-        - {"reply_to": {"message_sid": "..."}}
-        Probamos las variantes conocidas y devolvemos la primera que matchee.
+        Twilio Conversations pone el contexto de reply en Attributes SOLO cuando
+        puede resolver el WAMid al IM SID del mensaje original (ambos en la misma
+        Conversation). Probamos todas las variantes de key conocidas.
         """
         if not attrs_raw:
             return None
@@ -1006,11 +1002,12 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             attrs = attrs_raw if isinstance(attrs_raw, dict) else json.loads(attrs_raw)
         except Exception:
             return None
-        if not isinstance(attrs, dict):
+        if not isinstance(attrs, dict) or not attrs:
             return None
         sid = (
-            attrs.get("original_replied_message_sid")
-            or attrs.get("OriginalRepliedMessageSid")
+            attrs.get("originalRepliedMessageSid")         # camelCase Twilio actual
+            or attrs.get("original_replied_message_sid")   # snake_case alternativo
+            or attrs.get("OriginalRepliedMessageSid")      # PascalCase
             or (attrs.get("context") or {}).get("id")
             or (attrs.get("context") or {}).get("message_sid")
             or (attrs.get("referral") or {}).get("id")
@@ -1019,6 +1016,36 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             or (attrs.get("reply_to") or {}).get("id")
         )
         return sid or None
+
+    def _extract_reply_sid_from_channel_metadata(channel_metadata_raw: Any) -> Optional[str]:
+        """Extrae el SID del mensaje citado desde ChannelMetadata (fallback).
+
+        ChannelMetadata contiene metadata WhatsApp nativa. Para replies incluye
+        el WAMid del mensaje original en data.context. Si el mensaje original
+        fue enviado via Conversations API, Twilio puede haber guardado la
+        correspondencia IM SID → WAMid, pero no lo expone directamente aquí.
+        Logeamos para análisis; en producción el SID útil viene de Attributes.
+        """
+        if not channel_metadata_raw:
+            return None
+        try:
+            meta = channel_metadata_raw if isinstance(channel_metadata_raw, dict) \
+                   else json.loads(channel_metadata_raw)
+        except Exception:
+            return None
+        data_ctx = (meta.get("data") or {}).get("context") or {}
+        # WAMid del mensaje citado — no es un Twilio SID pero lo logueamos
+        wamid = (
+            data_ctx.get("quoted_message_id")
+            or data_ctx.get("message_id")
+            or data_ctx.get("id")
+        )
+        if wamid and wamid.startswith("wamid."):
+            logger.debug(
+                f"[Webhook][Reply] WAMid encontrado en ChannelMetadata: {wamid[:40]} "
+                f"(no mapeable a Twilio SID directamente)"
+            )
+        return None  # WAMid no es resoluble sin tabla de mapeo
 
     if is_json_request:
         # ── Path Conversations API (JSON) ──────────────────────────────────
@@ -1143,10 +1170,10 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
             OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
 
-            # Conversations API: el contexto de reply viene dentro del JSON de Attributes,
-            # NO como campo plano en el form. Si OriginalRepliedMessageSid no llegó suelto,
-            # parsear Attributes para extraerlo.
+            # Reply context: primero Attributes (Twilio resuelve IM SID allí cuando puede),
+            # luego ChannelMetadata como fallback de diagnóstico.
             attrs_raw = form_data.get("Attributes")
+            channel_metadata_raw = form_data.get("ChannelMetadata")
             if not OriginalRepliedMessageSid and attrs_raw:
                 OriginalRepliedMessageSid = _extract_reply_sid_from_attrs(attrs_raw)
                 if OriginalRepliedMessageSid:
@@ -1154,11 +1181,23 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"[Webhook][Conversations/Form][Reply] SID extraído de Attributes: "
                         f"{OriginalRepliedMessageSid}"
                     )
-                else:
-                    logger.debug(
-                        f"[Webhook][Conversations/Form][Reply] Attributes presente pero sin SID reconocido: "
-                        f"{str(attrs_raw)[:200]}"
+                elif attrs_raw and attrs_raw != "{}":
+                    logger.info(
+                        f"[Webhook][Conversations/Form][Reply] Attributes sin SID resoluble: "
+                        f"{str(attrs_raw)[:300]}"
                     )
+            # Diagnóstico ChannelMetadata (loguear cuando hay context de reply)
+            if channel_metadata_raw:
+                _extract_reply_sid_from_channel_metadata(channel_metadata_raw)
+                try:
+                    _cm = json.loads(channel_metadata_raw) if isinstance(channel_metadata_raw, str) else channel_metadata_raw
+                    _ctx = (_cm.get("data") or {}).get("context") or {}
+                    if len(_ctx) > 2:  # más que solo ProfileName y WaId → hay reply context
+                        logger.info(
+                            f"[Webhook][Conversations/Form][Reply] ChannelMetadata.context: {_ctx}"
+                        )
+                except Exception:
+                    pass
 
             logger.info(
                 f"[Webhook][Conversations/Form] EventType={event_type} | "

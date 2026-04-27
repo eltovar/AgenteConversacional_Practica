@@ -8,8 +8,10 @@ ya que Twilio cierra la conexión del webhook después de 15 segundos.
 En lugar de responder via TwiML, enviamos mensajes directamente via API.
 """
 
+import asyncio
 import json
 import os
+from datetime import datetime, timedelta
 from typing import Optional
 import httpx
 from logging_config import logger
@@ -104,11 +106,11 @@ class TwilioClient:
         return self._available
 
     async def _resolve_conv_sid_for_phone(self, to: str) -> Optional[str]:
-        """Busca el conversation_sid más reciente en MongoDB para este número.
+        """Busca el conversation_sid activo (< 23h) en MongoDB para este número.
 
-        Why: el endpoint Conversations cobra por sesión 24h en lugar de por
-        mensaje individual. Si ya tenemos un CHsid activo para el destinatario,
-        enviar por allí ahorra ~70% del costo en clientes recurrentes.
+        Filtra por timestamp_utc < 23h: las conversaciones de Twilio son sesiones
+        de 24h; si el último mensaje con conv_sid tiene más de 23h, la sesión
+        probablemente ya cerró → no intentar reusarla (evita 404s repetidos).
         """
         try:
             from database.mongodb_client import get_mongo_manager
@@ -120,11 +122,16 @@ class TwilioClient:
             except Exception:
                 pass
 
+            cutoff = datetime.utcnow() - timedelta(hours=23)
             mm = get_mongo_manager()
             if not await mm.connect():
                 return None
             doc = await mm.db.messages.find_one(
-                {"phone": phone, "conversation_sid": {"$nin": [None, ""]}},
+                {
+                    "phone": phone,
+                    "conversation_sid": {"$nin": [None, ""]},
+                    "timestamp_utc": {"$gte": cutoff},
+                },
                 sort=[("timestamp_utc", -1)],
                 projection={"conversation_sid": 1},
             )
@@ -132,6 +139,25 @@ class TwilioClient:
         except Exception as e:
             logger.warning(f"[TwilioClient] resolve conv_sid fallo para {to}: {e}")
             return None
+
+    async def _invalidate_stale_conv_sid(self, conversation_sid: str) -> None:
+        """Limpia un conversation_sid que devolvió 404 para evitar loops."""
+        try:
+            from database.mongodb_client import get_mongo_manager
+            mm = get_mongo_manager()
+            if not await mm.connect():
+                return
+            result = await mm.db.messages.update_many(
+                {"conversation_sid": conversation_sid},
+                {"$unset": {"conversation_sid": "", "conversations_message_sid": ""}},
+            )
+            if result.modified_count:
+                logger.info(
+                    f"[TwilioClient] Stale conv_sid {conversation_sid[:12]}... "
+                    f"limpiado en {result.modified_count} docs"
+                )
+        except Exception as e:
+            logger.warning(f"[TwilioClient] Error limpiando stale conv_sid: {e}")
 
     async def _send_via_conversations(
         self,
@@ -178,6 +204,9 @@ class TwilioClient:
                     "conversation_sid": conversation_sid,
                     "via": "conversations",
                 }
+            if resp.status_code == 404:
+                # Conversación expirada/cerrada en Twilio → limpiar para no reintentar
+                asyncio.create_task(self._invalidate_stale_conv_sid(conversation_sid))
             logger.warning(
                 f"[TwilioClient][Conv] Error {resp.status_code} send conv={conversation_sid}: "
                 f"{resp.text[:200]}"

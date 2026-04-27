@@ -1588,13 +1588,19 @@ DELETE_WINDOW_SECONDS = 60 * 60
 
 
 async def _resolve_conversation_sid_for_phone(phone: str) -> Optional[str]:
-    """Busca el conversation_sid más reciente para este phone en MongoDB."""
+    """Busca el conversation_sid activo (< 23h) para este phone en MongoDB."""
     try:
+        from datetime import timezone
+        cutoff = datetime.utcnow() - timedelta(hours=23)
         mm = get_mongo_manager()
         if not await mm.connect():
             return None
         doc = await mm.db.messages.find_one(
-            {"phone": phone, "conversation_sid": {"$nin": [None, ""]}},
+            {
+                "phone": phone,
+                "conversation_sid": {"$nin": [None, ""]},
+                "timestamp_utc": {"$gte": cutoff},
+            },
             sort=[("timestamp_utc", -1)],
             projection={"conversation_sid": 1},
         )

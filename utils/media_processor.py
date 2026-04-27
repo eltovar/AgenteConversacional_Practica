@@ -333,10 +333,44 @@ class MediaProcessor:
         """
         Descarga contenido multimedia desde Twilio.
 
-        Twilio requiere autenticación básica y puede usar redirecciones 302.
+        Soporta dos formatos:
+        - Legacy Programmable Messaging: URL pública con redirect 302 (auth básica).
+        - Conversations API (Media Content Service): URL del MCS que requiere
+          GET autenticado para obtener metadata con `links.content_direct_temporary`,
+          y luego descargar de esa URL temporal.
         """
         client = self._get_http_client()
-        response = await client.get(url, auth=self.twilio_auth, timeout=30.0)
+
+        # Detectar URL del Media Content Service (Conversations API)
+        if "mcs." in url and "/Services/" in url and "/Media/" in url:
+            logger.info(f"[MediaProcessor] Resolviendo MCS URL: {url}")
+            meta_resp = await client.get(url, auth=self.twilio_auth, timeout=30.0)
+            if meta_resp.status_code != 200:
+                logger.error(
+                    f"[MediaProcessor] Error consultando MCS: {meta_resp.status_code} - {meta_resp.text[:200]}"
+                )
+                raise Exception(f"Error consultando MCS: {meta_resp.status_code}")
+            try:
+                meta = meta_resp.json()
+            except Exception as e:
+                logger.error(f"[MediaProcessor] MCS no devolvió JSON: {e} - body={meta_resp.text[:200]}")
+                raise Exception("MCS respuesta inválida")
+
+            links = meta.get("links") or {}
+            temp_url = (
+                links.get("content_direct_temporary")
+                or links.get("content_direct")
+                or links.get("content")
+            )
+            if not temp_url:
+                logger.error(f"[MediaProcessor] MCS sin links de descarga: {meta}")
+                raise Exception("MCS no proveyó URL de descarga")
+
+            logger.info(f"[MediaProcessor] MCS URL temporal obtenida ({len(temp_url)} chars)")
+            # La URL temporal ya viene firmada — no requiere auth
+            response = await client.get(temp_url, timeout=30.0)
+        else:
+            response = await client.get(url, auth=self.twilio_auth, timeout=30.0)
 
         if response.status_code != 200:
             logger.error(f"[MediaProcessor] Error descargando de Twilio: {response.status_code}")

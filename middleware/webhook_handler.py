@@ -1167,6 +1167,35 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             NumMedia         = int(form_data.get("NumMedia", 0))
             MediaUrl0        = form_data.get("MediaUrl0")
             MediaContentType0 = form_data.get("MediaContentType0")
+
+            # Conversations API entrega media como JSON array en campo "Media",
+            # NO como NumMedia/MediaUrl0/MediaContentType0 (legacy Programmable Messaging).
+            # Estructura: [{"Sid":"MExxx","Filename":"...","ContentType":"image/jpeg","Size":123}]
+            # Resolución: construir URL del Media Content Service (MCS) que requiere
+            # un GET autenticado para obtener la URL temporal de descarga real.
+            if NumMedia == 0:
+                media_raw = form_data.get("Media")
+                chat_service_sid = form_data.get("ChatServiceSid")
+                if media_raw and chat_service_sid:
+                    try:
+                        media_items = json.loads(media_raw) if isinstance(media_raw, str) else media_raw
+                        if isinstance(media_items, list) and media_items:
+                            first = media_items[0] or {}
+                            media_sid = first.get("Sid")
+                            if media_sid:
+                                NumMedia = len(media_items)
+                                MediaUrl0 = (
+                                    f"https://mcs.us1.twilio.com/v1/Services/"
+                                    f"{chat_service_sid}/Media/{media_sid}"
+                                )
+                                MediaContentType0 = first.get("ContentType") or MediaContentType0
+                                logger.info(
+                                    f"[Webhook][Conversations/Media] {NumMedia} archivo(s) | "
+                                    f"MediaSid={media_sid} | ContentType={MediaContentType0} | "
+                                    f"Filename={first.get('Filename')}"
+                                )
+                    except Exception as _me:
+                        logger.error(f"[Webhook][Conversations/Media] Error parseando Media JSON: {_me} | raw={str(media_raw)[:200]}")
             OriginalRepliedMessageSid    = form_data.get("OriginalRepliedMessageSid")
             OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
 

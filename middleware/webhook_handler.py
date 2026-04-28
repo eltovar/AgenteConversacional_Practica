@@ -578,7 +578,9 @@ async def _process_message_deferred(
             if special_message:
                 result = await twilio_client.send_whatsapp_message(
                     to=phone_normalized,
-                    body=special_message
+                    body=special_message,
+                    conversation_sid=conversation_sid,
+                    chat_service_sid=chat_service_sid,
                 )
                 logger.info(f"[DeferredProcess] Mensaje especial enviado: {result}")
             
@@ -774,7 +776,9 @@ async def _process_message_deferred(
             if out_of_hours_msg:
                 await twilio_client.send_whatsapp_message(
                     to=phone_normalized,
-                    body=out_of_hours_msg
+                    body=out_of_hours_msg,
+                    conversation_sid=conversation_sid,
+                    chat_service_sid=chat_service_sid,
                 )
             return
         
@@ -787,7 +791,9 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         send_result = await twilio_client.send_whatsapp_message(
             to=phone_normalized,
-            body=response_text
+            body=response_text,
+            conversation_sid=conversation_sid,
+            chat_service_sid=chat_service_sid,
         )
         
         if send_result.get("status") == "error":
@@ -806,12 +812,18 @@ async def _process_message_deferred(
                 logger.info(f"[DeferredProcess] ✅ Handoff solicitado: {handoff_reason}")
 
         # Guardar respuesta de Sofia en MongoDB
+        _out_conv_sid = send_result.get("conversation_sid") or conversation_sid
+        _out_im_sid = send_result.get("conversations_message_sid")
         await mongo_manager.save_message(
             phone=phone_normalized,
             content=response_text,
             sender="bot",
             channel=final_channel,
-            hubspot_contact_id=contact_id
+            hubspot_contact_id=contact_id,
+            message_sid=send_result.get("message_sid"),
+            conversation_sid=_out_conv_sid,
+            conversations_message_sid=_out_im_sid,
+            chat_service_sid=chat_service_sid,
         )
         
         # Sincronizar con HubSpot

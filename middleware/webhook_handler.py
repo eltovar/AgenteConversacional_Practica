@@ -416,10 +416,16 @@ async def _process_message_deferred(
         )
         logger.info(f"[DeferredProcess] Mensaje guardado en MongoDB: {client_mongo_id}")
 
-        # Fetch diferido de reply context: si el mensaje tiene conv_sid pero
-        # aún no resolvimos reply_to_id, consultamos Twilio API en background
-        # tras 3 segundos (tiempo para que Twilio resuelva WAMid → IM SID async).
-        if conversation_sid and message_sid and not reply_to_id:
+        # Fetch diferido de reply context: SOLO si el webhook trajo un SID/WAMid
+        # de cita que aún no resolvió contra Mongo. Si original_replied_message_sid
+        # llegó vacío significa que Twilio no envió contexto de reply — NO sirve
+        # consultar la REST API (confirmado: Attributes={} también vía GET).
+        if (
+            conversation_sid
+            and message_sid
+            and not reply_to_id
+            and original_replied_message_sid
+        ):
             import asyncio
             asyncio.create_task(_fetch_reply_context_deferred(
                 im_sid=message_sid,
@@ -427,7 +433,7 @@ async def _process_message_deferred(
                 chat_service_sid=chat_service_sid,
                 mongo_message_sid=message_sid,
                 phone=phone_normalized,
-                advisor_id=None,  # broadcast; el panel filtra por phone
+                advisor_id=None,
                 delay=3.0,
             ))
 

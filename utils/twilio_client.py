@@ -321,16 +321,12 @@ class TwilioClient:
                     f"[TwilioClient][Conv] Enviado conv={conversation_sid[:12]}... "
                     f"IM={im_sid} (billing por sesión 24h)"
                 )
-                # Captura diferida del WAMid asignado por WhatsApp.
-                # Necesario para que las citaciones cliente→asesor funcionen.
-                if im_sid:
-                    asyncio.create_task(
-                        self._capture_outbound_wamid_deferred(
-                            conversation_sid=conversation_sid,
-                            im_sid=im_sid,
-                            chat_service_sid=chat_service_sid,
-                        )
-                    )
+                # NOTA: No lanzamos _capture_outbound_wamid_deferred aquí.
+                # Confirmado en producción: GET /Conversations/.../Messages/{IM}
+                # devuelve channel_metadata.data vacío para mensajes salientes
+                # (Twilio no expone el WAMid vía REST API GET).
+                # La captura del WAMid depende del webhook bounce-back con
+                # Source=API, manejado en webhook_handler.py.
                 return {
                     "status": "success",
                     "message_sid": im_sid,
@@ -676,6 +672,15 @@ class TwilioClient:
             if resp.status_code == 200:
                 data = resp.json()
                 return {"status": "success", "messages": data.get("messages", [])}
+            if resp.status_code == 404:
+                asyncio.create_task(
+                    self._invalidate_stale_conv_sid(conversation_sid, chat_service_sid)
+                )
+                logger.info(
+                    f"[TwilioClient] Conv {conversation_sid[:12]}... 404 al listar "
+                    f"mensajes — invalidando SID stale"
+                )
+                return {"status": "error", "code": 404, "message": "stale_conv_sid"}
             logger.error(
                 f"[TwilioClient] Error listando mensajes: {resp.status_code} - {resp.text}"
             )

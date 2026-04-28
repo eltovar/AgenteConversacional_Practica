@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import httpx
 from io import BytesIO
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 
@@ -1617,14 +1617,21 @@ EDIT_WINDOW_SECONDS = 15 * 60
 DELETE_WINDOW_SECONDS = 60 * 60
 
 
-async def _resolve_conversation_sid_for_phone(phone: str) -> Optional[str]:
-    """Busca el conversation_sid activo (< 23h) para este phone en MongoDB."""
+async def _resolve_conversation_sid_for_phone(
+    phone: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Busca el conversation_sid activo (< 23h) para este phone en MongoDB.
+
+    Returns: (conversation_sid, chat_service_sid). Ambos None si no se halla.
+    El chat_service_sid es necesario para construir URLs service-aware en
+    Conversations Services no-Default; sin él el GET /Messages devuelve 404.
+    """
     try:
         from datetime import timezone
         cutoff = datetime.utcnow() - timedelta(hours=23)
         mm = get_mongo_manager()
         if not await mm.connect():
-            return None
+            return None, None
         doc = await mm.db.messages.find_one(
             {
                 "phone": phone,
@@ -1632,12 +1639,14 @@ async def _resolve_conversation_sid_for_phone(phone: str) -> Optional[str]:
                 "timestamp_utc": {"$gte": cutoff},
             },
             sort=[("timestamp_utc", -1)],
-            projection={"conversation_sid": 1},
+            projection={"conversation_sid": 1, "chat_service_sid": 1},
         )
-        return doc.get("conversation_sid") if doc else None
+        if not doc:
+            return None, None
+        return doc.get("conversation_sid"), doc.get("chat_service_sid")
     except Exception as e:
         logger.warning(f"[Panel][Backfill] resolve conv_sid fallo: {e}")
-        return None
+        return None, None
 
 
 async def _backfill_im_sid_after_send(
@@ -1657,15 +1666,18 @@ async def _backfill_im_sid_after_send(
         return
     try:
         await asyncio.sleep(1.5)
+        chat_service_sid: Optional[str] = None
         if not conversation_sid:
-            conversation_sid = await _resolve_conversation_sid_for_phone(phone)
+            conversation_sid, chat_service_sid = await _resolve_conversation_sid_for_phone(phone)
         if not conversation_sid:
             logger.info(
                 f"[Panel][Backfill] Sin conversation_sid conocido para phone={phone} "
                 f"(probablemente primera interacción saliente — esperar webhook)"
             )
             return
-        result = await twilio_client.list_conversation_messages(conversation_sid, limit=5)
+        result = await twilio_client.list_conversation_messages(
+            conversation_sid, limit=5, chat_service_sid=chat_service_sid
+        )
         if result.get("status") != "success":
             logger.warning(
                 f"[Panel][Backfill] No se pudo listar mensajes conv={conversation_sid}: "

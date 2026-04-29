@@ -814,7 +814,7 @@ async def _process_message_deferred(
         # Guardar respuesta de Sofia en MongoDB
         _out_conv_sid = send_result.get("conversation_sid") or conversation_sid
         _out_im_sid = send_result.get("conversations_message_sid")
-        await mongo_manager.save_message(
+        _bot_mongo_id = await mongo_manager.save_message(
             phone=phone_normalized,
             content=response_text,
             sender="bot",
@@ -825,7 +825,7 @@ async def _process_message_deferred(
             conversations_message_sid=_out_im_sid,
             chat_service_sid=chat_service_sid,
         )
-        
+
         # Sincronizar con HubSpot
         if contact_info:
             await _sync_conversation_with_analysis_to_hubspot(
@@ -838,6 +838,7 @@ async def _process_message_deferred(
                 media_result,
                 client_mongo_id,
                 lead_context=lead_context,
+                existing_bot_mongo_id=_bot_mongo_id,
             )
         
         logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {phone_normalized}")
@@ -2580,12 +2581,13 @@ async def _sync_conversation_with_analysis_to_hubspot(
     media_result: Optional[dict] = None,
     existing_client_mongo_id: Optional[str] = None,
     lead_context: Optional[dict] = None,
+    existing_bot_mongo_id: Optional[str] = None,
 ) -> None:
     """
     Sincroniza una interacción completa con análisis.
     """
     mongo_client_id = existing_client_mongo_id  # Usar ID existente si fue guardado antes
-    mongo_bot_id = None
+    mongo_bot_id = existing_bot_mongo_id
     media_url = media_result.get("permanent_url") if media_result else None
     media_type = media_result.get("media_type") if media_result else None
     # Inicializar base_properties antes del try para acceso seguro en sección Deal
@@ -2625,18 +2627,22 @@ async def _sync_conversation_with_analysis_to_hubspot(
         else:
             logger.debug(f"[MongoDB] Mensaje del cliente ya existente (pre-Sofía): {existing_client_mongo_id}")
 
-        # Guardar respuesta de Sofía
-        mongo_bot_id = await mongo_manager.save_message(
-            phone=phone,
-            content=bot_response,
-            sender="bot",
-            channel=channel,
-            hubspot_contact_id=contact_id,
-            metadata={
-                "analysis_handoff": analysis.handoff_priority if analysis else None,
-                "analysis_score": analysis.sentiment_score if analysis else None
-            }
-        )
+        # Guardar respuesta de Sofía SOLO si no fue guardada previamente
+        if not existing_bot_mongo_id:
+            mongo_bot_id = await mongo_manager.save_message(
+                phone=phone,
+                content=bot_response,
+                sender="bot",
+                channel=channel,
+                hubspot_contact_id=contact_id,
+                metadata={
+                    "analysis_handoff": analysis.handoff_priority if analysis else None,
+                    "analysis_score": analysis.sentiment_score if analysis else None
+                }
+            )
+            logger.debug(f"[MongoDB] Mensaje del bot guardado (background): {mongo_bot_id}")
+        else:
+            logger.debug(f"[MongoDB] Mensaje del bot ya existente (pre-sync): {existing_bot_mongo_id}")
 
         if mongo_client_id and mongo_bot_id:
             logger.debug(f"[MongoDB] Conversación guardada: client={mongo_client_id}, bot={mongo_bot_id}")

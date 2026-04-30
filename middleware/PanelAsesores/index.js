@@ -2160,7 +2160,27 @@ function renderChatBubbles(messages) {
         ? _existingDividers[_existingDividers.length - 1].dataset.date
         : null;
 
-    messages.forEach(msg => {
+    // Nombre real del lead (para reemplazar "Cliente" hardcoded en sender_name)
+    const _contactHeaderName = (document.getElementById('contactName')?.textContent || '').trim();
+    const _clientDisplayName = (_contactHeaderName && _contactHeaderName !== 'Selecciona un contacto')
+        ? _contactHeaderName.split(' ')[0]
+        : 'Cliente';
+
+    // Patrones de sufijos/prefijos a limpiar en render-time
+    const _SOURCE_TAG_RX = /\n*\[Fuente:[^\]]*\]\s*$/i;
+    const _TEMPLATE_TAG_RX = /^\[TEMPLATE:\s*([^\]]+)\]\s*/i;
+    const _MEDIA_BODY_RX = [
+        /^\[El cliente envió un audio[^\]]*\]\s*$/i,
+        /^\[Imagen del cliente\]:\s*/i,
+        /^\[Audio del cliente\]:\s*/i,
+    ];
+
+    // Tracking para agrupamiento por autor consecutivo
+    const GROUP_WINDOW_MS = 120_000;
+    let _prevSender = null;
+    let _prevTs = 0;
+
+    messages.forEach((msg, _idx) => {
         // Verificar si el mensaje ya existe en el DOM usando data-msg-id
         const existingMsg = container.querySelector(`[data-msg-id="${msg.id}"]`);
         const msgDate = formatBogotaDate(msg.timestamp);
@@ -2281,7 +2301,33 @@ function renderChatBubbles(messages) {
                 if (_atm) {
                     const _pid3 = `ap-txt-${String(msg.id || Date.now()).replace(/\W/g,'')}-${Math.random().toString(36).slice(2,6)}`;
                     mediaHtml = buildAudioPlayerHtml(_atm[1], _detectAudioType(_atm[1]), _pid3);
-                    _displayMsg = (_atm[2] || '').trim(); // preservar texto adicional (ej: [Fuente: ...])
+                    _displayMsg = (_atm[2] || '').trim();
+                }
+            }
+
+            // Limpiar sufijo "[Fuente: ... Via Panel]" (defensa en profundidad: backend ya
+            // lo filtra al hidratar desde HubSpot, pero por si llega de otra ruta).
+            _displayMsg = _displayMsg.replace(_SOURCE_TAG_RX, '').trimEnd();
+
+            // Parsear prefijo "[TEMPLATE: <nombre>]" → chip discreto sobre el cuerpo
+            let templateBadge = '';
+            const _tplMatch = _displayMsg.match(_TEMPLATE_TAG_RX);
+            if (_tplMatch) {
+                const _tplName = _tplMatch[1].trim();
+                templateBadge = `<span class="tpl-chip" title="Plantilla: ${escapeHtml(_tplName)}">📋 Plantilla</span><br>`;
+                _displayMsg = _displayMsg.replace(_TEMPLATE_TAG_RX, '');
+            }
+
+            // Suprimir cuerpo duplicado de multimedia: si ya hay chip de
+            // transcripción/análisis y el body es el wrapper "[El cliente envió...]"
+            // o "[Imagen del cliente]: ...", ocultarlo.
+            if (transcription || analysis) {
+                if (_MEDIA_BODY_RX.some(rx => rx.test(_displayMsg))) {
+                    _displayMsg = '';
+                } else {
+                    _displayMsg = _displayMsg.replace(/^\[Imagen del cliente\]:\s*/i, '').trim();
+                    if (analysis && _displayMsg.trim() === String(analysis).trim()) _displayMsg = '';
+                    if (transcription && _displayMsg.trim() === String(transcription).trim()) _displayMsg = '';
                 }
             }
 
@@ -2346,28 +2392,57 @@ function renderChatBubbles(messages) {
                 ? `<span class="text-xs text-gray-400 ml-1">(editado)</span>`
                 : '';
 
+            // Header: sustituir "Cliente" hardcoded por nombre real del lead
+            let _headerName = msg.sender_name || msg.sender || '';
+            if (msg.sender === 'client' && (!_headerName || _headerName === 'Cliente')) {
+                _headerName = _clientDisplayName;
+            }
+
+            // Agrupamiento por autor consecutivo (omitir nombre y reducir margen)
+            const _curTs = msg.timestamp ? new Date(msg.timestamp).getTime() : 0;
+            const _isGrouped = _prevSender === msg.sender
+                && _prevTs > 0 && _curTs > 0
+                && Math.abs(_curTs - _prevTs) < GROUP_WINDOW_MS;
+            const _groupClass = _isGrouped ? ' bubble-grouped' : '';
+            const _headerHtml = _isGrouped
+                ? ''
+                : `<p class="text-xs font-semibold text-gray-600 mb-1">${escapeHtml(_headerName)}</p>`;
+
+            // Status icons (✓ / ✓✓ / ✓✓ azul) sólo en mensajes salientes con msg.status
+            let _statusHtml = '';
+            if (isRight && msg.status) {
+                const s = String(msg.status).toLowerCase();
+                if (s === 'read') _statusHtml = '<span class="msg-status read">✓✓</span>';
+                else if (s === 'delivered') _statusHtml = '<span class="msg-status">✓✓</span>';
+                else if (s === 'sent' || s === 'queued' || s === 'sending') _statusHtml = '<span class="msg-status">✓</span>';
+            }
+
             const msgHtml = `
-                <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3 animate-fadeIn"
+                <div class="flex ${isRight ? 'justify-end' : 'justify-start'} mb-3 animate-fadeIn${_groupClass}"
                      data-msg-id="${msg.id}"
                      data-sender="${msg.sender || ''}"
-                     data-sender-name="${escapeHtml(msg.sender_name || msg.sender || '')}"
+                     data-sender-name="${escapeHtml(_headerName)}"
                      data-content="${_safeContent}"
                      data-media-type="${msg.media?.type || ''}"
                      data-timestamp="${msg.timestamp || ''}">
-                    <div class="${bubbleClass} p-3 shadow-sm relative">
+                    <div class="${bubbleClass} shadow-sm relative">
                         ${replyBtnHtml}
                         ${ownerMenuHtml}
-                        <p class="text-xs font-semibold text-gray-600 mb-1">${msg.sender_name || msg.sender}</p>
+                        ${_headerHtml}
+                        ${templateBadge}
                         ${quoteHtml}
                         ${mediaHtml}
                         <p class="text-gray-800 whitespace-pre-wrap" data-msg-body="1" style="${_displayMsg ? '' : 'display:none;'}">${escapeHtml(_displayMsg || '')}</p>
-                        <p class="text-xs text-gray-500 text-right mt-1">${timestamp}${_editedChip}</p>
+                        <p class="text-xs text-gray-500 text-right mt-1">${timestamp}${_editedChip}${_statusHtml}</p>
                     </div>
                 </div>
             `;
 
             container.insertAdjacentHTML('beforeend', msgHtml);
             hasNewContent = true;
+
+            _prevSender = msg.sender;
+            _prevTs = _curTs;
         }
 
         // Actualizar lastRenderedDate para TODOS los mensajes (existentes y nuevos)

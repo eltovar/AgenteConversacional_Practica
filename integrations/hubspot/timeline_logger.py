@@ -22,6 +22,7 @@ OPTIMIZACIONES:
 """
 
 import os
+import re
 import asyncio
 import json
 from typing import Optional, Dict, Any, List
@@ -1038,6 +1039,12 @@ class TimelineLogger:
         for prefix in ["[Sofía - IA]", "[Asesor]", "[Cliente - WhatsApp]"]:
             if result.startswith(prefix):
                 result = result[len(prefix):].strip()
+
+        # Eliminar sufijo "[Fuente: ... Via Panel]" que se concatena en
+        # _log_advisor_message_to_hubspot al persistir en HubSpot Timeline.
+        # La nota original en HubSpot conserva el sufijo (auditoría); aquí
+        # solo lo limpiamos al hidratar de vuelta hacia el panel.
+        result = re.sub(r"\n*\[Fuente:[^\]]*\]\s*$", "", result, flags=re.IGNORECASE).rstrip()
 
         return result
 

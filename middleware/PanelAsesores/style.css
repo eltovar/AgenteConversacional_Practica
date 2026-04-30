@@ -4,20 +4,24 @@
 ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1a1; }
 
-/* Chat bubbles */
+/* Chat bubbles — paleta WhatsApp */
 .bubble-client {
     background: #FFFFFF;
-    border: 1px solid #E5E7EB;
-    border-radius: 0 12px 12px 12px;
+    border: 1px solid rgba(11,20,26,0.05);
+    border-radius: 8px 8px 8px 2px;
     max-width: 80%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    padding: 6px 9px 6px 10px !important;
+    box-shadow: 0 1px 0.5px rgba(11,20,26,0.13);
+    position: relative;
 }
 .bubble-bot {
-    background: #FFFBEB;
-    border: 1px solid #FDE68A;
-    border-radius: 0 12px 12px 12px;
+    background: #FEF7DC;
+    border: 1px solid #F4E5A8;
+    border-radius: 8px 8px 8px 2px;
     max-width: 80%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    padding: 6px 9px 6px 10px !important;
+    box-shadow: 0 1px 0.5px rgba(11,20,26,0.13);
+    position: relative;
 }
 /* Badge [IA] en el nombre del remitente de Sofía */
 .bubble-bot > p:first-child::before {
@@ -34,12 +38,49 @@
     letter-spacing: 0.03em;
 }
 .bubble-advisor {
-    background: #EFF6FF;
-    border: 1px solid #BFDBFE;
-    border-radius: 12px 0 12px 12px;
+    background: #D9FDD3;
+    border: 1px solid rgba(11,20,26,0.05);
+    border-radius: 8px 8px 2px 8px;
     max-width: 80%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    padding: 6px 10px 6px 9px !important;
+    box-shadow: 0 1px 0.5px rgba(11,20,26,0.13);
+    position: relative;
 }
+/* Tails estilo WhatsApp (triángulo en esquina superior) */
+.bubble-client::before,
+.bubble-bot::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -7px;
+    width: 8px;
+    height: 13px;
+    background: inherit;
+    clip-path: polygon(100% 0, 0 0, 100% 100%);
+}
+.bubble-advisor::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: -7px;
+    width: 8px;
+    height: 13px;
+    background: inherit;
+    clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+/* Agrupamiento de mensajes consecutivos del mismo autor (sin tail, margen reducido) */
+.bubble-grouped {
+    margin-top: -8px;
+}
+.bubble-grouped .bubble-client::before,
+.bubble-grouped .bubble-bot::before,
+.bubble-grouped .bubble-advisor::before {
+    display: none;
+}
+.bubble-grouped .bubble-client { border-radius: 8px 8px 8px 8px; }
+.bubble-grouped .bubble-advisor { border-radius: 8px 8px 8px 8px; }
+.bubble-grouped .bubble-bot { border-radius: 8px 8px 8px 8px; }
+
 .bubble-manual-note {
     background: #FFF7ED;
     border-left: 3px solid #F97316;
@@ -56,10 +97,39 @@
     font-size: 0.85rem;
 }
 
-/* Chat background — cálido sin patrón WhatsApp */
+/* Chat background — fondo WhatsApp con doodle SVG sutil */
 .chat-bg {
-    background-color: #F0EDE6;
+    background-color: #EFEAE2;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'><g fill='none' stroke='%2300120B' stroke-width='1.2' stroke-linecap='round' opacity='0.06'><path d='M20 30 q15 -10 30 0 t30 0'/><circle cx='160' cy='40' r='10'/><path d='M40 90 l20 -10 l0 20 z'/><path d='M120 110 q12 -8 24 0'/><circle cx='60' cy='160' r='6'/><path d='M150 170 h30 m-15 -15 v30'/><path d='M180 80 q10 10 0 20 q-10 -10 0 -20'/><path d='M90 50 l8 -8 l8 8 l-8 8 z'/></g></svg>");
+    background-repeat: repeat;
 }
+
+/* Chip Plantilla — discreto al inicio de la burbuja */
+.tpl-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: rgba(0,0,0,0.06);
+    color: #1F2937;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 999px;
+    margin-bottom: 4px;
+    cursor: help;
+    letter-spacing: 0.02em;
+}
+
+/* Status checks (✓ / ✓✓) en mensajes salientes */
+.msg-status {
+    display: inline-block;
+    margin-left: 3px;
+    font-size: 0.7rem;
+    line-height: 1;
+    color: #8696A0;
+    vertical-align: baseline;
+}
+.msg-status.read { color: #53BDEB; }
 
 /* Date dividers — sticky estilo WhatsApp */
 .date-divider {

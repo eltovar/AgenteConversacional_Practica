@@ -101,7 +101,8 @@ const PIPELINE_STAGES = [
     { id: "1326632209", name: "Pagos y Servicios Publicos" },
     { id: "1326623541", name: "Ya encontro" },
     { id: "subscriber", name: "Reubicados" },
-    { id: "lead", name: "Aprobado" }
+    { id: "lead", name: "Aprobado" },
+    { id: "1353539189", name: "Venta" }
 ];
 
 // Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.
@@ -415,50 +416,80 @@ async function filterContacts(searchTerm) {
 // =========================================================================
 
 async function updateDealStage(contactId, stageId) {
+    // Localizar el contacto: necesario para el body (auto-cierre) y para revertir
+    // el dropdown si el usuario cancela la confirmación de "No responde".
+    const contact = allContacts.find(c => String(c.contact_id) === String(contactId));
+    const dropdownEl = document.querySelector(`select[data-contact-id="${contactId}"]`);
+
+    // Confirmación específica para "No responde" (stage_id === "other") — evita
+    // cierres accidentales por click incorrecto en el dropdown del embudo.
+    if (stageId === 'other') {
+        const ok = confirm(
+            "Marcar como 'No responde'?\n\n" +
+            "- El contacto se movera al embudo 'No responde' en HubSpot\n" +
+            "- La conversacion se cerrara y desaparecera del panel\n" +
+            "- Sofia se reactivara si el cliente vuelve a escribir"
+        );
+        if (!ok) {
+            const previous = contactDealCache[contactId]?.current_stage || '';
+            if (dropdownEl && previous) dropdownEl.value = previous;
+            return;
+        }
+    }
+
     try {
         showLoader();
+
+        const body = { stage_id: stageId };
+        if (stageId === 'other' && contact) {
+            body.phone = contact.phone;
+            body.canal = contact.canal || 'whatsapp';
+        }
+
         const response = await fetch(`${BASE_URL}/contacts/${contactId}/stage`, {
             method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json',
                 'X-API-Key': API_KEY
             },
-            body: JSON.stringify({ stage_id: stageId })
+            body: JSON.stringify(body)
         });
 
         const data = await response.json();
 
         if (response.ok) {
-            // Mostrar confirmacion breve
             const stageName = PIPELINE_STAGES.find(s => s.id === stageId)?.name || stageId;
             console.log(`[Panel] Etapa actualizada: ${stageName}`);
 
-            // ACTUALIZAR CACHÉ LOCAL para evitar flickering en próximo polling
             if (contactId) {
                 contactDealCache[contactId] = { current_stage: stageId };
             }
 
-            // Pre-actualizar fingerprint para evitar re-render en el próximo poll.
-            // Sin esto, el poll siguiente detecta que el stage cambió y reconstruye
-            // el elemento DOM completo → parpadeo visible.
-            const dropdown = document.querySelector(`select[data-contact-id="${contactId}"]`);
-            const contactEl = dropdown?.closest('.contact-item[data-phone]');
+            const contactEl = dropdownEl?.closest('.contact-item[data-phone]');
             if (contactEl) {
                 const phone = contactEl.dataset.phone;
                 const currentFP = _contactFingerprints.get(phone);
                 if (currentFP) {
                     const parts = currentFP.split('|');
-                    parts[4] = stageId; // index 4 = stage en _getContactFingerprint
+                    parts[4] = stageId;
                     _contactFingerprints.set(phone, parts.join('|'));
                 }
             }
 
-            // Notificacion visual temporal
-            if (dropdown) {
-                dropdown.classList.add('ring-2', 'ring-yellow-400');
+            if (dropdownEl) {
+                dropdownEl.classList.add('ring-2', 'ring-yellow-400');
                 setTimeout(() => {
-                    dropdown.classList.remove('ring-2', 'ring-yellow-400');
+                    dropdownEl.classList.remove('ring-2', 'ring-yellow-400');
                 }, 1500);
+            }
+
+            // Auto-cierre: si el backend cerró la conversación, limpiar UI igual
+            // que el botón "Cerrar". Se basa en data.closed devuelto por el endpoint.
+            if (data.closed && body.phone) {
+                _performCloseCleanup(body.phone);
+            } else if (stageId === 'other' && data.close_error) {
+                console.warn('[Panel] Auto-cierre falló:', data.close_error);
+                alert("Etapa actualizada, pero el cierre automatico fallo. Cierra manualmente con el boton 'Cerrar'.");
             }
         } else {
             throw new Error(data.detail || 'Error actualizando etapa');
@@ -466,7 +497,6 @@ async function updateDealStage(contactId, stageId) {
     } catch (error) {
         console.error('[Panel] Error actualizando etapa:', error);
         alert('Error al actualizar etapa: ' + error.message);
-        // Recargar contactos para revertir el dropdown
         loadContacts();
     } finally {
         hideLoader();
@@ -2544,6 +2574,52 @@ function closeEditNameModal() {
 // FUNCION PARA CERRAR CONVERSACION
 // =========================================================================
 
+// Limpieza compartida tras un cierre exitoso (botón "Cerrar" o auto-cierre por
+// embudo "No responde"). Si el contacto cerrado es el actualmente seleccionado,
+// resetea toda la UI del chat. Siempre lo retira del listado optimistamente.
+function _performCloseCleanup(closedPhone) {
+    if (!closedPhone) return;
+
+    const isCurrent = currentPhone === closedPhone;
+
+    if (isCurrent) {
+        currentContactId = null;
+        currentPhone = null;
+        currentCanal = null;
+        currentName = null;
+
+        document.getElementById('contactName').textContent = 'Selecciona un contacto';
+        document.getElementById('contactPhone').textContent = '';
+        document.getElementById('chatMessages').innerHTML = `
+            <div class="flex items-center justify-center h-full text-gray-500">
+                <p>Conversacion cerrada. Selecciona otro contacto.</p>
+            </div>
+        `;
+        document.getElementById('messageInput').disabled = true;
+        document.getElementById('sendBtn').disabled = true;
+        document.getElementById('editNameBtn').classList.add('hidden');
+        document.getElementById('closeConversationBtn').classList.add('hidden');
+        document.getElementById('transferContactBtn').classList.add('hidden');
+        document.getElementById('detailsPanelToggle')?.classList.add('hidden');
+        document.getElementById('mainGrid')?.classList.remove('details-hidden');
+        const _banner = document.getElementById('handoffBanner');
+        if (_banner) _banner.classList.add('hidden');
+        _updateDetailsPanel(null);
+    }
+
+    // Remoción optimista del listado — el siguiente polling/WS no lo re-muestra
+    recentlyClosedPhones.add(closedPhone);
+    setTimeout(() => recentlyClosedPhones.delete(closedPhone), 90000);
+    try {
+        const _cp = JSON.parse(sessionStorage.getItem('_rcpPhones') || '[]');
+        _cp.push({ phone: closedPhone, ts: Date.now() });
+        sessionStorage.setItem('_rcpPhones', JSON.stringify(_cp));
+    } catch (_e) {}
+    allContacts = allContacts.filter(c => c.phone !== closedPhone);
+    _contactFingerprints.delete(closedPhone);
+    _applyFiltersAndRender();
+}
+
 async function closeConversation() {
     if (!currentPhone) {
         alert('No hay contacto seleccionado');
@@ -2580,54 +2656,7 @@ async function closeConversation() {
         const data = await response.json();
 
         if (response.ok) {
-            // Guardar phone antes de nullear — se usa para remoción optimista
-            const closedPhone = currentPhone;
-
-            // Limpiar seleccion actual
-            currentContactId = null;
-            currentPhone = null;
-            currentCanal = null;
-            currentName = null;
-
-            // Resetear UI
-            document.getElementById('contactName').textContent = 'Selecciona un contacto';
-            document.getElementById('contactPhone').textContent = '';
-            document.getElementById('chatMessages').innerHTML = `
-                <div class="flex items-center justify-center h-full text-gray-500">
-                    <p>Conversacion cerrada. Selecciona otro contacto.</p>
-                </div>
-            `;
-            document.getElementById('messageInput').disabled = true;
-            document.getElementById('sendBtn').disabled = true;
-            document.getElementById('editNameBtn').classList.add('hidden');
-            document.getElementById('closeConversationBtn').classList.add('hidden');
-            document.getElementById('transferContactBtn').classList.add('hidden');
-            document.getElementById('detailsPanelToggle')?.classList.add('hidden');
-            document.getElementById('mainGrid')?.classList.remove('details-hidden');
-            // Ocultar banner y resetear panel de detalles
-            const _banner = document.getElementById('handoffBanner');
-            if (_banner) _banner.classList.add('hidden');
-            _updateDetailsPanel(null);
-
-            // Remoción optimista: quitar del cache local inmediatamente para que el
-            // próximo render (polling o WS) no lo vuelva a mostrar.
-            // Guard de 15s contra respuestas de polling en vuelo que lleguen tarde.
-            recentlyClosedPhones.add(closedPhone);
-            // TTL extendido a 90s: cubre HubSpot 429 retry (12s) + múltiples ciclos de polling (10s c/u)
-            setTimeout(() => recentlyClosedPhones.delete(closedPhone), 90000);
-            // Persistir en sessionStorage para sobrevivir F5
-            try {
-                const _cp = JSON.parse(sessionStorage.getItem('_rcpPhones') || '[]');
-                _cp.push({ phone: closedPhone, ts: Date.now() });
-                sessionStorage.setItem('_rcpPhones', JSON.stringify(_cp));
-            } catch(_e) {}
-            allContacts = allContacts.filter(c => c.phone !== closedPhone);
-            _contactFingerprints.delete(closedPhone);
-            _applyFiltersAndRender();
-
-            // NO llamar loadContacts() aquí — el siguiente ciclo de polling se encarga.
-            // Llamarlo causaría race condition si hay una respuesta de polling en vuelo.
-
+            _performCloseCleanup(currentPhone);
             alert('Conversacion cerrada correctamente');
         } else {
             throw new Error(data.detail || 'Error cerrando conversacion');

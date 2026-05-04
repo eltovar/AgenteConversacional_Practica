@@ -175,7 +175,8 @@ PIPELINE_STAGES = {
     "1326632209": "Pagos y Servicios Publicos",
     "1326623541": "Ya encontro",
     "subscriber": "Reubicados",
-    "lead": "Aprobado"
+    "lead": "Aprobado",
+    "1353539189": "Venta"
 }
 
 # Lista ordenada de etapas para el frontend
@@ -198,7 +199,8 @@ PIPELINE_STAGES_LIST = [
     {"id": "1326632209", "name": "Pagos y Servicios Publicos"},
     {"id": "1326623541", "name": "Ya encontro"},
     {"id": "subscriber", "name": "Reubicados"},
-    {"id": "lead", "name": "Aprobado"}
+    {"id": "lead", "name": "Aprobado"},
+    {"id": "1353539189", "name": "Venta"}
 ]
 
 @dataclass
@@ -3380,6 +3382,76 @@ async def update_contact_name(
 # Endpoint para cerrar conversación (transicionar a BOT_ACTIVE)
 # ============================================================================
 
+async def _close_conversation_internal(
+    phone: str,
+    canal: Optional[str] = None,
+) -> dict:
+    """
+    Lógica reutilizable de cierre de conversación: BOT_ACTIVE + retirar del ZSET
+    y bot_controlled_conversations + in_panel=False + retirar del inbox del asesor.
+
+    Idempotente. Llamada por el endpoint DELETE /contacts/{phone}/close y por el
+    auto-cierre del embudo "No responde" en update_contact_stage.
+
+    Devuelve {"phone": normalizado, "canal": canal, "new_status": "BOT_ACTIVE"}.
+    """
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(phone)
+    phone_normalized = validation.normalized if validation.is_valid else phone
+
+    state_manager = _get_state_manager()
+
+    await state_manager.activate_bot(phone_normalized, canal=canal)
+    if phone != phone_normalized:
+        await state_manager.activate_bot(phone, canal=canal)
+
+    try:
+        r = await _get_redis_client()
+        canal_safe = (canal or "whatsapp").lower()
+        member = f"{phone_normalized}:{canal_safe}"
+        await r.zrem("active_conversations_sorted", member)
+        await r.srem("bot_controlled_conversations", member)
+        if phone != phone_normalized:
+            member_orig = f"{phone}:{canal_safe}"
+            await r.zrem("active_conversations_sorted", member_orig)
+            await r.srem("bot_controlled_conversations", member_orig)
+
+        meta_key_close = f"conv_meta:{phone_normalized}:{canal_safe}"
+        raw_close = await r.get(meta_key_close)
+        if raw_close:
+            try:
+                meta_close = json.loads(raw_close)
+                meta_close["in_panel"] = False
+                ttl_close = await r.ttl(meta_key_close)
+                ex_close = ttl_close if ttl_close and ttl_close > 0 else state_manager.PANEL_TTL_SECONDS
+                await r.set(meta_key_close, json.dumps(meta_close), ex=ex_close)
+            except Exception as e_meta:
+                logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {phone_normalized}: {e_meta}")
+    except Exception as e:
+        logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
+
+    try:
+        _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
+        if _close_meta and _close_meta.assigned_owner_id:
+            await state_manager.remove_from_advisor_inbox(
+                _close_meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
+            )
+    except Exception as _close_inbox_err:
+        logger.warning(f"[Panel] Error removiendo inbox al cerrar (non-fatal): {_close_inbox_err}")
+
+    canal_info = f":{canal}" if canal else ""
+    logger.info(
+        f"[Panel] Conversación cerrada — BOT_ACTIVE + removido del panel: "
+        f"{phone_normalized}{canal_info}"
+    )
+
+    return {
+        "phone": phone_normalized,
+        "canal": canal,
+        "new_status": "BOT_ACTIVE",
+    }
+
+
 @router.delete("/contacts/{phone}/close")
 async def close_conversation(
     phone: str,
@@ -3401,76 +3473,13 @@ async def close_conversation(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Normalizar teléfono si no está normalizado
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
-
-    phone_normalized = validation.normalized if validation.is_valid else phone
-
     try:
-        state_manager = _get_state_manager()
-
-        # Transicionar a BOT_ACTIVE para que Sofía retome la conversación con contexto
-        await state_manager.activate_bot(phone_normalized, canal=canal)
-
-        # También intentar con el teléfono original si es diferente
-        if phone != phone_normalized:
-            await state_manager.activate_bot(phone, canal=canal)
-
-        # Remover del ZSET y BOT_CONTROLLED_SET para que desaparezca inmediatamente del panel.
-        # activate_bot() solo cambia el estado pero no elimina del índice; si el contacto
-        # tuvo actividad reciente (<24h) seguiría visible como BOT_ACTIVE en el panel.
-        try:
-            r = await _get_redis_client()
-            canal_safe = (canal or "whatsapp").lower()
-            member = f"{phone_normalized}:{canal_safe}"
-            await r.zrem("active_conversations_sorted", member)
-            await r.srem("bot_controlled_conversations", member)
-            if phone != phone_normalized:
-                member_orig = f"{phone}:{canal_safe}"
-                await r.zrem("active_conversations_sorted", member_orig)
-                await r.srem("bot_controlled_conversations", member_orig)
-
-            # Setear in_panel=False para que update_activity() no re-agregue al ZSET
-            # si el cliente envía un mensaje mientras el bot está activo post-cierre.
-            meta_key_close = f"conv_meta:{phone_normalized}:{canal_safe}"
-            raw_close = await r.get(meta_key_close)
-            if raw_close:
-                try:
-                    meta_close = json.loads(raw_close)
-                    meta_close["in_panel"] = False
-                    ttl_close = await r.ttl(meta_key_close)
-                    ex_close = ttl_close if ttl_close and ttl_close > 0 else state_manager.PANEL_TTL_SECONDS
-                    await r.set(meta_key_close, json.dumps(meta_close), ex=ex_close)
-                except Exception as e_meta:
-                    logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {phone_normalized}: {e_meta}")
-        except Exception as e:
-            logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
-
-        # Inbox: remover del inbox del asesor asignado al cerrar conversación
-        try:
-            _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
-            if _close_meta and _close_meta.assigned_owner_id:
-                await state_manager.remove_from_advisor_inbox(
-                    _close_meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
-                )
-        except Exception as _close_inbox_err:
-            logger.warning(f"[Panel] Error removiendo inbox al cerrar (non-fatal): {_close_inbox_err}")
-
-        canal_info = f":{canal}" if canal else ""
-        logger.info(
-            f"[Panel] Conversación cerrada — BOT_ACTIVE + removido del panel: "
-            f"{phone_normalized}{canal_info}"
-        )
-
+        result = await _close_conversation_internal(phone, canal)
         return {
             "status": "success",
             "message": "Conversación cerrada - Sofía retomará automáticamente",
-            "phone": phone_normalized,
-            "canal": canal,
-            "new_status": "BOT_ACTIVE"
+            **result,
         }
-
     except Exception as e:
         logger.error(f"[Panel] Error cerrando conversación: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3520,11 +3529,18 @@ async def mark_contact_read(
 async def update_contact_stage(
     contact_id: str,
     stage_id: str = Body(..., embed=True),
+    phone: Optional[str] = Body(None, embed=True),
+    canal: Optional[str] = Body(None, embed=True),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Actualiza la etapa (lifecyclestage) del Contact en HubSpot desde el panel de asesores.
     Arquitectura Contact-Centric: no depende de objetos Deal.
+
+    Auto-cierre: cuando stage_id == "other" (No responde) y se provee phone, también
+    cierra la conversación (BOT_ACTIVE + remover del panel) reciclando la lógica del
+    endpoint DELETE /contacts/{phone}/close. Esto unifica dos acciones de la asesora
+    en una sola interacción.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -3554,13 +3570,31 @@ async def update_contact_stage(
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
             logger.info(f"[Panel] Contacto {contact_id} actualizado a etapa '{stage_name}'")
             await _invalidate_contact_stage_cache(contact_id)
-            return {
+
+            payload = {
                 "status": "success",
                 "message": f"Etapa actualizada a '{stage_name}'",
                 "contact_id": contact_id,
                 "stage_id": stage_id,
-                "stage_name": stage_name
+                "stage_name": stage_name,
+                "closed": False,
             }
+
+            if stage_id == "other" and phone:
+                try:
+                    close_result = await _close_conversation_internal(phone, canal)
+                    payload["closed"] = True
+                    payload["close_result"] = close_result
+                    logger.info(
+                        f"[Panel] Auto-cierre por 'No responde' — contact={contact_id} phone={phone}"
+                    )
+                except Exception as e_close:
+                    logger.error(
+                        f"[Panel] Auto-cierre falló para contact={contact_id} phone={phone}: {e_close}"
+                    )
+                    payload["close_error"] = str(e_close)
+
+            return payload
         else:
             logger.error(f"[Panel] Error actualizando lifecyclestage: {response.status_code} - {response.text}")
             raise HTTPException(

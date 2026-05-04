@@ -7,7 +7,9 @@
       "Bash(venv/Scripts/python -m pytest \"tests/panel/test_panel_fixes.py::TestIntegration::test_panel_loads_without_errors\" -v)",
       "Bash(venv/Scripts/python -m pytest tests/state/test_redis_state.py::test_ttl_configuration_default tests/panel/test_panel_fixes.py::TestTemplateVisibility::test_templates_endpoint_returns_list tests/panel/test_panel_fixes.py::TestCloseConversation::test_close_removes_from_redis tests/panel/test_panel_fixes.py::TestIntegration::test_panel_loads_without_errors -v)",
       "Bash(pip install *)",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(node --check middleware/PanelAsesores/index.js)",
+      "PowerShell(python -m py_compile \"C:\\\\Users\\\\Salo\\\\Desktop\\\\AgenteConversacional_Practica\\\\middleware\\\\outbound_panel.py\"; if \\($?\\) { \"OK\" })"
     ],
     "deny": [],
     "ask": []

@@ -99,7 +99,8 @@ const PIPELINE_STAGES = [
     { id: "1326632628", name: "Ana Contratos" },
     { id: "1326623069", name: "Propietarios" },
     { id: "1326632209", name: "Pagos y Servicios Publicos" },
-    { id: "1326623541", name: "Ya encontro" }
+    { id: "1326623541", name: "Ya encontro" },
+    { id: "subscriber", name: "Reubicados" }
 ];
 
 // Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.

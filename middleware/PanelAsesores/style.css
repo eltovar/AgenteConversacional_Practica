@@ -120,6 +120,22 @@
     letter-spacing: 0.02em;
 }
 
+/* Chip Mensaje Masivo — ámbar para distinguir de plantilla normal */
+.bulk-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: rgba(217, 119, 6, 0.12);
+    color: #92400E;
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 999px;
+    margin-bottom: 4px;
+    cursor: help;
+    letter-spacing: 0.02em;
+}
+
 /* Status checks (✓ / ✓✓) en mensajes salientes */
 .msg-status {
     display: inline-block;

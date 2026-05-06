@@ -7680,6 +7680,7 @@ async def _send_bulk_template_message(
     contact_id: str,
     campaign_id: str,
     campaign_stage_id: str,
+    template_name: str = "",
 ) -> dict:
     """
     Envío bulk: NO actualiza state_manager, NO ZSET, NO Timeline HubSpot.
@@ -7716,7 +7717,7 @@ async def _send_bulk_template_message(
         mongo_mgr = get_mongo_manager()
         await mongo_mgr.save_message(
             phone=phone,
-            content=f"[BULK template:{campaign_id}]",
+            content=f"[BULK template:{template_name or campaign_id}]",
             sender="advisor",
             channel="whatsapp",
             hubspot_contact_id=contact_id,
@@ -7816,6 +7817,7 @@ async def _process_bulk_campaign_tick():
                         contact_id=contact_id,
                         campaign_id=campaign_id,
                         campaign_stage_id=stage_id,
+                        template_name=template_meta["name"],
                     )
                 except Exception as e:
                     await mongo_mgr.mark_bulk_contact_failed(

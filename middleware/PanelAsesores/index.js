@@ -2202,6 +2202,7 @@ function renderChatBubbles(messages) {
     // Patrones de sufijos/prefijos a limpiar en render-time
     const _SOURCE_TAG_RX = /\n*\[Fuente:[^\]]*\]\s*$/i;
     const _TEMPLATE_TAG_RX = /^\[TEMPLATE:\s*([^\]]+)\]\s*/i;
+    const _BULK_TAG_RX = /^\[BULK template:\s*([^\]]+)\]\s*$/i;
     const _MEDIA_BODY_RX = [
         /^\[El cliente envió un audio[^\]]*\]\s*$/i,
         /^\[Imagen del cliente\]:\s*/i,
@@ -2349,6 +2350,27 @@ function renderChatBubbles(messages) {
                 const _tplName = _tplMatch[1].trim();
                 templateBadge = `<span class="tpl-chip" title="Plantilla: ${escapeHtml(_tplName)}">📋 Plantilla</span><br>`;
                 _displayMsg = _displayMsg.replace(_TEMPLATE_TAG_RX, '');
+            }
+
+            // Parsear "[BULK template: <name>]" → chip "Masivo" + preview de plantilla como cuerpo
+            const _bulkMatch = _displayMsg.match(_BULK_TAG_RX);
+            if (_bulkMatch) {
+                const _bulkName = _bulkMatch[1].trim();
+                const _bulkTpl = BULK_TEMPLATES.find(t => t.name === _bulkName);
+                if (_bulkTpl) {
+                    // Sustituir {key} → etiqueta legible usando vars del template
+                    let _bulkPreview = _bulkTpl.preview;
+                    (_bulkTpl.vars || []).forEach(v => {
+                        const _vLabel = v.auto_fill === 'firstname' ? '{nombre}' : `{${v.label.toLowerCase()}}`;
+                        _bulkPreview = _bulkPreview.replace(`{${v.key}}`, _vLabel);
+                    });
+                    templateBadge = `<span class="bulk-chip" title="Plantilla: ${escapeHtml(_bulkTpl.label)}">📢 Masivo</span><br>`;
+                    _displayMsg = _bulkPreview;
+                } else {
+                    // Legacy: campaign_id de MongoDB — no hay lookup posible
+                    templateBadge = `<span class="bulk-chip" title="Mensaje masivo (plantilla no disponible)">📢 Masivo</span><br>`;
+                    _displayMsg = '';
+                }
             }
 
             // Suprimir cuerpo duplicado de multimedia: si ya hay chip de

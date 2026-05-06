@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import httpx
 from io import BytesIO
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 
@@ -101,6 +101,47 @@ HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {
     "salesqualifiedlead", "opportunity", "customer", "evangelist"
+}
+
+# ============================================================================
+# Bulk Campaigns (mensajes masivos) — constantes
+# ============================================================================
+BULK_EXCLUDED_STAGES = {
+    "1326631578",  # Nuevo Lead
+    "1326623075",  # En conversación
+    "evangelist",  # Cerrado perdido
+    "1326632628",  # Ana Contratos
+    "1326632209",  # Pagos y Servicios Publicos
+}
+BULK_PROCESSOR_LOCK_KEY = "bulk_processor_lock"
+BULK_PROCESSOR_LOCK_TTL = 30
+BULK_BATCH_SIZE = 5
+BULK_SEND_SPACING_SEC = 0.5
+BULK_MAX_CONCURRENT = 2
+BULK_MESSAGE_DEDUP_TTL = 86400 * 7
+HUBSPOT_BULK_SEARCH_CACHE_TTL = 1800
+BULK_NO_RESPONDE_FLAG_PREFIX = "bulk_no_responde_pending:"
+BULK_NO_RESPONDE_FLAG_TTL = 86400 * 30
+BULK_SEND_DEDUP_PREFIX = "bulk_send_dedup:"
+HUBSPOT_BULK_SEARCH_CACHE_PREFIX = "hubspot_bulk_search:"
+
+# Plantillas permitidas para envío masivo. Mapeo SID → metadata.
+# La variable key="1" (nombre) SIEMPRE se auto-fill desde HubSpot firstname per-contacto.
+# Las demás variables se reciben del frontend como texto literal (aplicado a todos).
+BULK_ALLOWED_TEMPLATES = {
+    "HX550a2475d09a5fb3b5410e6d36eadf3f": {
+        "name": "aun_en_busqueda",
+        "label": "¿Aún estás interesado?",
+        "vars": [{"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"}],
+    },
+    "HX287a1c005459a6ceaec90a35108330c3": {
+        "name": "seguimiento_personalizado",
+        "label": "Seguimiento Personalizado",
+        "vars": [
+            {"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"},
+            {"key": "2", "label": "Mensaje personalizado"},
+        ],
+    },
 }
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
@@ -455,16 +496,7 @@ HUBSPOT_BATCH_CACHE_TTL = 600  # 10 minutos — batch key incluye md5 de IDs, re
 
 async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Obtiene información de múltiples contactos en UNA sola llamada batch.
-
-    Usa POST /crm/v3/objects/contacts/batch/read que permite hasta 100 IDs por llamada.
-    Cachea resultados en Redis 5 min (compartido entre workers) para reducir 429s.
-
-    Args:
-        contact_ids: Lista de IDs de contactos HubSpot (max 100)
-
-    Returns:
-        Dict[contact_id, properties] con firstname, lastname, email, phone
+    Obtiene información de múltiples contactos en UNA sola llamada batch. lastname, email, phone
     """
     if not contact_ids or not HUBSPOT_API_KEY:
         return {}
@@ -544,21 +576,6 @@ async def _hydrate_contact(
 ) -> Optional[Dict[str, Any]]:
     """
     Materializa un contacto completo desde Redis + HubSpot + MongoDB.
-
-    Pipeline de resolución (best-effort, cada paso aislado en try/except):
-      A. Normalizar phone
-      B. ZSCAN ZSET por phone:* + pipeline lectura state/meta/marker de cada canal
-      C. Resolver contact_id (meta OR ContactManager._search_contact)
-      D. Enriquecer con HubSpot (cache → batch → search_by_phone)
-      E. lifecyclestage
-      F. owner_id / owner_name
-      G. has_appointment
-      H. conversation_status
-      I. canal / canal_origen
-      J. Persistencia opcional (ensure_meta_with_channel + update_activity)
-
-    Retorna un dict COMPLETO (con fallback phone como display_name — nunca None)
-    o None SOLO si no hay rastro del contacto en ninguna fuente Y el phone es inválido.
     """
     # ── Paso A: Normalizar phone ────────────────────────────────────────────
     try:
@@ -921,9 +938,6 @@ async def _update_contact_to_visita_realizada(contact_id: str) -> None:
     (scheduler post-cita 1h30min). Background — no bloquea envío WhatsApp.
 
     Replica el patrón de _update_contact_to_en_conversacion:
-    - PATCH single-step con current_stage guard
-    - Invalida caché Redis contact_stage:{id} en éxito
-    - Try/except amplio — fire-and-forget desde el scheduler
     """
     import httpx
     if not HUBSPOT_API_KEY or not contact_id:
@@ -965,13 +979,60 @@ async def _update_contact_to_visita_realizada(contact_id: str) -> None:
         logger.error(f"[Lifecycle] Error en _update_contact_to_visita_realizada: {e}")
 
 
+async def _promote_no_responde_to_en_conversacion(
+    contact_id: str,
+    phone_normalized: str,
+) -> bool:
+    """
+    Auto-promueve un contacto de 'No responde' (other) a 'En conversación' (1326623075)
+    cuando responde a un mensaje masivo. Llamado desde webhook_handler.
+    """
+    if not HUBSPOT_API_KEY or not contact_id or not phone_normalized:
+        return False
+    try:
+        r = await _get_redis_client()
+        flag_key = f"{BULK_NO_RESPONDE_FLAG_PREFIX}{phone_normalized}"
+        flag_present = await r.get(flag_key)
+        if not flag_present:
+            return False  # caso normal — no había bulk No Responde pendiente
+
+        current_stage = await _get_contact_lifecyclestage(contact_id)
+        if current_stage != "other":
+            logger.info(
+                f"[BulkNoResponde] Contacto {contact_id} en '{current_stage}' — "
+                f"no se promueve (guard). Limpiando flag."
+            )
+            await r.delete(flag_key)
+            return False
+
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+        client = get_httpx_client()
+        resp = await client.patch(
+            url, headers=headers,
+            json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}},
+        )
+        if resp.status_code == 200:
+            logger.info(
+                f"[BulkNoResponde] Contacto {contact_id}: other → 1326623075 (En conversación) "
+                f"por respuesta a mensaje masivo"
+            )
+            await _invalidate_contact_stage_cache(contact_id)
+            await r.delete(flag_key)
+            return True
+        logger.warning(
+            f"[BulkNoResponde] Error PATCH HubSpot {contact_id}: "
+            f"{resp.status_code} - {resp.text[:200]}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"[BulkNoResponde] Error en promoción {contact_id}: {e}")
+        return False
+
+
 async def check_24h_window(phone_normalized: str) -> WindowStatus:
     """
     Verifica el estado de la ventana de 24 horas de WhatsApp.
-
-    WhatsApp solo permite enviar mensajes de texto libre durante 24 horas
-    después del último mensaje del cliente. Fuera de esa ventana,
-    solo se pueden enviar Templates pre-aprobados.
     """
     try:
         r = await _get_redis_client()
@@ -1276,8 +1337,7 @@ async def send_message(
     phone_normalized = validation.normalized
 
     # =========================================================================
-    # ASIGNACIÓN DE CANAL POR DEFECTO
-    # Si 'canal' es nulo, vacío, o literalmente "null" (que a veces manda JS)
+    # ASIGNACIÓN DE CANAL POR DEFECTO    
     # =========================================================================
     if not canal or canal.strip() == "" or canal.lower() == "null":
         canal_final = "whatsapp"
@@ -1426,9 +1486,6 @@ async def send_message(
 
     # ── Citación inline (compensa que Twilio Conversations API no soporta ReplyTo) ──
     # Para audio: WhatsApp NO acepta caption; enviamos primero un texto-cita y
-    # luego el audio. Para texto/imagen/video/documento: inyectamos quote en body/caption.
-    # IMPORTANTE: el body con `>` SOLO va a Twilio. En Mongo guardamos el body original
-    # porque el panel ya renderiza la cita usando reply_to_preview (evita doble display).
     body_for_twilio = message_body
     audio_intro_sid = None
     if parsed_reply_preview:
@@ -1616,9 +1673,6 @@ async def send_message(
 # =============================================================================
 # Edición y eliminación de mensajes propios del asesor (Conversations API)
 # =============================================================================
-
-# Twilio limita la edición/eliminación de mensajes a una ventana corta.
-# Conservador: 15 min para edit, 60 min para delete (cliente puede ya haberlo visto).
 EDIT_WINDOW_SECONDS = 15 * 60
 DELETE_WINDOW_SECONDS = 60 * 60
 
@@ -1627,10 +1681,6 @@ async def _resolve_conversation_sid_for_phone(
     phone: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Busca el conversation_sid activo (< 23h) para este phone en MongoDB.
-
-    Returns: (conversation_sid, chat_service_sid). Ambos None si no se halla.
-    El chat_service_sid es necesario para construir URLs service-aware en
-    Conversations Services no-Default; sin él el GET /Messages devuelve 404.
     """
     try:
         from datetime import timezone
@@ -1661,12 +1711,8 @@ async def _backfill_im_sid_after_send(
     mongo_message_id: Optional[str],
     conversation_sid: Optional[str] = None,
 ) -> None:
-    """Backfill activo del IM SID tras un envío del panel.
-
-    Why: el rebote `Source=API` del webhook de Conversations puede no llegar
-    (config Global Webhook variable). Sin IM SID el panel no puede editar/borrar.
-    Esta tarea consulta directamente la API de Twilio 1.5s después del envío
-    y persiste el `conversations_message_sid` en MongoDB.
+    """
+    Backfill activo del IM SID tras un envío del panel.
     """
     if not mongo_message_id:
         return
@@ -1756,15 +1802,6 @@ async def edit_advisor_message(
     notify_client: bool = Form(False, description="Si True, envía mensaje '✏️ Corrección' al cliente"),
 ):
     """Edita un mensaje del asesor.
-
-    Modos:
-    - notify_client=False (default, modo A): edición SOLO interna en panel.
-      Marca el mensaje como `edited` y actualiza el body. NO se envía nada al
-      WhatsApp del cliente (Meta no soporta editar mensajes ya entregados).
-      Best-effort: actualiza también el record en Twilio Conversations Store
-      (para el log/auditoría), si está dentro de la ventana de 15 min.
-    - notify_client=True (modo D): además envía un mensaje nuevo
-      "✏️ Corrección: {nuevo}" al cliente, que SÍ ve en su WhatsApp.
     """
     new_content = (new_content or "").strip()
     if not new_content:
@@ -1875,14 +1912,6 @@ async def delete_advisor_message(
     notify_client: bool = Query(False, description="Si True, envía '🚫 Mensaje anterior anulado' al cliente"),
 ):
     """Elimina un mensaje del asesor.
-
-    Modos:
-    - notify_client=False (default, modo A): borrado SOLO interno en panel.
-      Marca el mensaje como `deleted` (soft-delete). NO se borra del WhatsApp
-      del cliente (Meta no expone API de borrar-para-todos).
-      Best-effort: borra también el record en Twilio Conversations Store.
-    - notify_client=True (modo D): además envía un nuevo mensaje
-      "🚫 Mensaje anterior anulado" al cliente.
     """
     mongo_manager = get_mongo_manager()
     msg = await mongo_manager.get_message_by_id(mongo_id)
@@ -1989,20 +2018,6 @@ async def send_message_json(
 ):
     """
     Envía un mensaje de WhatsApp desde el panel (formato JSON).
-    
-    Endpoint alternativo para testing E2E y clientes que prefieren JSON.
-    Solo soporta texto (sin multimedia).
-    
-    Headers:
-        X-API-Key: API key de autenticación
-        Content-Type: application/json
-    
-    Body (JSON):
-        {
-            "phone": "+573001112235",
-            "message": "Hola Carlos, soy el asesor asignado.",
-            "canal": "whatsapp"
-        }
     """
     # Validar API Key
     if not _validate_api_key(x_api_key):
@@ -2229,10 +2244,6 @@ async def send_template_message(
 ):
     """
     Envía un mensaje de Template (plantilla) de WhatsApp para reactivar conversación.
-
-    Este endpoint se usa cuando la ventana de 24 horas está cerrada.
-    Los templates son mensajes pre-aprobados por Meta que pueden enviarse
-    fuera de la ventana de 24 horas.
     """
     # Validar API Key
     if not _validate_api_key(x_api_key):
@@ -2626,13 +2637,6 @@ async def create_manual_contact(
 ):
     """
     Crea un contacto manualmente desde el panel de asesores.
-
-    Flujo:
-    1. Normalizar teléfono
-    2. Verificar si existe (deduplicación por whatsapp_id)
-    3. Si existe → Retornar error con opción de tomar control
-    4. Si no existe → Crear contacto + deal en HubSpot
-    5. Activar HUMAN_ACTIVE para que aparezca en el panel
     """
     logger.info(f"[Panel] POST /contacts/create - phone={phone}, firstname={firstname}, canal={canal}, advisor_id={advisor_id}")
 
@@ -2886,14 +2890,6 @@ async def transfer_contact(
 ):
     """
     Transfiere un contacto a otro asesor.
-
-    Modos:
-    - exclusive: El contacto pasa completamente al nuevo asesor
-    - collaborative: Ambos asesores pueden ver y atender el contacto
-
-    Actualiza:
-    - Redis: Metadata de la conversación (assigned_owner_id)
-    - HubSpot: hubspot_owner_id del contacto (solo en modo exclusive)
     """
     logger.info(f"[Panel] POST /contacts/{phone}/transfer -> {to_owner_id} (modo: {mode})")
 
@@ -3460,15 +3456,6 @@ async def close_conversation(
 ):
     """
     Cierra una conversación transicionando a BOT_ACTIVE.
-
-    Esto hace que:
-    1. El contacto desaparezca del panel de "activos" (HUMAN_ACTIVE/IN_CONVERSATION)
-    2. Sofía retome la conversación automáticamente cuando el cliente escriba
-    3. Se preserve el contexto de la conversación
-
-    SEGREGACIÓN POR CANAL:
-    Si se proporciona el parámetro canal, solo se cierra la conversación
-    de ese canal específico.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -3536,11 +3523,6 @@ async def update_contact_stage(
     """
     Actualiza la etapa (lifecyclestage) del Contact en HubSpot desde el panel de asesores.
     Arquitectura Contact-Centric: no depende de objetos Deal.
-
-    Auto-cierre: cuando stage_id == "other" (No responde) y se provee phone, también
-    cierra la conversación (BOT_ACTIVE + remover del panel) reciclando la lógica del
-    endpoint DELETE /contacts/{phone}/close. Esto unifica dos acciones de la asesora
-    en una sola interacción.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -3639,19 +3621,6 @@ async def reset_bot_state(
 
     Útil cuando un contacto se queda "trabado" en HUMAN_ACTIVE/IN_CONVERSATION
     y no aparece en el panel para cerrarlo manualmente.
-
-    Este endpoint:
-    1. Busca el contacto en Redis por teléfono (todos los canales si no se especifica)
-    2. Transiciona a BOT_ACTIVE
-    3. Retorna información del estado anterior
-
-    Args:
-        phone: Número de teléfono (E.164 o sin normalizar)
-        canal: Canal específico (opcional, si no se especifica resetea todos)
-        force: Si es True, resetea incluso si ya está en BOT_ACTIVE
-
-    Returns:
-        Estado anterior y confirmación del reset
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -4021,11 +3990,6 @@ async def get_history_by_contact_id(
 ):
     """
     Obtiene el historial de conversación por contact_id.
-
-    ARQUITECTURA v2.0:
-    1. Si hay phone → Consultar MongoDB primero (fuente de verdad, ~5ms)
-    2. Si MongoDB vacío o sin phone → Consultar MongoDB por contact_id
-    3. Si aún vacío → Fallback a HubSpot (datos históricos de migración)
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -4339,13 +4303,6 @@ async def search_contacts_by_keyword(
     
     Usa búsqueda fulltext de MongoDB para encontrar mensajes que contengan
     la palabra buscada y retorna los contactos asociados.
-    
-    Args:
-        q: Palabra clave a buscar (mínimo 2 caracteres)
-        limit: Máximo de contactos a retornar
-    
-    Returns:
-        Lista de teléfonos que tienen mensajes con la palabra buscada
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -4402,14 +4359,6 @@ async def _get_contacts_by_worker_filter(
 ) -> dict:
     """
     Branch del pipeline de contactos activado cuando se filtra por worker_id.
-
-    Lógica:
-    1. MongoDB: citas del worker en rango de fechas (o ventana por defecto) → contact_ids + phones
-    2. HubSpot batch: obtener nombre/email de los contactos (1 llamada)
-    3. Por cada contacto: obtener lifecyclestage desde _get_contact_lifecyclestage (usa caché Redis)
-    4. Filtrar: solo etapa "marketingqualifiedlead" o "customer" (Visita agendada + Cerrado ganado)
-    5. Redis: añadir estado de conversación si está activo
-    6. Retornar ordenado por appointment_dt ASC
     """
     STAGES_VISIBLES_WORKER = {
         "marketingqualifiedlead",  # Visita agendada
@@ -7332,3 +7281,585 @@ async def cancel_scheduled_message(
         )
     logger.info(f"[Panel] Mensaje programado cancelado: {message_id}")
     return {"ok": True}
+
+
+# ============================================================================
+# BULK CAMPAIGNS — Mensajes Masivos por Embudo (per-asesora)
+# ============================================================================
+
+def _validate_bulk_request(
+    stage_id: str,
+    advisor_id: Optional[str],
+    template_sid: str,
+    template_variables: Optional[Dict[str, str]],
+) -> tuple[Optional[dict], Optional[str]]:
+    """
+    Valida un request de bulk:
+      - advisor_id presente
+      - stage no excluido
+      - template_sid en BULK_ALLOWED_TEMPLATES
+      - template_variables incluye texto para todas las vars NO auto-fill
+
+    Retorna (template_meta, error_msg). Si error_msg != None, hubo fallo.
+    """
+    if not advisor_id:
+        return None, "advisor_id requerido"
+    if stage_id in BULK_EXCLUDED_STAGES:
+        return None, f"stage_id '{stage_id}' no permite envío masivo"
+    if stage_id not in PIPELINE_STAGES:
+        return None, f"stage_id '{stage_id}' inválido"
+    if not template_sid or not template_sid.startswith("HX"):
+        return None, "template_sid inválido (debe comenzar con HX)"
+    template_meta = BULK_ALLOWED_TEMPLATES.get(template_sid)
+    if not template_meta:
+        return None, f"template_sid '{template_sid}' no permitido para envío masivo"
+
+    # Verificar que las variables NO auto-fill traigan texto
+    template_variables = template_variables or {}
+    missing = []
+    for var in template_meta["vars"]:
+        if var.get("auto_fill"):
+            continue  # se resuelve per-contacto en el worker
+        key = var["key"]
+        val = (template_variables.get(key) or "").strip()
+        if not val:
+            missing.append(f"{{{key}}} ({var['label']})")
+    if missing:
+        return None, f"Faltan valores para: {', '.join(missing)}"
+    return template_meta, None
+
+
+# Fallback cuando el contacto no tiene un nombre real utilizable.
+BULK_NAME_FALLBACK = "Buen dia"
+
+# Marcadores comunes de "sin nombre" que llegan desde HubSpot. Case-insensitive.
+import re as _re_bulk
+_BULK_INVALID_NAME_RE = _re_bulk.compile(
+    r"^\s*(none(\s+none)?|null|n/?a|undefined|sin\s*nombre|-+|\.+|cliente)\s*$",
+    _re_bulk.IGNORECASE,
+)
+
+
+def _clean_firstname_for_template(firstname: Optional[str]) -> str:
+    """
+    Normaliza el firstname para uso en plantillas WhatsApp masivas.
+
+    Devuelve BULK_NAME_FALLBACK ("Buen dia") cuando el valor recibido NO es
+    un nombre real. Casos cubiertos:
+      - vacío / None / solo whitespace
+      - marcadores típicos: "none", "none none", "null", "n/a", "sin nombre", "---"
+      - sin NINGUNA letra (ej. "+573001234567", "3001234567", "...", "0000")
+    De lo contrario, devuelve el firstname trimmed tal cual.
+    """
+    if not firstname:
+        return BULK_NAME_FALLBACK
+    cleaned = firstname.strip()
+    if not cleaned:
+        return BULK_NAME_FALLBACK
+    if _BULK_INVALID_NAME_RE.match(cleaned):
+        return BULK_NAME_FALLBACK
+    if not any(c.isalpha() for c in cleaned):
+        return BULK_NAME_FALLBACK
+    return cleaned
+
+
+def _resolve_bulk_template_variables(
+    template_meta: dict,
+    contact: dict,
+    literal_variables: Dict[str, str],
+) -> dict:
+    """
+    Construye el dict content_variables para Twilio, combinando:
+      - Variables auto_fill: resueltas per-contacto. Para 'firstname' usa
+        _clean_firstname_for_template() que aplica BULK_NAME_FALLBACK
+        cuando el valor no es un nombre real.
+      - Variables literales: texto que escribió la asesora (aplicado a todos).
+
+    Retorna {key: value} ej: {"1": "Juan", "2": "te escribo para..."}
+    """
+    content_variables = {}
+    for var in template_meta["vars"]:
+        key = var["key"]
+        if var.get("auto_fill") == "firstname":
+            content_variables[key] = _clean_firstname_for_template(contact.get("firstname"))
+        elif var.get("auto_fill"):
+            content_variables[key] = (contact.get(var["auto_fill"]) or "").strip() or ""
+        else:
+            content_variables[key] = (literal_variables.get(key) or "").strip()
+    return content_variables
+
+
+async def _resolve_advisor_name(advisor_id: str) -> str:
+    """
+    Resuelve display name de la asesora desde MongoDB panel_advisors.
+    Fallback: 'tu asesora'.
+    """
+    try:
+        mongo_mgr = get_mongo_manager()
+        if not await mongo_mgr.connect():
+            return "tu asesora"
+        doc = await mongo_mgr.db.panel_advisors.find_one({"advisor_id": advisor_id})
+        if doc:
+            return doc.get("name") or doc.get("display_name") or "tu asesora"
+    except Exception as e:
+        logger.debug(f"[BulkCampaign] No se pudo resolver advisor_name: {e}")
+    return "tu asesora"
+
+
+async def _hubspot_search_contacts_for_bulk(
+    stage_id: str,
+    advisor_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Busca todos los contactos del embudo asignados a la asesora vía HubSpot search.
+    Pagina 100/page con sleep 0.15s. Cache Redis 30 min para no saturar HubSpot.
+
+    Retorna lista de contactos con {contact_id, phone, firstname, owner_id}.
+    """
+    cache_key = f"{HUBSPOT_BULK_SEARCH_CACHE_PREFIX}{stage_id}:{advisor_id}"
+    try:
+        r = await _get_redis_client()
+        cached = await r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception as e:
+        logger.debug(f"[BulkCampaign] cache miss/error: {e}")
+
+    all_contacts: List[Dict[str, Any]] = []
+    after: Optional[str] = None
+    pages = 0
+    max_pages = 50  # 5000 contactos máx — más que suficiente
+    while pages < max_pages:
+        try:
+            resp = await _hs_singleton.search_contacts_by_lifecyclestage_and_owner(
+                stage_id=stage_id,
+                owner_id=advisor_id,
+                limit=100,
+                after=after,
+            )
+        except Exception as e:
+            logger.error(f"[BulkCampaign] Error HubSpot search: {e}")
+            break
+        for r_item in resp.get("results", []):
+            props = r_item.get("properties") or {}
+            phone_val = (props.get("whatsapp_id") or props.get("phone") or "").strip()
+            if not phone_val:
+                continue
+            all_contacts.append({
+                "contact_id": str(r_item.get("id")),
+                "phone": phone_val,
+                "firstname": (props.get("firstname") or "").strip(),
+                "owner_id": props.get("hubspot_owner_id") or advisor_id,
+            })
+        after = resp.get("next_after")
+        if not after:
+            break
+        pages += 1
+        await asyncio.sleep(0.15)
+
+    try:
+        r = await _get_redis_client()
+        await r.set(cache_key, json.dumps(all_contacts), ex=HUBSPOT_BULK_SEARCH_CACHE_TTL)
+    except Exception as e:
+        logger.debug(f"[BulkCampaign] Error guardando cache: {e}")
+
+    return all_contacts
+
+
+async def _filter_contacts_by_last_message_range(
+    contacts: List[Dict[str, Any]],
+    date_from: Optional[str],
+    date_to: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Filtra contactos cuyo LAST_CLIENT_MESSAGE esté en el rango [date_from, date_to].
+    Si no hay date_from ni date_to, retorna todos los contactos sin filtrar.
+    Si un contacto no tiene last_client_message en Redis, se INCLUYE igual
+    (cubre contactos importados sin historial reciente).
+    """
+    if not date_from and not date_to:
+        return contacts
+    try:
+        from_dt = datetime.fromisoformat(date_from + "T00:00:00+00:00") if date_from else None
+        to_dt = datetime.fromisoformat(date_to + "T23:59:59+00:00") if date_to else None
+    except Exception as e:
+        logger.warning(f"[BulkCampaign] date parse error: {e}")
+        return contacts
+
+    r = await _get_redis_client()
+    keys = [f"{LAST_CLIENT_MESSAGE_PREFIX}{c['phone']}" for c in contacts]
+    if not keys:
+        return contacts
+    pipe = r.pipeline()
+    for k in keys:
+        pipe.get(k)
+    raw_values = await pipe.execute()
+
+    filtered = []
+    for contact, raw in zip(contacts, raw_values):
+        if not raw:
+            # Sin historial conocido → se incluye
+            filtered.append(contact)
+            continue
+        try:
+            ts_str = raw if isinstance(raw, str) else raw.decode()
+            ts_str = ts_str.replace("Z", "+00:00")
+            ts = datetime.fromisoformat(ts_str)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if from_dt and ts < from_dt:
+                continue
+            if to_dt and ts > to_dt:
+                continue
+            filtered.append(contact)
+        except Exception:
+            filtered.append(contact)
+    return filtered
+
+
+# ----------------------------------------------------------------------------
+# Endpoints Bulk Campaigns
+# ----------------------------------------------------------------------------
+
+@router.post("/bulk-campaigns/preview")
+async def preview_bulk_campaign(
+    stage_id: str = Body(...),
+    advisor_id: str = Body(...),
+    template_sid: str = Body(...),
+    template_variables: Optional[Dict[str, str]] = Body(None),
+    date_from: Optional[str] = Body(None),
+    date_to: Optional[str] = Body(None),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Preview: cuántos contactos recibirían el bulk (sin crear campaña)."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    template_meta, err = _validate_bulk_request(stage_id, advisor_id, template_sid, template_variables)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    contacts = await _hubspot_search_contacts_for_bulk(stage_id, advisor_id)
+    filtered = await _filter_contacts_by_last_message_range(contacts, date_from, date_to)
+
+    sample = [{"firstname": c.get("firstname"), "phone": c.get("phone")[-4:]} for c in filtered[:5]]
+    return {
+        "status": "success",
+        "total": len(filtered),
+        "total_in_stage": len(contacts),
+        "sample": sample,
+        "stage_id": stage_id,
+        "stage_name": PIPELINE_STAGES.get(stage_id, stage_id),
+        "template_name": template_meta["name"],
+    }
+
+
+@router.post("/bulk-campaigns")
+async def create_bulk_campaign(
+    stage_id: str = Body(...),
+    advisor_id: str = Body(...),
+    template_sid: str = Body(...),
+    template_variables: Optional[Dict[str, str]] = Body(None),
+    date_from: Optional[str] = Body(None),
+    date_to: Optional[str] = Body(None),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Crea una campaña masiva. El processor APScheduler la procesa async."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    template_meta, err = _validate_bulk_request(stage_id, advisor_id, template_sid, template_variables)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    contacts = await _hubspot_search_contacts_for_bulk(stage_id, advisor_id)
+    filtered = await _filter_contacts_by_last_message_range(contacts, date_from, date_to)
+    if not filtered:
+        raise HTTPException(status_code=400, detail="No hay contactos en el rango especificado")
+
+    advisor_name = await _resolve_advisor_name(advisor_id)
+    auto_fill_keys = [v["key"] for v in template_meta["vars"] if v.get("auto_fill")]
+    literal_vars = {
+        v["key"]: (template_variables or {}).get(v["key"], "").strip()
+        for v in template_meta["vars"] if not v.get("auto_fill")
+    }
+
+    mongo_mgr = get_mongo_manager()
+    campaign_id = await mongo_mgr.create_bulk_campaign(
+        stage_id=stage_id,
+        stage_name=PIPELINE_STAGES.get(stage_id, stage_id),
+        template_id=template_meta["name"],
+        template_content_sid=template_sid,
+        date_from=date_from,
+        date_to=date_to,
+        contacts=filtered,
+        creator_advisor_id=advisor_id,
+        creator_advisor_name=advisor_name,
+        template_variables=literal_vars,
+        auto_fill_keys=auto_fill_keys,
+    )
+    if not campaign_id:
+        raise HTTPException(status_code=500, detail="Error creando campaña")
+
+    logger.info(
+        f"[BulkCampaign] Creada {campaign_id} stage={stage_id} advisor={advisor_id} "
+        f"total={len(filtered)} template={template_meta['name']}"
+    )
+    return {
+        "status": "success",
+        "campaign_id": campaign_id,
+        "total": len(filtered),
+        "stage_name": PIPELINE_STAGES.get(stage_id, stage_id),
+        "template_name": template_meta["name"],
+    }
+
+
+@router.get("/bulk-campaigns/{campaign_id}")
+async def get_bulk_campaign_status(
+    campaign_id: str,
+    advisor_id: str = Query(...),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Polling endpoint — solo retorna progreso si el advisor es el creador."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    doc = await mongo_mgr.get_bulk_campaign(campaign_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Campaña no encontrada")
+    if doc.get("creator_advisor_id") != advisor_id:
+        raise HTTPException(status_code=403, detail="Sin acceso a esta campaña")
+    return {
+        "campaign_id": doc["_id"],
+        "status": doc.get("status"),
+        "total_contacts": doc.get("total_contacts"),
+        "sent_count": doc.get("sent_count", 0),
+        "failed_count": doc.get("failed_count", 0),
+        "stage_name": doc.get("stage_name"),
+        "template_id": doc.get("template_id"),
+        "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+        "completed_at": doc.get("completed_at").isoformat() if doc.get("completed_at") else None,
+    }
+
+
+@router.get("/bulk-campaigns/last/{stage_id}")
+async def get_last_bulk_campaign(
+    stage_id: str,
+    advisor_id: str = Query(...),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Última campaña de esta asesora en este embudo (para el banner del modal)."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    mongo_mgr = get_mongo_manager()
+    doc = await mongo_mgr.get_last_bulk_campaign_by_stage_and_advisor(stage_id, advisor_id)
+    if not doc:
+        return {"status": "success", "last": None}
+    return {
+        "status": "success",
+        "last": {
+            "campaign_id": doc["_id"],
+            "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+            "date_from": doc.get("date_from"),
+            "date_to": doc.get("date_to"),
+            "total_contacts": doc.get("total_contacts"),
+            "sent_count": doc.get("sent_count", 0),
+            "failed_count": doc.get("failed_count", 0),
+            "status": doc.get("status"),
+            "template_id": doc.get("template_id"),
+        },
+    }
+
+
+# ----------------------------------------------------------------------------
+# Worker — Processor Bulk Campaigns
+# ----------------------------------------------------------------------------
+
+async def _send_bulk_template_message(
+    phone: str,
+    content_sid: str,
+    content_variables: dict,
+    contact_id: str,
+    campaign_id: str,
+    campaign_stage_id: str,
+) -> dict:
+    """
+    Envío bulk: NO actualiza state_manager, NO ZSET, NO Timeline HubSpot.
+    Solo Twilio + escritura mínima MongoDB messages.
+
+    Caso especial 'No Responde' (stage_id == 'other'): tras éxito, setea flag
+    Redis bulk_no_responde_pending:{phone} para auto-promoción al responder.
+
+    El contacto permanece BOT_ACTIVE invisible al panel hasta que responda.
+    """
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+
+    # Audit explícito: deja constancia exacta de qué variables recibió este contacto.
+    # Permite verificar post-envío si el {nombre} fue real o cayó al fallback.
+    logger.info(
+        f"[BulkCampaign] {campaign_id}: enviando a {phone} contact={contact_id} "
+        f"vars={content_variables}"
+    )
+
+    result = await twilio_client.send_whatsapp_message(
+        to=phone,
+        body=None,
+        content_sid=content_sid,
+        content_variables=content_variables,
+    )
+    if result.get("status") != "success":
+        return result
+
+    message_sid = result.get("message_sid")
+
+    # Guardar mensaje mínimo en MongoDB (audit + visibilidad si cliente responde)
+    try:
+        mongo_mgr = get_mongo_manager()
+        await mongo_mgr.save_message(
+            phone=phone,
+            content=f"[BULK template:{campaign_id}]",
+            sender="advisor",
+            channel="whatsapp",
+            hubspot_contact_id=contact_id,
+            message_sid=message_sid,
+            metadata={"is_bulk_send": True, "campaign_id": campaign_id, "stage_id": campaign_stage_id},
+        )
+    except Exception as e:
+        logger.warning(f"[BulkCampaign] No se pudo guardar mensaje en Mongo: {e}")
+
+    # Caso especial No Responde: setear flag para auto-promoción
+    if campaign_stage_id == "other":
+        try:
+            r = await _get_redis_client()
+            flag_key = f"{BULK_NO_RESPONDE_FLAG_PREFIX}{phone}"
+            await r.set(flag_key, campaign_id, ex=BULK_NO_RESPONDE_FLAG_TTL)
+        except Exception as e:
+            logger.warning(f"[BulkCampaign] No se pudo setear flag No Responde: {e}")
+
+    return result
+
+
+async def _process_bulk_campaign_tick():
+    """
+    Tick del scheduler — procesa hasta BULK_BATCH_SIZE contactos pending de
+    una campaña activa, con throttle conservador para no saturar Twilio/HubSpot.
+
+    Lock Redis bulk_processor_lock evita doble procesamiento concurrente.
+    Idempotencia por contacto: dedup key Redis bulk_send_dedup:{campaign}:{contact}.
+    """
+    r = None
+    try:
+        r = await _get_redis_client()
+        # Lock global del processor (NX) — solo 1 instancia activa
+        lock_acquired = await r.set(
+            BULK_PROCESSOR_LOCK_KEY, "1", ex=BULK_PROCESSOR_LOCK_TTL, nx=True
+        )
+        if not lock_acquired:
+            return
+    except Exception as e:
+        logger.warning(f"[BulkCampaign] No se pudo adquirir lock: {e}")
+        return
+
+    try:
+        mongo_mgr = get_mongo_manager()
+        active = await mongo_mgr.get_active_bulk_campaigns(limit=1)
+        if not active:
+            return
+
+        campaign = active[0]
+        campaign_id = campaign["_id"]
+        contacts = await mongo_mgr.claim_next_pending_contacts(campaign_id, BULK_BATCH_SIZE)
+        if not contacts:
+            await mongo_mgr.finalize_bulk_campaign_if_done(campaign_id)
+            return
+
+        sem = asyncio.Semaphore(BULK_MAX_CONCURRENT)
+
+        # Variables literales y auto_fill del documento Mongo (compartidas en toda la campaña)
+        campaign_literal_vars = campaign.get("template_variables") or {}
+
+        async def _process_one(contact):
+            async with sem:
+                contact_id = contact.get("contact_id")
+                phone = contact.get("phone") or ""
+                stage_id = contact.get("_campaign_stage_id")
+                content_sid = contact.get("_campaign_template_content_sid")
+
+                # Dedup por contacto (NX)
+                dedup_key = f"{BULK_SEND_DEDUP_PREFIX}{campaign_id}:{contact_id}"
+                try:
+                    dedup_set = await r.set(dedup_key, "1", ex=BULK_MESSAGE_DEDUP_TTL, nx=True)
+                except Exception:
+                    dedup_set = True
+                if not dedup_set:
+                    logger.info(f"[BulkCampaign] {campaign_id}: skip {contact_id} (dedup)")
+                    await mongo_mgr.mark_bulk_contact_sent(campaign_id, contact_id, None)
+                    return
+
+                # Resolver template_meta por SID (las plantillas viven en BULK_ALLOWED_TEMPLATES)
+                template_meta = BULK_ALLOWED_TEMPLATES.get(content_sid)
+                if not template_meta:
+                    await mongo_mgr.mark_bulk_contact_failed(
+                        campaign_id, contact_id, f"SID no permitido: {content_sid}"
+                    )
+                    return
+                content_variables = _resolve_bulk_template_variables(
+                    template_meta,
+                    {"firstname": contact.get("firstname")},
+                    campaign_literal_vars,
+                )
+
+                try:
+                    result = await _send_bulk_template_message(
+                        phone=phone,
+                        content_sid=content_sid,
+                        content_variables=content_variables,
+                        contact_id=contact_id,
+                        campaign_id=campaign_id,
+                        campaign_stage_id=stage_id,
+                    )
+                except Exception as e:
+                    await mongo_mgr.mark_bulk_contact_failed(
+                        campaign_id, contact_id, f"exception: {e}"
+                    )
+                    return
+
+                if result.get("status") == "success":
+                    await mongo_mgr.mark_bulk_contact_sent(
+                        campaign_id, contact_id, result.get("message_sid")
+                    )
+                else:
+                    await mongo_mgr.mark_bulk_contact_failed(
+                        campaign_id, contact_id, result.get("message", "")[:300]
+                    )
+
+                # Throttle entre sends (incluso paralelos por el semaphore)
+                await asyncio.sleep(BULK_SEND_SPACING_SEC)
+
+        await asyncio.gather(*[_process_one(c) for c in contacts])
+
+        # Reload counts
+        updated = await mongo_mgr.get_bulk_campaign(campaign_id)
+        if updated:
+            logger.info(
+                f"[BulkCampaign] {campaign_id}: "
+                f"{updated.get('sent_count', 0)}/{updated.get('total_contacts', 0)} sent, "
+                f"{updated.get('failed_count', 0)} failed"
+            )
+        await mongo_mgr.finalize_bulk_campaign_if_done(campaign_id)
+
+    except Exception as e:
+        logger.error(f"[BulkCampaign] Error en tick: {e}", exc_info=True)
+    finally:
+        try:
+            if r is not None:
+                await r.delete(BULK_PROCESSOR_LOCK_KEY)
+        except Exception:
+            pass
+
+
+async def _process_bulk_campaign_tick_safe():
+    """Wrapper para el scheduler — nunca propaga excepciones."""
+    try:
+        await _process_bulk_campaign_tick()
+    except Exception as e:
+        logger.error(f"[BulkCampaign] Error fatal en tick (capturado): {e}", exc_info=True)

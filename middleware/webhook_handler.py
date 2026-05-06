@@ -38,7 +38,7 @@ from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor
 
 # Importación para actualizar ventana de 24h
-from .outbound_panel import update_last_client_message
+from .outbound_panel import update_last_client_message, _promote_no_responde_to_en_conversacion
 
 # Detector de códigos de inmuebles
 from utils.property_code_detector import detect_property_code
@@ -1477,6 +1477,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         # Actualizar timestamps en background
         background_tasks.add_task(update_last_client_message, phone_normalized)
         background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
+        # Auto-promoción si responde a bulk a "No Responde" (verifica flag internamente)
+        background_tasks.add_task(_check_bulk_no_responde_promotion, phone_normalized)
 
         logger.info(f"[Webhook] ✅ Procesamiento encolado, retornando 200 OK inmediatamente")
 
@@ -1581,6 +1583,9 @@ async def _whatsapp_webhook_original_DISABLED(
 
         # Actualizar timestamp en ConversationMeta para TTL diferenciado
         background_tasks.add_task(_update_client_timestamp, phone_normalized, None)
+
+        # Auto-promoción si responde a bulk a "No Responde" (verifica flag internamente)
+        background_tasks.add_task(_check_bulk_no_responde_promotion, phone_normalized)
 
         # ════════════════════════════════════════════════════════════
         # DETECCIÓN TEMPRANA DEL CANAL DE ORIGEN (para métricas correctas)
@@ -2296,6 +2301,39 @@ async def _update_client_timestamp(phone_normalized: str, canal: Optional[str] =
         await state_manager.update_client_message_timestamp(phone_normalized, canal)
     except Exception as e:
         logger.error("[Webhook] Error actualizando timestamp cliente: %s", e)
+
+
+async def _check_bulk_no_responde_promotion(phone_normalized: str):
+    """
+    Si existe la flag Redis bulk_no_responde_pending:{phone}, promueve el contacto
+    de 'No Responde' a 'En conversación' en HubSpot. Fire-and-forget (background).
+
+    Se invoca al recibir cualquier mensaje entrante del cliente. La función verifica
+    internamente la flag — si no existe, retorna inmediatamente (caso 99% del tráfico,
+    sin presión adicional sobre HubSpot).
+    """
+    try:
+        from .outbound_panel import _get_redis_client, BULK_NO_RESPONDE_FLAG_PREFIX
+        from integrations.hubspot import hubspot_client as _hs_singleton
+
+        r = await _get_redis_client()
+        flag_key = f"{BULK_NO_RESPONDE_FLAG_PREFIX}{phone_normalized}"
+        flag_present = await r.get(flag_key)
+        if not flag_present:
+            return  # caso normal — sin bulk No Responde pendiente, NO se llama HubSpot
+
+        # Solo aquí (cliente respondió a bulk No Responde) hacemos el lookup HubSpot
+        contact_id = await _hs_singleton.search_contact_by_phone(phone_normalized)
+        if not contact_id:
+            logger.warning(
+                f"[BulkNoResponde] Flag presente para {phone_normalized} pero "
+                f"sin contact_id resuelto en HubSpot"
+            )
+            await r.delete(flag_key)
+            return
+        await _promote_no_responde_to_en_conversacion(contact_id, phone_normalized)
+    except Exception as e:
+        logger.warning(f"[BulkNoResponde] Error en promoción (non-fatal): {e}")
 
 
 async def _update_contact_channel(contact_id: str, canal_origen: str):

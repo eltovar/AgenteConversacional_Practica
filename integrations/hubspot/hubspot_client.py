@@ -248,6 +248,51 @@ class HubSpotClient:
             logger.error(f"[HubSpotClient] Error buscando contacto con propiedades: {e}", exc_info=True)
             return None
 
+    async def search_contacts_by_lifecyclestage_and_owner(
+        self,
+        stage_id: str,
+        owner_id: str,
+        limit: int = 100,
+        after: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Busca contactos en una etapa (lifecyclestage) filtrando por owner.
+        SIEMPRE filtra por owner — no se permite búsqueda global cross-asesora.
+        Soporta paginación HubSpot estándar (after = paging.next.after).
+
+        Returns: {"results": [...], "next_after": str | None, "total": int}
+        """
+        endpoint = "/crm/v3/objects/contacts/search"
+        payload = {
+            "filterGroups": [{
+                "filters": [
+                    {"propertyName": "lifecyclestage", "operator": "EQ", "value": stage_id},
+                    {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
+                ]
+            }],
+            "properties": ["firstname", "phone", "whatsapp_id", "hubspot_owner_id", "lifecyclestage"],
+            "limit": min(limit, 100),
+        }
+        if after:
+            payload["after"] = after
+
+        try:
+            response = await self._request("POST", endpoint, payload)
+            paging = response.get("paging") or {}
+            next_after = (paging.get("next") or {}).get("after")
+            return {
+                "results": response.get("results", []),
+                "next_after": next_after,
+                "total": response.get("total", len(response.get("results", []))),
+            }
+        except Exception as e:
+            logger.error(
+                f"[HubSpotClient] Error buscando contactos por stage+owner "
+                f"(stage={stage_id}, owner={owner_id}): {e}",
+                exc_info=True,
+            )
+            raise
+
     async def search_contacts_by_email(self, email: str) -> Dict[str, Any]:
         """
         Busca contactos por email usando la API de búsqueda.

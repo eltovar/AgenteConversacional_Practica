@@ -1193,6 +1193,7 @@ function _rebuildPortalChips(contacts) {
 function onStageFilterChange(val) {
     activeStageFilter = val;
     _applyFiltersAndRender();
+    _updateBulkButtonVisibility();
 }
 
 /**
@@ -6978,3 +6979,398 @@ async function submitAppointment(event) {
         submitBtn.textContent = editingId ? 'Guardar Cambios' : 'Agendar Cita';
     }
 }
+
+// =========================================================================
+// BULK MESSAGING — Mensaje masivo por embudo (per-asesora)
+// =========================================================================
+
+const BULK_EXCLUDED_STAGES = [
+    "1326631578",  // Nuevo Lead
+    "1326623075",  // En conversación
+    "evangelist",  // Cerrado perdido
+    "1326632628",  // Ana Contratos
+    "1326632209"   // Pagos y Servicios Publicos
+];
+
+// Plantillas permitidas para envío masivo. La var key='1' (nombre) siempre se
+// auto-fill desde HubSpot per-contacto. Las demás se escriben en el modal.
+const BULK_TEMPLATES = [
+    {
+        sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
+        name: 'aun_en_busqueda',
+        label: '¿Aún estás interesado?',
+        preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
+        vars: [
+            { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' }
+        ]
+    },
+    {
+        sid: 'HX287a1c005459a6ceaec90a35108330c3',
+        name: 'seguimiento_personalizado',
+        label: 'Seguimiento Personalizado',
+        preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
+        vars: [
+            { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' },
+            { key: '2', label: 'Mensaje personalizado' }
+        ]
+    }
+];
+
+let _bulkPreviewDebounce = null;
+let _bulkPollTimer = null;
+let _activeBulkCampaignId = null;
+
+function _updateBulkButtonVisibility() {
+    const btn = document.getElementById('bulkMessagingBtn');
+    if (!btn) return;
+    if (activeStageFilter && !BULK_EXCLUDED_STAGES.includes(activeStageFilter)) {
+        btn.classList.remove('hidden');
+    } else {
+        btn.classList.add('hidden');
+    }
+}
+
+function _formatDateShort(isoStr) {
+    if (!isoStr) return '—';
+    try {
+        const d = new Date(isoStr);
+        if (isNaN(d.getTime())) return isoStr.slice(0, 10);
+        return d.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch (_) { return isoStr.slice(0, 10); }
+}
+
+async function openBulkMessagingModal() {
+    if (!activeStageFilter || BULK_EXCLUDED_STAGES.includes(activeStageFilter)) {
+        alert('Selecciona un embudo elegible primero.');
+        return;
+    }
+    if (!ADVISOR_ID) {
+        alert('No se detectó tu identificador de asesora. Recarga el panel.');
+        return;
+    }
+
+    const stageObj = PIPELINE_STAGES.find(s => s.id === activeStageFilter);
+    document.getElementById('bulkStageName').textContent = stageObj ? stageObj.name : activeStageFilter;
+    document.getElementById('bulkPreview').textContent = 'Cargando contactos...';
+    document.getElementById('bulkSendCount').textContent = '0';
+    document.getElementById('bulkSendBtn').disabled = true;
+
+    // Fechas: últimos 30 días por default
+    const today = new Date();
+    const thirtyDaysAgo = new Date(today.getTime() - 30 * 86400000);
+    document.getElementById('bulkDateFrom').value = thirtyDaysAgo.toISOString().slice(0, 10);
+    document.getElementById('bulkDateTo').value = today.toISOString().slice(0, 10);
+
+    // Cargar las 2 plantillas permitidas para bulk
+    _populateBulkTemplateSelect();
+    onBulkTemplateChange();  // renderiza vars de la primera plantilla
+
+    // Listeners para preview live (debounce)
+    ['bulkDateFrom', 'bulkDateTo'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el._bulkBound) {
+            el.addEventListener('change', _scheduleBulkPreview);
+            el._bulkBound = true;
+        }
+    });
+
+    // Cargar último envío de esta asesora en este embudo
+    _loadLastBulkCampaignBanner();
+
+    document.getElementById('bulkMessagingModal').classList.remove('hidden');
+    _scheduleBulkPreview();
+}
+
+function closeBulkMessagingModal() {
+    document.getElementById('bulkMessagingModal').classList.add('hidden');
+}
+
+function _populateBulkTemplateSelect() {
+    const sel = document.getElementById('bulkTemplateSelect');
+    if (!sel) return;
+    sel.innerHTML = BULK_TEMPLATES.map(t =>
+        `<option value="${t.sid}">${t.label}</option>`
+    ).join('');
+}
+
+function _getSelectedBulkTemplate() {
+    const sel = document.getElementById('bulkTemplateSelect');
+    if (!sel) return null;
+    return BULK_TEMPLATES.find(t => t.sid === sel.value) || null;
+}
+
+function onBulkTemplateChange() {
+    const tpl = _getSelectedBulkTemplate();
+    const container = document.getElementById('bulkVarsContainer');
+    if (!tpl || !container) return;
+
+    container.innerHTML = tpl.vars.map(v => {
+        if (v.auto_fill) {
+            // Variable auto-fill per-contacto — info inmutable
+            return `
+            <div class="bg-gray-50 border border-gray-200 rounded px-3 py-2">
+                <div class="text-xs text-gray-700 font-medium">{${v.key}} ${v.label}</div>
+                <div class="text-xs text-gray-500 italic mt-0.5">
+                    🔄 Se usará el nombre de cada contacto automáticamente.
+                </div>
+            </div>`;
+        }
+        const existingVal = document.getElementById(`bulkVar_${v.key}`)?.value || '';
+        return `
+        <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">
+                {${v.key}} ${v.label} <span class="text-red-500">*</span>
+            </label>
+            <input type="text" id="bulkVar_${v.key}" required oninput="_updateBulkPreviewBox(); _scheduleBulkPreview();"
+                class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#F5C400]"
+                placeholder="Ej: te escribo para preguntar si aún estás buscando"
+                value="${existingVal.replace(/"/g, '&quot;')}">
+        </div>`;
+    }).join('');
+    _updateBulkPreviewBox();
+    _scheduleBulkPreview();
+}
+
+function _updateBulkPreviewBox() {
+    const tpl = _getSelectedBulkTemplate();
+    const box = document.getElementById('bulkPreviewBox');
+    if (!tpl || !box) return;
+    let rendered = tpl.preview;
+    tpl.vars.forEach(v => {
+        let val;
+        if (v.auto_fill === 'firstname') {
+            val = '[Nombre del contacto]';
+        } else {
+            val = document.getElementById(`bulkVar_${v.key}`)?.value.trim() || `{${v.key}}`;
+        }
+        rendered = rendered.split(`{${v.key}}`).join(val);
+    });
+    box.textContent = `"${rendered}"`;
+    box.classList.remove('hidden');
+}
+
+function _collectBulkLiteralVars() {
+    const tpl = _getSelectedBulkTemplate();
+    if (!tpl) return null;
+    const out = {};
+    let hasMissing = false;
+    tpl.vars.forEach(v => {
+        if (v.auto_fill) return;  // se resuelve per-contacto en backend
+        const val = document.getElementById(`bulkVar_${v.key}`)?.value.trim() || '';
+        if (!val) hasMissing = true;
+        out[v.key] = val;
+    });
+    return { vars: out, hasMissing, template: tpl };
+}
+
+async function _loadLastBulkCampaignBanner() {
+    const banner = document.getElementById('bulkLastInfo');
+    if (!banner) return;
+    try {
+        const url = `${BASE_URL}/bulk-campaigns/last/${encodeURIComponent(activeStageFilter)}?advisor_id=${encodeURIComponent(ADVISOR_ID)}`;
+        const resp = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
+        const data = await resp.json();
+        if (!resp.ok || !data.last) {
+            banner.textContent = 'Sin envíos masivos previos en este embudo.';
+            return;
+        }
+        const last = data.last;
+        const sent = last.sent_count || 0;
+        const total = last.total_contacts || 0;
+        banner.innerHTML = `
+            <strong>Último envío:</strong> ${_formatDateShort(last.created_at)} —
+            rango ${last.date_from || '—'} → ${last.date_to || '—'} —
+            ${sent}/${total} enviados (${last.status})
+        `;
+    } catch (e) {
+        console.error('[Bulk] Error cargando banner:', e);
+        banner.textContent = 'No se pudo cargar el histórico.';
+    }
+}
+
+function _scheduleBulkPreview() {
+    if (_bulkPreviewDebounce) clearTimeout(_bulkPreviewDebounce);
+    _bulkPreviewDebounce = setTimeout(_loadBulkCampaignPreview, 500);
+}
+
+async function _loadBulkCampaignPreview() {
+    const dateFrom = document.getElementById('bulkDateFrom').value || null;
+    const dateTo = document.getElementById('bulkDateTo').value || null;
+    const collected = _collectBulkLiteralVars();
+    const previewEl = document.getElementById('bulkPreview');
+    const btn = document.getElementById('bulkSendBtn');
+    const countEl = document.getElementById('bulkSendCount');
+
+    if (!collected || !collected.template) {
+        previewEl.textContent = 'Selecciona una plantilla.';
+        btn.disabled = true;
+        countEl.textContent = '0';
+        return;
+    }
+
+    previewEl.textContent = 'Calculando...';
+    btn.disabled = true;
+    try {
+        const resp = await fetch(`${BASE_URL}/bulk-campaigns/preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({
+                stage_id: activeStageFilter,
+                advisor_id: ADVISOR_ID,
+                template_sid: collected.template.sid,
+                template_variables: collected.vars,
+                date_from: dateFrom,
+                date_to: dateTo
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            previewEl.textContent = `Error: ${data.detail || 'desconocido'}`;
+            return;
+        }
+        const total = data.total || 0;
+        const totalStage = data.total_in_stage || 0;
+        countEl.textContent = total;
+        previewEl.innerHTML = `
+            <strong>${total}</strong> contactos serán contactados
+            (de ${totalStage} totales en "${data.stage_name}" asignados a ti).
+            ${total !== totalStage ? '<br><span class="text-xs text-gray-600">El rango de fechas filtra por último mensaje del cliente.</span>' : ''}
+        `;
+        btn.disabled = total === 0 || collected.hasMissing;
+    } catch (e) {
+        previewEl.textContent = 'Error de red.';
+        console.error('[Bulk] preview error:', e);
+    }
+}
+
+async function submitBulkCampaign() {
+    const dateFrom = document.getElementById('bulkDateFrom').value || null;
+    const dateTo = document.getElementById('bulkDateTo').value || null;
+    const collected = _collectBulkLiteralVars();
+    const stageName = document.getElementById('bulkStageName').textContent;
+    const total = parseInt(document.getElementById('bulkSendCount').textContent, 10) || 0;
+
+    if (!collected || !collected.template || total === 0) return;
+    if (collected.hasMissing) {
+        alert('Completa todas las variables marcadas con *.');
+        return;
+    }
+
+    const ok = confirm(
+        `Vas a enviar a ${total} contactos TUYOS en "${stageName}".\n\n` +
+        `Plantilla: ${collected.template.label}\n` +
+        `Rango: ${dateFrom || 'cualquiera'} → ${dateTo || 'cualquiera'}\n\n` +
+        `Esta acción no se puede deshacer. ¿Continuar?`
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('bulkSendBtn');
+    btn.disabled = true;
+    btn.textContent = 'Creando campaña...';
+    try {
+        const resp = await fetch(`${BASE_URL}/bulk-campaigns`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({
+                stage_id: activeStageFilter,
+                advisor_id: ADVISOR_ID,
+                template_sid: collected.template.sid,
+                template_variables: collected.vars,
+                date_from: dateFrom,
+                date_to: dateTo
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            alert(`Error: ${data.detail || 'desconocido'}`);
+            btn.disabled = false;
+            btn.textContent = `Enviar a ${total} contactos`;
+            return;
+        }
+        closeBulkMessagingModal();
+        _activeBulkCampaignId = data.campaign_id;
+        sessionStorage.setItem('_activeBulkCampaign', JSON.stringify({
+            id: data.campaign_id, stage_name: data.stage_name, total: data.total
+        }));
+        _showBulkProgressCard(data.stage_name, 0, data.total);
+        _startBulkCampaignPolling(data.campaign_id);
+    } catch (e) {
+        alert('Error de red al crear la campaña.');
+        console.error('[Bulk] submit error:', e);
+        btn.disabled = false;
+        btn.textContent = `Enviar a ${total} contactos`;
+    }
+}
+
+function _showBulkProgressCard(stageName, sent, total) {
+    const card = document.getElementById('bulkProgressCard');
+    if (!card) return;
+    document.getElementById('bulkProgressTitle').textContent = `Campaña: ${stageName}`;
+    document.getElementById('bulkProgressText').textContent = `${sent} / ${total} enviados`;
+    const pct = total > 0 ? Math.round((sent / total) * 100) : 0;
+    document.getElementById('bulkProgressBar').style.width = `${pct}%`;
+    card.classList.remove('hidden');
+}
+
+function hideBulkProgressCard() {
+    const card = document.getElementById('bulkProgressCard');
+    if (card) card.classList.add('hidden');
+    if (_bulkPollTimer) {
+        clearInterval(_bulkPollTimer);
+        _bulkPollTimer = null;
+    }
+    sessionStorage.removeItem('_activeBulkCampaign');
+    _activeBulkCampaignId = null;
+}
+
+function _startBulkCampaignPolling(campaignId) {
+    if (_bulkPollTimer) clearInterval(_bulkPollTimer);
+    _bulkPollTimer = setInterval(() => _pollBulkCampaign(campaignId), 5000);
+    _pollBulkCampaign(campaignId);  // primer hit inmediato
+}
+
+async function _pollBulkCampaign(campaignId) {
+    try {
+        const resp = await fetch(
+            `${BASE_URL}/bulk-campaigns/${campaignId}?advisor_id=${encodeURIComponent(ADVISOR_ID)}`,
+            { headers: { 'X-API-Key': API_KEY } }
+        );
+        if (!resp.ok) {
+            // 403/404 → detener polling
+            if (resp.status === 403 || resp.status === 404) {
+                hideBulkProgressCard();
+            }
+            return;
+        }
+        const data = await resp.json();
+        const sent = data.sent_count || 0;
+        const failed = data.failed_count || 0;
+        const total = data.total_contacts || 0;
+        _showBulkProgressCard(data.stage_name || '—', sent, total);
+        if (data.status === 'completed' || data.status === 'failed') {
+            clearInterval(_bulkPollTimer);
+            _bulkPollTimer = null;
+            const ok = sent;
+            const ko = failed;
+            setTimeout(() => {
+                hideBulkProgressCard();
+                alert(`Campaña finalizada: ${ok} enviados, ${ko} fallidos.`);
+            }, 800);
+        }
+    } catch (e) {
+        console.warn('[Bulk] polling error:', e);
+    }
+}
+
+// Reanudar polling tras F5 si había campaña activa
+(function _restoreActiveBulkCampaign() {
+    try {
+        const raw = sessionStorage.getItem('_activeBulkCampaign');
+        if (!raw) return;
+        const obj = JSON.parse(raw);
+        if (!obj || !obj.id) return;
+        _activeBulkCampaignId = obj.id;
+        _showBulkProgressCard(obj.stage_name || '—', 0, obj.total || 0);
+        _startBulkCampaignPolling(obj.id);
+    } catch (_) {}
+})();

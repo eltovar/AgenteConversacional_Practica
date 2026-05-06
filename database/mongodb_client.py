@@ -262,6 +262,16 @@ class MongoDBManager:
                 name="idx_sched_contact_dt"
             )
 
+            # Índices para bulk_campaigns (mensajes masivos por embudo)
+            await self.db.bulk_campaigns.create_index(
+                [("creator_advisor_id", ASCENDING), ("stage_id", ASCENDING), ("created_at", DESCENDING)],
+                name="idx_bulk_advisor_stage_created"
+            )
+            await self.db.bulk_campaigns.create_index(
+                [("status", ASCENDING), ("created_at", ASCENDING)],
+                name="idx_bulk_status_created"
+            )
+
             self._indexes_created = True
             logger.info("[MongoDB] Índices creados/verificados")
 
@@ -1689,6 +1699,248 @@ class MongoDBManager:
             return result.modified_count > 0
         except Exception as e:
             logger.error(f"[MongoDB] Error marcando failed {message_id}: {e}")
+            return False
+
+    # =========================================================================
+    # BULK CAMPAIGNS — Mensajes masivos por embudo (per-asesora)
+    # =========================================================================
+
+    async def create_bulk_campaign(
+        self,
+        stage_id: str,
+        stage_name: str,
+        template_id: str,
+        template_content_sid: str,
+        date_from: Optional[str],
+        date_to: Optional[str],
+        contacts: List[Dict[str, Any]],
+        creator_advisor_id: str,
+        creator_advisor_name: str,
+        template_variables: Optional[Dict[str, str]] = None,
+        auto_fill_keys: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        """
+        Crea una nueva campaña masiva. Cada contacto inicia con status="pending".
+        template_variables: dict de variables LITERALES escritas por la asesora
+            (aplican a todos los contactos), ej: {"2": "te escribo para..."}.
+        auto_fill_keys: lista de keys que se resuelven per-contacto en el worker
+            desde HubSpot (ej. ["1"] = nombre).
+        Retorna el campaign_id (str ObjectId) o None.
+        """
+        if not await self.connect():
+            return None
+        now = datetime.now(TIMEZONE)
+        normalized_contacts = []
+        for c in contacts:
+            normalized_contacts.append({
+                "contact_id": c.get("contact_id"),
+                "phone": c.get("phone"),
+                "firstname": c.get("firstname") or "",
+                "owner_id": c.get("owner_id") or creator_advisor_id,
+                "status": "pending",
+                "sent_at": None,
+                "message_sid": None,
+                "error": None,
+                "attempts": 0,
+            })
+        doc = {
+            "stage_id": stage_id,
+            "stage_name": stage_name,
+            "template_id": template_id,
+            "template_content_sid": template_content_sid,
+            "template_variables": template_variables or {},
+            "auto_fill_keys": auto_fill_keys or [],
+            "date_from": date_from,
+            "date_to": date_to,
+            "status": "pending",
+            "total_contacts": len(normalized_contacts),
+            "sent_count": 0,
+            "failed_count": 0,
+            "contacts": normalized_contacts,
+            "creator_advisor_id": creator_advisor_id,
+            "creator_advisor_name": creator_advisor_name,
+            "created_at": now,
+            "started_at": None,
+            "completed_at": None,
+        }
+        try:
+            result = await self.db.bulk_campaigns.insert_one(doc)
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error creando campaña: {e}")
+            return None
+
+    async def get_bulk_campaign(self, campaign_id: str) -> Optional[Dict[str, Any]]:
+        """Lee una campaña por su _id (str)."""
+        if not await self.connect():
+            return None
+        try:
+            doc = await self.db.bulk_campaigns.find_one({"_id": ObjectId(campaign_id)})
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return doc
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error get_bulk_campaign: {e}")
+            return None
+
+    async def get_active_bulk_campaigns(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Lista campañas pending o in_progress, ordenadas por created_at asc."""
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.bulk_campaigns.find(
+                {"status": {"$in": ["pending", "in_progress"]}}
+            ).sort("created_at", ASCENDING).limit(limit)
+            docs = []
+            async for doc in cursor:
+                doc["_id"] = str(doc["_id"])
+                docs.append(doc)
+            return docs
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error get_active: {e}")
+            return []
+
+    async def claim_next_pending_contacts(
+        self,
+        campaign_id: str,
+        batch_size: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Atomic: marca hasta N contactos pending → in_progress y los devuelve.
+        Si la campaña estaba pending, también la mueve a in_progress.
+        Idempotente: si un worker concurrente ya tomó el contacto, no se selecciona.
+        """
+        if not await self.connect():
+            return []
+        try:
+            # Promover campaña a in_progress (set started_at solo la primera vez)
+            await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id), "status": "pending"},
+                {"$set": {"status": "in_progress", "started_at": datetime.now(TIMEZONE)}}
+            )
+
+            claimed = []
+            for _ in range(batch_size):
+                # findOneAndUpdate atómico: marca el primer contacto pending como in_progress
+                result = await self.db.bulk_campaigns.find_one_and_update(
+                    {"_id": ObjectId(campaign_id), "contacts.status": "pending"},
+                    {"$set": {"contacts.$.status": "in_progress"}},
+                    projection={"contacts.$": 1, "creator_advisor_id": 1, "creator_advisor_name": 1,
+                                "stage_id": 1, "template_content_sid": 1, "template_id": 1,
+                                "template_variables": 1, "auto_fill_keys": 1},
+                )
+                if not result or not result.get("contacts"):
+                    break
+                contact = result["contacts"][0]
+                contact["_campaign_creator_advisor_id"] = result.get("creator_advisor_id")
+                contact["_campaign_creator_advisor_name"] = result.get("creator_advisor_name")
+                contact["_campaign_stage_id"] = result.get("stage_id")
+                contact["_campaign_template_content_sid"] = result.get("template_content_sid")
+                contact["_campaign_template_id"] = result.get("template_id")
+                claimed.append(contact)
+            return claimed
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error claim_next: {e}")
+            return []
+
+    async def mark_bulk_contact_sent(
+        self,
+        campaign_id: str,
+        contact_id: str,
+        message_sid: Optional[str],
+    ) -> bool:
+        """Marca un contacto como enviado y aumenta sent_count."""
+        if not await self.connect():
+            return False
+        try:
+            now = datetime.now(TIMEZONE)
+            result = await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id), "contacts.contact_id": contact_id},
+                {
+                    "$set": {
+                        "contacts.$.status": "sent",
+                        "contacts.$.sent_at": now,
+                        "contacts.$.message_sid": message_sid,
+                    },
+                    "$inc": {"sent_count": 1, "contacts.$.attempts": 1},
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error mark_sent: {e}")
+            return False
+
+    async def mark_bulk_contact_failed(
+        self,
+        campaign_id: str,
+        contact_id: str,
+        error: str,
+    ) -> bool:
+        """Marca un contacto como fallido con el error."""
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id), "contacts.contact_id": contact_id},
+                {
+                    "$set": {
+                        "contacts.$.status": "failed",
+                        "contacts.$.error": (error or "")[:300],
+                    },
+                    "$inc": {"failed_count": 1, "contacts.$.attempts": 1},
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error mark_failed: {e}")
+            return False
+
+    async def get_last_bulk_campaign_by_stage_and_advisor(
+        self,
+        stage_id: str,
+        advisor_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Última campaña creada por (stage, asesora) para mostrar en el modal."""
+        if not await self.connect():
+            return None
+        try:
+            doc = await self.db.bulk_campaigns.find_one(
+                {"stage_id": stage_id, "creator_advisor_id": advisor_id},
+                sort=[("created_at", DESCENDING)],
+            )
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return doc
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error last_by_stage_advisor: {e}")
+            return None
+
+    async def finalize_bulk_campaign_if_done(self, campaign_id: str) -> bool:
+        """Si no quedan contactos pending/in_progress, marca status=completed."""
+        if not await self.connect():
+            return False
+        try:
+            doc = await self.db.bulk_campaigns.find_one(
+                {"_id": ObjectId(campaign_id)},
+                projection={"contacts.status": 1, "status": 1},
+            )
+            if not doc:
+                return False
+            if doc.get("status") == "completed":
+                return False
+            still_pending = any(
+                c.get("status") in ("pending", "in_progress")
+                for c in doc.get("contacts", [])
+            )
+            if still_pending:
+                return False
+            await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id)},
+                {"$set": {"status": "completed", "completed_at": datetime.now(TIMEZONE)}}
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error finalize: {e}")
             return False
 
     async def close(self):

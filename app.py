@@ -1148,6 +1148,19 @@ async def startup_event():
         )
         logger.info("[STARTUP] Scheduler de mensajes programados HABILITADO (cada 1 min)")
 
+        # Bulk campaigns processor (cada 15s) — procesa lotes pequeños de mensajes masivos
+        from middleware.outbound_panel import _process_bulk_campaign_tick_safe
+        scheduler.add_job(
+            _process_bulk_campaign_tick_safe,
+            trigger=IntervalTrigger(seconds=15),
+            id="bulk_campaign_processor",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+            replace_existing=True,
+        )
+        logger.info("[STARTUP] Bulk campaign processor HABILITADO (cada 15s)")
+
         scheduler.start()
         logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)
 

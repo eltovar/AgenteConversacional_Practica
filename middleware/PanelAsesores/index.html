@@ -102,6 +102,13 @@
                         <option value="">🏷 Todas las etapas</option>
                     </select>
                 </div>
+                <!-- Botón Mensaje Masivo (solo aparece con embudo elegible) -->
+                <button id="bulkMessagingBtn"
+                        onclick="openBulkMessagingModal()"
+                        class="hidden mt-2 w-full text-sm bg-[#F5C400] text-[#1A1A1A] font-semibold rounded px-3 py-1.5 hover:bg-[#D4A800] transition-colors"
+                        aria-label="Enviar mensaje masivo al embudo seleccionado">
+                    📢 Mensaje masivo a este embudo
+                </button>
                 <!-- Buscador de contactos -->
                 <div class="mt-2">
                     <input type="text"
@@ -428,6 +435,71 @@
         </div>
     </div>
     <!-- Modal: Crear Contacto Manualmente -->
+    <!-- Modal Mensaje Masivo -->
+    <div id="bulkMessagingModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
+            <div class="p-4 border-b flex justify-between items-center bg-[#FEFCE8]">
+                <h2 class="text-lg font-semibold text-[#1A1A1A]">
+                    📢 Mensaje Masivo — <span id="bulkStageName" class="text-[#D4A800]">—</span>
+                </h2>
+                <button onclick="closeBulkMessagingModal()" class="text-gray-500 hover:text-gray-700 text-xl" aria-label="Cerrar">&times;</button>
+            </div>
+            <div class="p-4 space-y-4">
+                <!-- Banner último envío -->
+                <div id="bulkLastInfo" class="text-xs bg-gray-50 border-l-4 border-[#F5C400] px-3 py-2 rounded text-gray-700">
+                    Cargando histórico...
+                </div>
+                <!-- Rango de fechas -->
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-xs text-gray-700 font-medium" for="bulkDateFrom">Desde (último mensaje cliente)</label>
+                        <input type="date" id="bulkDateFrom" class="w-full border rounded px-2 py-1.5 mt-1 focus:outline-none focus:ring-2 focus:ring-[#F5C400]">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-700 font-medium" for="bulkDateTo">Hasta</label>
+                        <input type="date" id="bulkDateTo" class="w-full border rounded px-2 py-1.5 mt-1 focus:outline-none focus:ring-2 focus:ring-[#F5C400]">
+                    </div>
+                </div>
+                <!-- Selector de plantilla -->
+                <div>
+                    <label class="text-xs text-gray-700 font-medium" for="bulkTemplateSelect">Plantilla a enviar</label>
+                    <select id="bulkTemplateSelect" onchange="onBulkTemplateChange()" class="w-full border rounded px-2 py-1.5 mt-1 focus:outline-none focus:ring-2 focus:ring-[#F5C400]"></select>
+                </div>
+                <!-- Variables dinámicas -->
+                <div id="bulkVarsContainer" class="space-y-2"></div>
+                <!-- Preview del mensaje -->
+                <div id="bulkPreviewBox" class="hidden bg-amber-50 border-l-4 border-amber-400 px-3 py-2 rounded text-sm text-amber-900 italic"></div>
+                <!-- Conteo de contactos -->
+                <div id="bulkPreview" class="bg-blue-50 border-l-4 border-blue-500 px-3 py-2 rounded text-sm text-blue-900">
+                    Selecciona fechas y plantilla para ver el conteo.
+                </div>
+            </div>
+            <div class="p-4 border-t flex justify-end gap-2">
+                <button onclick="closeBulkMessagingModal()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300 transition-colors">Cancelar</button>
+                <button id="bulkSendBtn"
+                        onclick="submitBulkCampaign()"
+                        disabled
+                        class="px-4 py-2 bg-[#F5C400] text-[#1A1A1A] font-semibold rounded hover:bg-[#D4A800] disabled:bg-gray-400 disabled:text-white disabled:cursor-not-allowed transition-colors">
+                    Enviar a <span id="bulkSendCount">0</span> contactos
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Progress card flotante -->
+    <div id="bulkProgressCard"
+         class="hidden fixed top-4 right-4 z-40 bg-white border-l-4 border-[#F5C400] rounded-lg shadow-lg px-4 py-3 max-w-xs"
+         aria-live="polite">
+        <div class="flex justify-between items-start gap-2">
+            <div class="text-sm font-semibold text-[#1A1A1A]" id="bulkProgressTitle">Campaña en curso</div>
+            <button onclick="hideBulkProgressCard()" class="text-gray-400 hover:text-gray-600 text-sm" aria-label="Ocultar">&times;</button>
+        </div>
+        <div class="text-xs text-gray-600 mt-1" id="bulkProgressText">0 / 0</div>
+        <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+            <div id="bulkProgressBar" class="bg-[#F5C400] h-2 rounded-full transition-all" style="width:0%"></div>
+        </div>
+    </div>
+
     <div id="createContactModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden">
         <div class="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
             <div class="p-4 border-b flex justify-between items-center bg-[#FEFCE8]">

@@ -282,6 +282,29 @@ class TwilioClient:
                     f"[WAMidCapture] Excepción intento {attempt+1} para IM={im_sid[:20]}: {e}"
                 )
 
+    async def _post_with_429_retry(self, client, url, **kwargs):
+        """
+        POST con retry exponencial para 429 (Twilio rate limit).
+        Máx 3 intentos. Respeta header Retry-After si está presente.
+        Defensivo — protege envíos masivos de no saturar Twilio.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            resp = await client.post(url, **kwargs)
+            if resp.status_code != 429 or attempt == max_retries - 1:
+                return resp
+            retry_after_hdr = resp.headers.get("Retry-After")
+            try:
+                wait_s = float(retry_after_hdr) if retry_after_hdr else 2.0 * (2 ** attempt)
+            except (TypeError, ValueError):
+                wait_s = 2.0 * (2 ** attempt)
+            logger.warning(
+                f"[TwilioClient] 429 rate limit — esperando {wait_s:.1f}s "
+                f"(intento {attempt + 1}/{max_retries})"
+            )
+            await asyncio.sleep(wait_s)
+        return resp
+
     async def _send_via_conversations(
         self,
         conversation_sid: str,
@@ -313,7 +336,7 @@ class TwilioClient:
 
         try:
             client = self._get_http_client()
-            resp = await client.post(url, auth=(sid, token), data=payload)
+            resp = await self._post_with_429_retry(client, url, auth=(sid, token), data=payload)
             if resp.status_code in (200, 201):
                 data = resp.json()
                 im_sid = data.get("sid")
@@ -475,10 +498,11 @@ class TwilioClient:
             else:
                 logger.debug(f"[TwilioClient] Enviando mensaje de texto (sin multimedia)")
 
-            response = await client.post(
+            response = await self._post_with_429_retry(
+                client,
                 url,
                 auth=(sid, token),
-                data=payload
+                data=payload,
             )
 
             if response.status_code in (200, 201):

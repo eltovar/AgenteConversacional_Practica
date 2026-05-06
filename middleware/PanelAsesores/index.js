@@ -1816,7 +1816,7 @@ function _buildPipelineDropdown(contactIdForDropdown, currentStageForDropdown) {
     const options = PIPELINE_STAGES.map(stage =>
         `<option value="${stage.id}" ${stage.id === currentStageForDropdown ? 'selected' : ''}>${stage.name}</option>`
     ).join('');
-    return `<select class="text-xs text-gray-700 bg-transparent border-0 cursor-pointer font-medium focus:ring-0 focus:outline-none max-w-[140px]"
+    return `<select class="stage-pill-select"
                 data-contact-id="${contactIdForDropdown}"
                 onchange="updateDealStage('${contactIdForDropdown}', this.value)"
                 onclick="event.stopPropagation()"
@@ -2487,7 +2487,7 @@ function renderChatBubbles(messages) {
                         ${templateBadge}
                         ${quoteHtml}
                         ${mediaHtml}
-                        <p class="text-gray-800 whitespace-pre-wrap" data-msg-body="1" style="${_displayMsg ? '' : 'display:none;'}">${escapeHtml(_displayMsg || '')}</p>
+                        <p class="text-gray-800 whitespace-pre-wrap" data-msg-body="1" style="${_displayMsg ? '' : 'display:none;'}">${linkifyHtml(_displayMsg || '')}</p>
                         <p class="text-xs text-gray-500 text-right mt-1">${timestamp}${_editedChip}${_statusHtml}</p>
                     </div>
                 </div>
@@ -2521,6 +2521,24 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Convierte URLs en el texto a elementos <a> clickeables en el panel.
+ * Escapa primero cada segmento de texto para prevenir XSS.
+ * Solo afecta la vista del panel (no modifica el mensaje enviado al cliente).
+ */
+function linkifyHtml(rawText) {
+    if (!rawText) return '';
+    const URL_RX = /(https?:\/\/[^\s<>"']{4,})/gi;
+    const segments = rawText.split(URL_RX);
+    return segments.map((seg, i) => {
+        if (i % 2 === 1) {
+            const safe = escapeHtml(seg);
+            return `<a href="${safe}" target="_blank" rel="noopener noreferrer" class="text-blue-600 underline hover:text-blue-800 break-all">${safe}</a>`;
+        }
+        return escapeHtml(seg);
+    }).join('');
 }
 
 // NOTA v2.0: showSyncingState() eliminado - MongoDB proporciona datos en tiempo real
@@ -3525,6 +3543,69 @@ function cancelRecording() {
 }
 
 // =========================================================================
+// URL ROUTING — sincronización SPA de la URL con el contacto abierto
+// =========================================================================
+
+/**
+ * Actualiza el parámetro `phone` de la URL sin recargar la página.
+ * Preserva todos los demás params (key=, advisor=, etc.).
+ * null → elimina el param (estado vacío del panel).
+ */
+function _syncUrlToContact(phone) {
+    const p = new URLSearchParams(window.location.search);
+    if (phone) {
+        p.set('phone', phone);
+    } else {
+        p.delete('phone');
+    }
+    history.replaceState({ phone: phone || null }, '', `?${p.toString()}`);
+}
+
+/**
+ * Deselecciona el contacto activo y restaura el panel al estado vacío.
+ * Actualiza la URL eliminando el param phone=.
+ */
+function deselectContact() {
+    if (!currentContactId && !currentPhone) return;
+    currentContactId = null;
+    currentPhone = null;
+    currentCanal = null;
+    currentName = null;
+    isFirstChatLoad = true;
+    renderedContactId = null;
+
+    _syncUrlToContact(null);
+
+    // Deseleccionar visual en la lista
+    document.querySelectorAll('.contact-item.active').forEach(el => el.classList.remove('active'));
+
+    // Restaurar encabezado
+    const nameEl = document.getElementById('contactName');
+    if (nameEl) nameEl.textContent = 'Selecciona un contacto';
+    const phoneEl = document.getElementById('contactPhone');
+    if (phoneEl) phoneEl.textContent = '';
+
+    // Restaurar área central vacía
+    const chatMessages = document.getElementById('chatMessages');
+    if (chatMessages) chatMessages.innerHTML = '';
+
+    // Deshabilitar input y botones
+    const msgInput = document.getElementById('messageInput');
+    if (msgInput) msgInput.disabled = true;
+    const sendBtn = document.getElementById('sendBtn');
+    if (sendBtn) sendBtn.disabled = true;
+    document.getElementById('editNameBtn')?.classList.add('hidden');
+    document.getElementById('closeConversationBtn')?.classList.add('hidden');
+    document.getElementById('transferContactBtn')?.classList.add('hidden');
+    document.getElementById('detailsPanelToggle')?.classList.add('hidden');
+    document.getElementById('mainGrid')?.classList.remove('details-hidden');
+    const banner = document.getElementById('handoffBanner');
+    if (banner) banner.classList.add('hidden');
+
+    _updateDetailsPanel(null);
+}
+
+// =========================================================================
 // FUNCIONES DE INTERACCION
 // =========================================================================
 
@@ -3590,6 +3671,9 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     currentPhone = phone;
     currentCanal = canal;  // Guardar canal para segregacion
     currentName = displayName || null;
+
+    // Sincronizar URL para que F5 restaure este contacto
+    _syncUrlToContact(phone);
 
     // Limpiar estado del template picker y reply al cambiar de contacto
     activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
@@ -3862,7 +3946,9 @@ function _updateDetailsPanel(contact) {
         </div>
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
             <span class="text-gray-500 text-xs">Etapa</span>
-            <span class="text-xs font-semibold text-gray-800">${stageLabel}</span>
+            ${contact.contact_id
+                ? _buildPipelineDropdown(contact.contact_id, contact.current_stage)
+                : `<span class="text-xs font-semibold text-gray-800">${stageLabel}</span>`}
         </div>
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
             <span class="text-gray-500 text-xs">Teléfono</span>
@@ -4931,6 +5017,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // Sin fecha por defecto: el panel arranca mostrando todos los contactos activos.
     // El usuario elige un día específico para filtrar historial.
     (function _initDefaultDates() {})();
+
+    // Esc: deseleccionar contacto activo y limpiar URL (solo si no hay modal/picker abierto)
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        // Si el template picker está abierto, dejarlo gestionar el Esc
+        const pickerOpen = document.getElementById('templatePicker')?.classList.contains('hidden') === false
+            || document.getElementById('templatePickerPopup')?.style.display === 'block';
+        if (pickerOpen) return;
+        // Si hay algún modal visible, no deseleccionar
+        const modalOpen = document.querySelector('.fixed.inset-0:not(.hidden)');
+        if (modalOpen) return;
+        if (currentContactId) deselectContact();
+    });
 
     // Right-click en contactos → menú "Marcar como no leído"
     const _contactsList = document.getElementById('contactsList');

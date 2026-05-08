@@ -93,6 +93,7 @@ class ConversationMeta:
     deal_id: Optional[str] = None
     deal_stage: Optional[str] = None
     last_advisor_message: Optional[str] = None
+    canal_display: Optional[str] = None  # Canal visible en UI (editable por asesor), no afecta routing
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -336,6 +337,7 @@ class ConversationStateManager:
                         "contact_id": meta.contact_id if meta else None,
                         "is_active": True,
                         "canal_origen": (meta.canal_origen if meta else canal) or canal,
+                        "canal_display": meta.canal_display if meta else None,
                         "activated_at": meta.created_at if meta else get_bogota_now_iso(),
                         "conversation_status": status_raw,
                         "in_priority_zset": in_priority_zset,
@@ -406,6 +408,7 @@ class ConversationStateManager:
                         "contact_id": meta.contact_id,
                         "is_active": True,
                         "canal_origen": meta.canal_origen or canal,
+                        "canal_display": meta.canal_display,
                         "activated_at": meta.created_at,
                         "conversation_status": status,
                         "in_priority_zset": False,
@@ -1334,6 +1337,123 @@ class ConversationStateManager:
         except Exception as e:
             logger.error(f"[Inbox][Error][Batch] advisor={advisor_id}: {e}")
             return {}  # Fail-safe: sin badges antes que romper la UI
+
+    async def get_all_inbox_phones(self, advisor_id: str) -> set:
+        """Retorna set de phones con mensajes no leídos del asesor. O(N), 1 round-trip Redis."""
+        try:
+            key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
+            all_members = await self.redis.zrange(key, 0, -1)
+            phones = set()
+            for m in all_members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                phones.add(m.split(":", 1)[0] if ":" in m else m)
+            return phones
+        except Exception as e:
+            logger.error(f"[Inbox][Error][GetPhones] advisor={advisor_id}: {e}")
+            return set()
+
+    # ─── Notificaciones persistentes por asesor ───────────────────────────────
+    # advisor_notifications:{advisor_id} → ZSET score=timestamp member=JSON
+    ADVISOR_NOTIF_PREFIX  = "advisor_notifications:"
+    ADVISOR_NOTIF_TTL     = 30 * 86400   # 30 días
+    NOTIF_IDEM_PREFIX     = "notif_24h_sent:"
+    NOTIF_IDEM_TTL        = 25 * 3600    # 25h — evita duplicados entre ciclos horarios
+    NOTIF_APROBADOS_PREFIX = "notif_aprobados_sent:"
+
+    async def add_advisor_notification(
+        self,
+        advisor_id: str,
+        notif_type: str,
+        payload: dict
+    ) -> str:
+        """
+        Crea una notificación persistente para el asesor.
+        notif_type: 'inactivity_24h' | 'aprobados_daily'
+        Retorna el notif_id generado.
+        """
+        try:
+            notif_id = str(uuid.uuid4())
+            now_ts = get_bogota_now().timestamp()
+            member = json.dumps(
+                {"id": notif_id, "type": notif_type, "created_at": get_bogota_now_iso(), **payload},
+                ensure_ascii=False
+            )
+            key = f"{self.ADVISOR_NOTIF_PREFIX}{advisor_id}"
+            await self.redis.zadd(key, {member: now_ts})
+            await self.redis.expire(key, self.ADVISOR_NOTIF_TTL)
+            logger.info(f"[Notif][Add] advisor={advisor_id} type={notif_type} id={notif_id}")
+            return notif_id
+        except Exception as e:
+            logger.error(f"[Notif][Error][Add] advisor={advisor_id}: {e}")
+            return ""
+
+    async def get_advisor_notifications(self, advisor_id: str) -> list:
+        """Retorna notificaciones activas del asesor (más recientes primero)."""
+        try:
+            key = f"{self.ADVISOR_NOTIF_PREFIX}{advisor_id}"
+            members = await self.redis.zrevrange(key, 0, -1)
+            result = []
+            for m in members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                try:
+                    result.append(json.loads(m))
+                except json.JSONDecodeError:
+                    pass
+            return result
+        except Exception as e:
+            logger.error(f"[Notif][Error][Get] advisor={advisor_id}: {e}")
+            return []
+
+    async def remove_advisor_notification(self, advisor_id: str, notif_id: str) -> bool:
+        """Elimina una notificación por su ID."""
+        try:
+            key = f"{self.ADVISOR_NOTIF_PREFIX}{advisor_id}"
+            members = await self.redis.zrange(key, 0, -1)
+            for m in members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                try:
+                    if json.loads(m).get("id") == notif_id:
+                        await self.redis.zrem(key, m)
+                        logger.info(f"[Notif][Remove] advisor={advisor_id} id={notif_id}")
+                        return True
+                except json.JSONDecodeError:
+                    pass
+            return False
+        except Exception as e:
+            logger.error(f"[Notif][Error][Remove] advisor={advisor_id} id={notif_id}: {e}")
+            return False
+
+    async def clear_inactivity_notifications_for_contact(
+        self, advisor_id: str, phone: str
+    ) -> int:
+        """
+        Elimina notificaciones 'inactivity_24h' de un contacto específico.
+        Se llama cuando el asesor responde al contacto.
+        """
+        try:
+            key = f"{self.ADVISOR_NOTIF_PREFIX}{advisor_id}"
+            members = await self.redis.zrange(key, 0, -1)
+            to_remove = []
+            for m in members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                try:
+                    data = json.loads(m)
+                    if data.get("type") == "inactivity_24h" and data.get("phone") == phone:
+                        to_remove.append(m)
+                except json.JSONDecodeError:
+                    pass
+            if to_remove:
+                removed = await self.redis.zrem(key, *to_remove)
+                logger.info(f"[Notif][ClearContact] advisor={advisor_id} phone={phone} removed={removed}")
+                return removed
+            return 0
+        except Exception as e:
+            logger.error(f"[Notif][Error][ClearContact] advisor={advisor_id} phone={phone}: {e}")
+            return 0
 
     async def get_conversation_state(self, phone: str, canal: str = "whatsapp") -> Optional[Dict[str, Any]]:
         """

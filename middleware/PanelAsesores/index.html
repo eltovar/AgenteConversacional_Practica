@@ -43,6 +43,33 @@
                 <div class="flex items-center justify-between">
                     <h1 id="panelTitle" class="text-lg font-semibold">Asesores Comerciales</h1>
                     <div class="flex items-center gap-2">
+                        <!-- Campana de notificaciones -->
+                        <div class="relative" id="notifBtnWrapper">
+                            <button
+                                id="notifBtn"
+                                onclick="toggleNotifDropdown()"
+                                class="relative border border-[#F5C400]/40 text-[#F5C400] text-xs px-2 py-1 rounded-full hover:bg-[#F5C400]/10 transition-colors"
+                                title="Notificaciones"
+                            >
+                                &#128276;
+                                <span id="notifBadge"
+                                      class="hidden absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+                                    0
+                                </span>
+                            </button>
+                            <!-- Dropdown de notificaciones — posicionado por JS con position:fixed para evitar overflow-hidden del sidebar -->
+                            <div id="notifDropdown"
+                                 class="hidden fixed bg-white rounded-xl shadow-2xl border border-gray-100 overflow-hidden"
+                                 style="min-width:300px; width:300px; z-index:9999;">
+                                <div class="flex items-center justify-between px-4 py-3 bg-gray-50 border-b">
+                                    <span class="font-semibold text-sm text-gray-700">Notificaciones</span>
+                                    <button onclick="markAllNotifsRead()" class="text-xs text-blue-500 hover:underline">Marcar todo leído</button>
+                                </div>
+                                <div id="notifList" class="max-h-80 overflow-y-auto divide-y divide-gray-50">
+                                    <p id="notifEmpty" class="text-xs text-gray-400 text-center py-6">Sin notificaciones</p>
+                                </div>
+                            </div>
+                        </div>
                         <button
                             onclick="openCreateContactModal()"
                             class="bg-[#F5C400] text-[#1A1A1A] text-xs px-2 py-1 rounded-full hover:bg-[#D4A800] transition-colors font-semibold"
@@ -865,10 +892,10 @@
         let ADVISOR_NAMES = {{ advisor_names | tojson | safe }};
     </script>
     <script src="/whatsapp/panel/static/index.js"></script>
-    <!-- Contenedor de alertas flotantes de espera -->
-    <div id="pendingAlertsContainer"
+    <!-- Contenedor de toasts de notificaciones (sistema nuevo) -->
+    <div id="notifToastContainer"
          class="fixed bottom-5 right-5 z-[60] flex flex-col gap-2 pointer-events-none"
-         style="max-width: 320px;">
+         style="max-width: 340px;">
     </div>
 </body>
 </html>

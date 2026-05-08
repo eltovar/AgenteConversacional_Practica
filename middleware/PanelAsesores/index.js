@@ -163,13 +163,10 @@ const _lastWsNotifiedTimestamps = {};
 // Phones que el asesor abrió en esta sesión.
 // Previene re-inicialización de badges desde has_unread (backend) si el asesor ya los limpió.
 const _seenPhones = new Set();
-// Seguimiento de alertas flotantes de espera
-let _pendingAlertShown = (() => { // { [phone]: { shownAt: timestampMs } }
-    try { return JSON.parse(sessionStorage.getItem('_pendingAlertShown') || '{}'); }
-    catch { return {}; }
-})();
-const PENDING_ALERT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 horas
-const PENDING_ALERT_COOLDOWN_MS = 30 * 60 * 1000;      // 30 minutos
+// Sistema de notificaciones del asesor (backend-driven)
+const NOTIF_POLL_INTERVAL = 30_000; // 30 segundos
+let _seenNotifIds = new Set();      // IDs ya procesados (para detectar nuevas)
+let _notifDropdownOpen = false;
 // "Marcar como no leído" manual — persiste en localStorage entre sesiones
 let _manuallyUnread = new Set(
     (() => { try { return JSON.parse(localStorage.getItem('_manuallyUnread') || '[]'); } catch { return []; } })()
@@ -1412,7 +1409,6 @@ async function loadContacts() {
         _rebuildPortalChips(allContacts);
         _applyFiltersAndRender();
         console.log(`[Filtro] Renderizando ${allContacts.length} contactos en lista.`);
-        checkPendingResponseAlerts();
         checkSilentBotContacts();
 
         // Auto-select por deep link (?phone=): ejecutar solo una vez tras la primera carga
@@ -1811,6 +1807,37 @@ async function loadContactDetail(phone, contactId, canal) {
  * Genera el HTML del dropdown de pipeline para un contacto.
  * Extraído de la función anidada original para poder usarse en _buildContactHTML.
  */
+const _CANAL_OPTIONS = [
+    { value: 'whatsapp',        label: 'WhatsApp' },
+    { value: 'whatsapp_directo',label: 'WhatsApp Directo' },
+    { value: 'instagram',       label: 'Instagram' },
+    { value: 'facebook',        label: 'Facebook' },
+    { value: 'tiktok',          label: 'TikTok' },
+    { value: 'linkedin',        label: 'LinkedIn' },
+    { value: 'youtube',         label: 'YouTube' },
+    { value: 'metrocuadrado',   label: 'MetroCuadrado' },
+    { value: 'finca_raiz',      label: 'Finca Raíz' },
+    { value: 'mercado_libre',   label: 'Mercado Libre' },
+    { value: 'ciencuadras',     label: 'CienCuadras' },
+    { value: 'pagina_web',      label: 'Página Web' },
+    { value: 'desconocido',     label: 'Desconocido' },
+];
+
+function _buildCanalDropdown(contact) {
+    // Usa canal_display si existe (editado por asesor), sino canal_origen
+    const activeCanal = contact.canal_display || contact.canal_origen || 'whatsapp';
+    const phone = contact.phone || '';
+    const canal = contact.canal || contact.canal_origen || 'whatsapp';
+    const options = _CANAL_OPTIONS.map(opt =>
+        `<option value="${opt.value}" ${opt.value === activeCanal ? 'selected' : ''}>${opt.label}</option>`
+    ).join('');
+    return `<select class="canal-pill-select"
+                data-canal-phone="${phone}"
+                onchange="updateCanalDisplay(this.value, '${canal}')"
+                onclick="event.stopPropagation()"
+                title="Cambiar canal del contacto">${options}</select>`;
+}
+
 function _buildPipelineDropdown(contactIdForDropdown, currentStageForDropdown) {
     if (!contactIdForDropdown) return '';
     const options = PIPELINE_STAGES.map(stage =>
@@ -3584,6 +3611,7 @@ function deselectContact() {
     if (nameEl) nameEl.textContent = 'Selecciona un contacto';
     const phoneEl = document.getElementById('contactPhone');
     if (phoneEl) phoneEl.textContent = '';
+    document.getElementById('canalDisplayWrapper')?.classList.add('hidden');
 
     // Restaurar área central vacía
     const chatMessages = document.getElementById('chatMessages');
@@ -3625,8 +3653,6 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         return;
     }
 
-    // Descartar alerta de espera si existe para este contacto
-    _dismissPendingAlert(phone);
 
     // Limpiar "marcado como no leído" manual al abrir el contacto
     if (phone && _manuallyUnread.has(phone)) {
@@ -3924,25 +3950,13 @@ function _updateDetailsPanel(contact) {
     const infoEl = document.getElementById('leadInfoContent');
     if (!infoEl) return;
 
-    const canalColors = {
-        'instagram': 'bg-pink-100 text-pink-700',
-        'facebook': 'bg-blue-100 text-blue-700',
-        'finca_raiz': 'bg-yellow-100 text-yellow-700',
-        'metrocuadrado': 'bg-orange-100 text-orange-700',
-        'pagina_web': 'bg-indigo-100 text-indigo-700',
-        'whatsapp_directo': 'bg-emerald-100 text-emerald-700',
-        'default': 'bg-gray-100 text-gray-600'
-    };
-    const canalClass = canalColors[contact.canal_origen] || canalColors['default'];
-    const canalLabel = (contact.canal_origen || '').replace('_', ' ') || '—';
-
     // Stage label desde PIPELINE_STAGES
     const stageLabel = PIPELINE_STAGES.find(s => s.id === contact.current_stage)?.name || contact.current_stage || '—';
 
     infoEl.innerHTML = `
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
             <span class="text-gray-500 text-xs">Canal</span>
-            <span class="text-xs font-medium ${canalClass} px-2 py-0.5 rounded-full">${canalLabel}</span>
+            ${_buildCanalDropdown(contact)}
         </div>
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
             <span class="text-gray-500 text-xs">Etapa</span>
@@ -4673,11 +4687,6 @@ async function sendMessage(e) {
             // polling incremental complejo. Un refresh inmediato es suficiente.
             loadChatHistory(contactId);
             scheduleContactsRefresh(); // Reordenar la lista inmediatamente
-            // Suprimir alerta de espera permanentemente para este contacto tras responder
-            if (currentPhone) {
-                _pendingAlertShown[currentPhone] = { shownAt: Date.now() };
-                try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
-            }
         } else if (data.status === 'warning') {
             console.warn('[Panel] Warning del servidor:', data.message);
             resultDiv.className = 'mt-2 text-sm text-orange-600';
@@ -4971,8 +4980,7 @@ function handleVisibilityChange() {
             }
         }
 
-        // Revisar alertas de espera + contactos BOT_ACTIVE sin nombre al volver a la pestaña
-        checkPendingResponseAlerts();
+        // Revisar contactos BOT_ACTIVE sin nombre al volver a la pestaña
         checkSilentBotContacts();
     }
 }
@@ -5008,11 +5016,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // Iniciar polling
     startPolling();
 
-    // Revisión periódica de alertas de espera + contactos BOT_ACTIVE sin nombre
-    setInterval(() => {
-        checkPendingResponseAlerts();
-        checkSilentBotContacts();
-    }, 5 * 60 * 1000);
+    // Revisión periódica de contactos BOT_ACTIVE sin nombre (cada 5 min)
+    setInterval(checkSilentBotContacts, 5 * 60 * 1000);
+
+    // Polling de notificaciones backend (cada 30s)
+    if (ADVISOR_ID) {
+        pollNotifications();
+        setInterval(pollNotifications, NOTIF_POLL_INTERVAL);
+    }
 
     // Sin fecha por defecto: el panel arranca mostrando todos los contactos activos.
     // El usuario elige un día específico para filtrar historial.
@@ -5709,124 +5720,242 @@ function _showUnreadContextMenu(x, y, phone) {
     }, 0);
 }
 
-// ========== ALERTAS FLOTANTES DE ESPERA ==========
+// ========== SISTEMA DE NOTIFICACIONES BACKEND-DRIVEN ==========
 
-function _dismissPendingAlert(phone) {
-    if (!phone) return;
-    // Siempre registrar/actualizar cooldown, incluso si no había alerta visible
-    // (p.ej. usuario abre contacto desde sidebar antes de que aparezca la alerta)
-    _pendingAlertShown[phone] = { shownAt: Date.now() };
-    try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
-    const card = document.querySelector(`[data-alert-phone="${phone}"]`);
-    if (card) {
-        card.style.transition = 'opacity 0.3s, transform 0.3s';
-        card.style.opacity = '0';
-        card.style.transform = 'translateX(20px)';
-        setTimeout(() => card.remove(), 300);
+// ── pollNotifications: obtiene notificaciones del backend cada 30s ──────────
+
+async function pollNotifications() {
+    if (!ADVISOR_ID) return;
+    try {
+        const res = await fetch(`${BASE_URL}/notifications?advisor=${encodeURIComponent(ADVISOR_ID)}`, {
+            headers: { 'X-API-Key': API_KEY }
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const notifications = data.notifications || [];
+
+        // Detectar notificaciones nuevas (no vistas aún) para mostrar toast
+        const currentIds = new Set(notifications.map(n => n.id));
+        const newNotifs = notifications.filter(n => !_seenNotifIds.has(n.id));
+        _seenNotifIds = currentIds;
+
+        // Mostrar toast para cada notificación nueva (máx 3 simultáneos)
+        newNotifs.slice(0, 3).forEach(n => showNotifToast(n));
+
+        // Actualizar badge en campana
+        const badge = document.getElementById('notifBadge');
+        if (badge) {
+            const count = notifications.length;
+            if (count > 0) {
+                badge.textContent = count > 99 ? '99+' : String(count);
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+            }
+        }
+
+        // Renderizar lista en dropdown
+        renderNotifList(notifications);
+    } catch (e) {
+        console.warn('[Notif] Error polling notificaciones:', e);
     }
 }
 
-function _showPendingResponseAlert(phone, name, waitMs) {
-    const container = document.getElementById('pendingAlertsContainer');
+function showNotifToast(notif) {
+    const container = document.getElementById('notifToastContainer');
     if (!container) return;
 
-    // Quitar carta previa para este teléfono si existe (re-crear con datos frescos)
-    const existing = container.querySelector(`[data-alert-phone="${phone}"]`);
-    if (existing) existing.remove();
+    const isInactivity = notif.type === 'inactivity_24h';
+    const isAprobados  = notif.type === 'aprobados_daily';
 
-    const hoursWaiting = Math.floor(waitMs / 3600000);
-    const minutesWaiting = Math.floor((waitMs % 3600000) / 60000);
-    const waitLabel = hoursWaiting > 0
-        ? `${hoursWaiting}h ${minutesWaiting}m esperando`
-        : `${minutesWaiting} min esperando`;
+    let icon = '🔔';
+    let title = '';
+    let subtitle = '';
+    let borderColor = 'border-l-yellow-400';
 
-    const initials = (name || '?').split(' ').map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+    if (isInactivity) {
+        icon = '⏰';
+        title = notif.contact_name || notif.phone || 'Contacto';
+        subtitle = `Lleva ${notif.hours_waiting || '+24'}h esperando respuesta`;
+        borderColor = 'border-l-red-400';
+    } else if (isAprobados) {
+        icon = '📢';
+        title = 'Contactos aprobados';
+        subtitle = notif.message || '';
+        borderColor = 'border-l-blue-400';
+    }
 
-    const card = document.createElement('div');
-    card.setAttribute('data-alert-phone', phone);
-    card.className = 'pointer-events-auto flex items-center gap-3 bg-white border border-red-200 border-l-4 border-l-red-500 rounded-lg shadow-lg px-4 py-3 cursor-pointer select-none';
+    const toast = document.createElement('div');
+    toast.className = `pointer-events-auto flex items-start gap-3 bg-white border border-gray-200 border-l-4 ${borderColor} rounded-lg shadow-lg px-4 py-3 cursor-pointer select-none`;
+    toast.style.cssText = 'opacity:0; transform:translateX(20px); transition:opacity 0.3s,transform 0.3s;';
+    toast.dataset.notifId = notif.id;
 
-    card.innerHTML = `
-        <div class="flex-shrink-0 w-9 h-9 rounded-full bg-red-100 text-red-600 flex items-center justify-center font-bold text-sm">${initials}</div>
+    toast.innerHTML = `
+        <span class="text-lg leading-none mt-0.5">${icon}</span>
         <div class="flex-1 min-w-0">
-            <p class="font-semibold text-sm text-gray-900 truncate">${name || phone}</p>
-            <p class="text-xs text-red-600 font-medium">sigue esperando respuesta</p>
-            <p class="text-xs text-gray-400">${waitLabel}</p>
+            <p class="font-semibold text-sm text-gray-900 truncate">${title}</p>
+            <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">${subtitle}</p>
         </div>
-        <button data-dismiss-phone="${phone}" class="flex-shrink-0 text-gray-300 hover:text-gray-500 p-1 rounded transition-colors" title="Descartar">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
-        </button>
+        <button class="flex-shrink-0 text-gray-300 hover:text-gray-500 p-1" onclick="event.stopPropagation();this.closest('[data-notif-id]').remove()">✕</button>
     `;
 
-    card.addEventListener('click', (e) => {
-        if (e.target.closest('[data-dismiss-phone]')) return;
-        _dismissPendingAlert(phone);
-        const contact = allContacts.find(c => c.phone === phone);
-        if (contact) {
-            selectContact(contact.contact_id || '', phone, contact.display_name || phone, contact.canal_origen || 'whatsapp');
-        }
-    });
-
-    card.querySelector('[data-dismiss-phone]').addEventListener('click', (e) => {
-        e.stopPropagation();
-        _dismissPendingAlert(phone);
-    });
-
-    container.appendChild(card);
-}
-
-function checkPendingResponseAlerts() {
-    const now = Date.now();
-    const container = document.getElementById('pendingAlertsContainer');
-    if (!container) return;
-
-    // --- Limpieza de tarjetas que ya no son elegibles ---
-    for (const card of Array.from(container.querySelectorAll('[data-alert-phone]'))) {
-        const cardPhone = card.getAttribute('data-alert-phone');
-        const contact = allContacts.find(c => c.phone === cardPhone);
-        if (!contact) { card.remove(); continue; }
-        const st = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(st)) { card.remove(); continue; }
-        if (cardPhone === currentPhone) { card.remove(); continue; }
-        const lastClientTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
-        const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
-        // Asesora respondió después del último mensaje del cliente → ya no está en espera
-        if (lastAdvisorTs && lastAdvisorTs >= lastClientTs) { card.remove(); continue; }
-        // Asesora abrió/respondió contacto después del último mensaje del cliente (tracking local)
-        const dismissedAt = (_pendingAlertShown[cardPhone]?.shownAt) || 0;
-        if (dismissedAt >= lastClientTs) { card.remove(); continue; }
-        // Actividad del cliente reciente (< 2h) → ya no está en espera
-        if (lastClientTs && (now - lastClientTs) < PENDING_ALERT_THRESHOLD_MS) { card.remove(); continue; }
+    if (isInactivity && notif.phone) {
+        toast.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            toast.remove();
+            const contact = allContacts.find(c => c.phone === notif.phone);
+            if (contact) selectContact(contact.contact_id || '', notif.phone, contact.display_name || notif.phone, contact.canal_origen || 'whatsapp');
+        });
     }
 
-    for (const contact of allContacts) {
-        const phone = contact.phone;
-        const status = contact.conversation_status || contact.status || '';
-        if (!['PENDING_HANDOFF', 'HUMAN_ACTIVE'].includes(status)) continue;
-        if (phone === currentPhone) continue;
+    container.appendChild(toast);
+    requestAnimationFrame(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateX(0)';
+    });
 
-        const lastTs = contact.last_activity ? new Date(contact.last_activity).getTime() : 0;
-        if (!lastTs || (now - lastTs) < PENDING_ALERT_THRESHOLD_MS) continue;
+    // Auto-dismiss después de 6 segundos
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(20px)';
+        setTimeout(() => toast.remove(), 300);
+    }, 6000);
+}
 
-        // Asesora ya respondió después del último mensaje del cliente → no mostrar alerta
-        const lastAdvisorTs = contact.last_advisor_message ? new Date(contact.last_advisor_message).getTime() : 0;
-        if (lastAdvisorTs && lastAdvisorTs >= lastTs) continue;
+function renderNotifList(notifications) {
+    const list = document.getElementById('notifList');
+    const empty = document.getElementById('notifEmpty');
+    if (!list) return;
 
-        const record = _pendingAlertShown[phone];
-        if (record) {
-            // Supresión permanente: asesora manejó este contacto DESPUÉS del último msg del cliente
-            if (record.shownAt >= lastTs) continue;
-            // Cooldown: alerta ya mostrada recientemente (evita spam en misma ventana de tiempo)
-            if ((now - record.shownAt) < PENDING_ALERT_COOLDOWN_MS) continue;
+    // Limpiar items anteriores (preservar el empty placeholder)
+    Array.from(list.querySelectorAll('[data-notif-item]')).forEach(el => el.remove());
+
+    if (!notifications.length) {
+        if (empty) empty.classList.remove('hidden');
+        return;
+    }
+    if (empty) empty.classList.add('hidden');
+
+    for (const notif of notifications) {
+        const isInactivity = notif.type === 'inactivity_24h';
+        const isAprobados  = notif.type === 'aprobados_daily';
+        const icon  = isInactivity ? '⏰' : isAprobados ? '📢' : '🔔';
+        const title = isInactivity
+            ? (notif.contact_name || notif.phone || 'Contacto')
+            : isAprobados ? 'Contactos aprobados' : 'Notificación';
+        const sub   = isInactivity
+            ? `Lleva ${notif.hours_waiting || '+24'}h esperando respuesta`
+            : (notif.message || '');
+
+        const item = document.createElement('div');
+        item.dataset.notifItem = notif.id;
+        item.className = 'flex items-start gap-3 px-4 py-3 hover:bg-gray-50 transition-colors' + (isInactivity ? ' cursor-pointer' : '');
+        item.innerHTML = `
+            <span class="text-base mt-0.5">${icon}</span>
+            <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-gray-800 truncate">${title}</p>
+                <p class="text-xs text-gray-500 mt-0.5">${sub}</p>
+            </div>
+            <button onclick="event.stopPropagation(); dismissNotif('${notif.id}')"
+                    class="flex-shrink-0 text-gray-300 hover:text-gray-500 text-xs p-1" title="Descartar">✕</button>
+        `;
+
+        if (isInactivity && notif.phone) {
+            item.addEventListener('click', (e) => {
+                if (e.target.tagName === 'BUTTON') return;
+                toggleNotifDropdown(false);
+                const contact = allContacts.find(c => c.phone === notif.phone);
+                if (contact) selectContact(contact.contact_id || '', notif.phone, contact.display_name || notif.phone, contact.canal_origen || 'whatsapp');
+            });
         }
 
-        if (container.children.length >= 5) break;
+        list.appendChild(item);
+    }
+}
 
-        _showPendingResponseAlert(phone, contact.display_name, now - lastTs);
-        _pendingAlertShown[phone] = { shownAt: now };
-        try { sessionStorage.setItem('_pendingAlertShown', JSON.stringify(_pendingAlertShown)); } catch {}
+function toggleNotifDropdown(forceState) {
+    const dropdown = document.getElementById('notifDropdown');
+    const btn      = document.getElementById('notifBtn');
+    if (!dropdown) return;
+
+    _notifDropdownOpen = forceState !== undefined ? forceState : !_notifDropdownOpen;
+
+    if (_notifDropdownOpen && btn) {
+        // Calcular posición absoluta en viewport (position:fixed escapa overflow-hidden del sidebar)
+        const rect = btn.getBoundingClientRect();
+        const dropW = 300;
+        // Colocar debajo del botón; ajustar si se sale por la derecha
+        let left = rect.left;
+        if (left + dropW > window.innerWidth - 8) {
+            left = window.innerWidth - dropW - 8;
+        }
+        dropdown.style.top  = `${rect.bottom + 6}px`;
+        dropdown.style.left = `${left}px`;
+        dropdown.classList.remove('hidden');
+    } else {
+        dropdown.classList.add('hidden');
+    }
+}
+
+// Cerrar dropdown al hacer clic fuera
+document.addEventListener('click', (e) => {
+    if (_notifDropdownOpen && !e.target.closest('#notifBtnWrapper') && !e.target.closest('#notifDropdown')) {
+        toggleNotifDropdown(false);
+    }
+});
+
+async function dismissNotif(notifId) {
+    if (!ADVISOR_ID || !notifId) return;
+    try {
+        await fetch(`${BASE_URL}/notifications/${encodeURIComponent(notifId)}/read`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ advisor: ADVISOR_ID })
+        });
+        _seenNotifIds.delete(notifId);
+        await pollNotifications(); // Refrescar inmediatamente
+    } catch (e) {
+        console.warn('[Notif] Error descartando notificación:', e);
+    }
+}
+
+async function markAllNotifsRead() {
+    if (!ADVISOR_ID) return;
+    try {
+        await fetch(`${BASE_URL}/notifications/read-all`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ advisor: ADVISOR_ID })
+        });
+        _seenNotifIds = new Set();
+        await pollNotifications();
+    } catch (e) {
+        console.warn('[Notif] Error marcando todo leído:', e);
+    }
+}
+
+// ── Canal display: permite al asesor cambiar el canal visible del contacto ───
+
+async function updateCanalDisplay(canalValue, canal) {
+    if (!currentPhone) return;
+    const canalMeta = canal || currentCanal || 'whatsapp';
+    try {
+        const res = await fetch(`${BASE_URL}/contacts/${encodeURIComponent(currentPhone)}/canal`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ canal_display: canalValue, canal: canalMeta })
+        });
+        if (res.ok) {
+            // Actualizar en allContacts para que el fingerprint se mantenga coherente
+            const idx = allContacts.findIndex(c => c.phone === currentPhone);
+            if (idx !== -1) allContacts[idx].canal_display = canalValue;
+            const labelMap = Object.fromEntries(_CANAL_OPTIONS.map(o => [o.value, o.label]));
+            showToast(`Canal cambiado a ${labelMap[canalValue] || canalValue}`, 'success');
+        } else {
+            showToast('Error al actualizar canal', 'error');
+        }
+    } catch (e) {
+        showToast('Error de conexión', 'error');
     }
 }
 
@@ -5834,7 +5963,7 @@ function checkPendingResponseAlerts() {
 // checkSilentBotContacts: Safety net de 30 minutos para contactos BOT_ACTIVE sin nombre.
 // Cubre el caso donde la notificación inicial fue perdida (contacto nuevo de portal,
 // Fix-B probation, etc.) y el cliente nunca dio su nombre tras la pregunta de Sofia.
-// Se llama cada 5 minutos junto a checkPendingResponseAlerts.
+// Se llama cada 5 minutos para detectar contactos BOT_ACTIVE sin nombre.
 function checkSilentBotContacts() {
     const SILENT_THRESHOLD_MS = 30 * 60 * 1000; // 30 min sin respuesta
     const COOLDOWN_MS         = 2 * 60 * 60 * 1000; // 2 horas entre re-notificaciones

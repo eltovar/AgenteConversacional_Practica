@@ -65,6 +65,7 @@ from datetime import timedelta
 # Scheduler para seguimiento automático
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 # Importar componentes del middleware (Sesión 1)
 from middleware import get_whatsapp_router, get_outbound_panel_router, get_contact_manager, get_contact_manager_singleton
@@ -713,6 +714,151 @@ async def check_and_send_followups():
             await r.aclose()
 
 
+async def check_24h_advisor_notifications():
+    """
+    Detecta contactos activos (HUMAN_ACTIVE / IN_CONVERSATION) donde el asesor lleva
+    24h+ sin responder al cliente y crea una notificación persistente en el panel.
+    Idempotencia: flag Redis 'notif_24h_sent:{advisor_id}:{phone}' TTL 25h.
+    """
+    state_manager = get_state_manager()
+    now = get_bogota_now()
+    THRESHOLD_HOURS = 24
+
+    try:
+        all_contacts = await state_manager.get_all_human_active_contacts(limit=300, offset=0)
+        checked = 0
+        notified = 0
+        for contact in all_contacts:
+            phone    = contact.get("phone", "")
+            canal    = contact.get("canal") or "whatsapp"
+            status   = contact.get("status") or contact.get("conversation_status") or ""
+            owner_id = contact.get("owner_id") or contact.get("assigned_owner_id")
+
+            if status not in ("HUMAN_ACTIVE", "IN_CONVERSATION") or not owner_id or not phone:
+                continue
+            checked += 1
+
+            # Verificar idempotencia
+            idem_key = f"{state_manager.NOTIF_IDEM_PREFIX}{owner_id}:{phone}"
+            if await state_manager.redis.exists(idem_key):
+                continue
+
+            # Determinar si el asesor lleva 24h+ sin responder al último mensaje del cliente
+            last_advisor_str = contact.get("last_advisor_message")
+            last_activity_str = contact.get("last_activity") or ""
+            if not last_activity_str:
+                continue
+
+            from middleware.conversation_state import parse_datetime_safe
+            last_activity_dt = parse_datetime_safe(last_activity_str)
+            if not last_activity_dt:
+                continue
+
+            hours_since_activity = (now - last_activity_dt).total_seconds() / 3600
+            if hours_since_activity < THRESHOLD_HOURS:
+                continue  # Actividad reciente, no notificar aún
+
+            # Si el asesor respondió DESPUÉS de la última actividad registrada, no notificar
+            if last_advisor_str:
+                last_advisor_dt = parse_datetime_safe(last_advisor_str)
+                if last_advisor_dt and last_advisor_dt >= last_activity_dt:
+                    continue  # Asesor respondió al último evento
+
+            # Crear notificación
+            name = contact.get("display_name") or phone
+            hours_waiting = int(hours_since_activity)
+            await state_manager.add_advisor_notification(
+                advisor_id=owner_id,
+                notif_type="inactivity_24h",
+                payload={
+                    "phone": phone,
+                    "canal": canal,
+                    "contact_name": name,
+                    "hours_waiting": hours_waiting,
+                    "contact_id": contact.get("contact_id", ""),
+                }
+            )
+            # Flag idempotencia TTL 25h — se limpia cuando el asesor responde
+            await state_manager.redis.set(idem_key, "1", ex=state_manager.NOTIF_IDEM_TTL)
+            notified += 1
+
+        logger.info(
+            "[Scheduler][24hNotif] Revisados: %d HUMAN/IN_CONV → %d nuevas notificaciones",
+            checked, notified
+        )
+    except Exception as e:
+        logger.error("[Scheduler][24hNotif] Error: %s", e, exc_info=True)
+
+
+async def check_aprobados_daily():
+    """
+    Corre diariamente a las 9:00 AM Bogotá.
+    Consulta HubSpot por contactos con lifecyclestage='lead' (Aprobados) por asesor
+    y crea una notificación de recordatorio de seguimiento.
+    """
+    state_manager = get_state_manager()
+    now = get_bogota_now()
+    today_str = now.strftime("%Y-%m-%d")
+
+    try:
+        from integrations.hubspot import hubspot_client as _hs
+        from integrations.hubspot.lead_assigner import lead_assigner
+
+        # Obtener asesores activos únicos desde OWNERS_CONFIG
+        active_advisors: dict = {}  # {id: name}
+        for team_members in lead_assigner.OWNERS_CONFIG.values():
+            for member in team_members:
+                if member.get("active") and member.get("id") and member["id"] not in active_advisors:
+                    active_advisors[member["id"]] = member["name"]
+
+        if not active_advisors:
+            logger.info("[Scheduler][Aprobados] Sin asesores activos configurados, skip.")
+            return
+
+        notified = 0
+        for advisor_id, advisor_name in active_advisors.items():
+            # Idempotencia diaria
+            idem_key = f"{state_manager.NOTIF_APROBADOS_PREFIX}{advisor_id}:{today_str}"
+            if await state_manager.redis.exists(idem_key):
+                continue
+
+            # Consultar HubSpot: contactos Aprobados (lifecyclestage=lead) del asesor
+            try:
+                result = await _hs.search_contacts_by_lifecyclestage_and_owner(
+                    stage_id="lead",
+                    owner_id=str(advisor_id)
+                )
+                contacts_count = len(result.get("results", []))
+            except Exception as hs_err:
+                logger.warning("[Scheduler][Aprobados] Error HubSpot advisor=%s: %s", advisor_id, hs_err)
+                continue
+
+            if contacts_count == 0:
+                await state_manager.redis.set(idem_key, "0", ex=state_manager.NOTIF_IDEM_TTL)
+                continue
+
+            await state_manager.add_advisor_notification(
+                advisor_id=str(advisor_id),
+                notif_type="aprobados_daily",
+                payload={
+                    "count": contacts_count,
+                    "date": today_str,
+                    "message": f"Tienes {contacts_count} contacto{'s' if contacts_count != 1 else ''} aprobado{'s' if contacts_count != 1 else ''}. Recuerda hacer seguimiento.",
+                }
+            )
+            await state_manager.redis.set(idem_key, str(contacts_count), ex=state_manager.NOTIF_IDEM_TTL)
+            notified += 1
+            logger.info(
+                "[Scheduler][Aprobados] advisor=%s → %d aprobados, notificación creada",
+                advisor_id, contacts_count
+            )
+
+        logger.info("[Scheduler][Aprobados] Ciclo completado. Notificados: %d asesores", notified)
+
+    except Exception as e:
+        logger.error("[Scheduler][Aprobados] Error: %s", e, exc_info=True)
+
+
 async def check_appointment_followups():
     """
     Verifica citas que ocurrieron hace ~1h30min y envía mensaje de experiencia.
@@ -1160,6 +1306,24 @@ async def startup_event():
             replace_existing=True,
         )
         logger.info("[STARTUP] Bulk campaign processor HABILITADO (cada 15s)")
+
+        # Notificaciones 24h al asesor — detecta contactos HUMAN_ACTIVE sin respuesta del asesor en 24h
+        scheduler.add_job(
+            check_24h_advisor_notifications,
+            trigger=IntervalTrigger(hours=1),
+            id="advisor_24h_notifications",
+            replace_existing=True
+        )
+        logger.info("[STARTUP] Scheduler notificaciones 24h asesor HABILITADO (cada 1h)")
+
+        # Recordatorio diario de contactos Aprobados — 9:00 AM Bogotá (America/Bogota)
+        scheduler.add_job(
+            check_aprobados_daily,
+            trigger=CronTrigger(hour=9, minute=0, timezone=str(TIMEZONE_BOGOTA)),
+            id="aprobados_daily_reminder",
+            replace_existing=True
+        )
+        logger.info("[STARTUP] Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
 
         scheduler.start()
         logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)

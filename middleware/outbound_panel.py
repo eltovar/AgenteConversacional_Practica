@@ -3593,6 +3593,140 @@ async def update_contact_stage(
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
+# ─── Canales válidos para edición manual de canal_display ────────────────────
+_CANALES_DISPLAY_VALIDOS = [
+    "whatsapp", "whatsapp_directo",
+    "instagram", "facebook", "linkedin", "youtube", "tiktok",
+    "finca_raiz", "metrocuadrado", "mercado_libre", "ciencuadras",
+    "pagina_web", "desconocido",
+]
+
+
+@router.patch("/contacts/{phone}/canal")
+async def update_contact_canal_display(
+    phone: str,
+    canal_display: str = Body(..., embed=True),
+    canal: Optional[str] = Body(None, embed=True),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Actualiza el canal visible (canal_display) de un contacto.
+    canal_display es solo para UI y métricas — NO cambia canal_origen ni el routing.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    canal_display_clean = canal_display.lower().strip()
+    if canal_display_clean not in _CANALES_DISPLAY_VALIDOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"canal_display inválido. Valores permitidos: {_CANALES_DISPLAY_VALIDOS}"
+        )
+
+    try:
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(phone)
+        if not validation.is_valid:
+            raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
+        phone_normalized = validation.normalized
+
+        state_manager = _get_state_manager()
+        canal_meta = (canal or "whatsapp").lower().strip()
+        meta_key = f"{state_manager.META_PREFIX}{phone_normalized}:{canal_meta}"
+
+        raw = await state_manager.redis.get(meta_key)
+        if not raw:
+            raise HTTPException(status_code=404, detail="Contacto no encontrado en Redis")
+
+        meta_dict = json.loads(raw)
+        meta_dict["canal_display"] = canal_display_clean
+        ttl = await state_manager.redis.ttl(meta_key)
+        await state_manager.redis.set(meta_key, json.dumps(meta_dict), ex=max(ttl, 86400) if ttl > 0 else state_manager.PANEL_TTL_SECONDS)
+
+        logger.info(f"[Panel] canal_display actualizado: {phone_normalized}:{canal_meta} → {canal_display_clean}")
+        return {"status": "success", "phone": phone_normalized, "canal_display": canal_display_clean}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Panel] Error actualizando canal_display: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# ─── Notificaciones del asesor ────────────────────────────────────────────────
+
+@router.get("/notifications")
+@limiter.limit("60/minute")
+async def get_advisor_notifications(
+    request: Request,
+    advisor: str = Query(..., description="ID del asesor"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Retorna las notificaciones activas del asesor (inactividad 24h + recordatorios diarios).
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        state_manager = _get_state_manager()
+        notifications = await state_manager.get_advisor_notifications(advisor)
+        return {
+            "notifications": notifications,
+            "unread_count": len(notifications),
+        }
+    except Exception as e:
+        logger.error(f"[Panel] Error obteniendo notificaciones advisor={advisor}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+@router.post("/notifications/{notif_id}/read")
+async def mark_notification_read(
+    notif_id: str,
+    advisor: str = Body(..., embed=True),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Marca una notificación como leída (la elimina del ZSET)."""
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        state_manager = _get_state_manager()
+        removed = await state_manager.remove_advisor_notification(advisor, notif_id)
+        return {"status": "success", "removed": removed}
+    except Exception as e:
+        logger.error(f"[Panel] Error marcando notificación leída: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+@router.post("/notifications/read-all")
+async def mark_all_notifications_read(
+    advisor: str = Body(..., embed=True),
+    notif_type: Optional[str] = Body(None, embed=True),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Marca todas las notificaciones del asesor como leídas.
+    Si notif_type se especifica (ej: 'inactivity_24h'), solo borra ese tipo.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    try:
+        state_manager = _get_state_manager()
+        notifications = await state_manager.get_advisor_notifications(advisor)
+        removed = 0
+        for notif in notifications:
+            if notif_type is None or notif.get("type") == notif_type:
+                ok = await state_manager.remove_advisor_notification(advisor, notif["id"])
+                if ok:
+                    removed += 1
+        return {"status": "success", "removed": removed}
+    except Exception as e:
+        logger.error(f"[Panel] Error marcando todas las notificaciones: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
 @router.get("/stages")
 async def get_pipeline_stages(
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -4611,9 +4745,18 @@ async def get_active_contacts(
                 or advisor in (c.get("assigned_owner_ids") or [])
             ]
             logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(advisor_contacts)} contactos")
-            zset_offset = (page - 1) * limit
-            active_contacts = advisor_contacts[zset_offset:zset_offset + limit]
+            # Límite dinámico: siempre incluir TODOS los contactos con unread + top `limit` del resto.
+            # Garantiza que si hay 40 contactos con mensajes nuevos todos se muestran sin importar el límite.
+            _unread_phones = await state_manager.get_all_inbox_phones(advisor)
+            _unread_set = [c for c in advisor_contacts if c.get("phone") in _unread_phones]
+            _other_set  = [c for c in advisor_contacts if c.get("phone") not in _unread_phones]
+            _other_offset = (page - 1) * limit
+            active_contacts = _unread_set + _other_set[_other_offset:_other_offset + limit]
             total_for_advisor = len(advisor_contacts)
+            logger.info(
+                f"[Panel] Límite dinámico: {len(_unread_set)} unread (sin límite) + "
+                f"{len(active_contacts) - len(_unread_set)} otros = {len(active_contacts)} total"
+            )
         else:
             zset_offset = (page - 1) * limit
             active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)
@@ -5985,17 +6128,21 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     """
     Actualiza timestamp del mensaje del asesor en ConversationMeta.
     Usado para calcular TTL de 72h si asesor deja de responder.
-    También remueve el contacto del inbox del asesor (el asesor ya está atendiendo).
+    También remueve del inbox y limpia notificaciones de inactividad del contacto.
     """
     try:
         state_manager = _get_state_manager()
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
         logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
-        # Inbox: el asesor está enviando → ya vio el contacto → remover del inbox
         meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
         if meta and meta.assigned_owner_id:
+            # Inbox: el asesor está enviando → ya vio el contacto → remover del inbox
             await state_manager.remove_from_advisor_inbox(
                 meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
+            )
+            # Notificaciones: asesor respondió → limpiar alertas de inactividad 24h
+            await state_manager.clear_inactivity_notifications_for_contact(
+                meta.assigned_owner_id, phone_normalized
             )
     except Exception as e:
         logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")

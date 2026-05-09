@@ -919,42 +919,27 @@ async def check_appointment_followups():
                     contact_name, _name_source
                 )
 
-                message = (
+                followup1_preview = (
                     f"¡Hola {contact_name}! 😊 Esperamos que la visita haya sido de tu agrado. "
-                    f"Cuéntanos, ¿Te ha gustado el inmueble?\n"
-                    f"Para nosotros es importante conocer tu experiencia y seguir "
-                    f"mejorando la calidad de nuestro servicio. 📈\n"
-                    f"¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
-                    f"Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
-                    f"para optimizar nuestros procesos de atención. 💪\n\n"
-                    f"¡Gracias por confiar en Inmobiliaria Proteger! 💛"
+                    f"Cuéntanos, ¿Te ha gustado el inmueble?"
                 )
 
                 if twilio_client.is_available:
-                    # Template seguimiento_cita (aprobado Meta). Env var mantiene precedencia
-                    # por compatibilidad, pero si está ausente usamos el SID oficial.
                     _followup_sid = os.getenv(
-                        "TWILIO_FOLLOWUP_TEMPLATE_SID",
-                        "HX9696fc73c9dbb5f76382bd77b5f410c8",
+                        "TWILIO_FOLLOWUP1_TEMPLATE_SID",
+                        "HXd27d74d382aef9fdbd9d8a409be5fedc",
                     )
-                    if _followup_sid:
-                        result = await twilio_client.send_whatsapp_message(
-                            to=apt.phone_normalized,
-                            body=message,
-                            content_sid=_followup_sid,
-                            content_variables={"1": contact_name}
-                        )
-                    else:
-                        result = await twilio_client.send_whatsapp_message(
-                            to=apt.phone_normalized,
-                            body=message
-                        )
+                    result = await twilio_client.send_whatsapp_message(
+                        to=apt.phone_normalized,
+                        body="",
+                        content_sid=_followup_sid,
+                        content_variables={"1": contact_name}
+                    )
 
                     if result.get("status") == "success":
                         await apt_manager.mark_followup_sent(apt.phone_normalized, apt.canal)
 
                         # Transición automática de ciclo de vida (fire-and-forget)
-                        # Replica el patrón de _update_contact_to_en_conversacion
                         if apt.contact_id:
                             try:
                                 from middleware.outbound_panel import (
@@ -979,7 +964,7 @@ async def check_appointment_followups():
                                 timeline = get_timeline_logger()
                                 await timeline.log_bot_message(
                                     contact_id=apt.contact_id,
-                                    content="Mensaje de experiencia post-visita enviado automáticamente.",
+                                    content="Primer seguimiento post-visita enviado automáticamente.",
                                     session_id=apt.phone_normalized
                                 )
                             except Exception as hs_err:
@@ -987,18 +972,17 @@ async def check_appointment_followups():
 
                         sent += 1
                         logger.info("[Scheduler][Followup] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
-                        # Guardar en MongoDB para que aparezca en el panel
                         try:
                             canal_apt = apt.canal or "whatsapp"
                             mongo_mgr = get_mongo_manager()
                             await mongo_mgr.save_message(
                                 phone=apt.phone_normalized,
-                                content=message,
+                                content=followup1_preview,
                                 sender="bot",
                                 channel=canal_apt,
                                 hubspot_contact_id=apt.contact_id,
                                 message_sid=result.get("message_sid"),
-                                metadata={"source": "Seguimiento post-cita automático", "template_id": "seguimiento_cita"}
+                                metadata={"source": "Seguimiento post-cita automático", "template_id": "seguimiento_inmueble"}
                             )
                             await state_manager.update_activity(apt.phone_normalized, canal=canal_apt)
                             await ws_manager.publish_broadcast(state_manager.redis, {
@@ -1007,7 +991,7 @@ async def check_appointment_followups():
                                 "phone": apt.phone_normalized,
                                 "canal": canal_apt,
                                 "sender": "bot",
-                                "preview": message[:100],
+                                "preview": followup1_preview[:100],
                                 "contact_name": contact_name
                             })
                         except Exception as _panel_err:
@@ -1029,6 +1013,98 @@ async def check_appointment_followups():
 
     except Exception as e:
         logger.error("[Scheduler][Followup] Error en check_appointment_followups: %s", e, exc_info=True)
+    finally:
+        await apt_manager.close()
+
+
+async def check_appointment_followup2():
+    """
+    Envía el segundo seguimiento post-cita (encuesta de experiencia) 5+ min después del primero.
+    Se ejecuta cada 15 minutos.
+    """
+    if not APPOINTMENT_REMINDERS_ENABLED:
+        return
+
+    await apply_jitter()
+
+    apt_manager = AppointmentManager(get_redis_url())
+    state_manager = get_state_manager()
+    now = get_bogota_now()
+
+    logger.info("[Scheduler][Followup2] ▶ Ciclo iniciado — %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
+
+    VALID_STATUSES = {ConversationStatus.BOT_ACTIVE, ConversationStatus.HUMAN_ACTIVE, ConversationStatus.IN_CONVERSATION}
+    sent = 0
+
+    try:
+        appointments = await apt_manager.get_appointments_needing_followup2()
+        logger.info("[Scheduler][Followup2] Citas para encuesta experiencia: %d", len(appointments))
+
+        for apt in appointments:
+            try:
+                status = await state_manager.get_status(apt.phone_normalized, apt.canal)
+                if status not in VALID_STATUSES:
+                    logger.info(
+                        "[Scheduler][Followup2] Skip %s — estado inactivo: %s",
+                        apt.phone_normalized, status.value if status else "None"
+                    )
+                    continue
+
+                _followup2_sid = os.getenv(
+                    "TWILIO_FOLLOWUP2_TEMPLATE_SID",
+                    "HXe4a60594744f0687233b663fdccc087d",
+                )
+
+                if twilio_client.is_available:
+                    result = await twilio_client.send_whatsapp_message(
+                        to=apt.phone_normalized,
+                        body="",
+                        content_sid=_followup2_sid,
+                        content_variables={}
+                    )
+
+                    if result.get("status") == "success":
+                        await apt_manager.mark_followup2_sent(apt.phone_normalized, apt.canal)
+
+                        sent += 1
+                        logger.info("[Scheduler][Followup2] ✅ Encuesta enviada a %s", apt.phone_normalized)
+
+                        try:
+                            canal_apt = apt.canal or "whatsapp"
+                            mongo_mgr = get_mongo_manager()
+                            survey_preview = "Para nosotros es importante conocer tu experiencia y seguir mejorando la calidad de nuestro servicio. 📈"
+                            await mongo_mgr.save_message(
+                                phone=apt.phone_normalized,
+                                content=survey_preview,
+                                sender="bot",
+                                channel=canal_apt,
+                                hubspot_contact_id=apt.contact_id,
+                                message_sid=result.get("message_sid"),
+                                metadata={"source": "Encuesta experiencia post-cita", "template_id": "encuesta_experiencia"}
+                            )
+                            await state_manager.update_activity(apt.phone_normalized, canal=canal_apt)
+                            await ws_manager.publish_broadcast(state_manager.redis, {
+                                "type": "contact_updated",
+                                "action": "new_message",
+                                "phone": apt.phone_normalized,
+                                "canal": canal_apt,
+                                "sender": "bot",
+                                "preview": survey_preview[:100],
+                            })
+                        except Exception as panel_err:
+                            logger.warning("[Scheduler][Followup2] Error guardando en panel: %s", panel_err)
+                    else:
+                        logger.warning("[Scheduler][Followup2] ❌ Error enviando encuesta a %s", apt.phone_normalized)
+                else:
+                    logger.warning("[Scheduler][Followup2] Twilio no disponible para followup2")
+
+            except Exception as apt_err:
+                logger.error("[Scheduler][Followup2] Error en %s: %s", apt.phone_normalized, apt_err)
+
+        logger.info("[Scheduler][Followup2] ✓ Completado — enviadas: %d", sent)
+
+    except Exception as e:
+        logger.error("[Scheduler][Followup2] Error general: %s", e, exc_info=True)
     finally:
         await apt_manager.close()
 
@@ -1169,7 +1245,13 @@ async def startup_event():
                 id="apt_followups",
                 replace_existing=True
             )
-            logger.info("[STARTUP] Scheduler post-cita HABILITADO (cada 15 min, ventana 1h30min)")
+            scheduler.add_job(
+                check_appointment_followup2,
+                trigger=IntervalTrigger(minutes=15),
+                id="apt_followup2",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] Scheduler post-cita HABILITADO (msg1 + msg2 en 2 pasos, cada 15 min)")
 
         scheduler.add_job(
             check_conversation_timeouts,

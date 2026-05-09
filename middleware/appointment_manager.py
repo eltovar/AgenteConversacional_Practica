@@ -121,6 +121,8 @@ class Appointment:
     # NUEVOS: Para idempotencia de notificaciones
     reminder_sent_at: Optional[str] = None
     followup_sent_at: Optional[str] = None
+    followup2_sent: bool = False
+    followup2_sent_at: Optional[str] = None
 
     # Asesor asignado (HubSpot owner_id) — requerido para métricas post-cita
     advisor_id: Optional[str] = None
@@ -399,6 +401,22 @@ class AppointmentManager:
 
         return await self.update_appointment(appointment)
 
+    async def mark_followup2_sent(self, phone_normalized: str, canal: str) -> bool:
+        """Marca que se envió el segundo seguimiento post-cita (encuesta experiencia)."""
+        appointment = await self.get_appointment(phone_normalized, canal)
+        if not appointment:
+            return False
+
+        now_iso = get_bogota_now_iso()
+        appointment.followup2_sent = True
+        appointment.followup2_sent_at = now_iso
+
+        r = await self._get_redis()
+        notif_key = self._build_notification_key(phone_normalized, canal, "followup2")
+        await r.set(notif_key, now_iso, ex=7 * 24 * 60 * 60)
+
+        return await self.update_appointment(appointment)
+
     async def was_notification_sent(
         self,
         phone_normalized: str,
@@ -656,6 +674,59 @@ class AppointmentManager:
 
         logger.info(
             "[AppointmentManager] Citas necesitando seguimiento: %d",
+            len(appointments)
+        )
+        return appointments
+
+    async def get_appointments_needing_followup2(self) -> List[Appointment]:
+        """
+        Citas donde followup1 ya fue enviado hace ≥5min y followup2 aún no se envió.
+        Ventana ZSET: citas entre 1h20min y 3h atrás (cubre toda la zona post-followup1).
+        """
+        r = await self._get_redis()
+        now = get_bogota_now()
+
+        min_time = now - timedelta(minutes=180)  # hace 3h (techo generoso)
+        max_time = now - timedelta(minutes=80)   # hace 1h20min (1h15min + 5min buffer)
+
+        keys = await r.zrangebyscore(self.APPOINTMENT_INDEX, min_time.timestamp(), max_time.timestamp())
+
+        appointments = []
+        for key in keys:
+            data_str = await r.get(key)
+            if not data_str:
+                continue
+            try:
+                data = json.loads(data_str)
+                apt = Appointment.from_dict(data)
+
+                parts = key.replace(self.APPOINTMENT_PREFIX, "").rsplit(":", 1)
+                phone = parts[0] if parts else apt.phone_normalized
+                canal = parts[1] if len(parts) > 1 else apt.canal
+
+                # Idempotencia: ya enviado followup2
+                if await self.was_notification_sent(phone, canal, "followup2"):
+                    continue
+
+                # followup1 debe haberse enviado
+                if not apt.followup_sent or not apt.followup_sent_at:
+                    continue
+
+                # Verificar que hayan pasado ≥5min desde followup1
+                sent_at_dt = parse_datetime_to_bogota(apt.followup_sent_at)
+                if (now - sent_at_dt).total_seconds() < 300:
+                    continue
+
+                appointments.append(apt)
+
+            except Exception as e:
+                logger.error(
+                    "[AppointmentManager] Error procesando followup2 %s: %s",
+                    key, e
+                )
+
+        logger.info(
+            "[AppointmentManager] Citas necesitando followup2: %d",
             len(appointments)
         )
         return appointments

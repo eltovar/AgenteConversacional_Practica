@@ -94,8 +94,7 @@ DEFAULT_TEMPLATE_PREFIX = "whatsapp_template:default:"
 
 # IDs del Pipeline Comercial de HubSpot (actualizado)
 HUBSPOT_PIPELINE_ID = "854756009"
-HUBSPOT_STAGE_NUEVO_LEAD = "1326631578"
-HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"
+HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Stage unificado (entrada de todos los leads)
 HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
 HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
@@ -107,8 +106,7 @@ PROTECTED_STAGES_POST_VISITA = {
 # Bulk Campaigns (mensajes masivos) — constantes
 # ============================================================================
 BULK_EXCLUDED_STAGES = {
-    "1326631578",  # Nuevo Lead
-    "1326623075",  # En conversación
+    "1326623075",  # En Conversación (stage unificado)
     "evangelist",  # Cerrado perdido
     "1326632628",  # Ana Contratos
     "1326632209",  # Pagos y Servicios Publicos
@@ -198,7 +196,6 @@ _TEMPLATES_INITIALIZED: bool = False
 # Etapas del Pipeline de HubSpot
 # ============================================================================
 PIPELINE_STAGES = {
-    "1326631578": "Nuevo Lead",
     "1326623075": "En conversación",
     "marketingqualifiedlead": "Visita agendada",
     "salesqualifiedlead": "Visita realizada",
@@ -222,7 +219,6 @@ PIPELINE_STAGES = {
 
 # Lista ordenada de etapas para el frontend
 PIPELINE_STAGES_LIST = [
-    {"id": "1326631578", "name": "Nuevo Lead"},
     {"id": "1326623075", "name": "En conversación"},
     {"id": "marketingqualifiedlead", "name": "Visita agendada"},
     {"id": "salesqualifiedlead", "name": "Visita realizada"},
@@ -292,7 +288,7 @@ async def _get_contact_lifecyclestage(contact_id: str) -> str:
     Usa caché en Redis (1h) para reducir llamadas a la API.
     """
     if not contact_id or not HUBSPOT_API_KEY:
-        return HUBSPOT_STAGE_NUEVO_LEAD
+        return HUBSPOT_STAGE_EN_CONVERSACION
 
     cache_key = f"contact_stage:{contact_id}"
     try:
@@ -307,7 +303,7 @@ async def _get_contact_lifecyclestage(contact_id: str) -> str:
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}?properties=lifecyclestage"
         response = await _hubspot_get(None, url, HUBSPOT_API_KEY)
         if response.status_code == 200:
-            stage = response.json().get("properties", {}).get("lifecyclestage") or HUBSPOT_STAGE_NUEVO_LEAD
+            stage = response.json().get("properties", {}).get("lifecyclestage") or HUBSPOT_STAGE_EN_CONVERSACION
             try:
                 redis_client = await _get_redis_client()
                 await redis_client.setex(cache_key, CONTACT_STAGE_CACHE_TTL, stage)
@@ -317,7 +313,7 @@ async def _get_contact_lifecyclestage(contact_id: str) -> str:
     except Exception as e:
         logger.debug(f"[Panel] Error leyendo lifecyclestage de contacto {contact_id}: {e}")
 
-    return HUBSPOT_STAGE_NUEVO_LEAD
+    return HUBSPOT_STAGE_EN_CONVERSACION
 
 
 async def _invalidate_contact_stage_cache(contact_id: str) -> None:
@@ -903,41 +899,12 @@ async def _hydrate_contact_and_ensure_panel(
     return await _hydrate_contact(phone, canal_hint=canal_hint, add_to_zset=True)
 
 
-async def _update_contact_to_en_conversacion(contact_id: str) -> None:
-    """
-    Actualiza lifecyclestage del Contact a 'En conversación' (1326623075)
-    cuando la asesora inicia una conversación. Solo avanza si está en 'Nuevo Lead'.
-    Se ejecuta en background — no bloquea el envío del mensaje.
-    """
-    import httpx
-    if not HUBSPOT_API_KEY or not contact_id:
-        return
-    try:
-        current_stage = await _get_contact_lifecyclestage(contact_id)
-        if current_stage and current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
-            logger.info(f"[Panel] Contacto {contact_id} ya en etapa '{current_stage}', no se sobreescribe")
-            return
-
-        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
-        client = get_httpx_client()
-        r = await client.patch(url, headers=headers, json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}})
-        if r.status_code == 200:
-            logger.info(f"[Panel] Contacto {contact_id} actualizado a 'En conversación'")
-            await _invalidate_contact_stage_cache(contact_id)
-        else:
-            logger.warning(f"[Panel] Error actualizando lifecyclestage: {r.status_code} - {r.text}")
-    except Exception as e:
-        logger.error(f"[Panel] Error en _update_contact_to_en_conversacion: {e}")
-
-
 async def _update_contact_to_visita_realizada(contact_id: str) -> None:
     """
     Avanza lifecyclestage 'marketingqualifiedlead' (Visita agendada)
     → 'salesqualifiedlead' (Visita realizada) cuando se completa la visita
     (scheduler post-cita 1h30min). Background — no bloquea envío WhatsApp.
 
-    Replica el patrón de _update_contact_to_en_conversacion:
     """
     import httpx
     if not HUBSPOT_API_KEY or not contact_id:
@@ -1406,9 +1373,6 @@ async def send_message(
                 canal=canal_final
             )
             logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
-            # Sincronizar Contact a "En conversación" en HubSpot (background)
-            if contact_id:
-                background_tasks.add_task(_update_contact_to_en_conversacion, contact_id)
         elif current_status == ConversationStatus.IN_CONVERSATION:
             # Ya está en conversación, solo refrescar TTL
             await state_manager.set_status(
@@ -2767,7 +2731,7 @@ async def create_manual_contact(
         "lastname": lastname.strip() if lastname else "",
         "canal_origen": canal_hs,
         "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
-        "lifecyclestage": HUBSPOT_STAGE_NUEVO_LEAD,
+        "lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION,
     }
 
     # Agregar owner si está disponible
@@ -4497,8 +4461,7 @@ async def _get_contacts_by_worker_filter(
     STAGES_VISIBLES_WORKER = {
         "marketingqualifiedlead",  # Visita agendada
         "customer",                # Cerrado ganado
-        "1326631578",              # Nuevo Lead (custom)
-        "1326623075",              # En Conversación (custom)
+        "1326623075",              # En Conversación (stage unificado)
     }
 
     mongo_mgr = get_mongo_manager()
@@ -4901,7 +4864,7 @@ async def get_active_contacts(
                             contact["current_stage"] = await _get_contact_lifecyclestage(cid)
                         except Exception as e:
                             logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {e}")
-                            contact["current_stage"] = HUBSPOT_STAGE_NUEVO_LEAD
+                            contact["current_stage"] = HUBSPOT_STAGE_EN_CONVERSACION
 
             # Si aún no tenemos nombre, usar teléfono
             if not contact.get("display_name"):

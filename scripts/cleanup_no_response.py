@@ -63,10 +63,9 @@ load_dotenv()
 # Constantes
 # ────────────────────────────────────────────────────────────────────────────
 
-STAGE_NUEVO_LEAD = "1326631578"
 STAGE_EN_CONVERSACION = "1326623075"
 STAGE_NO_RESPONDE = "other"
-ELIGIBLE_STAGES = {STAGE_NUEVO_LEAD, STAGE_EN_CONVERSACION}
+ELIGIBLE_STAGES = {STAGE_EN_CONVERSACION}
 
 HUBSPOT_BASE = "https://api.hubapi.com"
 HUBSPOT_BATCH_READ = f"{HUBSPOT_BASE}/crm/v3/objects/contacts/batch/read"
@@ -404,7 +403,6 @@ def fmt_dt(dt: Optional[datetime]) -> str:
 
 
 STAGE_NAMES = {
-    "1326631578": "Nuevo Lead",
     "1326623075": "En conversación",
     "marketingqualifiedlead": "Visita agendada",
     "salesqualifiedlead": "Visita realizada",

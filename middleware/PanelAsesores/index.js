@@ -83,7 +83,6 @@ const POLLING_INTERVAL_ACTIVE = 10000;  // 10 segundos — WS maneja eventos en 
 
 // Etapas del Pipeline de HubSpot (Contact-based)
 const PIPELINE_STAGES = [
-    { id: "1326631578", name: "Nuevo Lead" },
     { id: "1326623075", name: "En conversacion" },
     { id: "marketingqualifiedlead", name: "Visita agendada" },
     { id: "salesqualifiedlead", name: "Visita realizada" },
@@ -7235,8 +7234,7 @@ async function submitAppointment(event) {
 // =========================================================================
 
 const BULK_EXCLUDED_STAGES = [
-    "1326631578",  // Nuevo Lead
-    "1326623075",  // En conversación
+    "1326623075",  // En Conversación (stage unificado)
     "evangelist",  // Cerrado perdido
     "1326632628",  // Ana Contratos
     "1326632209"   // Pagos y Servicios Publicos

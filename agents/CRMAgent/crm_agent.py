@@ -573,7 +573,7 @@ class CRMAgent:
                 "chatbot_timestamp": timestamp_ms,
                 "canal_origen": channel_origin,  # Canal de origen para workflows y reportes
                 "hs_analytics_source": analytics_source,  # Categoría macro para gráficos de HubSpot
-                "lifecyclestage": "1326631578",  # Nuevo Lead (Contact-Centric, sin Deal)
+                "lifecyclestage": "1326623075",  # En Conversación (stage unificado)
             }
 
             # Agregar email si fue proporcionado

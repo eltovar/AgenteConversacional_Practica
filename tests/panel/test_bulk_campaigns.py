@@ -56,8 +56,7 @@ def _redis_mock_default():
 class TestSecurityValidations:
 
     @pytest.mark.parametrize("excluded_stage", [
-        "1326631578",  # Nuevo Lead
-        "1326623075",  # En conversación
+        "1326623075",  # En Conversación (stage unificado)
         "evangelist",  # Cerrado perdido
         "1326632628",  # Ana Contratos
         "1326632209",  # Pagos y Servicios Publicos

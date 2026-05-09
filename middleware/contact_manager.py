@@ -41,8 +41,8 @@ LEAD_CREATION_LOCK_TTL = 2
 # Máximo de reintentos para rate limits
 MAX_RATE_LIMIT_RETRIES = 3
 
-# ID de etapa "Nuevo Lead" en HubSpot (Contact-centric, lifecyclestage del Contacto)
-STAGE_NUEVO_LEAD = "1326631578"
+# ID de etapa "En Conversación" en HubSpot (stage unificado, entrada de todos los leads)
+STAGE_NUEVO_LEAD = "1326623075"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -583,7 +583,7 @@ class ContactManager:
             "canal_origen": hs_canal,
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
 
-            # Lifecycle stage inicial (custom stage "Nuevo Lead")
+            # Lifecycle stage inicial (En Conversación — stage unificado)
             "lifecyclestage": STAGE_NUEVO_LEAD,
         }
 
@@ -640,7 +640,7 @@ class ContactManager:
         Se ejecuta en background (asyncio.create_task) para no bloquear
         el procesamiento del webhook. Usa el pipeline y etapa correctos.
 
-        Etapa inicial: 1326631578 (Nuevo Lead)
+        Etapa inicial: 1326623075 (En Conversación — stage unificado)
 
         Si se provee url_chat, también actualiza la propiedad url_chat del negocio
         para que el deep link esté disponible tanto en el Contacto como en el Negocio.
@@ -652,7 +652,7 @@ class ContactManager:
         """
         # IDs del pipeline definidos como constantes
         PIPELINE_ID = "854756009"
-        STAGE_NUEVO_LEAD = "1326631578"
+        STAGE_NUEVO_LEAD = "1326623075"
 
         try:
             deal_name = f"Lead WA {phone_normalized}"

@@ -9,7 +9,9 @@
       "Bash(pip install *)",
       "Bash(xargs grep *)",
       "Bash(node --check middleware/PanelAsesores/index.js)",
-      "PowerShell(python -m py_compile \"C:\\\\Users\\\\Salo\\\\Desktop\\\\AgenteConversacional_Practica\\\\middleware\\\\outbound_panel.py\"; if \\($?\\) { \"OK\" })"
+      "PowerShell(python -m py_compile \"C:\\\\Users\\\\Salo\\\\Desktop\\\\AgenteConversacional_Practica\\\\middleware\\\\outbound_panel.py\"; if \\($?\\) { \"OK\" })",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ],
     "deny": [],
     "ask": []

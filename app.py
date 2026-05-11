@@ -1390,25 +1390,35 @@ async def startup_event():
         logger.info("[STARTUP] Bulk campaign processor HABILITADO (cada 15s)")
 
         # Notificaciones 24h al asesor — detecta contactos HUMAN_ACTIVE sin respuesta del asesor en 24h
-        scheduler.add_job(
-            check_24h_advisor_notifications,
-            trigger=IntervalTrigger(hours=1),
-            id="advisor_24h_notifications",
-            replace_existing=True
-        )
-        logger.info("[STARTUP] Scheduler notificaciones 24h asesor HABILITADO (cada 1h)")
+        try:
+            scheduler.add_job(
+                check_24h_advisor_notifications,
+                trigger=IntervalTrigger(hours=1),
+                id="advisor_24h_notifications",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] ✅ Scheduler notificaciones 24h asesor HABILITADO (cada 1h)")
+        except Exception as _e24h:
+            logger.error("[STARTUP] ❌ FALLO registrando advisor_24h_notifications: %s", _e24h, exc_info=True)
 
         # Recordatorio diario de contactos Aprobados — 9:00 AM Bogotá (America/Bogota)
-        scheduler.add_job(
-            check_aprobados_daily,
-            trigger=CronTrigger(hour=9, minute=0, timezone=str(TIMEZONE_BOGOTA)),
-            id="aprobados_daily_reminder",
-            replace_existing=True
-        )
-        logger.info("[STARTUP] Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
+        try:
+            scheduler.add_job(
+                check_aprobados_daily,
+                trigger=CronTrigger(hour=9, minute=0, timezone="America/Bogota"),
+                id="aprobados_daily_reminder",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] ✅ Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
+        except Exception as _eapro:
+            logger.error("[STARTUP] ❌ FALLO registrando aprobados_daily_reminder: %s", _eapro, exc_info=True)
 
         scheduler.start()
-        logger.info("[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s)", TIMEZONE_BOGOTA, pid)
+        registered_job_ids = [j.id for j in scheduler.get_jobs()]
+        logger.info(
+            "[STARTUP] Schedulers iniciados (Timezone: %s, PID lider: %s) — Jobs activos: %s",
+            TIMEZONE_BOGOTA, pid, registered_job_ids
+        )
 
     # Iniciar Redis Pub/Sub listener para broadcast WebSocket cross-worker
     try:

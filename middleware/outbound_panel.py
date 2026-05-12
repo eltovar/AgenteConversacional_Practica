@@ -3707,6 +3707,57 @@ async def get_pipeline_stages(
     }
 
 
+@router.get("/debug/aprobados-stage-discovery")
+async def debug_aprobados_stage_discovery(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    TEMPORAL/DIAGNÓSTICO: Distribuye lifecyclestage de contactos por asesor.
+    Usar para descubrir el stage_id correcto para los 'Aprobados'.
+    Remover tras confirmar el valor correcto.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    from integrations.hubspot import hubspot_client as _hs_diag
+    from integrations.hubspot.lead_assigner import lead_assigner
+
+    discovery: dict = {}
+    for team_members in lead_assigner.OWNERS_CONFIG.values():
+        for member in team_members:
+            if not member.get("active") or not member.get("id"):
+                continue
+            aid = str(member["id"])
+            if aid in discovery:
+                continue
+            try:
+                resp = await _hs_diag._request(
+                    "POST",
+                    "/crm/v3/objects/contacts/search",
+                    {
+                        "filterGroups": [{"filters": [
+                            {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": aid}
+                        ]}],
+                        "properties": ["lifecyclestage"],
+                        "limit": 100,
+                    }
+                )
+                stage_dist: dict = {}
+                for c in resp.get("results", []):
+                    s = (c.get("properties") or {}).get("lifecyclestage") or "null"
+                    stage_dist[s] = stage_dist.get(s, 0) + 1
+                discovery[aid] = {
+                    "name": member["name"],
+                    "hs_total": resp.get("total", 0),
+                    "sampled": len(resp.get("results", [])),
+                    "stages": stage_dist,
+                }
+            except Exception as e:
+                discovery[aid] = {"name": member["name"], "error": str(e)}
+
+    return {"advisors": discovery}
+
+
 @router.post("/reset-bot/{phone}")
 async def reset_bot_state(
     phone: str,

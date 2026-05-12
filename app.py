@@ -829,6 +829,10 @@ async def check_aprobados_daily():
                     owner_id=str(advisor_id)
                 )
                 contacts_count = len(result.get("results", []))
+                logger.info(
+                    "[Scheduler][Aprobados] advisor=%s stage='lead' → hs_total=%d results=%d",
+                    advisor_id, result.get("total", 0), contacts_count
+                )
             except Exception as hs_err:
                 logger.warning("[Scheduler][Aprobados] Error HubSpot advisor=%s: %s", advisor_id, hs_err)
                 continue

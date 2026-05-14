@@ -22,6 +22,10 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")  # Número de WhatsApp (whatsapp:+1234567890)
 TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxxx — Conversations API
 
+# Feature flag para routing outbound. False → fuerza Programmable Messaging
+# (/Messages.json) y evita el cargo MAU de Conversations API ($0.05/usuario activo)
+TWILIO_USE_CONVERSATIONS = os.getenv("TWILIO_USE_CONVERSATIONS", "true").lower() == "true"
+
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
@@ -416,7 +420,7 @@ class TwilioClient:
 
         # Ruta preferida: Conversations endpoint (billing por sesión 24h)
         # Solo aplica si no hay media (Conversations requiere MCS upload para MediaSid).
-        if not media_url:
+        if not media_url and TWILIO_USE_CONVERSATIONS:
             if conversation_sid:
                 conv_sid = conversation_sid
                 svc_sid = chat_service_sid

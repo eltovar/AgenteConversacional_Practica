@@ -452,8 +452,10 @@ class TwilioClient:
             # Construir payload base:
             # Si hay MessagingServiceSid (Conversations API), usarlo como origen.
             # Si no, usar From con el número de WhatsApp (modo legacy).
+            # Cuando TWILIO_USE_CONVERSATIONS=false, forzar From directo: el Sender
+            # ya no está vinculado al MGS y enviar con MessagingServiceSid devuelve 21703.
             msg_svc = self.messaging_service_sid or os.getenv("TWILIO_MESSAGING_SERVICE_SID")
-            if msg_svc:
+            if msg_svc and TWILIO_USE_CONVERSATIONS:
                 payload = {
                     "MessagingServiceSid": msg_svc,
                     "To": to,

@@ -7336,6 +7336,169 @@ async def restore_panel_from_hubspot(
 
 
 # =============================================================================
+# RECOVERY — Restaurar badges/orden tras outage de MongoDB
+# =============================================================================
+
+def _parse_iso_to_utc(iso_str: str) -> datetime:
+    """Parsea ISO 8601 (con o sin tz) a datetime UTC-aware."""
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+@router.post("/admin/recover-outage")
+async def recover_outage(
+    start_iso: str = Query(..., description="Inicio ventana ISO 8601 ej: 2026-05-20T10:54:00-05:00"),
+    end_iso: str = Query(..., description="Fin ventana ISO 8601 ej: 2026-05-20T14:00:00-05:00"),
+    dry_run: bool = Query(True, description="True = solo listar candidatos, no modificar Redis"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Recupera badges y orden de contactos cuyo cliente envió mensajes durante un outage
+    pero la asesora no ha respondido. Lee Redis (que estuvo UP durante el outage de MongoDB),
+    filtra por ventana de tiempo, y restaura advisor_inbox + ZSET + WS broadcast.
+
+    Use cases:
+    - Tras outage de MongoDB que pudo desincronizar advisor_inbox
+    - Tras crash del worker que pudo dejar contactos sin badge
+    - Sweep manual para asegurar que todo contacto esperando respuesta aparece en panel
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    try:
+        start_dt = _parse_iso_to_utc(start_iso)
+        end_dt = _parse_iso_to_utc(end_iso)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Fecha inválida: {ve}")
+
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_iso debe ser mayor que start_iso")
+
+    rc = await _get_redis_client()
+    state_manager = _get_state_manager()
+
+    candidates: List[Dict[str, Any]] = []
+    scanned = 0
+    parse_errors = 0
+
+    # 1. Scan todas las metas conv_meta:* (cursor SCAN, no KEYS)
+    try:
+        async for key_bytes in rc.scan_iter(match=f"{state_manager.META_PREFIX}*", count=200):
+            scanned += 1
+            try:
+                # Las redis-py async devuelven bytes o str según decode_responses
+                key = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
+                raw = await rc.get(key)
+                if not raw:
+                    continue
+                meta = json.loads(raw)
+
+                last_client_iso = meta.get("last_client_message")
+                if not last_client_iso:
+                    continue
+                last_client_dt = _parse_iso_to_utc(last_client_iso)
+
+                # Filtro por ventana de outage
+                if not (start_dt <= last_client_dt <= end_dt):
+                    continue
+
+                # Cliente fue el último en hablar? (gate principal: "esperó respuesta")
+                last_advisor_iso = meta.get("last_advisor_message")
+                if last_advisor_iso:
+                    last_advisor_dt = _parse_iso_to_utc(last_advisor_iso)
+                    if last_advisor_dt >= last_client_dt:
+                        continue  # asesora ya respondió, no recuperar
+
+                phone = meta.get("phone_normalized")
+                canal = (meta.get("canal_origen") or "whatsapp").lower()
+                owner_id = meta.get("assigned_owner_id")
+                display_name = meta.get("display_name")
+
+                if not phone:
+                    continue
+
+                candidates.append({
+                    "phone": phone,
+                    "canal": canal,
+                    "owner_id": owner_id,
+                    "display_name": display_name,
+                    "last_client_message": last_client_iso,
+                    "last_advisor_message": last_advisor_iso,
+                    "redis_key": key,
+                })
+            except Exception as pe:
+                parse_errors += 1
+                if parse_errors <= 5:
+                    logger.warning(f"[Recovery] Parse error en {key_bytes}: {pe}")
+    except Exception as scan_err:
+        logger.error(f"[Recovery] Error escaneando Redis: {scan_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error escaneando Redis: {scan_err}")
+
+    logger.info(
+        f"[Recovery] Scan completo: {scanned} metas revisadas, "
+        f"{len(candidates)} candidatos en ventana, {parse_errors} errores parseo"
+    )
+
+    # 2. Aplicar recovery (si no es dry_run)
+    applied: List[str] = []
+    apply_errors: List[Dict[str, str]] = []
+    skipped_no_owner: List[str] = []
+
+    if not dry_run:
+        for cand in candidates:
+            phone = cand["phone"]
+            canal = cand["canal"]
+            owner_id = cand["owner_id"]
+            try:
+                last_client_dt = _parse_iso_to_utc(cand["last_client_message"])
+                score = last_client_dt.timestamp()
+
+                # 2a. ZADD active_conversations_sorted (mantiene orden por urgencia)
+                await rc.zadd(
+                    state_manager.ACTIVE_CONTACTS_ZSET,
+                    {f"{phone}:{canal}": score}
+                )
+
+                # 2b. advisor_inbox (badge "no leído") — requiere owner_id
+                if owner_id:
+                    await state_manager.add_to_advisor_inbox(owner_id, phone, canal, score=score)
+                else:
+                    skipped_no_owner.append(phone)
+
+                # 2c. WS broadcast para refrescar panel en vivo
+                try:
+                    await ws_manager.publish_broadcast(rc, {
+                        "type": "contact_updated",
+                        "phone": phone,
+                        "canal": canal,
+                        "action": "new_message",
+                    })
+                except Exception as we:
+                    logger.warning(f"[Recovery] WS broadcast falló para {phone}: {we}")
+
+                applied.append(phone)
+            except Exception as ae:
+                apply_errors.append({"phone": phone, "error": str(ae)})
+                logger.error(f"[Recovery] Apply error para {phone}: {ae}", exc_info=True)
+
+    return {
+        "window": {"start": start_iso, "end": end_iso},
+        "dry_run": dry_run,
+        "scanned_metas": scanned,
+        "candidates_found": len(candidates),
+        "parse_errors": parse_errors,
+        "applied_count": len(applied) if not dry_run else 0,
+        "apply_errors": apply_errors,
+        "skipped_no_owner": skipped_no_owner,
+        # En dry_run devolvemos detalle completo; en aplicado solo lista de phones
+        "candidates": candidates if dry_run else None,
+        "applied": applied if not dry_run else None,
+    }
+
+
+# =============================================================================
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
 # =============================================================================
 

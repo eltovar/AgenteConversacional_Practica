@@ -7382,19 +7382,16 @@ async def recover_outage(
     candidates: List[Dict[str, Any]] = []
     scanned = 0
     parse_errors = 0
+    BATCH_SIZE = 500  # MGET en lotes de 500 para evitar N+1
 
-    # 1. Scan todas las metas conv_meta:* (cursor SCAN, no KEYS)
-    try:
-        async for key_bytes in rc.scan_iter(match=f"{state_manager.META_PREFIX}*", count=200):
-            scanned += 1
+    def _process_batch(keys_batch: List[str], values_batch: List[Any]) -> None:
+        """Procesa un batch de (key, value) buscando candidatos en la ventana."""
+        nonlocal parse_errors
+        for key, raw in zip(keys_batch, values_batch):
+            if not raw:
+                continue
             try:
-                # Las redis-py async devuelven bytes o str según decode_responses
-                key = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
-                raw = await rc.get(key)
-                if not raw:
-                    continue
                 meta = json.loads(raw)
-
                 last_client_iso = meta.get("last_client_message")
                 if not last_client_iso:
                     continue
@@ -7404,12 +7401,12 @@ async def recover_outage(
                 if not (start_dt <= last_client_dt <= end_dt):
                     continue
 
-                # Cliente fue el último en hablar? (gate principal: "esperó respuesta")
+                # Cliente fue el último en hablar? (gate principal)
                 last_advisor_iso = meta.get("last_advisor_message")
                 if last_advisor_iso:
                     last_advisor_dt = _parse_iso_to_utc(last_advisor_iso)
                     if last_advisor_dt >= last_client_dt:
-                        continue  # asesora ya respondió, no recuperar
+                        continue
 
                 phone = meta.get("phone_normalized")
                 canal = (meta.get("canal_origen") or "whatsapp").lower()
@@ -7431,7 +7428,32 @@ async def recover_outage(
             except Exception as pe:
                 parse_errors += 1
                 if parse_errors <= 5:
-                    logger.warning(f"[Recovery] Parse error en {key_bytes}: {pe}")
+                    logger.warning(f"[Recovery] Parse error en {key}: {pe}")
+
+    # 1. Scan + MGET en batches (3-5 ordenes de magnitud más rápido que GET individual)
+    logger.info(f"[Recovery] Iniciando scan con ventana {start_iso} → {end_iso}")
+    keys_buffer: List[str] = []
+    try:
+        async for key_bytes in rc.scan_iter(match=f"{state_manager.META_PREFIX}*", count=500):
+            key = key_bytes.decode() if isinstance(key_bytes, bytes) else key_bytes
+            keys_buffer.append(key)
+
+            # Flush cuando el buffer llegue a BATCH_SIZE
+            if len(keys_buffer) >= BATCH_SIZE:
+                values = await rc.mget(keys_buffer)
+                _process_batch(keys_buffer, values)
+                scanned += len(keys_buffer)
+                keys_buffer = []
+                logger.info(
+                    f"[Recovery] Progreso: {scanned} metas escaneadas, "
+                    f"{len(candidates)} candidatos hasta ahora"
+                )
+
+        # Flush del buffer restante
+        if keys_buffer:
+            values = await rc.mget(keys_buffer)
+            _process_batch(keys_buffer, values)
+            scanned += len(keys_buffer)
     except Exception as scan_err:
         logger.error(f"[Recovery] Error escaneando Redis: {scan_err}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error escaneando Redis: {scan_err}")

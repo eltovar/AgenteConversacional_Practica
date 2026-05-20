@@ -9,6 +9,7 @@ import sys
 # 3. URL pasada como argumento: python audit_inbox.py redis://...
 
 url = None
+#comentatio para comintear algo
 
 # Intenta 1: Railway run
 url = os.environ.get('REDIS_URL')

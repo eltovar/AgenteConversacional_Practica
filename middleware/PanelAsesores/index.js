@@ -1188,7 +1188,9 @@ function _rebuildPortalChips(contacts) {
  */
 function onStageFilterChange(val) {
     activeStageFilter = val;
-    _applyFiltersAndRender();
+    // [StageFilter] Backend hace el filtro de etapa (trae todos del owner en esa etapa
+    // desde HubSpot, cap 500). Sin etapa, loadContacts() vuelve al flujo ZSET normal.
+    loadContacts();
     _updateBulkButtonVisibility();
 }
 
@@ -1309,6 +1311,12 @@ async function loadContacts() {
     } else {
         console.log(`[Filtro] Sin fecha — mostrando todos los contactos activos`);
     }
+
+    // [StageFilter] Filtro por etapa: backend trae TODOS los contactos del owner en esa etapa
+    if (activeStageFilter) {
+        url += `&stage=${encodeURIComponent(activeStageFilter)}`;
+        console.log(`[StageFilter] Solicitando todos los contactos en etapa ${activeStageFilter}`);
+    }
     console.log(`[Filtro] GET ${url}`);
 
     try {
@@ -1321,7 +1329,12 @@ async function loadContacts() {
         const data = await response.json();
         const newContacts = data.contacts || [];
 
-        console.log(`[Filtro] Respuesta: ${newContacts.length} contactos  |  activos: ${data.active_count ?? '?'}  |  históricos: ${data.historical_count ?? '?'}  |  rango: ${data.since ?? '?'} → ${data.until ?? '?'}`);
+        // [StageFilter] Aviso si HubSpot devolvió el tope duro (más contactos disponibles allá)
+        if (data.filter_mode === 'stage_full' && data.max_reached) {
+            try { showToast(`Mostrando los primeros ${data.total} contactos. Hay más en HubSpot.`, 'info'); } catch (_e) {}
+        }
+
+        console.log(`[Filtro] Respuesta: ${newContacts.length} contactos  |  activos: ${data.active_count ?? '?'}  |  históricos: ${data.historical_count ?? '?'}  |  rango: ${data.since ?? '?'} → ${data.until ?? '?'}  |  mode: ${data.filter_mode ?? 'normal'}${data.from_cache ? ' (cache)' : ''}`);
         if (newContacts.length === 0) {
             console.warn('[Filtro] ⚠️  El backend devolvió 0 contactos. Causas posibles: rango de fechas sin actividad, filtro de asesora muy restrictivo, o error Redis transitorio.');
         }
@@ -1974,6 +1987,11 @@ function _buildContactHTML(contact) {
         ? `<span class="absolute -bottom-1 -left-1 bg-sky-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Asignado a otro asesor">🔄</span>`
         : '';
 
+    // [StageFilter] Badge HubSpot-only: contacto desde filtro de etapa sin conversación activa en Redis
+    const hsOnlyBadge = contact.from_hubspot_stage
+        ? `<span class="absolute -top-1 -right-1 bg-amber-400 text-white text-[10px] rounded px-1 py-0.5 leading-none" title="Sin conversación activa — solo HubSpot">🏷</span>`
+        : '';
+
     const stateBadge = (isInConversation || isHumanActive || isActive)
         ? `<span class="absolute -top-1 -left-1 bg-blue-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Asesora atendiendo">👤</span>`
         : status === 'BOT_ACTIVE'
@@ -1996,6 +2014,7 @@ function _buildContactHTML(contact) {
                     ${manualUnreadBadge}
                     ${apptBadge}
                     ${crossAdvisorBadge}
+                    ${hsOnlyBadge}
                 </div>
                 <div class="flex-1 min-w-0">
                     <div class="flex items-center justify-between gap-1">
@@ -4948,11 +4967,14 @@ function stopPolling() {
  */
 function startFallbackPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
+    // [StageFilter] Cuando hay filtro de etapa activo, cada loadContacts() golpea HubSpot.
+    // Reducir cadencia a 30s para no saturar HubSpot ni el cache.
+    const _intervalMs = activeStageFilter ? 30000 : POLLING_INTERVAL_IDLE;
     pollingInterval = setInterval(async () => {
         if (!isTabVisible) return;
         await loadContacts();
-    }, POLLING_INTERVAL_IDLE);
-    console.log('[Panel] Fallback polling activo (WS conectado): 10s');
+    }, _intervalMs);
+    console.log(`[Panel] Fallback polling activo (WS conectado): ${_intervalMs / 1000}s${activeStageFilter ? ' [stage filter]' : ''}`);
 }
 
 /**

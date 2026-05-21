@@ -4669,6 +4669,7 @@ async def get_active_contacts(
     worker_id: Optional[str] = Query(None, description="Worker ID para filtrar contactos por encargado de cita"),
     include_phone: Optional[str] = Query(None, description="Teléfono a incluir aunque no pertenezca al advisor (deep link cross-advisor)"),
     date_field: str = Query("last_activity", description="Campo de fecha para filtro custom: last_activity | created_at"),
+    stage: Optional[str] = Query(None, description="Filtro por lifecyclestage — trae TODOS los contactos del owner en esa etapa (cap 500). Ignora limit/page."),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -4676,6 +4677,30 @@ async def get_active_contacts(
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
+
+    # ── Branch: filtro por etapa → delega a módulo aislado stage_filter ──────
+    if stage and advisor:
+        try:
+            from middleware.stage_filter import get_contacts_by_stage_full
+            _sm = _get_state_manager()
+            _stage_result = await get_contacts_by_stage_full(stage, advisor, _sm)
+            if worker_id:
+                logger.info(f"[StageFilter] worker_id={worker_id} ignorado al combinar con stage={stage}")
+            return {
+                "contacts": _stage_result["contacts"],
+                "total": _stage_result["total"],
+                "page": 1,
+                "limit": _stage_result["total"],
+                "filter_mode": "stage_full",
+                "max_reached": _stage_result["max_reached"],
+                "from_cache": _stage_result["from_cache"],
+            }
+        except Exception as _stage_err:
+            logger.error(
+                f"[StageFilter] Error en branch stage={stage}, fallback al flujo ZSET: {_stage_err}",
+                exc_info=True,
+            )
+            # Cae al flujo normal abajo
 
     try:
         from zoneinfo import ZoneInfo

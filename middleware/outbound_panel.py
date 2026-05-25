@@ -3935,9 +3935,9 @@ async def get_contact_detail(
                 channel=canal
             )
 
-            # Paso 1.5: si canal de portal y sin resultados → reintentar sin filtro de canal
-            # (lead mercado_libre/ciencuadras: canal=portal pero mensajes en channel=whatsapp)
-            if not mongo_msgs and canal and canal not in ("whatsapp", "instagram"):
+            # Paso 1.5: si no hay resultados → reintentar sin filtro de canal (red de seguridad).
+            # Cubre desincronizaciones donde el canal almacenado difiere del canal_origen.
+            if not mongo_msgs and canal:
                 mongo_msgs = await mongo_manager.get_history(
                     phone=phone_normalized,
                     limit=limit,

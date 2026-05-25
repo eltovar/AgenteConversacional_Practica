@@ -224,7 +224,7 @@ class TestTakeControlWebhookE2E:
         assert status_1 is None or status_1 == ConversationStatus.BOT_ACTIVE
 
         with patch("middleware.webhook_handler.get_state_manager", return_value=state_manager):
-            should_respond_1, reason_1, _ = await should_bot_respond(phone, contact_id)
+            should_respond_1, reason_1, _, _ = await should_bot_respond(phone, contact_id)
 
             assert should_respond_1 is True, \
                 "Bot debe responder inicialmente (BOT_ACTIVE)"
@@ -242,7 +242,7 @@ class TestTakeControlWebhookE2E:
         assert status_2 == ConversationStatus.HUMAN_ACTIVE
 
         with patch("middleware.webhook_handler.get_state_manager", return_value=state_manager):
-            should_respond_2, reason_2, _ = await should_bot_respond(phone, contact_id)
+            should_respond_2, reason_2, _, _ = await should_bot_respond(phone, contact_id)
 
             assert should_respond_2 is False, \
                 "Bot NO debe responder después de take-control (HUMAN_ACTIVE)"
@@ -255,7 +255,7 @@ class TestTakeControlWebhookE2E:
         assert status_3 == ConversationStatus.BOT_ACTIVE
 
         with patch("middleware.webhook_handler.get_state_manager", return_value=state_manager):
-            should_respond_3, reason_3, _ = await should_bot_respond(phone, contact_id)
+            should_respond_3, reason_3, _, _ = await should_bot_respond(phone, contact_id)
 
             assert should_respond_3 is True, \
                 "Bot debe volver a responder después de cerrar conversación (BOT_ACTIVE)"
@@ -288,7 +288,7 @@ class TestTakeControlWebhookE2E:
         # Cliente envía mensaje por WhatsApp (diferente canal)
         with patch("middleware.webhook_handler.get_state_manager", return_value=state_manager):
             # Verificar con canal whatsapp
-            should_respond_wsp, reason_wsp, _ = await should_bot_respond(
+            should_respond_wsp, reason_wsp, _, _ = await should_bot_respond(
                 phone_normalized=phone,
                 contact_id="196843060059"
             )

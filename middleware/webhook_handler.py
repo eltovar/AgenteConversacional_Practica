@@ -353,15 +353,15 @@ async def _process_message_deferred(
             contact_id=contact_id
         )
         
-        # Determinar final_channel: si el mensaje llegó DIRECTAMENTE por WhatsApp
-        # (prefijo 'whatsapp:' en el campo From de Twilio), forzar 'whatsapp' para
-        # que el panel pueda leer los mensajes (MongoDB filtra por channel=whatsapp).
-        # Sin este guard, contactos con historial de otro canal (instagram, finca_raiz, etc.)
-        # tendrían sus mensajes de WhatsApp almacenados con channel='instagram', haciendo
-        # que el panel nunca los muestre al cargar el historial con canal='whatsapp'.
+        # Determinar final_channel usando el canal histórico del contacto.
+        # El panel filtra historial por canal_origen (no siempre 'whatsapp'), por lo que
+        # almacenar bajo historical_channel garantiza consistencia en MongoDB, ZSET e inbox.
+        # Para contactos nuevos sin historial se defaultea a 'whatsapp'.
         _real_incoming = incoming_channel or early_channel
-        if _real_incoming == "whatsapp":
-            final_channel = "whatsapp"
+        if _real_incoming == "whatsapp" and historical_channel:
+            final_channel = historical_channel
+        elif _real_incoming == "whatsapp":
+            final_channel = "whatsapp"  # contacto nuevo sin historial previo
         else:
             final_channel = historical_channel if historical_channel != "whatsapp" else detect_channel_dynamic(processed_body, redis_channel)
         

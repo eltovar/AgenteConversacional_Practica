@@ -4051,7 +4051,9 @@ async def hydrate_contact_endpoint(
 @router.get("/conversations/{phone}")
 async def get_conversation_history(
     phone: str,
-    limit: int = Query(50, ge=1, le=100),
+    # ⚠️ 2026-05-30: default 100 (antes 50), cap 500 (antes 100). Permite ver historial
+    # completo de conversaciones largas sin perder mensajes que MongoDB sí tiene.
+    limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal para filtrar mensajes"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -4132,7 +4134,8 @@ async def get_conversation_history(
 @router.get("/history/{contact_id}")
 async def get_history_by_contact_id(
     contact_id: str,
-    limit: int = Query(50, ge=1, le=100),
+    # ⚠️ 2026-05-30: default 100 (antes 50), cap 500 (antes 100).
+    limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
     phone: Optional[str] = Query(None, description="Teléfono para buscar historial"),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -4784,6 +4787,27 @@ async def get_active_contacts(
                 or advisor in (c.get("assigned_owner_ids") or [])
             ]
             logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(advisor_contacts)} contactos")
+
+            # ⚠️ 2026-05-30: Fallback MongoDB — recupera conversaciones del owner que
+            # ya no estén en el ZSET Redis (TTL expirado, ghost cleanup histórico,
+            # eviction de Redis, etc.). Garantiza que el panel muestre TODAS las
+            # conversaciones del asesor aunque tengan semanas/meses.
+            try:
+                _zset_phones = {c.get("phone") for c in advisor_contacts if c.get("phone")}
+                _mongo_extra = await state_manager.get_archived_conversations_from_mongo(
+                    owner_id=advisor,
+                    limit=200,  # cap para no inflar la página
+                    exclude_phones=_zset_phones,
+                )
+                if _mongo_extra:
+                    advisor_contacts = advisor_contacts + _mongo_extra
+                    logger.info(
+                        f"[Panel][MongoFallback] +{len(_mongo_extra)} conversaciones desde MongoDB "
+                        f"(owner={advisor}, total ahora {len(advisor_contacts)})"
+                    )
+            except Exception as _fb_err:
+                logger.warning(f"[Panel] Fallback MongoDB falló (non-fatal): {_fb_err}")
+
             # Límite dinámico: siempre incluir TODOS los contactos con unread + top `limit` del resto.
             # Garantiza que si hay 40 contactos con mensajes nuevos todos se muestran sin importar el límite.
             _unread_phones = await state_manager.get_all_inbox_phones(advisor)
@@ -7890,7 +7914,7 @@ async def _filter_contacts_by_last_message_range(
 
 # ----------------------------------------------------------------------------
 # Endpoints Bulk Campaigns
-# ----------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------
 
 @router.post("/bulk-campaigns/preview")
 async def preview_bulk_campaign(

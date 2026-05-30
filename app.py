@@ -588,6 +588,83 @@ async def check_conversation_timeouts():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# JOB NOCTURNO: REBUILD ZSET DESDE MONGODB CONVERSATIONS
+# ⚠️ 2026-05-30: garantiza auto-consistencia del inbox del panel ante pérdidas de
+# Redis (memory watchdog SIGTERM, eviction, ghost cleanup histórico). Lee
+# conversaciones recientes de MongoDB y las re-agrega al ZSET si faltan.
+# Idempotente: usa zadd con NX implícito (no pisa scores existentes más recientes).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def rebuild_zset_from_conversations():
+    """
+    Reconstruye `active_conversations_sorted` desde MongoDB `conversations` —
+    últimos 90 días por defecto. Re-inserta conversaciones perdidas en el ZSET
+    sin pisar las que ya están con score más reciente.
+
+    Corre 1x/día a las 3 AM Bogotá (leader scheduler).
+    Cap: 5000 conversaciones por ejecución para no saturar Redis.
+    """
+    await apply_jitter()
+    try:
+        from database.mongodb_client import get_mongo_manager
+        from middleware.conversation_state import ConversationStateManager, get_bogota_now
+
+        mongo = get_mongo_manager()
+        state_mgr = get_state_manager()
+        since = get_bogota_now() - timedelta(days=90)
+
+        conv_docs = await mongo.find_recent_conversations(since=since, limit=5000)
+        if not conv_docs:
+            logger.info("[Rebuild ZSET] Sin conversaciones recientes en MongoDB — skip")
+            return
+
+        # Leer ZSET actual una sola vez para diff
+        try:
+            current_members = set(await state_mgr.redis.zrange(
+                state_mgr.ACTIVE_CONTACTS_ZSET, 0, -1
+            ))
+            current_members = {
+                m if isinstance(m, str) else m.decode("utf-8", errors="ignore")
+                for m in current_members
+            }
+        except Exception as _zr_err:
+            logger.warning(f"[Rebuild ZSET] Error leyendo ZSET actual: {_zr_err}")
+            current_members = set()
+
+        added = 0
+        pipe = state_mgr.redis.pipeline(transaction=False)
+        for d in conv_docs:
+            phone = d.get("phone")
+            canal = (d.get("canal") or "whatsapp").lower()
+            last_msg = d.get("last_message_at")
+            if not phone or not last_msg:
+                continue
+            member = f"{phone}:{canal}"
+            if member in current_members:
+                continue  # ya está, no tocar score
+            score = last_msg.timestamp() if hasattr(last_msg, "timestamp") else 0.0
+            if score <= 0:
+                continue
+            pipe.zadd(state_mgr.ACTIVE_CONTACTS_ZSET, {member: score})
+            added += 1
+
+        if added > 0:
+            await pipe.execute()
+            logger.info(
+                f"[Rebuild ZSET] {added} conversaciones recuperadas desde MongoDB "
+                f"(total escaneado: {len(conv_docs)}, ya en ZSET: {len(current_members)})"
+            )
+        else:
+            logger.info(
+                f"[Rebuild ZSET] ZSET ya consistente — {len(conv_docs)} conversaciones "
+                f"revisadas, 0 agregadas"
+            )
+
+    except Exception as e:
+        logger.error("[Rebuild ZSET] Error: %s", e, exc_info=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE SEGUIMIENTO 24H
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1416,6 +1493,20 @@ async def startup_event():
             logger.info("[STARTUP] ✅ Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
         except Exception as _eapro:
             logger.error("[STARTUP] ❌ FALLO registrando aprobados_daily_reminder: %s", _eapro, exc_info=True)
+
+        # ⚠️ 2026-05-30: Rebuild nocturno del ZSET desde MongoDB conversations.
+        # Auto-consistencia: recupera conversaciones perdidas del inbox por
+        # cualquier causa (memory watchdog, eviction Redis, ghost cleanup histórico).
+        try:
+            scheduler.add_job(
+                rebuild_zset_from_conversations,
+                trigger=CronTrigger(hour=3, minute=0, timezone="America/Bogota"),
+                id="rebuild_zset_nightly",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] ✅ Rebuild ZSET nocturno HABILITADO (3:00 AM Bogotá)")
+        except Exception as _erz:
+            logger.error("[STARTUP] ❌ FALLO registrando rebuild_zset_nightly: %s", _erz, exc_info=True)
 
         scheduler.start()
         registered_job_ids = [j.id for j in scheduler.get_jobs()]

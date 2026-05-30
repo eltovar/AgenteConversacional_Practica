@@ -171,11 +171,19 @@ class MongoDBManager:
                 sparse=True
             )
 
-            # Índice TTL para auto-limpieza (mensajes > 90 días)
+            # Índice TTL para auto-limpieza (mensajes > 730 días = 2 años)
+            # CAMBIO 2026-05-30: subido de 90d → 730d para que el panel pueda mostrar
+            # historial de conversaciones de hace meses sin depender del fallback a
+            # HubSpot. La colección `conversations` (sin TTL) es la fuente del INBOX;
+            # `messages` con 2 años es suficiente buffer para el historial DETALLADO.
+            # Para cambiar el TTL en producción tras este deploy, MongoDB requiere:
+            #   db.messages.dropIndex("timestamp_ttl_idx")
+            #   db.messages.createIndex({timestamp:1}, {expireAfterSeconds: 730*86400, name:"timestamp_ttl_idx"})
+            # (collMod no funciona si el índice tiene nombre custom — ver docs MongoDB).
             await self.db.messages.create_index(
                 "timestamp",
                 name="timestamp_ttl_idx",
-                expireAfterSeconds=90 * 24 * 60 * 60  # 90 días
+                expireAfterSeconds=730 * 24 * 60 * 60  # 730 días = ~2 años
             )
 
             # Índice único para deduplicación por MessageSid de Twilio
@@ -270,6 +278,33 @@ class MongoDBManager:
             await self.db.bulk_campaigns.create_index(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
                 name="idx_bulk_status_created"
+            )
+
+            # ⚠️ 2026-05-30: Nueva colección `conversations` — fuente de verdad permanente
+            # del inbox del panel. SIN TTL — sobrevive a expiración de keys Redis y a
+            # purgas de la colección `messages` (TTL 730d).
+            # Ver upsert_conversation_on_message() para flujo de actualización.
+            await self.db.conversations.create_index(
+                [("phone", ASCENDING), ("canal", ASCENDING)],
+                name="conv_phone_canal_unique_idx",
+                unique=True
+            )
+            await self.db.conversations.create_index(
+                [("owner_id", ASCENDING), ("last_message_at", DESCENDING)],
+                name="conv_owner_last_msg_idx"
+            )
+            await self.db.conversations.create_index(
+                "last_message_at",
+                name="conv_last_msg_idx"
+            )
+            await self.db.conversations.create_index(
+                "contact_id",
+                name="conv_contact_id_idx",
+                sparse=True
+            )
+            await self.db.conversations.create_index(
+                [("archived", ASCENDING), ("last_message_at", DESCENDING)],
+                name="conv_archived_idx"
             )
 
             self._indexes_created = True
@@ -383,6 +418,25 @@ class MongoDBManager:
                         f"[MongoDB] Mensaje guardado: phone={phone}, sender={sender}, "
                         f"media={media}, id={result.inserted_id}"
                     )
+
+                # ⚠️ 2026-05-30: Upsert atómico en colección `conversations`.
+                # Fire-and-forget — no bloquea el path crítico de mensajería.
+                # Garantiza que el inbox del panel pueda mostrar la conversación
+                # aunque Redis pierda el ZSET o el conv_meta expire.
+                try:
+                    asyncio.create_task(
+                        self.upsert_conversation_on_message(
+                            phone=phone,
+                            canal=channel,
+                            content=content,
+                            sender=sender,
+                            hubspot_contact_id=hubspot_contact_id,
+                        )
+                    )
+                except Exception as _conv_err:
+                    # Cualquier error aquí NO debe afectar el guardado del mensaje
+                    logger.debug(f"[MongoDB] Upsert conversation no crítico: {_conv_err}")
+
                 return str(result.inserted_id)
 
             except DuplicateKeyError:
@@ -1942,6 +1996,245 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"[MongoDB][BulkCampaign] Error finalize: {e}")
             return False
+
+    # =========================================================================
+    # CONVERSATIONS — Fuente de verdad PERMANENTE del inbox del panel
+    # =========================================================================
+    # ⚠️ 2026-05-30: Colección sin TTL — sobrevive expiración de Redis ZSET
+    # y del TTL de `messages` (730d). El panel lee de esta colección cuando
+    # el ZSET Redis no tiene un contacto que MongoDB sí conoce.
+    # Diseño: 1 documento por (phone, canal). Upsert en cada save_message().
+    # Costo por mensaje: 1 op MongoDB extra (~5ms), fire-and-forget desde
+    # save_message para no bloquear el path crítico de mensajería.
+
+    async def upsert_conversation_on_message(
+        self,
+        phone: str,
+        canal: str,
+        content: str,
+        sender: str,
+        hubspot_contact_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Upsert atómico de un documento `conversations` cuando llega/sale un mensaje.
+
+        - $inc message_count en cada llamada
+        - $set last_message_at / last_message_preview / last_message_sender
+        - $setOnInsert first_message_at + created_at (solo en primera inserción)
+        - hubspot_contact_id se setea solo si llega — preserva valor existente
+
+        NO crítico: si falla, log + return False. save_message ya guardó el mensaje
+        en la colección `messages` (que es source of truth de los textos).
+        """
+        if not phone or not await self.connect():
+            return False
+        try:
+            canal_safe = (canal or "whatsapp").lower()
+            now = datetime.now(TIMEZONE)
+            preview = (content or "")[:200]
+
+            set_fields = {
+                "last_message_at": now,
+                "last_message_preview": preview,
+                "last_message_sender": sender,
+                "updated_at": now,
+            }
+            # Solo setear contact_id si llega (no sobrescribir con None)
+            if hubspot_contact_id:
+                set_fields["contact_id"] = hubspot_contact_id
+
+            set_on_insert = {
+                "phone": phone,
+                "canal": canal_safe,
+                "first_message_at": now,
+                "created_at": now,
+                "archived": False,
+                "message_count": 0,  # se incrementa abajo
+            }
+
+            await self.db.conversations.update_one(
+                {"phone": phone, "canal": canal_safe},
+                {
+                    "$set": set_fields,
+                    "$setOnInsert": set_on_insert,
+                    "$inc": {"message_count": 1},
+                },
+                upsert=True,
+            )
+            return True
+        except DuplicateKeyError:
+            # Race condition en primera inserción concurrente — reintentar update
+            try:
+                await self.db.conversations.update_one(
+                    {"phone": phone, "canal": canal_safe},
+                    {"$set": set_fields, "$inc": {"message_count": 1}},
+                )
+                return True
+            except Exception as e2:
+                logger.warning(f"[MongoDB][conv] Retry upsert falló para {phone}: {e2}")
+                return False
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error upsert conversation {phone}: {e}")
+            return False
+
+    async def update_conversation_meta(
+        self,
+        phone: str,
+        canal: str = "whatsapp",
+        owner_id: Optional[str] = None,
+        display_name: Optional[str] = None,
+        status: Optional[str] = None,
+        contact_id: Optional[str] = None,
+        canal_origen: Optional[str] = None,
+    ) -> bool:
+        """
+        Sincroniza metadatos del contacto en la colección `conversations`.
+        Llamar desde activate_human, request_handoff, transfer_contact, close-conversation.
+        Solo actualiza campos no-None — preserva valores existentes.
+        """
+        if not phone or not await self.connect():
+            return False
+        try:
+            canal_safe = (canal or "whatsapp").lower()
+            set_fields = {"updated_at": datetime.now(TIMEZONE)}
+            if owner_id is not None:
+                set_fields["owner_id"] = owner_id
+            if display_name is not None:
+                set_fields["display_name"] = display_name
+            if status is not None:
+                set_fields["status"] = status
+            if contact_id is not None:
+                set_fields["contact_id"] = contact_id
+            if canal_origen is not None:
+                set_fields["canal_origen"] = canal_origen
+            if len(set_fields) == 1:  # solo updated_at — nada útil que actualizar
+                return False
+            result = await self.db.conversations.update_one(
+                {"phone": phone, "canal": canal_safe},
+                {"$set": set_fields},
+                upsert=False,  # NO crear sin mensajes — upsert solo via upsert_conversation_on_message
+            )
+            return result.matched_count > 0
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error update_conversation_meta {phone}: {e}")
+            return False
+
+    async def get_conversation(
+        self, phone: str, canal: str = "whatsapp"
+    ) -> Optional[Dict[str, Any]]:
+        """Lookup individual de conversación por (phone, canal)."""
+        if not phone or not await self.connect():
+            return None
+        try:
+            canal_safe = (canal or "whatsapp").lower()
+            doc = await self.db.conversations.find_one(
+                {"phone": phone, "canal": canal_safe}
+            )
+            if doc:
+                doc["_id"] = str(doc["_id"])
+            return doc
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error get_conversation {phone}: {e}")
+            return None
+
+    async def find_conversations_by_owner(
+        self,
+        owner_id: str,
+        before_ts: Optional[datetime] = None,
+        limit: int = 30,
+        include_archived: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Lista conversaciones de un owner, paginadas por last_message_at desc.
+        Si before_ts se provee, retorna conversaciones con last_message_at < before_ts
+        (cursor-based pagination para "cargar más antiguas").
+        """
+        if not owner_id or not await self.connect():
+            return []
+        try:
+            query: Dict[str, Any] = {"owner_id": owner_id}
+            if not include_archived:
+                query["archived"] = {"$ne": True}
+            if before_ts:
+                query["last_message_at"] = {"$lt": before_ts}
+            cursor = self.db.conversations.find(query).sort(
+                "last_message_at", DESCENDING
+            ).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            for d in docs:
+                d["_id"] = str(d["_id"])
+            return docs
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error find_conversations_by_owner {owner_id}: {e}")
+            return []
+
+    async def find_recent_conversations(
+        self,
+        since: datetime,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Usado por el job nocturno rebuild_zset_from_conversations.
+        Retorna conversaciones con last_message_at >= since.
+        """
+        if not await self.connect():
+            return []
+        try:
+            cursor = self.db.conversations.find(
+                {"last_message_at": {"$gte": since}, "archived": {"$ne": True}}
+            ).sort("last_message_at", DESCENDING).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            for d in docs:
+                d["_id"] = str(d["_id"])
+            return docs
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error find_recent_conversations: {e}")
+            return []
+
+    async def search_conversations(
+        self,
+        owner_id: Optional[str] = None,
+        query_text: Optional[str] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Búsqueda histórica para el panel — combina filtro por owner + texto + rango fechas.
+        El texto busca en display_name y last_message_preview (regex case-insensitive).
+        """
+        if not await self.connect():
+            return []
+        try:
+            query: Dict[str, Any] = {"archived": {"$ne": True}}
+            if owner_id:
+                query["owner_id"] = owner_id
+            if query_text:
+                # Escapar regex special chars básico
+                import re as _re
+                safe = _re.escape(query_text)
+                query["$or"] = [
+                    {"display_name": {"$regex": safe, "$options": "i"}},
+                    {"last_message_preview": {"$regex": safe, "$options": "i"}},
+                    {"phone": {"$regex": safe, "$options": "i"}},
+                ]
+            if date_from or date_to:
+                date_filter: Dict[str, Any] = {}
+                if date_from:
+                    date_filter["$gte"] = date_from
+                if date_to:
+                    date_filter["$lte"] = date_to
+                query["last_message_at"] = date_filter
+            cursor = self.db.conversations.find(query).sort(
+                "last_message_at", DESCENDING
+            ).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            for d in docs:
+                d["_id"] = str(d["_id"])
+            return docs
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error search_conversations: {e}")
+            return []
 
     async def close(self):
         """Cierra la conexión."""

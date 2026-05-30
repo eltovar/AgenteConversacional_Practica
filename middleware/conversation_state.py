@@ -9,7 +9,7 @@ import uuid
 import os
 from enum import Enum
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field, fields
 from zoneinfo import ZoneInfo
 
@@ -260,7 +260,12 @@ class ConversationStateManager:
             # ── Paso 2: Pipeline de lectura para todos los miembros ZSET (1 round-trip) ─
             valid_members = [m for m in members if ":" in m]
             now_ts = get_bogota_now().timestamp()
-            ghosts_to_remove = []
+            ghosts_detected = []  # ⚠️ 2026-05-30: ya NO se borran automáticamente del ZSET.
+                                  # Se logean y se delegan a job nocturno rebuild_zset_from_conversations
+                                  # que valida contra MongoDB `conversations` antes de hacer zrem.
+                                  # Causa: el ghost cleanup automático estaba eliminando del inbox
+                                  # cualquier conversación cuyo conv_meta expirara (48-72h sin handoff),
+                                  # haciendo que conversaciones de >1 semana desaparecieran del panel.
             to_move_to_bot_set = []
             state_keys_to_refresh = []  # Refresh-on-read: state_keys cerca de expirar
 
@@ -295,13 +300,26 @@ class ConversationStateManager:
 
                     if not status_raw:
                         if not meta:
-                            ghosts_to_remove.append(member)
-                            continue
-                        status_raw = ConversationStatus.BOT_ACTIVE.value
-                        logger.debug(
-                            f"[ConversationState] TTL expirado para {phone}:{canal} — "
-                            f"mostrando como BOT_ACTIVE en el panel"
-                        )
+                            # ⚠️ 2026-05-30: NO borrar del ZSET aquí.
+                            # Antes hacíamos zrem inmediato → conversaciones perdidas para siempre.
+                            # Ahora: logear + dejar entrada visible con fallback mínimo.
+                            # El job nocturno valida contra MongoDB `conversations` y solo
+                            # purga miembros cuya conversación NO existe en MongoDB.
+                            ghosts_detected.append(member)
+                            logger.warning(
+                                f"[ConversationState] meta+state expirados para {phone}:{canal} "
+                                f"— se mantiene en ZSET. Job nocturno validará contra MongoDB."
+                            )
+                            # Re-hidratación mínima para que el panel pueda mostrar la fila
+                            # con datos básicos hasta que el job de rebuild la enriquezca
+                            # o el cliente vuelva a escribir.
+                            status_raw = ConversationStatus.BOT_ACTIVE.value
+                        else:
+                            status_raw = ConversationStatus.BOT_ACTIVE.value
+                            logger.debug(
+                                f"[ConversationState] TTL state expirado para {phone}:{canal} — "
+                                f"mostrando como BOT_ACTIVE en el panel"
+                            )
 
                     # Refresh-on-read: si el contacto está activo en panel y su state_key
                     # está a punto de expirar, re-extender TTL para evitar que "baje"
@@ -347,10 +365,10 @@ class ConversationStateManager:
                     })
 
             # ── Paso 3: Escrituras pendientes en un solo pipeline ─────────────────────
-            if ghosts_to_remove or to_move_to_bot_set or state_keys_to_refresh:
+            # ⚠️ 2026-05-30: ghosts_detected ya NO se zrem aquí — el job nocturno
+            # rebuild_zset_from_conversations valida contra MongoDB antes de purgar.
+            if to_move_to_bot_set or state_keys_to_refresh:
                 write_pipe = self.redis.pipeline(transaction=False)
-                for member in ghosts_to_remove:
-                    write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
                 for member in to_move_to_bot_set:
                     write_pipe.sadd(self.BOT_CONTROLLED_SET, member)
                     write_pipe.zrem(self.ACTIVE_CONTACTS_ZSET, member)
@@ -391,7 +409,15 @@ class ConversationStateManager:
 
                     meta = self._parse_meta_raw(meta_raw)
                     if not meta:
-                        bot_ghosts.append(member)
+                        # ⚠️ 2026-05-30: NO eliminar del BOT_CONTROLLED_SET aquí.
+                        # El job nocturno rebuild_zset_from_conversations valida
+                        # contra MongoDB `conversations` antes de hacer srem.
+                        # Antes esto borraba conversaciones del panel cuando el
+                        # meta_key expiraba (TTL 365d post-handoff o 48h dinámico).
+                        logger.warning(
+                            f"[ConversationState] BOT_CONTROLLED ghost {phone}:{canal} "
+                            f"— se preserva. Job nocturno validará vs MongoDB."
+                        )
                         continue
 
                     status = status_raw or ConversationStatus.BOT_ACTIVE.value
@@ -417,11 +443,12 @@ class ConversationStateManager:
                         "last_advisor_message": meta.last_advisor_message,
                     })
 
+                # ⚠️ 2026-05-30: bot_ghosts ya no se srem aquí — job nocturno los valida.
                 if bot_ghosts:
-                    clean_pipe = self.redis.pipeline(transaction=False)
-                    for member in bot_ghosts:
-                        clean_pipe.srem(self.BOT_CONTROLLED_SET, member)
-                    await clean_pipe.execute()
+                    logger.info(
+                        f"[ConversationState] {len(bot_ghosts)} ghost(s) detectados en BOT_CONTROLLED_SET "
+                        f"— preservados para validación nocturna"
+                    )
 
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
@@ -430,6 +457,93 @@ class ConversationStateManager:
     async def get_all_human_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """Alias para obtener contactos activos."""
         return await self.get_active_contacts(limit=limit, offset=offset)
+
+    async def get_archived_conversations_from_mongo(
+        self,
+        owner_id: Optional[str] = None,
+        before_ts: Optional[datetime] = None,
+        limit: int = 30,
+        exclude_phones: Optional[set] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        ⚠️ 2026-05-30: Fallback inbox desde MongoDB `conversations`.
+
+        Retorna conversaciones del owner ordenadas por last_message_at desc,
+        EXCLUYENDO teléfonos que ya están en el ZSET Redis (para no duplicar).
+        Formato compatible con get_active_contacts() para que el panel los
+        mezcle transparentemente.
+
+        Usado por outbound_panel.GET /contacts cuando el ZSET tiene menos
+        contactos que el `limit` solicitado o cuando el usuario pagina hacia
+        conversaciones antiguas.
+        """
+        try:
+            from database.mongodb_client import get_mongo_manager
+            mongo = get_mongo_manager()
+            if owner_id:
+                conv_docs = await mongo.find_conversations_by_owner(
+                    owner_id=owner_id,
+                    before_ts=before_ts,
+                    limit=limit * 2,  # over-fetch para compensar dedup contra ZSET
+                    include_archived=False,
+                )
+            else:
+                # Sin owner_id, usar query genérica reciente
+                since = before_ts or get_bogota_now()
+                conv_docs = await mongo.find_recent_conversations(
+                    since=since - timedelta(days=365),
+                    limit=limit * 2,
+                )
+
+            exclude = exclude_phones or set()
+            result = []
+            for d in conv_docs:
+                phone = d.get("phone", "")
+                if phone in exclude:
+                    continue
+                last_msg_dt = d.get("last_message_at")
+                if isinstance(last_msg_dt, datetime):
+                    last_activity_iso = last_msg_dt.astimezone(TIMEZONE_BOGOTA).isoformat()
+                else:
+                    last_activity_iso = str(last_msg_dt) if last_msg_dt else get_bogota_now_iso()
+
+                result.append({
+                    "phone": phone,
+                    "canal": d.get("canal", "whatsapp"),
+                    "status": d.get("status") or ConversationStatus.BOT_ACTIVE.value,
+                    "display_name": d.get("display_name") or phone or "Cliente",
+                    "last_activity": last_activity_iso,
+                    "owner_id": d.get("owner_id"),
+                    "assigned_owner_ids": [],
+                    "handoff_reason": None,
+                    "ttl_remaining": None,
+                    "contact_id": d.get("contact_id"),
+                    "is_active": True,
+                    "canal_origen": d.get("canal_origen") or d.get("canal", "whatsapp"),
+                    "canal_display": None,
+                    "activated_at": (d.get("created_at").astimezone(TIMEZONE_BOGOTA).isoformat()
+                                     if isinstance(d.get("created_at"), datetime)
+                                     else get_bogota_now_iso()),
+                    "conversation_status": d.get("status") or ConversationStatus.BOT_ACTIVE.value,
+                    "in_priority_zset": False,
+                    "deal_id": None,
+                    "deal_stage": None,
+                    "last_advisor_message": None,
+                    "_from_mongo_fallback": True,  # marca para debugging/logs
+                    "last_message_preview": d.get("last_message_preview", ""),
+                    "message_count": d.get("message_count", 0),
+                })
+                if len(result) >= limit:
+                    break
+            if result:
+                logger.info(
+                    f"[ConversationState][MongoFallback] {len(result)} conversaciones recuperadas "
+                    f"desde MongoDB para owner={owner_id or 'all'} (excluyendo {len(exclude)} ya en ZSET)"
+                )
+            return result
+        except Exception as e:
+            logger.warning(f"[ConversationState][MongoFallback] Error: {e}")
+            return []
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # MÉTODOS DE COMPATIBILIDAD PARA app.py Y outbound_panel.py
@@ -613,6 +727,26 @@ class ConversationStateManager:
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
             logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe} (re-agregado al ZSET)")
+
+            # ⚠️ 2026-05-30: Sincronizar metadatos a MongoDB `conversations` (fuente permanente).
+            # Fire-and-forget — si falla no rompe el handoff.
+            try:
+                import asyncio as _asyncio
+                from database.mongodb_client import get_mongo_manager as _gmm
+                _asyncio.create_task(
+                    _gmm().update_conversation_meta(
+                        phone=phone_num,
+                        canal=canal_safe,
+                        owner_id=owner_id,
+                        display_name=display_name,
+                        status=ConversationStatus.HUMAN_ACTIVE.value,
+                        contact_id=contact_id,
+                        canal_origen=canal_origen,
+                    )
+                )
+            except Exception as _sync_err:
+                logger.debug(f"[ConversationState] sync MongoDB conv no crítico: {_sync_err}")
+
             return True
 
         except Exception as e:
@@ -679,6 +813,23 @@ class ConversationStateManager:
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
             logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason} (ZSET índice 0)")
+
+            # ⚠️ 2026-05-30: Sincronizar a MongoDB `conversations`.
+            try:
+                import asyncio as _asyncio
+                from database.mongodb_client import get_mongo_manager as _gmm
+                _asyncio.create_task(
+                    _gmm().update_conversation_meta(
+                        phone=phone,
+                        canal=canal_safe,
+                        status=ConversationStatus.PENDING_HANDOFF.value,
+                        contact_id=contact_id,
+                        canal_origen=canal,
+                    )
+                )
+            except Exception as _sync_err:
+                logger.debug(f"[ConversationState] sync MongoDB conv no crítico: {_sync_err}")
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en request_handoff: {e}")
@@ -699,10 +850,13 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_activity"] = get_bogota_now_iso()
-                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                # ⚠️ 2026-05-30: TTL meta unificado a PANEL_TTL_SECONDS (365d).
+                # Antes: TTL dinámico 48-72h hacía que meta expirara antes del handoff
+                # y luego el ghost cleanup borraba el contacto del ZSET para siempre.
+                # Ahora: meta siempre 365d. El state_key sigue con TTL corto (lifecycle real).
                 ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0:
-                    ttl = self._calculate_dynamic_ttl()
+                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
+                    ttl = self.PANEL_TTL_SECONDS
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Actualizar score en ZSET para reordenamiento
@@ -731,7 +885,9 @@ class ConversationStateManager:
                     "_temp_meta": True,
                     "_needs_hydration": True,
                 }
-                await self.redis.set(meta_key, json.dumps(minimal_meta), ex=self._calculate_dynamic_ttl())
+                # ⚠️ 2026-05-30: TTL unificado a 365d incluso para meta temporal.
+                # La hidratación async reescribirá con datos reales pero preserva TTL largo.
+                await self.redis.set(meta_key, json.dumps(minimal_meta), ex=self.PANEL_TTL_SECONDS)
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
@@ -892,9 +1048,10 @@ class ConversationStateManager:
                     # Guardar meta mergeado en whatsapp
                     wa_meta.pop("_temp_meta", None)
                     wa_meta["in_panel"] = True
+                    # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico si no había handoff).
                     wa_ttl = await self.redis.ttl(wa_meta_key)
-                    if not wa_ttl or wa_ttl <= 0:
-                        wa_ttl = self.PANEL_TTL_SECONDS if best_prio >= 2 else self._calculate_dynamic_ttl()
+                    if not wa_ttl or wa_ttl <= 0 or wa_ttl < self.PANEL_TTL_SECONDS:
+                        wa_ttl = self.PANEL_TTL_SECONDS
                     await self.redis.set(wa_meta_key, json.dumps(wa_meta), ex=wa_ttl)
 
                     # Promover status si el stale tenía prioridad mayor
@@ -1013,10 +1170,12 @@ class ConversationStateManager:
                         f"[ConversationState] {phone} removido del ZSET (señal baja, sin intent comercial)"
                     )
 
+                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
                 ttl = await self.redis.ttl(meta_key)
-                ex = ttl if ttl and ttl > 0 else self._calculate_dynamic_ttl()
-                await self.redis.set(meta_key, json.dumps(meta), ex=ex)
-                
+                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
+                    ttl = self.PANEL_TTL_SECONDS
+                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+
             else:
                 # Meta no existe - crear nuevo
                 meta = {
@@ -1041,7 +1200,10 @@ class ConversationStateManager:
                     meta["in_panel"] = True
                     logger.info(f"[ConversationState] ↩ Re-entrada al panel (fue handoff antes): {phone}")
 
-                ttl = self.PANEL_TTL_SECONDS if had_panel_before else self._calculate_dynamic_ttl()
+                # ⚠️ 2026-05-30: TTL meta unificado a 365d incluso para meta nuevo sin handoff.
+                # Causa: contactos que entraban al panel via update_activity (lead nuevo)
+                # tenían meta de 48-72h y al expirar el ghost cleanup los borraba.
+                ttl = self.PANEL_TTL_SECONDS
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # Agregar al ZSET solo si tiene intención comercial (add_to_zset=True)
@@ -1125,16 +1287,31 @@ class ConversationStateManager:
                 meta["assigned_owner_ids"] = owners
                 meta["primary_owner_id"] = to_owner_id  # El nuevo es el principal
 
-            # Guardar metadata actualizada preservando TTL existente
+            # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
+            # transfer_contact siempre debe extender meta a TTL largo — es operación humana explícita.
             ttl = await self.redis.ttl(meta_key)
-            if not ttl or ttl <= 0:
-                ttl = self._calculate_dynamic_ttl()
+            if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
+                ttl = self.PANEL_TTL_SECONDS
             await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
             logger.info(
                 f"[ConversationState] Contacto {phone} transferido: "
                 f"{original_owner} -> {to_owner_id} (modo: {mode})"
             )
+
+            # ⚠️ 2026-05-30: Sincronizar transferencia a MongoDB `conversations`.
+            try:
+                import asyncio as _asyncio
+                from database.mongodb_client import get_mongo_manager as _gmm
+                _asyncio.create_task(
+                    _gmm().update_conversation_meta(
+                        phone=phone,
+                        canal=canal_safe,
+                        owner_id=to_owner_id,
+                    )
+                )
+            except Exception as _sync_err:
+                logger.debug(f"[ConversationState] sync MongoDB conv no crítico: {_sync_err}")
 
             return {
                 "status": "success",
@@ -1162,10 +1339,10 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_client_message"] = get_bogota_now_iso()
-                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
                 ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0:
-                    ttl = self._calculate_dynamic_ttl()
+                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
+                    ttl = self.PANEL_TTL_SECONDS
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
@@ -1175,7 +1352,7 @@ class ConversationStateManager:
                     score = get_bogota_now().timestamp()
                     await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
                     logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje cliente)")
-                
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en update_client_message_timestamp: {e}")
@@ -1196,10 +1373,10 @@ class ConversationStateManager:
                 _now_iso = get_bogota_now_iso()
                 meta["last_advisor_message"] = _now_iso
                 meta["last_activity"] = _now_iso      # FIX: actualizar last_activity para sort correcto en GET /contacts
-                # Preservar TTL existente (puede ser PANEL_TTL_SECONDS=365d para contactos con handoff)
+                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
                 ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0:
-                    ttl = self._calculate_dynamic_ttl()
+                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
+                    ttl = self.PANEL_TTL_SECONDS
                 await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
@@ -1583,3 +1760,9 @@ class ConversationStateManager:
                 logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
         except Exception as e:
             logger.warning(f"[ConversationState] Error cerrando Redis: {e}")
+                logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
+        except Exception as e:
+            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")                logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
+        except Exception as e:
+            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")
+)

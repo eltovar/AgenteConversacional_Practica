@@ -28,3 +28,8 @@ htmlcov/
 .coverage
 *.cover
 cleanup_report_*.csv
+
+# Logs y outputs locales (contienen PII de clientes)
+railway_logs_output.txt
+railway_logs_*.txt
+*.log

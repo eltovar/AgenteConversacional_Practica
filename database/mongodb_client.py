@@ -2043,13 +2043,17 @@ class MongoDBManager:
             if hubspot_contact_id:
                 set_fields["contact_id"] = hubspot_contact_id
 
+            # ⚠️ 2026-06-02 FIX: NO incluir message_count en $setOnInsert.
+            # MongoDB rechaza con "Updating the path 'message_count' would create a
+            # conflict at 'message_count'" si setOnInsert y $inc tocan el mismo path.
+            # En upsert nuevo, $inc crea el campo con el valor delta (1). En update
+            # existente, $inc incrementa el valor actual. setOnInsert es innecesario.
             set_on_insert = {
                 "phone": phone,
                 "canal": canal_safe,
                 "first_message_at": now,
                 "created_at": now,
                 "archived": False,
-                "message_count": 0,  # se incrementa abajo
             }
 
             await self.db.conversations.update_one(

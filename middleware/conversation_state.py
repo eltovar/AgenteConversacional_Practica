@@ -1760,9 +1760,3 @@ class ConversationStateManager:
                 logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
         except Exception as e:
             logger.warning(f"[ConversationState] Error cerrando Redis: {e}")
-                logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
-        except Exception as e:
-            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")                logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
-        except Exception as e:
-            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")
-)

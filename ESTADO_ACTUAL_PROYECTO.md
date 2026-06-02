@@ -1,7 +1,7 @@
 # Estado Actual del Proyecto — SofIA Conversacional
 ## Inmobiliaria Proteger — Agente Conversacional Multicanal
 
-**Última actualización:** 2026-05-30  
+**Última actualización:** 2026-06-01  
 **Rama activa:** `twilio-conversations-migration`  
 **Desarrollador:** CyberTovar  
 **Deploy:** Railway Pro — `$20/mes`
@@ -808,6 +808,39 @@ python scripts/reconcile_history_from_hubspot.py --owner-id 89096378 --confirm
 - Toggle "ver archivadas" en `PanelAsesores/index.js`.
 - Migración Redis ZSET → MongoDB como fuente primaria (paginación cursor-based desde Mongo).
 - Eliminar `cleanup_redis.py` / `cleanup_no_history.py` o moverlos a `scripts/` con confirmación.
+
+---
+
+---
+
+## Sesión 2026-06-01 — Auditoría BI de rendimiento Mayo 2026
+
+### Objetivo
+Informe ejecutivo de rendimiento del agente conversacional SofIA para mayo 2026, cruzando datos de MongoDB, HubSpot CRM y Twilio WhatsApp API.
+
+### Hallazgos clave
+- **12,807 mensajes** procesados en mayo (6,134 client / 4,734 advisor / 1,788 bot / 151 system).
+- **785 clientes únicos** escribieron (790 según Twilio — 5 contactos fantasma por timeouts de MongoDB).
+- **574 usuarios nuevos** (primera interacción histórica). HubSpot creó 617 contactos (43 por creación CRM-first desde portales).
+- **Tasa de automatización: 2.4%** — solo 31 conversaciones se resolvieron sin intervención humana.
+- **97.6% requirió asesora humana** — Sofía actúa casi exclusivamente como agente de recepción/clasificación, no resolutivo.
+- Pico de tráfico: **6 de mayo** con 229 clientes y 782 mensajes (investigar fuente de campaña).
+- Ventana activa: 8 AM–5 PM concentra el 91.2% del tráfico.
+- Colección `conversations` en MongoDB tiene **0 documentos** — requiere backfill post-deploy del 30/05.
+
+### Archivos generados
+| Archivo | Contenido |
+|---------|-----------|
+| `INFORME_RENDIMIENTO_MAYO_2026.md` | Reporte ejecutivo completo con 5 secciones |
+| `scripts/audit_mayo_2026.py` | Script de extracción MongoDB + Twilio |
+| `scripts/audit_mayo_2026_results.json` | Datos crudos de la auditoría |
+
+### Recomendaciones pendientes de implementar
+1. **Prompt de Sofía:** Ampliar resolución autónoma (FAQs de disponibilidad, precios, requisitos) para subir tasa de automatización del 2.4%.
+2. **Dead letter queue:** Encolar mensajes en Redis cuando `save_message()` falle (evitar los 5 fantasma/mes).
+3. **Backfill `conversations`:** Script de agregación desde `messages` para poblar la colección vacía.
+4. **Sincronizar resumen IA a HubSpot:** Timeline notes automáticas al cierre de conversación.
+5. **Flujo fuera de horario:** IA más agresiva capturando datos completos + callback programado.
 
 ---
 

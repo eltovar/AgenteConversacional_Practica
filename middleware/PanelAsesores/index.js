@@ -1,12 +1,12 @@
-// =========================================================================
-// DATE UTILITIES — Separadores de fecha en el chat
+﻿// =========================================================================
+// DATE UTILITIES â€” Separadores de fecha en el chat
 // =========================================================================
 
 const MESES_ES = ['enero','febrero','marzo','abril','mayo','junio',
                   'julio','agosto','septiembre','octubre','noviembre','diciembre'];
-const DIAS_ES  = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+const DIAS_ES  = ['domingo','lunes','martes','miÃ©rcoles','jueves','viernes','sÃ¡bado'];
 
-/** Retorna "YYYY-MM-DD" del timestamp en zona Bogotá (para comparar días). */
+/** Retorna "YYYY-MM-DD" del timestamp en zona BogotÃ¡ (para comparar dÃ­as). */
 function formatBogotaDate(ts) {
     try {
         if (!ts) return '';
@@ -27,12 +27,12 @@ function getDateLabel(ts) {
     const yesterday = formatBogotaDate(new Date(Date.now() - 86400000).toISOString());
     if (dateStr === yesterday) return 'Ayer';
     const [year, month, day] = dateStr.split('-').map(Number);
-    // Construir fecha al mediodía Bogotá para evitar edge cases de timezone
+    // Construir fecha al mediodÃ­a BogotÃ¡ para evitar edge cases de timezone
     const msgDate  = new Date(`${dateStr}T12:00:00`);
     const todayDate = new Date(`${today}T12:00:00`);
     const diffDays  = Math.round((todayDate - msgDate) / 86400000);
     if (diffDays < 7) {
-        // Últimos 6 días → nombre del día
+        // Ãšltimos 6 dÃ­as â†’ nombre del dÃ­a
         const nombreDia = DIAS_ES[msgDate.getDay()];
         return nombreDia.charAt(0).toUpperCase() + nombreDia.slice(1);
     }
@@ -52,7 +52,7 @@ function buildDateDivider(label, dateStr) {
 }
 
 // =========================================================================
-// Formatea la hora en zona Bogotá y con AM/PM claro y robusto
+// Formatea la hora en zona BogotÃ¡ y con AM/PM claro y robusto
 function formatBogotaTime(ts) {
     try {
         if (!ts) return '';
@@ -63,7 +63,7 @@ function formatBogotaTime(ts) {
         }
         // Parsear como UTC
         const date = new Date(safeTs);
-        // Convertir a hora de Bogotá
+        // Convertir a hora de BogotÃ¡
         return date.toLocaleTimeString('es-CO', {
             timeZone: 'America/Bogota',
             hour: '2-digit',
@@ -79,7 +79,7 @@ function formatBogotaTime(ts) {
 // Las variables API_KEY, BASE_URL y ADVISOR_NAMES son inyectadas desde index.html
 
 const POLLING_INTERVAL_IDLE = 10000;   // 10 segundos cuando no hay chat activo
-const POLLING_INTERVAL_ACTIVE = 10000;  // 10 segundos — WS maneja eventos en tiempo real (era 3s → 429s)
+const POLLING_INTERVAL_ACTIVE = 10000;  // 10 segundos â€” WS maneja eventos en tiempo real (era 3s â†’ 429s)
 
 // Etapas del Pipeline de HubSpot (Contact-based)
 const PIPELINE_STAGES = [
@@ -104,29 +104,29 @@ const PIPELINE_STAGES = [
     { id: "1353539189", name: "Venta" }
 ];
 
-// Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.
-// La asignación del contacto se determina por advisor_id (quien crea), no por el canal seleccionado.
+// Todos los portales disponibles â€” todos los asesores pueden seleccionar cualquier portal al crear un contacto.
+// La asignaciÃ³n del contacto se determina por advisor_id (quien crea), no por el canal seleccionado.
 const ALL_PORTALS = [
     { value: "metrocuadrado",    label: "MetroCuadrado" },
-    { value: "finca_raiz",       label: "Finca Raíz" },
+    { value: "finca_raiz",       label: "Finca RaÃ­z" },
     { value: "facebook",         label: "Facebook" },
     { value: "instagram",        label: "Instagram" },
     { value: "ciencuadras",      label: "Ciencuadras" },
     { value: "tiktok",           label: "TikTok" },
     { value: "charly",           label: "Charly" },
-    { value: "pagina_web",       label: "Página Web" },
+    { value: "pagina_web",       label: "PÃ¡gina Web" },
     { value: "whatsapp_directo", label: "WhatsApp Directo" },
     { value: "youtube",          label: "YouTube" },
 ];
 
-// Mapeo advisor ID → portales. Todos los IDs usan la lista completa.
+// Mapeo advisor ID â†’ portales. Todos los IDs usan la lista completa.
 const ADVISOR_PORTALS = {
     "89096378": ALL_PORTALS,
     "89096380": ALL_PORTALS,
 };
 
 // Leer parametro advisor de la URL y persistir en sessionStorage para sobrevivir F5/reloads.
-// sessionStorage (no localStorage) para que cada pestaña/sesión sea independiente.
+// sessionStorage (no localStorage) para que cada pestaÃ±a/sesiÃ³n sea independiente.
 const urlParams = new URLSearchParams(window.location.search);
 const _rawAdvisorId = urlParams.get('advisor');
 if (_rawAdvisorId) {
@@ -146,34 +146,34 @@ let allContacts = [];    // Cache de contactos para el buscador
 let selectedMediaFile = null;  // Archivo multimedia seleccionado
 let replyToMessage = null;  // { id, sender, sender_name, content, media_type, timestamp }
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
-const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
-const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos recién cerrados
+const _contactFingerprints = new Map(); // Fingerprint del Ãºltimo render por phone â†’ evita re-renders innecesarios
+const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos reciÃ©n cerrados
 // [Bug2] Render guard: evita que dos renders DOM corran intercalados (causa index jumping)
 let _renderInProgress = false;
 let _pendingRenderContacts = null;
 
-// Contador de mensajes no leídos por telefono (se reinicia en cada sesión)
+// Contador de mensajes no leÃ­dos por telefono (se reinicia en cada sesiÃ³n)
 let unreadCounts = {};
-// Timestamps del último last_activity conocido por phone (para detección de nuevos mensajes en polling)
+// Timestamps del Ãºltimo last_activity conocido por phone (para detecciÃ³n de nuevos mensajes en polling)
 let _lastContactTimestamps = {};
-// Fix CR-4: timestamp del último evento WS recibido por phone.
-// Evita double-counting cuando el polling detecta el mismo mensaje que el WS ya notificó.
+// Fix CR-4: timestamp del Ãºltimo evento WS recibido por phone.
+// Evita double-counting cuando el polling detecta el mismo mensaje que el WS ya notificÃ³.
 const _lastWsNotifiedTimestamps = {};
-// Phones que el asesor abrió en esta sesión.
-// Previene re-inicialización de badges desde has_unread (backend) si el asesor ya los limpió.
+// Phones que el asesor abriÃ³ en esta sesiÃ³n.
+// Previene re-inicializaciÃ³n de badges desde has_unread (backend) si el asesor ya los limpiÃ³.
 const _seenPhones = new Set();
 // Sistema de notificaciones del asesor (backend-driven)
 const NOTIF_POLL_INTERVAL = 30_000; // 30 segundos
 let _seenNotifIds = new Set();      // IDs ya procesados (para detectar nuevas)
 let _notifDropdownOpen = false;
-// "Marcar como no leído" manual — persiste en localStorage entre sesiones
+// "Marcar como no leÃ­do" manual â€” persiste en localStorage entre sesiones
 let _manuallyUnread = new Set(
     (() => { try { return JSON.parse(localStorage.getItem('_manuallyUnread') || '[]'); } catch { return []; } })()
 );
 function _saveManuallyUnread() {
     try { localStorage.setItem('_manuallyUnread', JSON.stringify([..._manuallyUnread])); } catch {}
 }
-// Flag para saber si ya se ejecutó el auto-select de deep link
+// Flag para saber si ya se ejecutÃ³ el auto-select de deep link
 let deepLinkHandled = false;
 
 // Template picker (slash command)
@@ -187,31 +187,31 @@ let pickerVisibleItems = [];
 let currentWindowOpen = true;
 
 // =========================================================================
-// ⚠️ 2026-06-02: PAGINACIÓN CURSOR-BASED DEL HISTORIAL (scroll infinito)
+// âš ï¸ 2026-06-02: PAGINACIÃ“N CURSOR-BASED DEL HISTORIAL (scroll infinito)
 // =========================================================================
-// Tamaño de página: 100 mensajes por request. Calibrado para:
-//   • Carga inicial rápida (~300-500ms para conversaciones típicas).
-//   • Suficiente contexto sin saturar DOM (100 burbujas ≈ 500KB DOM).
-//   • Bajo costo MongoDB: query con índice phone_timestamp_idx = O(log N).
+// TamaÃ±o de pÃ¡gina: 100 mensajes por request. Calibrado para:
+//   â€¢ Carga inicial rÃ¡pida (~300-500ms para conversaciones tÃ­picas).
+//   â€¢ Suficiente contexto sin saturar DOM (100 burbujas â‰ˆ 500KB DOM).
+//   â€¢ Bajo costo MongoDB: query con Ã­ndice phone_timestamp_idx = O(log N).
 const CHAT_PAGE_SIZE = 100;
 
-// Trigger del scroll: cargar más cuando scrollTop < SCROLL_THRESHOLD_PX.
-// Margen generoso (200px) → la siguiente página llega antes de que el usuario
-// llegue al límite visual = sin "salto" perceptible.
+// Trigger del scroll: cargar mÃ¡s cuando scrollTop < SCROLL_THRESHOLD_PX.
+// Margen generoso (200px) â†’ la siguiente pÃ¡gina llega antes de que el usuario
+// llegue al lÃ­mite visual = sin "salto" perceptible.
 const SCROLL_THRESHOLD_PX = 200;
 
-// Throttle del listener scroll → máximo 5 evaluaciones/segundo.
-// Combinado con state.loading reduce a máximo 1 fetch real/segundo.
+// Throttle del listener scroll â†’ mÃ¡ximo 5 evaluaciones/segundo.
+// Combinado con state.loading reduce a mÃ¡ximo 1 fetch real/segundo.
 const SCROLL_THROTTLE_MS = 200;
 
-// State global de paginación del historial. Una sola conversación abierta a la vez,
-// así que un objeto global basta. Se RESETEA al cambiar de contacto.
+// State global de paginaciÃ³n del historial. Una sola conversaciÃ³n abierta a la vez,
+// asÃ­ que un objeto global basta. Se RESETEA al cambiar de contacto.
 const chatHistoryState = {
-    contactId: null,        // contact_id de la conversación activa
-    canal: null,            // canal asociado (para preservar en paginación)
-    phone: null,            // teléfono asociado
-    oldestTs: null,         // cursor: timestamp del mensaje más antiguo cargado
-    hasMore: true,          // si el backend dijo que aún hay mensajes más antiguos
+    contactId: null,        // contact_id de la conversaciÃ³n activa
+    canal: null,            // canal asociado (para preservar en paginaciÃ³n)
+    phone: null,            // telÃ©fono asociado
+    oldestTs: null,         // cursor: timestamp del mensaje mÃ¡s antiguo cargado
+    hasMore: true,          // si el backend dijo que aÃºn hay mensajes mÃ¡s antiguos
     loading: false,         // flag anti-doble-fetch (request en vuelo)
     listenerAttached: false,// si ya montamos el scroll listener al contenedor
     scrollTimeout: null,    // handle del setTimeout del throttle
@@ -228,15 +228,15 @@ function _resetChatHistoryState(contactId, canal, phone) {
         clearTimeout(chatHistoryState.scrollTimeout);
         chatHistoryState.scrollTimeout = null;
     }
-    // Limpiar cache de mensajes — pertenece a la conversación que se cierra.
+    // Limpiar cache de mensajes â€” pertenece a la conversaciÃ³n que se cierra.
     window.__chatMessagesCache = [];
-    // Quitar marcador de "inicio de conversación" si quedó de la conversación anterior.
+    // Quitar marcador de "inicio de conversaciÃ³n" si quedÃ³ de la conversaciÃ³n anterior.
     const oldMarker = document.getElementById('chatHistoryStartMarker');
     if (oldMarker) oldMarker.remove();
 }
 
 // =========================================================================
-// HELPER: UI según estado de ventana 24h
+// HELPER: UI segÃºn estado de ventana 24h
 // =========================================================================
 function _applyWindowClosedUI(isClosed) {
     const triggerBtn = document.getElementById('templateTriggerBtn');
@@ -275,30 +275,30 @@ function hideLoader() {
 // FUNCION DE BUSQUEDA DE CONTACTOS
 // =========================================================================
 
-// Debounce para búsqueda en servidor (evitar spam de requests)
+// Debounce para bÃºsqueda en servidor (evitar spam de requests)
 let searchDebounceTimeout = null;
 
-// Estado global: término actual de búsqueda (para empty-state contextual)
+// Estado global: tÃ©rmino actual de bÃºsqueda (para empty-state contextual)
 window._currentSearchTerm = '';
 
 /**
- * Detecta si el término ingresado parece un teléfono y lo normaliza a E.164.
- * Retorna null si no parece teléfono.
+ * Detecta si el tÃ©rmino ingresado parece un telÃ©fono y lo normaliza a E.164.
+ * Retorna null si no parece telÃ©fono.
  * Acepta: "3138405930", "+573138405930", "57 313 840 5930", "313-840-5930"
  */
 function _detectPhoneTerm(term) {
     if (!term) return null;
-    // Extraer solo dígitos y el + inicial si existe
+    // Extraer solo dÃ­gitos y el + inicial si existe
     const hasPlus = term.trim().startsWith('+');
     const digits = term.replace(/[^\d]/g, '');
     if (!digits) return null;
-    // Un teléfono válido tiene entre 10 y 15 dígitos
+    // Un telÃ©fono vÃ¡lido tiene entre 10 y 15 dÃ­gitos
     if (digits.length < 10 || digits.length > 15) return null;
-    // Si tiene + explícito o 11+ dígitos → asumir ya tiene código de país
+    // Si tiene + explÃ­cito o 11+ dÃ­gitos â†’ asumir ya tiene cÃ³digo de paÃ­s
     if (hasPlus || digits.length >= 11) {
         return '+' + digits;
     }
-    // 10 dígitos → asumir Colombia (+57)
+    // 10 dÃ­gitos â†’ asumir Colombia (+57)
     if (digits.length === 10) {
         return '+57' + digits;
     }
@@ -314,7 +314,7 @@ async function filterContacts(searchTerm) {
         return;
     }
 
-    // Búsqueda local inmediata (nombre, teléfono, canal, razón)
+    // BÃºsqueda local inmediata (nombre, telÃ©fono, canal, razÃ³n)
     let localFiltered = allContacts.filter(contact => {
         const haystack = [
             contact.display_name || '',
@@ -324,28 +324,28 @@ async function filterContacts(searchTerm) {
         ].join(' ').toLowerCase();
         return haystack.includes(term);
     });
-    // Aplicar filtros activos sobre el resultado de búsqueda
+    // Aplicar filtros activos sobre el resultado de bÃºsqueda
     if (activePortalFilter) localFiltered = localFiltered.filter(c => c.canal_origen === activePortalFilter);
     if (activeStageFilter)  localFiltered = localFiltered.filter(c => c.current_stage === activeStageFilter);
 
     // Mostrar resultados locales inmediatamente
     renderContactsList(localFiltered);
 
-    // Si el término es corto (< 3 caracteres), solo hacer búsqueda local
+    // Si el tÃ©rmino es corto (< 3 caracteres), solo hacer bÃºsqueda local
     if (term.length < 3) {
         return;
     }
 
-    // ── Detección de teléfono: si es un número, llamar /hydrate directo ──
+    // â”€â”€ DetecciÃ³n de telÃ©fono: si es un nÃºmero, llamar /hydrate directo â”€â”€
     // /contacts/search usa fulltext de MongoDB sobre el body de los mensajes,
-    // NO sobre el campo phone. Para búsqueda por número necesitamos el endpoint
+    // NO sobre el campo phone. Para bÃºsqueda por nÃºmero necesitamos el endpoint
     // /hydrate que consulta Redis + HubSpot directamente.
     const phoneE164 = _detectPhoneTerm(term);
 
     // Debounce 500ms para no spamear requests mientras el usuario escribe
     clearTimeout(searchDebounceTimeout);
     searchDebounceTimeout = setTimeout(async () => {
-        // Evitar carrera: si el término cambió durante el debounce, abortar
+        // Evitar carrera: si el tÃ©rmino cambiÃ³ durante el debounce, abortar
         if (window._currentSearchTerm !== term) return;
 
         const localPhones = new Set(localFiltered.map(c => c.phone));
@@ -353,7 +353,7 @@ async function filterContacts(searchTerm) {
         let additionalFromServer = [];
         let additionalFromLocal = [];
 
-        // ── Rama A: Búsqueda por teléfono vía /hydrate ──
+        // â”€â”€ Rama A: BÃºsqueda por telÃ©fono vÃ­a /hydrate â”€â”€
         if (phoneE164) {
             try {
                 const hydrateUrl = `${BASE_URL}/contacts/${encodeURIComponent(phoneE164)}/hydrate`;
@@ -382,18 +382,18 @@ async function filterContacts(searchTerm) {
                     }
                 } else if (hResp.status === 404) {
                     console.log(`[Panel] /hydrate 404 para ${phoneE164}`);
-                    // No encontrado — dejar que renderContactsList muestre empty state
+                    // No encontrado â€” dejar que renderContactsList muestre empty state
                 }
             } catch (e) {
                 console.warn('[Panel] Error consultando /hydrate:', e);
             }
         }
 
-        // ── Rama B: Búsqueda en historial de mensajes (fulltext) ──
-        // CRÍTICO: SOLO ejecutar si NO es un teléfono. El fulltext de MongoDB
-        // tokeniza por separadores y, al buscar un número, matchea tokens comunes
-        // (57, 313, 840, ...) en CUALQUIER mensaje → 12+ falsos positivos.
-        // Para búsqueda por teléfono, la rama A (/hydrate) ya dio la respuesta correcta.
+        // â”€â”€ Rama B: BÃºsqueda en historial de mensajes (fulltext) â”€â”€
+        // CRÃTICO: SOLO ejecutar si NO es un telÃ©fono. El fulltext de MongoDB
+        // tokeniza por separadores y, al buscar un nÃºmero, matchea tokens comunes
+        // (57, 313, 840, ...) en CUALQUIER mensaje â†’ 12+ falsos positivos.
+        // Para bÃºsqueda por telÃ©fono, la rama A (/hydrate) ya dio la respuesta correcta.
         if (!phoneE164) {
             try {
                 const response = await fetch(
@@ -433,23 +433,23 @@ async function filterContacts(searchTerm) {
                     additionalFromServer = [...additionalFromServer, ...moreFromServer];
                 }
             } catch (error) {
-                console.warn('[Panel] Error en búsqueda de historial:', error);
+                console.warn('[Panel] Error en bÃºsqueda de historial:', error);
             }
         }
 
-        // Si el término cambió mientras esperábamos, abortar el render
+        // Si el tÃ©rmino cambiÃ³ mientras esperÃ¡bamos, abortar el render
         if (window._currentSearchTerm !== term) return;
 
         const allAdditional = [...additionalFromLocal, ...additionalFromServer];
         if (allAdditional.length > 0) {
             console.log(
-                `[Panel] Búsqueda: +${additionalFromLocal.length} local, ` +
+                `[Panel] BÃºsqueda: +${additionalFromLocal.length} local, ` +
                 `+${additionalFromServer.length} servidor` +
                 (phoneE164 ? ` (phone detectado: ${phoneE164})` : '')
             );
             renderContactsList([...localFiltered, ...allAdditional]);
         } else if (localFiltered.length === 0) {
-            // Ningún resultado en ningún lado — re-render para que el empty state
+            // NingÃºn resultado en ningÃºn lado â€” re-render para que el empty state
             // contextual se muestre correctamente
             renderContactsList([]);
         }
@@ -462,11 +462,11 @@ async function filterContacts(searchTerm) {
 
 async function updateDealStage(contactId, stageId) {
     // Localizar el contacto: necesario para el body (auto-cierre) y para revertir
-    // el dropdown si el usuario cancela la confirmación de "No responde".
+    // el dropdown si el usuario cancela la confirmaciÃ³n de "No responde".
     const contact = allContacts.find(c => String(c.contact_id) === String(contactId));
     const dropdownEl = document.querySelector(`select[data-contact-id="${contactId}"]`);
 
-    // Confirmación específica para "No responde" (stage_id === "other") — evita
+    // ConfirmaciÃ³n especÃ­fica para "No responde" (stage_id === "other") â€” evita
     // cierres accidentales por click incorrecto en el dropdown del embudo.
     if (stageId === 'other') {
         const ok = confirm(
@@ -528,12 +528,12 @@ async function updateDealStage(contactId, stageId) {
                 }, 1500);
             }
 
-            // Auto-cierre: si el backend cerró la conversación, limpiar UI igual
-            // que el botón "Cerrar". Se basa en data.closed devuelto por el endpoint.
+            // Auto-cierre: si el backend cerrÃ³ la conversaciÃ³n, limpiar UI igual
+            // que el botÃ³n "Cerrar". Se basa en data.closed devuelto por el endpoint.
             if (data.closed && body.phone) {
                 _performCloseCleanup(body.phone);
             } else if (stageId === 'other' && data.close_error) {
-                console.warn('[Panel] Auto-cierre falló:', data.close_error);
+                console.warn('[Panel] Auto-cierre fallÃ³:', data.close_error);
                 alert("Etapa actualizada, pero el cierre automatico fallo. Cierra manualmente con el boton 'Cerrar'.");
             }
         } else {
@@ -553,7 +553,7 @@ async function updateDealStage(contactId, stageId) {
 // =========================================================================
 
 async function loadTemplates(forceRefresh = false) {
-    // Usar caché de sesión: los templates no cambian durante una sesión normal
+    // Usar cachÃ© de sesiÃ³n: los templates no cambian durante una sesiÃ³n normal
     if (!forceRefresh && templatesData && templatesData.length > 0) {
         populateTemplateSelector();
         return;
@@ -606,7 +606,7 @@ function closeTemplatePicker() {
     if (inp && inp.value === '/') inp.value = '';
     if (!currentWindowOpen) {
         if (!activeTemplateId) {
-            // Asesor canceló sin elegir template: re-deshabilitar input
+            // Asesor cancelÃ³ sin elegir template: re-deshabilitar input
             if (inp) {
                 inp.disabled = true;
                 inp.placeholder = 'Ventana cerrada. Usa un template para reactivar.';
@@ -630,8 +630,8 @@ function renderTemplatePicker(filter) {
 
     const f = (filter || '').toLowerCase();
     const categoryIcons = {
-        cita: '📅', reactivacion: '📨', seguimiento: '🔄',
-        recordatorio: '⏰', promocion: '🎯', agradecimiento: '🙏', otros: '📝'
+        cita: 'ðŸ“…', reactivacion: 'ðŸ“¨', seguimiento: 'ðŸ”„',
+        recordatorio: 'â°', promocion: 'ðŸŽ¯', agradecimiento: 'ðŸ™', otros: 'ðŸ“'
     };
 
     const categories = {};
@@ -658,7 +658,7 @@ function renderTemplatePicker(filter) {
     }
 
     Object.keys(categories).sort().forEach(cat => {
-        const icon = categoryIcons[cat] || '📝';
+        const icon = categoryIcons[cat] || 'ðŸ“';
         const catLabel = cat.charAt(0).toUpperCase() + cat.slice(1);
         html += `<div class="px-4 py-1.5 bg-gray-50 border-b border-gray-100 sticky top-0">
             <span class="text-xs font-semibold text-gray-400 uppercase tracking-wide">${icon} ${catLabel}</span>
@@ -739,7 +739,7 @@ function jumpToNextVariable(textarea, direction, fromStart) {
 function extractVariableValues(originalBody, editedText, variables) {
     if (!variables || variables.length === 0) return {};
 
-    // Normalizar: trim + colapsar whitespace múltiple (tolera espacios/newlines extra)
+    // Normalizar: trim + colapsar whitespace mÃºltiple (tolera espacios/newlines extra)
     const normalizedEdit = editedText.trim().replace(/\s+/g, ' ');
     const normalizedBody = originalBody.trim().replace(/\s+/g, ' ');
 
@@ -749,13 +749,13 @@ function extractVariableValues(originalBody, editedText, variables) {
     variables.forEach(v => {
         pattern = pattern.replace(`\\{${v}\\}`, '([\\s\\S]+?)');
     });
-    // El último grupo debe ser greedy para capturar hasta el final
+    // El Ãºltimo grupo debe ser greedy para capturar hasta el final
     pattern = pattern.replace(/\(\[\\s\\S\]\+\?\)(?=[^(]*$)/, '([\\s\\S]+)');
     try {
         // Intentar match exacto primero
         let match = normalizedEdit.match(new RegExp('^' + pattern + '$'));
         if (!match) {
-            // Fallback: permitir texto extra al inicio/final (asesora agregó algo)
+            // Fallback: permitir texto extra al inicio/final (asesora agregÃ³ algo)
             match = normalizedEdit.match(new RegExp(pattern));
         }
         if (!match) return {};
@@ -783,7 +783,7 @@ function confirmPickerSelection() {
     if (pickerSelectedIndex >= 0 && pickerVisibleItems[pickerSelectedIndex]) {
         selectTemplate(pickerVisibleItems[pickerSelectedIndex]);
     } else if (pickerVisibleItems.length > 0) {
-        // Si no hay selección por teclado, seleccionar el primero
+        // Si no hay selecciÃ³n por teclado, seleccionar el primero
         selectTemplate(pickerVisibleItems[0]);
     }
 }
@@ -813,7 +813,7 @@ function _initTemplatePickerListeners() {
             if (search) search.value = filter;
             renderTemplatePicker(filter);
         } else if (!val.startsWith('/') && pickerOpen) {
-            // Borro el slash → cerrar picker
+            // Borro el slash â†’ cerrar picker
             const pickerEl2 = document.getElementById('templatePicker');
             if (pickerEl2) pickerEl2.classList.add('hidden');
             pickerSelectedIndex = -1;
@@ -827,7 +827,7 @@ function _initTemplatePickerListeners() {
         }
     });
 
-    // Teclado: navegación en picker + Tab entre variables
+    // Teclado: navegaciÃ³n en picker + Tab entre variables
     inp.addEventListener('keydown', function(e) {
         const pickerEl = document.getElementById('templatePicker');
         const pickerOpen = pickerEl && !pickerEl.classList.contains('hidden');
@@ -837,7 +837,7 @@ function _initTemplatePickerListeners() {
             if (e.key === 'ArrowUp')    { e.preventDefault(); movePickerSelection(-1); return; }
             if (e.key === 'Enter')      { e.preventDefault(); confirmPickerSelection(); return; }
             if (e.key === 'Escape')     { e.preventDefault(); closeTemplatePicker(); return; }
-            // Mientras el picker está abierto no enviamos con Enter
+            // Mientras el picker estÃ¡ abierto no enviamos con Enter
             return;
         }
 
@@ -864,7 +864,7 @@ function _initTemplatePickerListeners() {
         });
     }
 
-    // Botón "/" para ventana cerrada: habilita input temporalmente y abre picker
+    // BotÃ³n "/" para ventana cerrada: habilita input temporalmente y abre picker
     const triggerBtn = document.getElementById('templateTriggerBtn');
     if (triggerBtn && !triggerBtn._listenerAdded) {
         triggerBtn._listenerAdded = true;
@@ -1007,10 +1007,10 @@ async function saveTemplate(event) {
     const form = event.target;
     const formData = new FormData(form);
 
-    // Relajar validación: permitir cualquier nombre, solo bloquear si está vacío
+    // Relajar validaciÃ³n: permitir cualquier nombre, solo bloquear si estÃ¡ vacÃ­o
     const name = formData.get('name').trim();
     if (!name) {
-        alert('El nombre no puede estar vacío.');
+        alert('El nombre no puede estar vacÃ­o.');
         return;
     }
 
@@ -1024,7 +1024,7 @@ async function saveTemplate(event) {
             variables.push(match[1]);
         }
     }
-    // Siempre enviar variables como JSON válido
+    // Siempre enviar variables como JSON vÃ¡lido
     formData.append('variables', JSON.stringify(variables));
 
     try {
@@ -1038,7 +1038,7 @@ async function saveTemplate(event) {
         try {
             data = await response.json();
         } catch (e) {
-            // Si no es JSON, mostrar mensaje genérico
+            // Si no es JSON, mostrar mensaje genÃ©rico
             alert('Error interno del servidor. Intenta nuevamente o contacta soporte.');
             return;
         }
@@ -1048,7 +1048,7 @@ async function saveTemplate(event) {
             await loadTemplates(true);
             renderTemplateList();
         } else {
-            // Mensajes claros según código
+            // Mensajes claros segÃºn cÃ³digo
             if (response.status === 409) {
                 alert('Ya existe un template con ese nombre. Elige otro nombre.');
             } else if (response.status === 400) {
@@ -1178,7 +1178,7 @@ let activePortalFilter = '';
 // Variable global para el filtro de etapa activo
 let activeStageFilter = '';
 
-// Mapa de canal_origen → label corto para los chips de portal
+// Mapa de canal_origen â†’ label corto para los chips de portal
 const CANAL_LABELS = {
     finca_raiz: 'FR', metrocuadrado: 'MC', instagram: 'IG',
     facebook: 'FB', whatsapp_directo: 'WA', pagina_web: 'WEB',
@@ -1190,11 +1190,11 @@ const CANAL_LABELS = {
  * Llamado desde loadContacts(), filterByPortal(), onStageFilterChange().
  */
 function _applyFiltersAndRender() {
-    // CRÍTICO: si hay búsqueda activa, delegar a filterContacts para no clobberear
-    // los resultados de búsqueda con el polling periódico.
+    // CRÃTICO: si hay bÃºsqueda activa, delegar a filterContacts para no clobberear
+    // los resultados de bÃºsqueda con el polling periÃ³dico.
     const _activeTerm = (window._currentSearchTerm || '').trim();
     if (_activeTerm) {
-        // Re-ejecuta filterContacts que hará render local + eventualmente /hydrate
+        // Re-ejecuta filterContacts que harÃ¡ render local + eventualmente /hydrate
         filterContacts(_activeTerm);
         return;
     }
@@ -1205,7 +1205,7 @@ function _applyFiltersAndRender() {
 }
 
 /**
- * Reconstruye los chips de portal según los canales realmente presentes en contacts.
+ * Reconstruye los chips de portal segÃºn los canales realmente presentes en contacts.
  * @param {Array} contacts - Array de contactos (allContacts)
  */
 function _rebuildPortalChips(contacts) {
@@ -1245,7 +1245,7 @@ function onStageFilterChange(val) {
 
 /**
  * Pobla el select #stageFilter con las etapas del pipeline.
- * Llamado una sola vez en la inicialización.
+ * Llamado una sola vez en la inicializaciÃ³n.
  */
 function _initStageFilter() {
     const sel = document.getElementById('stageFilter');
@@ -1283,15 +1283,15 @@ async function loadWorkerFilterOptions() {
         if (!resp.ok) return;
         const data = await resp.json();
         const workers = data.workers || [];
-        // Conservar la opción "Todas las conversaciones" y agregar workers
+        // Conservar la opciÃ³n "Todas las conversaciones" y agregar workers
         sel.innerHTML = '<option value="">&#128197; Todas las conversaciones</option>';
         workers.forEach(w => {
             const opt = document.createElement('option');
             opt.value = w._id || w.id || w.worker_id || w.name;
-            opt.textContent = `👤 Citas de ${w.name}`;
+            opt.textContent = `ðŸ‘¤ Citas de ${w.name}`;
             sel.appendChild(opt);
         });
-        // Restaurar selección activa si había una
+        // Restaurar selecciÃ³n activa si habÃ­a una
         if (activeWorkerFilter) sel.value = activeWorkerFilter;
     } catch (err) {
         console.warn('[Panel] No se pudieron cargar workers para filtro:', err);
@@ -1304,7 +1304,7 @@ function onWorkerFilterChange(workerId) {
     const sel = document.getElementById('workerFilter');
     const selectedOpt = sel ? sel.options[sel.selectedIndex] : null;
     activeWorkerName = selectedOpt && workerId
-        ? selectedOpt.textContent.replace('👤 Citas de', '').trim()
+        ? selectedOpt.textContent.replace('ðŸ‘¤ Citas de', '').trim()
         : '';
     loadContacts();
 }
@@ -1313,17 +1313,17 @@ async function loadContacts() {
     const workerSel = document.getElementById('workerFilter');
     const workerIdParam = workerSel ? workerSel.value : '';
 
-    // Un solo input de fecha — filtra por un día específico
+    // Un solo input de fecha â€” filtra por un dÃ­a especÃ­fico
     const dateFrom = document.getElementById('dateFrom')?.value;
 
-    // Construir URL base según modo activo
+    // Construir URL base segÃºn modo activo
     let url;
     if (workerIdParam) {
         url = `${BASE_URL}/contacts?worker_id=${encodeURIComponent(workerIdParam)}`;
     } else if (dateFrom) {
         url = `${BASE_URL}/contacts?filter_time=custom`;
     } else {
-        // Sin fecha: mostrar todos los contactos activos sin filtro histórico
+        // Sin fecha: mostrar todos los contactos activos sin filtro histÃ³rico
         url = `${BASE_URL}/contacts?filter_time=all`;
     }
 
@@ -1332,7 +1332,7 @@ async function loadContacts() {
         url += `&advisor=${ADVISOR_ID}`;
     }
 
-    // [Sync] Primera carga con deep link: incluir teléfono aunque sea cross-advisor
+    // [Sync] Primera carga con deep link: incluir telÃ©fono aunque sea cross-advisor
     if (!deepLinkHandled) {
         const _dlPhone = urlParams.get('phone');
         if (_dlPhone) {
@@ -1344,7 +1344,7 @@ async function loadContacts() {
         }
     }
 
-    // Agregar fecha: si dateFrom tiene valor, se filtra ese día completo (00:00 → 23:59)
+    // Agregar fecha: si dateFrom tiene valor, se filtra ese dÃ­a completo (00:00 â†’ 23:59)
     if (dateFrom) {
         url += `&date_from=${dateFrom}T00:00:00`;
         url += `&date_to=${dateFrom}T23:59:59`;
@@ -1358,7 +1358,7 @@ async function loadContacts() {
     } else if (workerIdParam) {
         console.log(`[Filtro] Modo worker: ${workerIdParam} | Fecha: ${dateFrom || '(todas)'}`);
     } else {
-        console.log(`[Filtro] Sin fecha — mostrando todos los contactos activos`);
+        console.log(`[Filtro] Sin fecha â€” mostrando todos los contactos activos`);
     }
 
     // [StageFilter] Filtro por etapa: backend trae TODOS los contactos del owner en esa etapa
@@ -1378,31 +1378,31 @@ async function loadContacts() {
         const data = await response.json();
         const newContacts = data.contacts || [];
 
-        // [StageFilter] Aviso si HubSpot devolvió el tope duro (más contactos disponibles allá)
+        // [StageFilter] Aviso si HubSpot devolviÃ³ el tope duro (mÃ¡s contactos disponibles allÃ¡)
         if (data.filter_mode === 'stage_full' && data.max_reached) {
-            try { showToast(`Mostrando los primeros ${data.total} contactos. Hay más en HubSpot.`, 'info'); } catch (_e) {}
+            try { showToast(`Mostrando los primeros ${data.total} contactos. Hay mÃ¡s en HubSpot.`, 'info'); } catch (_e) {}
         }
 
-        console.log(`[Filtro] Respuesta: ${newContacts.length} contactos  |  activos: ${data.active_count ?? '?'}  |  históricos: ${data.historical_count ?? '?'}  |  rango: ${data.since ?? '?'} → ${data.until ?? '?'}  |  mode: ${data.filter_mode ?? 'normal'}${data.from_cache ? ' (cache)' : ''}`);
+        console.log(`[Filtro] Respuesta: ${newContacts.length} contactos  |  activos: ${data.active_count ?? '?'}  |  histÃ³ricos: ${data.historical_count ?? '?'}  |  rango: ${data.since ?? '?'} â†’ ${data.until ?? '?'}  |  mode: ${data.filter_mode ?? 'normal'}${data.from_cache ? ' (cache)' : ''}`);
         if (newContacts.length === 0) {
-            console.warn('[Filtro] ⚠️  El backend devolvió 0 contactos. Causas posibles: rango de fechas sin actividad, filtro de asesora muy restrictivo, o error Redis transitorio.');
+            console.warn('[Filtro] âš ï¸  El backend devolviÃ³ 0 contactos. Causas posibles: rango de fechas sin actividad, filtro de asesora muy restrictivo, o error Redis transitorio.');
         }
 
-        // Fix: guard contra error Redis transitorio — si el backend devuelve 0 contactos
-        // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
+        // Fix: guard contra error Redis transitorio â€” si el backend devuelve 0 contactos
+        // pero tenÃ­amos una lista previa, es casi seguro un error de pool exhausto (Too many
         // connections). Mantener la lista anterior evita el blink total de la UI.
-        // Excepción: si hay un filtro activo (worker o fecha), el 0 es intencional → limpiar lista.
+        // ExcepciÃ³n: si hay un filtro activo (worker o fecha), el 0 es intencional â†’ limpiar lista.
         if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam && !dateFrom) {
-            console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
+            console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacÃ­o (posible error transitorio).');
             return;
         }
 
         allContacts = newContacts;  // Guardar en cache para el buscador
 
-        // ── Badges persistentes desde servidor (advisor_inbox) ────────────────
-        // Inicializa badges para contactos con actividad no leída desde la última sesión.
-        // Guards: solo con ADVISOR_ID, solo si el phone no fue visto en esta sesión,
-        // solo si el contacto no está actualmente abierto.
+        // â”€â”€ Badges persistentes desde servidor (advisor_inbox) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Inicializa badges para contactos con actividad no leÃ­da desde la Ãºltima sesiÃ³n.
+        // Guards: solo con ADVISOR_ID, solo si el phone no fue visto en esta sesiÃ³n,
+        // solo si el contacto no estÃ¡ actualmente abierto.
         if (ADVISOR_ID) {
             for (const contact of newContacts) {
                 const phone = contact.phone || '';
@@ -1412,7 +1412,7 @@ async function loadContacts() {
                     phone !== currentPhone &&
                     !_seenPhones.has(phone)
                 ) {
-                    // Solo inicializar si no hay conteo activo mayor (WS puede haber incrementado más)
+                    // Solo inicializar si no hay conteo activo mayor (WS puede haber incrementado mÃ¡s)
                     if (!(phone in unreadCounts) || unreadCounts[phone] === 0) {
                         unreadCounts[phone] = 1;
                         console.log('[Panel][Inbox] Badge inicializado desde servidor para', phone);
@@ -1421,9 +1421,9 @@ async function loadContacts() {
             }
         }
 
-        // Reconciliación: si servidor dice has_unread=false pero tenemos badge local → limpiar.
-        // El servidor es fuente de verdad para LIMPIAR (advisor marcó como leído en otra tab/sesión).
-        // Solo aplica si el contacto no está abierto actualmente ni fue cerrado recientemente.
+        // ReconciliaciÃ³n: si servidor dice has_unread=false pero tenemos badge local â†’ limpiar.
+        // El servidor es fuente de verdad para LIMPIAR (advisor marcÃ³ como leÃ­do en otra tab/sesiÃ³n).
+        // Solo aplica si el contacto no estÃ¡ abierto actualmente ni fue cerrado recientemente.
         for (const contact of newContacts) {
             const _rp = contact.phone || '';
             if (!contact.has_unread && _rp && _rp !== currentPhone &&
@@ -1434,11 +1434,11 @@ async function loadContacts() {
             }
         }
 
-        // Detección de mensajes nuevos por polling.
+        // DetecciÃ³n de mensajes nuevos por polling.
         // Solo actualiza el timestamp si es mayor (upgrade-only, nunca downgrade).
         // Esto evita falsos positivos cuando el backend devuelve el mismo contacto
-        // duplicado con timestamps distintos (la entrada menor sobreescribiría la mayor,
-        // causando que el próximo poll detecte un "nuevo mensaje" eternamente).
+        // duplicado con timestamps distintos (la entrada menor sobreescribirÃ­a la mayor,
+        // causando que el prÃ³ximo poll detecte un "nuevo mensaje" eternamente).
         for (const contact of allContacts) {
             const phone = contact.phone || '';
             const newTime = contact.last_activity || '';
@@ -1449,7 +1449,7 @@ async function loadContacts() {
                 if (isNewMessage) {
                     console.log('[Panel] Nuevo mensaje detectado (polling):', phone);
                     if (phone !== currentPhone) {
-                        // Fix CR-4: no incrementar si el WS ya notificó este mensaje en los últimos 10s.
+                        // Fix CR-4: no incrementar si el WS ya notificÃ³ este mensaje en los Ãºltimos 10s.
                         // Ventana de 10s cubre servidores lentos (Railway bajo carga puede demorar 6-8s).
                         const wsHandledRecently = (_lastWsNotifiedTimestamps[phone] || 0) > Date.now() - 10000;
                         if (!wsHandledRecently) {
@@ -1462,7 +1462,7 @@ async function loadContacts() {
             }
         }
 
-        // Filtrar contactos recién cerrados antes de renderizar (guard contra polling stale)
+        // Filtrar contactos reciÃ©n cerrados antes de renderizar (guard contra polling stale)
         if (recentlyClosedPhones.size > 0) {
             allContacts = allContacts.filter(c => !recentlyClosedPhones.has(c.phone));
         }
@@ -1478,7 +1478,7 @@ async function loadContacts() {
             if (deepLinkPhone) {
                 deepLinkHandled = true;
                 // Normalizar: quitar espacios y agregar + si no lo tiene
-                // (URLs convierten + en espacio, así que "+" llega como " ")
+                // (URLs convierten + en espacio, asÃ­ que "+" llega como " ")
                 deepLinkPhone = deepLinkPhone.replace(/\s+/g, '').trim();
                 if (deepLinkPhone && !deepLinkPhone.startsWith('+') && /^\d/.test(deepLinkPhone)) {
                     deepLinkPhone = '+' + deepLinkPhone;
@@ -1493,7 +1493,7 @@ async function loadContacts() {
                         target.canal || target.canal_origen || 'whatsapp'
                     );
                 } else {
-                    // Contacto no está en la lista tras include_phone → hidratar vía /hydrate
+                    // Contacto no estÃ¡ en la lista tras include_phone â†’ hidratar vÃ­a /hydrate
                     _handleDeepLinkMiss(deepLinkPhone);
                 }
             }
@@ -1512,31 +1512,31 @@ async function loadContacts() {
 }
 
 /**
- * Fallback del deep link: el contacto no está en allContacts tras la carga inicial.
+ * Fallback del deep link: el contacto no estÃ¡ en allContacts tras la carga inicial.
  *
  * Llama GET /contacts/{phone}/hydrate?ensure_panel=true para obtener todos los
  * metadatos REALES del contacto (contact_id, display_name, owner, canal, stage)
- * en UN solo round-trip. El endpoint además re-inyecta el contacto al panel vía
- * _hydrate_contact_and_ensure_panel() — siguiente poll ya lo verá.
+ * en UN solo round-trip. El endpoint ademÃ¡s re-inyecta el contacto al panel vÃ­a
+ * _hydrate_contact_and_ensure_panel() â€” siguiente poll ya lo verÃ¡.
  *
  * Reemplaza el viejo flujo take-control + reload + fallback selectContact('',...)
- * que producía estado "ghost" cuando el contacto no se materializaba.
+ * que producÃ­a estado "ghost" cuando el contacto no se materializaba.
  *
- * @param {string} phone - Teléfono normalizado (con +)
+ * @param {string} phone - TelÃ©fono normalizado (con +)
  */
 async function _handleDeepLinkMiss(phone) {
-    // Normalización defensiva: asegurar formato +E164
+    // NormalizaciÃ³n defensiva: asegurar formato +E164
     let phoneNorm = (phone || '').replace(/\s+/g, '').trim();
     if (phoneNorm && !phoneNorm.startsWith('+') && /^\d/.test(phoneNorm)) {
         phoneNorm = '+' + phoneNorm;
     }
     if (!phoneNorm) {
-        console.error('[Panel] Deep link: phone vacío, abortando');
+        console.error('[Panel] Deep link: phone vacÃ­o, abortando');
         return;
     }
 
     console.log('[Panel] Deep link: hidratando contacto cross-advisor:', phoneNorm);
-    showToast('Cargando conversación...', 'info');
+    showToast('Cargando conversaciÃ³n...', 'info');
 
     try {
         const hydrateUrl =
@@ -1549,7 +1549,7 @@ async function _handleDeepLinkMiss(phone) {
 
         if (resp.status === 404) {
             console.warn('[Panel] Deep link: contacto no existe en Redis/HubSpot:', phoneNorm);
-            showToast('Este número no tiene historial en el sistema', 'error');
+            showToast('Este nÃºmero no tiene historial en el sistema', 'error');
             return;
         }
 
@@ -1567,7 +1567,7 @@ async function _handleDeepLinkMiss(phone) {
             source: contact.source
         });
 
-        // Inyectar en allContacts si aún no está (el próximo poll lo traerá, pero
+        // Inyectar en allContacts si aÃºn no estÃ¡ (el prÃ³ximo poll lo traerÃ¡, pero
         // el usuario no debe esperar al poll)
         if (!allContacts.some(c => c.phone === contact.phone)) {
             // Marcar cross_advisor si el owner real no es la asesora actual
@@ -1586,7 +1586,7 @@ async function _handleDeepLinkMiss(phone) {
             showToast(`Contacto de: ${contact.owner_name}`, 'info');
         }
 
-        // Seleccionar con TODOS los campos reales — nunca más phone como fallback de nombre
+        // Seleccionar con TODOS los campos reales â€” nunca mÃ¡s phone como fallback de nombre
         selectContact(
             contact.contact_id || '',
             contact.phone,
@@ -1596,28 +1596,28 @@ async function _handleDeepLinkMiss(phone) {
 
     } catch (err) {
         console.error('[Panel] Deep link: error hidratando:', err);
-        showToast(`No se pudo cargar la conversación: ${err.message}`, 'error');
+        showToast(`No se pudo cargar la conversaciÃ³n: ${err.message}`, 'error');
     }
 }
 
 async function loadChatHistory(contactId) {
-    // Capturar el contactId y phone al momento de iniciar la petición
-    // para verificar que no cambió durante el fetch (race condition fix)
+    // Capturar el contactId y phone al momento de iniciar la peticiÃ³n
+    // para verificar que no cambiÃ³ durante el fetch (race condition fix)
     const requestedContactId = contactId;
     const requestedPhone = currentPhone;
     const requestedCanal = currentCanal;
 
-    // ⚠️ 2026-06-02: reset del state de paginación al cambiar conversación.
+    // âš ï¸ 2026-06-02: reset del state de paginaciÃ³n al cambiar conversaciÃ³n.
     // Garantiza que el cursor (oldestTs) y hasMore correspondan SIEMPRE al
-    // contacto actualmente abierto. Sin esto, scroll en conversación nueva
-    // podría usar oldestTs de la conversación anterior.
+    // contacto actualmente abierto. Sin esto, scroll en conversaciÃ³n nueva
+    // podrÃ­a usar oldestTs de la conversaciÃ³n anterior.
     _resetChatHistoryState(requestedContactId, requestedCanal, requestedPhone);
 
     console.log('[Panel] Cargando historial para contact_id:', requestedContactId, 'canal:', requestedCanal, 'phone:', requestedPhone);
     try {
-        // ⚠️ 2026-06-02: paginación cursor-based con scroll infinito.
-        // Carga inicial = 100 mensajes (los más recientes). Si el usuario scrollea
-        // hacia arriba, loadOlderMessages() trae páginas adicionales de 100 con
+        // âš ï¸ 2026-06-02: paginaciÃ³n cursor-based con scroll infinito.
+        // Carga inicial = 100 mensajes (los mÃ¡s recientes). Si el usuario scrollea
+        // hacia arriba, loadOlderMessages() trae pÃ¡ginas adicionales de 100 con
         // ?before_ts=<oldest_ts>. Esto evita transferir miles de mensajes upfront.
         let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=${CHAT_PAGE_SIZE}`;
         if (requestedCanal) {
@@ -1631,18 +1631,18 @@ async function loadChatHistory(contactId) {
             headers: { 'X-API-Key': API_KEY }
         });
 
-        // ═══════════════════════════════════════════════════════════════
-        // FIX RACE CONDITION: Verificar que el contacto no cambió
-        // mientras la petición estaba en vuelo. Si cambió, descartar.
-        // ═══════════════════════════════════════════════════════════════
+        // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        // FIX RACE CONDITION: Verificar que el contacto no cambiÃ³
+        // mientras la peticiÃ³n estaba en vuelo. Si cambiÃ³, descartar.
+        // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
         if (currentContactId !== requestedContactId) {
-            console.warn(`[Panel] Race condition detectada: petición para ${requestedContactId} descartada (ahora es ${currentContactId})`);
+            console.warn(`[Panel] Race condition detectada: peticiÃ³n para ${requestedContactId} descartada (ahora es ${currentContactId})`);
             return; // Descartar respuesta obsoleta
         }
 
         console.log('[Panel] Respuesta de historial:', response.status);
 
-        // P2-C: verificar HTTP status antes de parsear — distingue error de "sin mensajes"
+        // P2-C: verificar HTTP status antes de parsear â€” distingue error de "sin mensajes"
         if (!response.ok) {
             console.error(`[Panel] Error cargando historial: HTTP ${response.status}`);
             const chatMessages = document.getElementById('chatMessages');
@@ -1660,9 +1660,9 @@ async function loadChatHistory(contactId) {
         const data = await response.json();
         console.log('[Panel] Datos recibidos para', requestedContactId, '- mensajes:', data.messages?.length || 0);
 
-        // Doble verificación después del JSON parse
+        // Doble verificaciÃ³n despuÃ©s del JSON parse
         if (currentContactId !== requestedContactId) {
-            console.warn(`[Panel] Race condition (post-parse): petición para ${requestedContactId} descartada`);
+            console.warn(`[Panel] Race condition (post-parse): peticiÃ³n para ${requestedContactId} descartada`);
             return;
         }
 
@@ -1671,9 +1671,9 @@ async function loadChatHistory(contactId) {
             console.warn('[Panel] Error en respuesta:', data.error);
         }
 
-        // P2-B: HubSpot timeout — mostrar aviso de historial parcial + retry automático
+        // P2-B: HubSpot timeout â€” mostrar aviso de historial parcial + retry automÃ¡tico
         if (data.hs_timeout) {
-            console.warn('[Panel] HubSpot timeout — historial puede ser parcial, reintentando en 8s');
+            console.warn('[Panel] HubSpot timeout â€” historial puede ser parcial, reintentando en 8s');
             showToast('Cargando historial completo...', 'info');
             setTimeout(() => {
                 if (currentContactId === requestedContactId) {
@@ -1685,15 +1685,15 @@ async function loadChatHistory(contactId) {
         // Renderizar mensajes (puede estar vacio)
         renderChatBubbles(data.messages || []);
 
-        // ⚠️ 2026-06-02: guardar cursor + has_more en state para paginación.
+        // âš ï¸ 2026-06-02: guardar cursor + has_more en state para paginaciÃ³n.
         // Solo si el contacto sigue siendo el mismo (race condition guard).
         if (currentContactId === requestedContactId) {
             chatHistoryState.hasMore = data.has_more === true;
             chatHistoryState.oldestTs = data.oldest_ts || null;
             // Inicializar cache de mensajes (necesario para _prependChatMessages).
-            // El cache contiene los mensajes en orden cronológico exacto.
+            // El cache contiene los mensajes en orden cronolÃ³gico exacto.
             window.__chatMessagesCache = (data.messages || []).slice();
-            // Montar listener de scroll si aún no está montado.
+            // Montar listener de scroll si aÃºn no estÃ¡ montado.
             _attachScrollListener();
             // Si has_more=false y hay mensajes, mostrar separador de "inicio"
             if (!chatHistoryState.hasMore && (data.messages?.length || 0) > 0) {
@@ -1720,23 +1720,23 @@ async function loadChatHistory(contactId) {
 }
 
 // =========================================================================
-// ⚠️ 2026-06-02: PAGINACIÓN — Scroll infinito hacia el pasado
+// âš ï¸ 2026-06-02: PAGINACIÃ“N â€” Scroll infinito hacia el pasado
 // =========================================================================
 //
-// Diseño:
-//   • Scroll listener throttled (200ms) en #chatMessages.
-//   • Trigger: scrollTop < SCROLL_THRESHOLD_PX Y state.hasMore Y !state.loading.
-//   • Fetch /history/{cid}?before_ts=<oldestTs>&limit=100.
-//   • Prepend mensajes ANTERIORES al inicio del DOM SIN saltos visuales:
+// DiseÃ±o:
+//   â€¢ Scroll listener throttled (200ms) en #chatMessages.
+//   â€¢ Trigger: scrollTop < SCROLL_THRESHOLD_PX Y state.hasMore Y !state.loading.
+//   â€¢ Fetch /history/{cid}?before_ts=<oldestTs>&limit=100.
+//   â€¢ Prepend mensajes ANTERIORES al inicio del DOM SIN saltos visuales:
 //     guardamos scrollHeight antes, calculamos delta, restauramos scrollTop.
-//   • Si recibimos menos de `limit` mensajes → has_more=false → desactivar trigger.
-//   • Si el usuario cambia de conversación durante el fetch, descartamos resultado.
+//   â€¢ Si recibimos menos de `limit` mensajes â†’ has_more=false â†’ desactivar trigger.
+//   â€¢ Si el usuario cambia de conversaciÃ³n durante el fetch, descartamos resultado.
 //
 // Defensa en profundidad (6 capas):
 //   1. state.loading (anti-doble-fetch)
-//   2. state.hasMore=false (terminal: no más fetches)
+//   2. state.hasMore=false (terminal: no mÃ¡s fetches)
 //   3. Throttle scroll listener (max 5 evals/s)
-//   4. Threshold 200px desde top (carga ANTES del límite visual)
+//   4. Threshold 200px desde top (carga ANTES del lÃ­mite visual)
 //   5. Race condition check (contactId estable durante fetch)
 //   6. renderChatBubbles deduplica por data-msg-id (defensa final natural)
 // =========================================================================
@@ -1763,7 +1763,7 @@ function _onChatScroll() {
 }
 
 async function loadOlderMessages() {
-    // Guards (capas 1, 2, 5 del diseño)
+    // Guards (capas 1, 2, 5 del diseÃ±o)
     if (chatHistoryState.loading) return;
     if (!chatHistoryState.hasMore) return;
     if (!chatHistoryState.oldestTs) return;
@@ -1787,14 +1787,14 @@ async function loadOlderMessages() {
 
         const response = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
         if (!response.ok) {
-            console.warn(`[Panel][Pagination] HTTP ${response.status} cargando página anterior`);
+            console.warn(`[Panel][Pagination] HTTP ${response.status} cargando pÃ¡gina anterior`);
             return;
         }
         const data = await response.json();
 
-        // Race guard (capa 5): si el usuario cambió de conversación, descartar.
+        // Race guard (capa 5): si el usuario cambiÃ³ de conversaciÃ³n, descartar.
         if (currentContactId !== requestedCid) {
-            console.warn(`[Panel][Pagination] Contacto cambió durante fetch — descartando`);
+            console.warn(`[Panel][Pagination] Contacto cambiÃ³ durante fetch â€” descartando`);
             return;
         }
 
@@ -1838,47 +1838,47 @@ async function loadOlderMessages() {
     }
 }
 
-// ⚠️ Re-render total con cache cronológico.
+// âš ï¸ Re-render total con cache cronolÃ³gico.
 // Aproach simple y robusto: limpiar container y re-renderizar el array completo
-// (mensajes antiguos + mensajes existentes) en orden cronológico exacto.
-// El scroll-restore (calculado en loadOlderMessages) mantiene la posición visual
+// (mensajes antiguos + mensajes existentes) en orden cronolÃ³gico exacto.
+// El scroll-restore (calculado en loadOlderMessages) mantiene la posiciÃ³n visual
 // del usuario sin saltos perceptibles.
 //
-// Cache: window.__chatMessagesCache contiene los objetos msg en orden cronológico
-// (más antiguo primero, igual que el formato de /history backend response). Se
-// inicializa en loadChatHistory() y se actualiza aquí en cada paginación.
+// Cache: window.__chatMessagesCache contiene los objetos msg en orden cronolÃ³gico
+// (mÃ¡s antiguo primero, igual que el formato de /history backend response). Se
+// inicializa en loadChatHistory() y se actualiza aquÃ­ en cada paginaciÃ³n.
 function _prependChatMessages(messages) {
     const container = document.getElementById('chatMessages');
     if (!container) return;
 
-    // Dedup contra cache existente (defensa final, capa 6 del diseño).
+    // Dedup contra cache existente (defensa final, capa 6 del diseÃ±o).
     const cache = window.__chatMessagesCache || [];
     const existingIds = new Set(cache.map(m => String(m.id)));
     const trulyNew = messages.filter(m => m.id && !existingIds.has(String(m.id)));
     if (trulyNew.length === 0) return;
 
-    // Concatenar: trulyNew (más antiguos) + cache (existentes) = lista cronológica completa.
+    // Concatenar: trulyNew (mÃ¡s antiguos) + cache (existentes) = lista cronolÃ³gica completa.
     const merged = [...trulyNew, ...cache];
     window.__chatMessagesCache = merged;
 
     // Limpiar container completamente para evitar conflictos con el render
-    // incremental de renderChatBubbles. Como currentContactId no cambió,
-    // renderChatBubbles NO va a re-limpiar — hará appendChild secuencial.
+    // incremental de renderChatBubbles. Como currentContactId no cambiÃ³,
+    // renderChatBubbles NO va a re-limpiar â€” harÃ¡ appendChild secuencial.
     container.innerHTML = '';
-    // Limpiar también el marcador "inicio de conversación" si existía
+    // Limpiar tambiÃ©n el marcador "inicio de conversaciÃ³n" si existÃ­a
     // (puede reaparecer al final si has_more sigue siendo false).
     const oldMarker = document.getElementById('chatHistoryStartMarker');
     if (oldMarker) oldMarker.remove();
 
-    // ⚠️ Flag para que renderChatBubbles NO haga auto-scroll al fondo.
-    // El caller (loadOlderMessages) restaura la posición manualmente.
+    // âš ï¸ Flag para que renderChatBubbles NO haga auto-scroll al fondo.
+    // El caller (loadOlderMessages) restaura la posiciÃ³n manualmente.
     window.__isPaginating = true;
     try {
         renderChatBubbles(merged);
     } finally {
-        // Limpiar flag después de un breve delay para cubrir el setTimeout
+        // Limpiar flag despuÃ©s de un breve delay para cubrir el setTimeout
         // interno de renderChatBubbles (100ms). Si la flag se limpia muy
-        // pronto, el setTimeout encolado podría disparar el auto-scroll.
+        // pronto, el setTimeout encolado podrÃ­a disparar el auto-scroll.
         setTimeout(() => { window.__isPaginating = false; }, 200);
     }
 }
@@ -1892,7 +1892,7 @@ function _showLoadingMoreSpinner(show) {
             spinner = document.createElement('div');
             spinner.id = 'chatLoadingMoreSpinner';
             spinner.className = 'flex items-center justify-center py-3 text-gray-500 text-xs';
-            spinner.innerHTML = '<span>📜 Cargando mensajes anteriores...</span>';
+            spinner.innerHTML = '<span>ðŸ“œ Cargando mensajes anteriores...</span>';
             container.insertBefore(spinner, container.firstChild);
         }
     } else {
@@ -1907,7 +1907,7 @@ function _showHistoryStartMarker() {
     const marker = document.createElement('div');
     marker.id = 'chatHistoryStartMarker';
     marker.className = 'flex items-center justify-center py-3 text-gray-400 text-xs';
-    marker.innerHTML = '<span>📜 Inicio de la conversación</span>';
+    marker.innerHTML = '<span>ðŸ“œ Inicio de la conversaciÃ³n</span>';
     container.insertBefore(marker, container.firstChild);
 }
 
@@ -2002,25 +2002,25 @@ async function loadContactDetail(phone, contactId, canal) {
     const templateSection = document.getElementById('templateSection');
 
     try {
-        // ⚠️ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). El historial
-        // detallado se carga vía loadChatHistory() con paginación cursor.
+        // âš ï¸ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). El historial
+        // detallado se carga vÃ­a loadChatHistory() con paginaciÃ³n cursor.
         let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=${CHAT_PAGE_SIZE}`;
         if (contactId) url += `&contact_id=${encodeURIComponent(contactId)}`;
         if (canal) url += `&canal=${encodeURIComponent(canal)}`;
 
         const response = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
 
-        // Race condition: si el contacto cambió mientras esperábamos, descartar
+        // Race condition: si el contacto cambiÃ³ mientras esperÃ¡bamos, descartar
         if (currentContactId !== requestedContactId) {
             console.warn(`[Panel] Race condition en loadContactDetail: descartado (${requestedContactId})`);
             return;
         }
 
-        // P2-C: verificar HTTP status antes de parsear — distingue error de "sin mensajes"
+        // P2-C: verificar HTTP status antes de parsear â€” distingue error de "sin mensajes"
         if (!response.ok) {
             console.error(`[Panel] Error en detail: HTTP ${response.status}`);
             renderChatBubbles([]);
-            showToast(`Error cargando conversación (${response.status})`, 'error');
+            showToast(`Error cargando conversaciÃ³n (${response.status})`, 'error');
             return;
         }
 
@@ -2085,7 +2085,7 @@ async function loadContactDetail(phone, contactId, canal) {
 
 /**
  * Genera el HTML del dropdown de pipeline para un contacto.
- * Extraído de la función anidada original para poder usarse en _buildContactHTML.
+ * ExtraÃ­do de la funciÃ³n anidada original para poder usarse en _buildContactHTML.
  */
 const _CANAL_OPTIONS = [
     { value: 'whatsapp',        label: 'WhatsApp' },
@@ -2096,10 +2096,10 @@ const _CANAL_OPTIONS = [
     { value: 'linkedin',        label: 'LinkedIn' },
     { value: 'youtube',         label: 'YouTube' },
     { value: 'metrocuadrado',   label: 'MetroCuadrado' },
-    { value: 'finca_raiz',      label: 'Finca Raíz' },
+    { value: 'finca_raiz',      label: 'Finca RaÃ­z' },
     { value: 'mercado_libre',   label: 'Mercado Libre' },
     { value: 'ciencuadras',     label: 'CienCuadras' },
-    { value: 'pagina_web',      label: 'Página Web' },
+    { value: 'pagina_web',      label: 'PÃ¡gina Web' },
     { value: 'desconocido',     label: 'Desconocido' },
 ];
 
@@ -2132,7 +2132,7 @@ function _buildPipelineDropdown(contactIdForDropdown, currentStageForDropdown) {
 
 /**
  * Genera un string "fingerprint" de todos los campos que afectan el render de un contacto.
- * Si el fingerprint no cambió, el elemento DOM no necesita ser reconstruido.
+ * Si el fingerprint no cambiÃ³, el elemento DOM no necesita ser reconstruido.
  */
 function _getContactFingerprint(contact) {
     const contactId = contact.contact_id || contact.id || '';
@@ -2140,7 +2140,7 @@ function _getContactFingerprint(contact) {
     const cacheKey = contactId || phone;
     const cached = contactDealCache[cacheKey];
     const currentStage = contact.current_stage || (cached?.current_stage) || '';
-    // Fix: time_ago se excluye del fingerprint — cambia cada minuto y forzaba reconstruir
+    // Fix: time_ago se excluye del fingerprint â€” cambia cada minuto y forzaba reconstruir
     // el elemento DOM completo (incluyendo re-descarga del avatar). Se actualiza in-place
     // via _updateContactTimeAgo() al final de renderContactsList.
     return [
@@ -2168,8 +2168,8 @@ function _updateContactTimeAgo(phone, timeAgo) {
 }
 
 /**
- * Genera el HTML completo para un único elemento de contacto en la lista.
- * Contiene la misma lógica que el antiguo .map() callback de renderContactsList.
+ * Genera el HTML completo para un Ãºnico elemento de contacto en la lista.
+ * Contiene la misma lÃ³gica que el antiguo .map() callback de renderContactsList.
  */
 function _buildContactHTML(contact) {
     const isActive = contact.is_active === true;
@@ -2213,12 +2213,12 @@ function _buildContactHTML(contact) {
     const cacheKey = contactId || phone;
     let currentStage = contact.current_stage || contactDealCache[cacheKey]?.current_stage || '';
 
-    // Actualizar caché local de stage para evitar flickering en re-renders
+    // Actualizar cachÃ© local de stage para evitar flickering en re-renders
     if (cacheKey && contact.current_stage) {
         contactDealCache[cacheKey] = { current_stage: contact.current_stage };
     }
 
-    // Fila 2 de la card: canal badge + stage select (o badge estático)
+    // Fila 2 de la card: canal badge + stage select (o badge estÃ¡tico)
     let stageRow = '';
     if (isInConversation || isHumanActive || isActive) {
         const pipelineDropdown = _buildPipelineDropdown(contactId, currentStage);
@@ -2241,29 +2241,29 @@ function _buildContactHTML(contact) {
         ? `<span class="unread-badge absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center font-bold px-0.5 leading-none">${unread > 9 ? '9+' : unread}</span>`
         : '';
 
-    // Punto azul: "marcado como no leído" manualmente (solo si no hay badge rojo real)
+    // Punto azul: "marcado como no leÃ­do" manualmente (solo si no hay badge rojo real)
     const manualUnreadBadge = (_manuallyUnread.has(phone) && phone !== currentPhone && unread === 0)
-        ? `<span class="manual-unread-badge absolute -top-1 -right-1 bg-blue-500 rounded-full w-[12px] h-[12px]" title="Marcado como no leído"></span>`
+        ? `<span class="manual-unread-badge absolute -top-1 -right-1 bg-blue-500 rounded-full w-[12px] h-[12px]" title="Marcado como no leÃ­do"></span>`
         : '';
 
     const apptBadge = contact.has_appointment
-        ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">📅</span>`
+        ? `<span class="absolute -bottom-1 -right-1 bg-amber-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Tiene cita programada">ðŸ“…</span>`
         : '';
 
-    // [Sync] Badge cross-advisor: bottom-left (slot libre) — contacto reasignado a otro asesor
+    // [Sync] Badge cross-advisor: bottom-left (slot libre) â€” contacto reasignado a otro asesor
     const crossAdvisorBadge = contact.cross_advisor
-        ? `<span class="absolute -bottom-1 -left-1 bg-sky-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Asignado a otro asesor">🔄</span>`
+        ? `<span class="absolute -bottom-1 -left-1 bg-sky-400 text-white text-xs rounded-full w-[18px] h-[18px] flex items-center justify-center leading-none" title="Asignado a otro asesor">ðŸ”„</span>`
         : '';
 
-    // [StageFilter] Badge HubSpot-only: contacto desde filtro de etapa sin conversación activa en Redis
+    // [StageFilter] Badge HubSpot-only: contacto desde filtro de etapa sin conversaciÃ³n activa en Redis
     const hsOnlyBadge = contact.from_hubspot_stage
-        ? `<span class="absolute -top-1 -right-1 bg-amber-400 text-white text-[10px] rounded px-1 py-0.5 leading-none" title="Sin conversación activa — solo HubSpot">🏷</span>`
+        ? `<span class="absolute -top-1 -right-1 bg-amber-400 text-white text-[10px] rounded px-1 py-0.5 leading-none" title="Sin conversaciÃ³n activa â€” solo HubSpot">ðŸ·</span>`
         : '';
 
     const stateBadge = (isInConversation || isHumanActive || isActive)
-        ? `<span class="absolute -top-1 -left-1 bg-blue-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Asesora atendiendo">👤</span>`
+        ? `<span class="absolute -top-1 -left-1 bg-blue-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Asesora atendiendo">ðŸ‘¤</span>`
         : status === 'BOT_ACTIVE'
-        ? `<span class="absolute -top-1 -left-1 bg-gray-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Sofía está manejando">🤖</span>`
+        ? `<span class="absolute -top-1 -left-1 bg-gray-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="SofÃ­a estÃ¡ manejando">ðŸ¤–</span>`
         : '';
 
     // Layout 2 filas: [Fila 1] nombre + timeAgo  |  [Fila 2] canal badge + stage select
@@ -2294,7 +2294,7 @@ function _buildContactHTML(contact) {
                         <div class="min-w-0 overflow-hidden">${stageRow}</div>
                     </div>
                     ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate mt-0.5">${contact.handoff_reason}</p>` : ''}
-                    ${contact.cross_advisor && contact.owner_name ? `<p class="text-xs text-sky-600 truncate mt-0.5 font-medium" title="Asesora asignada">👤 ${contact.owner_name}</p>` : ''}
+                    ${contact.cross_advisor && contact.owner_name ? `<p class="text-xs text-sky-600 truncate mt-0.5 font-medium" title="Asesora asignada">ðŸ‘¤ ${contact.owner_name}</p>` : ''}
                 </div>
             </div>
         </div>
@@ -2302,18 +2302,18 @@ function _buildContactHTML(contact) {
 }
 
 // =========================================================================
-// RENDERIZADO DE LISTA DE CONTACTOS — Diferencial (sin innerHTML completo)
+// RENDERIZADO DE LISTA DE CONTACTOS â€” Diferencial (sin innerHTML completo)
 // =========================================================================
 
 /**
  * Renderiza la lista de contactos de forma diferencial:
- * solo reconstruye los elementos cuyo fingerprint cambió,
- * inserta los nuevos y elimina los que ya no están.
+ * solo reconstruye los elementos cuyo fingerprint cambiÃ³,
+ * inserta los nuevos y elimina los que ya no estÃ¡n.
  * Evita el parpadeo causado por reemplazar container.innerHTML completo.
  */
 function renderContactsList(contacts) {
-    // [Bug2] Guard: si hay un render en curso, encolar el más reciente y salir.
-    // Cuando el render activo termine (requestAnimationFrame callback), procesará el encolado.
+    // [Bug2] Guard: si hay un render en curso, encolar el mÃ¡s reciente y salir.
+    // Cuando el render activo termine (requestAnimationFrame callback), procesarÃ¡ el encolado.
     if (_renderInProgress) {
         _pendingRenderContacts = contacts;
         return;
@@ -2338,16 +2338,16 @@ function _renderContactsListInner(contacts) {
         const _searchTerm = (window._currentSearchTerm || '').trim();
         let _emptyMsg;
         if (_searchTerm) {
-            // Búsqueda activa: mensaje contextual
+            // BÃºsqueda activa: mensaje contextual
             const _safeTerm = _searchTerm.replace(/[<>&]/g, ch => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[ch]));
-            // Si parece teléfono, dar feedback específico
+            // Si parece telÃ©fono, dar feedback especÃ­fico
             const _looksLikePhone = /^\+?[\d\s\-()]+$/.test(_searchTerm) &&
                                     _searchTerm.replace(/[^\d]/g, '').length >= 10;
             _emptyMsg = _looksLikePhone
-                ? `No se encontró ningún contacto con el número <strong>${_safeTerm}</strong>.<br><span class="text-xs text-gray-500">Verifica que el número esté en HubSpot o intenta con el código de país.</span>`
-                : `Sin resultados para <strong>"${_safeTerm}"</strong>.<br><span class="text-xs text-gray-500">Intenta con otro término o parte del nombre.</span>`;
+                ? `No se encontrÃ³ ningÃºn contacto con el nÃºmero <strong>${_safeTerm}</strong>.<br><span class="text-xs text-gray-500">Verifica que el nÃºmero estÃ© en HubSpot o intenta con el cÃ³digo de paÃ­s.</span>`
+                : `Sin resultados para <strong>"${_safeTerm}"</strong>.<br><span class="text-xs text-gray-500">Intenta con otro tÃ©rmino o parte del nombre.</span>`;
         } else if (activeWorkerFilter && activeWorkerName) {
-            _emptyMsg = `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`;
+            _emptyMsg = `No hay citas de <strong>${activeWorkerName}</strong> en el perÃ­odo seleccionado.`;
         } else if (_currentDate) {
             const [_y, _m, _d] = _currentDate.split('-');
             const _meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
@@ -2358,7 +2358,7 @@ function _renderContactsListInner(contacts) {
                 ? `No hay contactos que llegaron el <strong>${_fechaDisplay}</strong>.`
                 : `No hay contactos con actividad el <strong>${_fechaDisplay}</strong>.`;
         } else {
-            _emptyMsg = 'No hay contactos esperando atención.';
+            _emptyMsg = 'No hay contactos esperando atenciÃ³n.';
         }
         container.innerHTML = `
             <div class="p-4 text-center text-gray-400 empty-state-msg">
@@ -2371,14 +2371,14 @@ function _renderContactsListInner(contacts) {
 
     // FIX-G: limpiar cualquier empty-state residual de renders previos que no
     // fueron reemplazados (por ej. cuando transicionamos de 0 resultados a N).
-    // El diff-renderer sólo gestiona nodos con [data-phone], así que un div de
+    // El diff-renderer sÃ³lo gestiona nodos con [data-phone], asÃ­ que un div de
     // empty-state queda flotando como "item fantasma" entre contactos.
     for (const el of container.querySelectorAll('.empty-state-msg')) {
         el.remove();
     }
 
     const savedScrollTop = container.scrollTop;
-    // Fix-C: detectar cambio en índice 0 para forzar scroll al top (comportamiento WhatsApp)
+    // Fix-C: detectar cambio en Ã­ndice 0 para forzar scroll al top (comportamiento WhatsApp)
     const prevTopPhone = window._lastTopPhone || null;
     const newTopPhone = contacts.length > 0 ? (contacts[0].phone || '') : '';
 
@@ -2390,7 +2390,7 @@ function _renderContactsListInner(contacts) {
 
     const newPhones = new Set(contacts.map(c => c.phone || ''));
 
-    // Eliminar contactos que ya no están en la lista nueva
+    // Eliminar contactos que ya no estÃ¡n en la lista nueva
     for (const [phone, el] of existingMap) {
         if (!newPhones.has(phone)) {
             el.remove();
@@ -2409,7 +2409,7 @@ function _renderContactsListInner(contacts) {
         let el;
         if (existing) {
             if (_contactFingerprints.get(phone) !== fingerprint) {
-                // Los datos cambiaron — reconstruir solo este elemento
+                // Los datos cambiaron â€” reconstruir solo este elemento
                 const wrapper = document.createElement('div');
                 wrapper.innerHTML = _buildContactHTML(contact).trim();
                 const newEl = wrapper.firstElementChild;
@@ -2421,7 +2421,7 @@ function _renderContactsListInner(contacts) {
             }
             _contactFingerprints.set(phone, fingerprint);
         } else {
-            // Contacto nuevo — crear e insertar
+            // Contacto nuevo â€” crear e insertar
             const wrapper = document.createElement('div');
             wrapper.innerHTML = _buildContactHTML(contact).trim();
             el = wrapper.firstElementChild;
@@ -2429,14 +2429,14 @@ function _renderContactsListInner(contacts) {
             _contactFingerprints.set(phone, fingerprint);
         }
 
-        // Garantizar posición correcta en el contenedor (orden del servidor)
+        // Garantizar posiciÃ³n correcta en el contenedor (orden del servidor)
         const currentAtPosition = container.children[i];
         if (currentAtPosition !== el) {
             container.insertBefore(el, currentAtPosition || null);
         }
 
-        // Fix CR-3: re-aplicar badge si el contacto tiene no-leídos pendientes en memoria.
-        // updateUnreadBadge() hace early-return si el elemento no existe → es seguro llamarlo siempre.
+        // Fix CR-3: re-aplicar badge si el contacto tiene no-leÃ­dos pendientes en memoria.
+        // updateUnreadBadge() hace early-return si el elemento no existe â†’ es seguro llamarlo siempre.
         if (unreadCounts[phone] > 0) {
             updateUnreadBadge(phone, unreadCounts[phone]);
         }
@@ -2447,11 +2447,11 @@ function _renderContactsListInner(contacts) {
         }
     }
 
-    // Fix-C: Si el índice 0 cambió (llegó mensaje nuevo que subió un contacto al top),
-    // scrollear al inicio. Si no cambió, restaurar posición para no interrumpir al asesor.
+    // Fix-C: Si el Ã­ndice 0 cambiÃ³ (llegÃ³ mensaje nuevo que subiÃ³ un contacto al top),
+    // scrollear al inicio. Si no cambiÃ³, restaurar posiciÃ³n para no interrumpir al asesor.
     if (newTopPhone && newTopPhone !== prevTopPhone && prevTopPhone !== null) {
         container.scrollTop = 0;
-        console.log(`[Panel][Scroll] Índice 0 cambió: ${prevTopPhone} → ${newTopPhone}, scrolleando al top`);
+        console.log(`[Panel][Scroll] Ãndice 0 cambiÃ³: ${prevTopPhone} â†’ ${newTopPhone}, scrolleando al top`);
     } else {
         container.scrollTop = savedScrollTop;
     }
@@ -2468,17 +2468,17 @@ function renderChatBubbles(messages) {
 
     // =========================================================================
     // FIX CRUCE DE CONVERSACIONES: Detectar cambio de contacto
-    // Si el contacto cambió, LIMPIAR completamente el contenedor antes de renderizar
+    // Si el contacto cambiÃ³, LIMPIAR completamente el contenedor antes de renderizar
     // =========================================================================
     const contactChanged = renderedContactId !== currentContactId;
     if (contactChanged) {
-        console.log(`[Panel] Contacto cambió: ${renderedContactId} → ${currentContactId}, limpiando chat`);
+        console.log(`[Panel] Contacto cambiÃ³: ${renderedContactId} â†’ ${currentContactId}, limpiando chat`);
         container.innerHTML = '';  // Limpiar mensajes del contacto anterior
         renderedContactId = currentContactId;
     }
 
     if (!messages || messages.length === 0) {
-        // Mostrar mensaje de sin historial (siempre al limpiar o si está vacío)
+        // Mostrar mensaje de sin historial (siempre al limpiar o si estÃ¡ vacÃ­o)
         container.innerHTML = `
             <div class="flex items-center justify-center h-full text-gray-500" data-empty-msg="true">
                 <p>No hay mensajes en el historial</p>
@@ -2497,10 +2497,10 @@ function renderChatBubbles(messages) {
         emptyMsg.remove();
     }
 
-    // Limpiar burbujas optimistas — serán reemplazadas por los datos reales de MongoDB
+    // Limpiar burbujas optimistas â€” serÃ¡n reemplazadas por los datos reales de MongoDB
     container.querySelectorAll('[data-optimistic="true"]').forEach(el => el.remove());
 
-    // DATE DIVIDERS: rastrear último día renderizado (soporta actualizaciones incrementales)
+    // DATE DIVIDERS: rastrear Ãºltimo dÃ­a renderizado (soporta actualizaciones incrementales)
     const _existingDividers = container.querySelectorAll('.date-divider');
     let lastRenderedDate = _existingDividers.length > 0
         ? _existingDividers[_existingDividers.length - 1].dataset.date
@@ -2517,7 +2517,7 @@ function renderChatBubbles(messages) {
     const _TEMPLATE_TAG_RX = /^\[TEMPLATE:\s*([^\]]+)\]\s*/i;
     const _BULK_TAG_RX = /^\[BULK template:\s*([^\]]+)\]\s*$/i;
     const _MEDIA_BODY_RX = [
-        /^\[El cliente envió un audio[^\]]*\]\s*$/i,
+        /^\[El cliente enviÃ³ un audio[^\]]*\]\s*$/i,
         /^\[Imagen del cliente\]:\s*/i,
         /^\[Audio del cliente\]:\s*/i,
     ];
@@ -2533,7 +2533,7 @@ function renderChatBubbles(messages) {
         const msgDate = formatBogotaDate(msg.timestamp);
 
         if (!existingMsg) {
-            // Insertar separador de fecha si el día cambió
+            // Insertar separador de fecha si el dÃ­a cambiÃ³
             if (msgDate && msgDate !== lastRenderedDate) {
                 container.insertAdjacentHTML('beforeend', buildDateDivider(getDateLabel(msg.timestamp), msgDate));
             }
@@ -2559,7 +2559,7 @@ function renderChatBubbles(messages) {
             const transcription = msg.media?.transcription;
             const analysis = msg.media?.analysis;
 
-            // Helper: detectar si la URL corresponde a un documento por extensión
+            // Helper: detectar si la URL corresponde a un documento por extensiÃ³n
             const _isDocUrl = (url) => url && /\.(pdf|docx?|xlsx?)(\?|$)/i.test(url);
 
             if (mediaUrl) {
@@ -2603,7 +2603,7 @@ function renderChatBubbles(messages) {
                         || (mediaUrl.match(/\.([a-z]+)(\?|$)/i) || [])[1]?.toLowerCase()
                         || 'doc';
                     const docIcon = msg.media?.doc_icon
-                        || (docFormat === 'pdf' ? '📄' : (docFormat.includes('xl') ? '📊' : '📝'));
+                        || (docFormat === 'pdf' ? 'ðŸ“„' : (docFormat.includes('xl') ? 'ðŸ“Š' : 'ðŸ“'));
                     const fileName = msg.media?.original_filename
                         || decodeURIComponent(mediaUrl.split('/').pop().split('?')[0])
                         || 'Documento';
@@ -2640,11 +2640,11 @@ function renderChatBubbles(messages) {
                 }
             }
 
-            // Detectar audio guardado como texto plano: "🎵 Audio: https://..."
+            // Detectar audio guardado como texto plano: "ðŸŽµ Audio: https://..."
             // Ocurre cuando MongoDB guarda el audio en msg.message en vez de msg.media
             let _displayMsg = msg.message || '';
             if (!mediaUrl && _displayMsg) {
-                const _atm = _displayMsg.match(/^🎵\s*Audio:\s*(https?:\/\/\S+)([\s\S]*)?$/i);
+                const _atm = _displayMsg.match(/^ðŸŽµ\s*Audio:\s*(https?:\/\/\S+)([\s\S]*)?$/i);
                 if (_atm) {
                     const _pid3 = `ap-txt-${String(msg.id || Date.now()).replace(/\W/g,'')}-${Math.random().toString(36).slice(2,6)}`;
                     mediaHtml = buildAudioPlayerHtml(_atm[1], _detectAudioType(_atm[1]), _pid3);
@@ -2656,38 +2656,38 @@ function renderChatBubbles(messages) {
             // lo filtra al hidratar desde HubSpot, pero por si llega de otra ruta).
             _displayMsg = _displayMsg.replace(_SOURCE_TAG_RX, '').trimEnd();
 
-            // Parsear prefijo "[TEMPLATE: <nombre>]" → chip discreto sobre el cuerpo
+            // Parsear prefijo "[TEMPLATE: <nombre>]" â†’ chip discreto sobre el cuerpo
             let templateBadge = '';
             const _tplMatch = _displayMsg.match(_TEMPLATE_TAG_RX);
             if (_tplMatch) {
                 const _tplName = _tplMatch[1].trim();
-                templateBadge = `<span class="tpl-chip" title="Plantilla: ${escapeHtml(_tplName)}">📋 Plantilla</span><br>`;
+                templateBadge = `<span class="tpl-chip" title="Plantilla: ${escapeHtml(_tplName)}">ðŸ“‹ Plantilla</span><br>`;
                 _displayMsg = _displayMsg.replace(_TEMPLATE_TAG_RX, '');
             }
 
-            // Parsear "[BULK template: <name>]" → chip "Masivo" + preview de plantilla como cuerpo
+            // Parsear "[BULK template: <name>]" â†’ chip "Masivo" + preview de plantilla como cuerpo
             const _bulkMatch = _displayMsg.match(_BULK_TAG_RX);
             if (_bulkMatch) {
                 const _bulkName = _bulkMatch[1].trim();
                 const _bulkTpl = BULK_TEMPLATES.find(t => t.name === _bulkName);
                 if (_bulkTpl) {
-                    // Sustituir {key} → etiqueta legible usando vars del template
+                    // Sustituir {key} â†’ etiqueta legible usando vars del template
                     let _bulkPreview = _bulkTpl.preview;
                     (_bulkTpl.vars || []).forEach(v => {
                         const _vLabel = v.auto_fill === 'firstname' ? '{nombre}' : `{${v.label.toLowerCase()}}`;
                         _bulkPreview = _bulkPreview.replace(`{${v.key}}`, _vLabel);
                     });
-                    templateBadge = `<span class="bulk-chip" title="Plantilla: ${escapeHtml(_bulkTpl.label)}">📢 Masivo</span><br>`;
+                    templateBadge = `<span class="bulk-chip" title="Plantilla: ${escapeHtml(_bulkTpl.label)}">ðŸ“¢ Masivo</span><br>`;
                     _displayMsg = _bulkPreview;
                 } else {
-                    // Legacy: campaign_id de MongoDB — no hay lookup posible
-                    templateBadge = `<span class="bulk-chip" title="Mensaje masivo (plantilla no disponible)">📢 Masivo</span><br>`;
+                    // Legacy: campaign_id de MongoDB â€” no hay lookup posible
+                    templateBadge = `<span class="bulk-chip" title="Mensaje masivo (plantilla no disponible)">ðŸ“¢ Masivo</span><br>`;
                     _displayMsg = '';
                 }
             }
 
             // Suprimir cuerpo duplicado de multimedia: si ya hay chip de
-            // transcripción/análisis y el body es el wrapper "[El cliente envió...]"
+            // transcripciÃ³n/anÃ¡lisis y el body es el wrapper "[El cliente enviÃ³...]"
             // o "[Imagen del cliente]: ...", ocultarlo.
             if (transcription || analysis) {
                 if (_MEDIA_BODY_RX.some(rx => rx.test(_displayMsg))) {
@@ -2706,7 +2706,7 @@ function renderChatBubbles(messages) {
                 const rpSender = rp.sender_name || rp.sender || '';
                 let rpText = escapeHtml((rp.content || '').substring(0, 80));
                 if (rp.media_type && !rp.content) {
-                    rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[rp.media_type] || '📎 Archivo';
+                    rpText = { image: 'ðŸ“· Imagen', audio: 'ðŸŽµ Audio', video: 'ðŸŽ¬ Video', document: 'ðŸ“„ Documento' }[rp.media_type] || 'ðŸ“Ž Archivo';
                 }
                 const rpColor = rp.sender === 'client' ? '#6B7280' : (rp.sender === 'bot' ? '#D97706' : '#2563EB');
                 quoteHtml = `
@@ -2725,12 +2725,12 @@ function renderChatBubbles(messages) {
                     </svg>
                 </button>`;
 
-            // Menú ⋯ Editar/Eliminar — solo en mensajes propios del asesor (sender=advisor)
+            // MenÃº â‹¯ Editar/Eliminar â€” solo en mensajes propios del asesor (sender=advisor)
             const _isAdvisorMsg = (msg.sender === 'advisor');
             const ownerMenuHtml = _isAdvisorMsg ? `
                 <button class="msg-menu-btn"
                         onclick="event.stopPropagation();toggleMsgMenu('${msg.id}', this)"
-                        title="Más opciones"
+                        title="MÃ¡s opciones"
                         style="position:absolute;top:6px;right:6px;background:transparent;border:none;cursor:pointer;padding:2px 4px;">
                     <svg class="w-4 h-4 text-gray-400 hover:text-gray-600" fill="currentColor" viewBox="0 0 20 20">
                         <path d="M10 3a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3zm0 5.5a1.5 1.5 0 110 3 1.5 1.5 0 010-3z"/>
@@ -2776,13 +2776,13 @@ function renderChatBubbles(messages) {
                 ? ''
                 : `<p class="text-xs font-semibold text-gray-600 mb-1">${escapeHtml(_headerName)}</p>`;
 
-            // Status icons (✓ / ✓✓ / ✓✓ azul) sólo en mensajes salientes con msg.status
+            // Status icons (âœ“ / âœ“âœ“ / âœ“âœ“ azul) sÃ³lo en mensajes salientes con msg.status
             let _statusHtml = '';
             if (isRight && msg.status) {
                 const s = String(msg.status).toLowerCase();
-                if (s === 'read') _statusHtml = '<span class="msg-status read">✓✓</span>';
-                else if (s === 'delivered') _statusHtml = '<span class="msg-status">✓✓</span>';
-                else if (s === 'sent' || s === 'queued' || s === 'sending') _statusHtml = '<span class="msg-status">✓</span>';
+                if (s === 'read') _statusHtml = '<span class="msg-status read">âœ“âœ“</span>';
+                else if (s === 'delivered') _statusHtml = '<span class="msg-status">âœ“âœ“</span>';
+                else if (s === 'sent' || s === 'queued' || s === 'sending') _statusHtml = '<span class="msg-status">âœ“</span>';
             }
 
             const msgHtml = `
@@ -2818,9 +2818,9 @@ function renderChatBubbles(messages) {
     });
 
     // Solo hacer scroll si hay contenido nuevo o es la primera carga.
-    // ⚠️ 2026-06-02: si estamos en modo paginación (cargando mensajes anteriores
-    // via scroll infinito), NO hacer auto-scroll al fondo — el caller restaura
-    // la posición manualmente con scrollTop = before + delta.
+    // âš ï¸ 2026-06-02: si estamos en modo paginaciÃ³n (cargando mensajes anteriores
+    // via scroll infinito), NO hacer auto-scroll al fondo â€” el caller restaura
+    // la posiciÃ³n manualmente con scrollTop = before + delta.
     const isPaginating = window.__isPaginating === true;
     if ((hasNewContent || isFirstChatLoad) && !isPaginating) {
         setTimeout(() => {
@@ -2932,7 +2932,7 @@ function closeEditNameModal() {
 // FUNCION PARA CERRAR CONVERSACION
 // =========================================================================
 
-// Limpieza compartida tras un cierre exitoso (botón "Cerrar" o auto-cierre por
+// Limpieza compartida tras un cierre exitoso (botÃ³n "Cerrar" o auto-cierre por
 // embudo "No responde"). Si el contacto cerrado es el actualmente seleccionado,
 // resetea toda la UI del chat. Siempre lo retira del listado optimistamente.
 function _performCloseCleanup(closedPhone) {
@@ -2965,7 +2965,7 @@ function _performCloseCleanup(closedPhone) {
         _updateDetailsPanel(null);
     }
 
-    // Remoción optimista del listado — el siguiente polling/WS no lo re-muestra
+    // RemociÃ³n optimista del listado â€” el siguiente polling/WS no lo re-muestra
     recentlyClosedPhones.add(closedPhone);
     setTimeout(() => recentlyClosedPhones.delete(closedPhone), 90000);
     try {
@@ -3059,7 +3059,7 @@ async function saveNameChange(event) {
             const displayName = data.display_name || `${firstname} ${lastname}`.trim();
             // Actualizar header inmediatamente
             document.getElementById('contactName').textContent = displayName;
-            // Actualizar allContacts en memoria → re-render inmediato del sidebar
+            // Actualizar allContacts en memoria â†’ re-render inmediato del sidebar
             const idx = allContacts.findIndex(
                 c => (c.contact_id || c.id) === currentContactId
             );
@@ -3070,7 +3070,7 @@ async function saveNameChange(event) {
             closeEditNameModal();
             // NO llamar loadContacts() inmediatamente: HubSpot tarda ~1-3s en propagar
             // el PATCH internamente. Si se llama ahora, el batch devuelve el nombre viejo
-            // y sobreescribe la actualización en memoria. El próximo poll (10s) sincroniza.
+            // y sobreescribe la actualizaciÃ³n en memoria. El prÃ³ximo poll (10s) sincroniza.
             alert('Nombre actualizado correctamente');
         } else {
             throw new Error(data.detail || 'Error actualizando nombre');
@@ -3102,19 +3102,19 @@ function handleFileSelect(input) {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     ];
     if (!validTypes.includes(file.type)) {
-        alert('Tipo de archivo no soportado. Formatos permitidos: imágenes, audios, videos, PDF, Word, Excel.');
+        alert('Tipo de archivo no soportado. Formatos permitidos: imÃ¡genes, audios, videos, PDF, Word, Excel.');
         input.value = '';
         return;
     }
 
-    // Validar tamaño: documentos max 10MB, videos y otros max 16MB
+    // Validar tamaÃ±o: documentos max 10MB, videos y otros max 16MB
     const isDocument = file.type.includes('pdf') || file.type.includes('word') || file.type.includes('excel') || file.type.includes('spreadsheet');
     const isVideo = file.type.startsWith('video/');
     const maxSize = isDocument ? 10 * 1024 * 1024 : 16 * 1024 * 1024;
     if (file.size > maxSize) {
-        if (isDocument) alert('El documento es demasiado grande. Máximo 10MB.');
-        else if (isVideo) alert('El video es demasiado grande. Máximo 16MB.');
-        else alert('El archivo es demasiado grande. Máximo 16MB.');
+        if (isDocument) alert('El documento es demasiado grande. MÃ¡ximo 10MB.');
+        else if (isVideo) alert('El video es demasiado grande. MÃ¡ximo 16MB.');
+        else alert('El archivo es demasiado grande. MÃ¡ximo 16MB.');
         input.value = '';
         return;
     }
@@ -3161,9 +3161,9 @@ function selectReplyMessage(msgId) {
 
     let previewText = replyToMessage.content.substring(0, 80);
     if (replyToMessage.media_type && !replyToMessage.content) {
-        previewText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[replyToMessage.media_type] || '📎 Archivo';
+        previewText = { image: 'ðŸ“· Imagen', audio: 'ðŸŽµ Audio', video: 'ðŸŽ¬ Video', document: 'ðŸ“„ Documento' }[replyToMessage.media_type] || 'ðŸ“Ž Archivo';
     } else if (replyToMessage.media_type) {
-        const icon = { image: '📷', audio: '🎵', video: '🎬', document: '📄' }[replyToMessage.media_type] || '📎';
+        const icon = { image: 'ðŸ“·', audio: 'ðŸŽµ', video: 'ðŸŽ¬', document: 'ðŸ“„' }[replyToMessage.media_type] || 'ðŸ“Ž';
         previewText = icon + ' ' + previewText;
     }
     document.getElementById('replyPreviewContent').textContent = previewText;
@@ -3177,7 +3177,7 @@ function cancelReply() {
 }
 
 // =========================================================================
-// MENÚ EDITAR / ELIMINAR — mensajes propios del asesor
+// MENÃš EDITAR / ELIMINAR â€” mensajes propios del asesor
 // =========================================================================
 
 function _closeAllMsgMenus() {
@@ -3203,12 +3203,12 @@ function toggleMsgMenu(msgId, btnEl) {
         <button onclick="event.stopPropagation();_closeAllMsgMenus();startEditMessage('${msgId}')"
                 style="display:block;width:100%;text-align:left;padding:8px 12px;background:transparent;border:none;cursor:pointer;font-size:13px;color:#374151;"
                 onmouseover="this.style.background='#f3f4f6'" onmouseout="this.style.background='transparent'">
-            ✏️ Editar
+            âœï¸ Editar
         </button>
         <button onclick="event.stopPropagation();_closeAllMsgMenus();confirmDeleteMessage('${msgId}')"
                 style="display:block;width:100%;text-align:left;padding:8px 12px;background:transparent;border:none;cursor:pointer;font-size:13px;color:#dc2626;"
                 onmouseover="this.style.background='#fee2e2'" onmouseout="this.style.background='transparent'">
-            🗑️ Eliminar
+            ðŸ—‘ï¸ Eliminar
         </button>
     `;
     btnEl.parentElement.appendChild(popup);
@@ -3257,7 +3257,7 @@ async function submitEditMessage(msgId, btn) {
     if (!bubble) return;
     const ta = bubble.querySelector('.edit-msg-input');
     const newContent = (ta?.value || '').trim();
-    if (!newContent) { alert('El contenido no puede estar vacío'); return; }
+    if (!newContent) { alert('El contenido no puede estar vacÃ­o'); return; }
 
     btn.disabled = true; btn.textContent = 'Guardando...';
     try {
@@ -3295,7 +3295,7 @@ async function submitEditMessage(msgId, btn) {
 }
 
 async function confirmDeleteMessage(msgId) {
-    if (!confirm('¿Eliminar este mensaje? Se enviará una notificación al cliente.')) return;
+    if (!confirm('Â¿Eliminar este mensaje? Se enviarÃ¡ una notificaciÃ³n al cliente.')) return;
     try {
         await _executeDeleteMessage(msgId, true);
     } catch (e) {
@@ -3316,7 +3316,7 @@ async function _executeDeleteMessage(msgId, notifyClient) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${resp.status}`);
     }
-    // Cambio optimista local. El WS también disparará message_deleted.
+    // Cambio optimista local. El WS tambiÃ©n dispararÃ¡ message_deleted.
     const bubble = document.querySelector(`[data-msg-id="${msgId}"]`);
     if (bubble) {
         const isRight = bubble.classList.contains('justify-end');
@@ -3340,7 +3340,7 @@ function scrollToMessage(msgId) {
 /** Instancias Audio activas. { playerId: { audio: Audio, playing: bool } } */
 const _audioPlayers = {};
 
-/** Detecta MIME type del audio por extensión de URL. */
+/** Detecta MIME type del audio por extensiÃ³n de URL. */
 function _detectAudioType(url) {
     if (!url) return 'audio/mpeg';
     if (url.includes('.webm')) return 'audio/webm';
@@ -3349,7 +3349,7 @@ function _detectAudioType(url) {
     return 'audio/mpeg';
 }
 
-/** Alturas en px de las 19 barras del waveform (máx 18px en contenedor 20px). */
+/** Alturas en px de las 19 barras del waveform (mÃ¡x 18px en contenedor 20px). */
 const _WAVE_HEIGHTS = [4, 8, 14, 10, 18, 12, 16, 6, 18, 12, 8, 15, 5, 14, 10, 18, 12, 8, 4];
 
 const _PLAY_SVG  = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M8 5v14l11-7z"/></svg>`;
@@ -3359,7 +3359,7 @@ const _PAUSE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" 
  * Genera el HTML del reproductor de audio personalizado (WhatsApp-style).
  * @param {string} src       - URL del archivo de audio
  * @param {string} audioType - MIME type ('audio/ogg', 'audio/mpeg', etc.)
- * @param {string} playerId  - ID único para este reproductor
+ * @param {string} playerId  - ID Ãºnico para este reproductor
  */
 function buildAudioPlayerHtml(src, audioType, playerId) {
     const bars = _WAVE_HEIGHTS
@@ -3387,8 +3387,8 @@ function buildAudioPlayerHtml(src, audioType, playerId) {
 }
 
 /**
- * Alterna reproducción / pausa del reproductor de audio.
- * Pausa automáticamente cualquier otro reproductor activo.
+ * Alterna reproducciÃ³n / pausa del reproductor de audio.
+ * Pausa automÃ¡ticamente cualquier otro reproductor activo.
  * @param {string} id - ID del reproductor
  */
 function toggleAudioPlayer(id) {
@@ -3444,7 +3444,7 @@ function toggleAudioPlayer(id) {
         el.classList.remove('is-playing');
         if (btn) btn.innerHTML = _PLAY_SVG;
     } else {
-        // Pausar todos los demás reproductores activos
+        // Pausar todos los demÃ¡s reproductores activos
         Object.entries(_audioPlayers).forEach(([pid, p]) => {
             if (pid !== id && p.playing) {
                 p.audio.pause();
@@ -3768,13 +3768,13 @@ function confirmAndSendAudio(audioFile) {
 
     console.log('[Panel] Audio listo para enviar:', audioFile.name, audioFile.type, audioFile.size);
 
-    // Aviso: WhatsApp no permite caption en audio. Si hay cita activa, irá como mensaje de texto previo.
+    // Aviso: WhatsApp no permite caption en audio. Si hay cita activa, irÃ¡ como mensaje de texto previo.
     if (replyToMessage) {
-        showToast('Tu cita aparecerá como mensaje de texto antes del audio.', 'info');
+        showToast('Tu cita aparecerÃ¡ como mensaje de texto antes del audio.', 'info');
     }
 
     // Preguntar si desea enviar inmediatamente o agregar texto
-    const sendNow = confirm('Audio grabado. ¿Deseas enviarlo ahora?\n\nPresiona "Cancelar" para agregar un mensaje de texto antes de enviar.');
+    const sendNow = confirm('Audio grabado. Â¿Deseas enviarlo ahora?\n\nPresiona "Cancelar" para agregar un mensaje de texto antes de enviar.');
 
     if (sendNow) {
         // Enviar inmediatamente
@@ -3860,13 +3860,13 @@ function cancelRecording() {
 }
 
 // =========================================================================
-// URL ROUTING — sincronización SPA de la URL con el contacto abierto
+// URL ROUTING â€” sincronizaciÃ³n SPA de la URL con el contacto abierto
 // =========================================================================
 
 /**
- * Actualiza el parámetro `phone` de la URL sin recargar la página.
- * Preserva todos los demás params (key=, advisor=, etc.).
- * null → elimina el param (estado vacío del panel).
+ * Actualiza el parÃ¡metro `phone` de la URL sin recargar la pÃ¡gina.
+ * Preserva todos los demÃ¡s params (key=, advisor=, etc.).
+ * null â†’ elimina el param (estado vacÃ­o del panel).
  */
 function _syncUrlToContact(phone) {
     const p = new URLSearchParams(window.location.search);
@@ -3879,7 +3879,7 @@ function _syncUrlToContact(phone) {
 }
 
 /**
- * Deselecciona el contacto activo y restaura el panel al estado vacío.
+ * Deselecciona el contacto activo y restaura el panel al estado vacÃ­o.
  * Actualiza la URL eliminando el param phone=.
  */
 function deselectContact() {
@@ -3903,7 +3903,7 @@ function deselectContact() {
     if (phoneEl) phoneEl.textContent = '';
     document.getElementById('canalDisplayWrapper')?.classList.add('hidden');
 
-    // Restaurar área central vacía
+    // Restaurar Ã¡rea central vacÃ­a
     const chatMessages = document.getElementById('chatMessages');
     if (chatMessages) chatMessages.innerHTML = '';
 
@@ -3928,11 +3928,11 @@ function deselectContact() {
 // =========================================================================
 
 async function selectContact(contactId, phone, displayName, canal = null) {
-    // Guard: phone es requerido — selectContact sin phone crea estado "ghost"
+    // Guard: phone es requerido â€” selectContact sin phone crea estado "ghost"
     // (header visible pero handlers de editar/cerrar/plantilla fallan con
-    // "debes seleccionar un contacto primero"). Abortamos explícitamente.
+    // "debes seleccionar un contacto primero"). Abortamos explÃ­citamente.
     if (!phone) {
-        console.error('[Panel] selectContact llamado sin phone — abortando para evitar ghost state', { contactId, displayName, canal });
+        console.error('[Panel] selectContact llamado sin phone â€” abortando para evitar ghost state', { contactId, displayName, canal });
         try { showToast && showToast('No se pudo abrir el contacto (datos incompletos)', 'error'); } catch (_e) {}
         return;
     }
@@ -3944,7 +3944,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     }
 
 
-    // Limpiar "marcado como no leído" manual al abrir el contacto
+    // Limpiar "marcado como no leÃ­do" manual al abrir el contacto
     if (phone && _manuallyUnread.has(phone)) {
         _manuallyUnread.delete(phone);
         _saveManuallyUnread();
@@ -3952,10 +3952,10 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         if (manualBadge) manualBadge.remove();
     }
 
-    // Al abrir el chat de un contacto, marcar sus mensajes como leídos
+    // Al abrir el chat de un contacto, marcar sus mensajes como leÃ­dos
     if (phone && unreadCounts[phone]) {
         delete unreadCounts[phone];
-        // Re-renderizar solo el ítem de la lista para quitar el badge
+        // Re-renderizar solo el Ã­tem de la lista para quitar el badge
         const phoneToReset = phone;
         const contactItem = document.querySelector(`.contact-item[data-phone="${phoneToReset}"]`);
         if (contactItem) {
@@ -3964,9 +3964,9 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }
     }
 
-    // Inbox persistente: registrar como visto en esta sesión + marcar leído en Redis.
-    // Siempre se dispara: si ADVISOR_ID está disponible se envía, si no el backend
-    // lo infiere de ConversationMeta.assigned_owner_id (no más 422 por param faltante).
+    // Inbox persistente: registrar como visto en esta sesiÃ³n + marcar leÃ­do en Redis.
+    // Siempre se dispara: si ADVISOR_ID estÃ¡ disponible se envÃ­a, si no el backend
+    // lo infiere de ConversationMeta.assigned_owner_id (no mÃ¡s 422 por param faltante).
     if (phone) {
         _seenPhones.add(phone);
         const _mrParams = new URLSearchParams();
@@ -3979,7 +3979,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
         }).catch(err => console.warn('[Panel][Inbox] mark-read error (non-fatal):', err));
     }
 
-    // Mostrar toggle de Columna C y asegurar que el panel esté visible
+    // Mostrar toggle de Columna C y asegurar que el panel estÃ© visible
     document.getElementById('detailsPanelToggle')?.classList.remove('hidden');
     document.getElementById('mainGrid')?.classList.remove('details-hidden');
 
@@ -4007,7 +4007,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     // Mostrar indicador de carga sobre el chat existente (no limpiar por completo)
     const chatContainer = document.getElementById('chatMessages');
     if (chatContainer) {
-        // Añadir overlay de carga sin destruir el contenido
+        // AÃ±adir overlay de carga sin destruir el contenido
         const existingOverlay = chatContainer.querySelector('.loading-overlay');
         if (!existingOverlay) {
             const overlay = document.createElement('div');
@@ -4034,12 +4034,12 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     const transferBtn = document.getElementById('transferContactBtn');
     if (transferBtn) transferBtn.classList.remove('hidden');
 
-    // Habilitar inputs (loadContactDetail ajustará si la ventana está cerrada)
+    // Habilitar inputs (loadContactDetail ajustarÃ¡ si la ventana estÃ¡ cerrada)
     document.getElementById('messageInput').disabled = false;
     document.getElementById('sendBtn').disabled = false;
     document.getElementById('attachBtn').disabled = false;
     document.getElementById('recordBtn').disabled = false;
-    // Resetear estado de ventana cerrada (se actualizará en loadContactDetail)
+    // Resetear estado de ventana cerrada (se actualizarÃ¡ en loadContactDetail)
     document.getElementById('templateTriggerBtn')?.classList.add('hidden');
     document.getElementById('attachBtn')?.classList.remove('hidden');
     document.getElementById('recordBtn')?.classList.remove('hidden');
@@ -4052,7 +4052,7 @@ async function selectContact(contactId, phone, displayName, canal = null) {
 
     // Actualizar visualmente la seleccion en la lista (inmediatamente)
     // Usamos data-phone (atributo ya presente en el DOM) en lugar de parsear el string
-    // del onclick — evita fallas cuando contact_id está vacío o contiene caracteres raros.
+    // del onclick â€” evita fallas cuando contact_id estÃ¡ vacÃ­o o contiene caracteres raros.
     document.querySelectorAll('.contact-item').forEach(el => {
         el.classList.remove('active');
     });
@@ -4115,11 +4115,11 @@ async function selectContact(contactId, phone, displayName, canal = null) {
 }
 
 // =========================================================================
-// BANNER DE HANDOFF — Indicador de modo Sofía vs Asesora
+// BANNER DE HANDOFF â€” Indicador de modo SofÃ­a vs Asesora
 // =========================================================================
 
 /**
- * Actualiza el banner de handoff según el estado de la conversación.
+ * Actualiza el banner de handoff segÃºn el estado de la conversaciÃ³n.
  * @param {string} status - BOT_ACTIVE | HUMAN_ACTIVE | IN_CONVERSATION | PENDING_HANDOFF
  * @param {string} contactName - Nombre del contacto seleccionado
  */
@@ -4137,30 +4137,30 @@ function _updateHandoffBanner(status, contactName) {
 
     if (status === 'PENDING_HANDOFF') {
         banner.classList.add('handoff-banner-pending');
-        icon.textContent = '🔔';
-        text.textContent = `${name} necesita atención urgente`;
+        icon.textContent = 'ðŸ””';
+        text.textContent = `${name} necesita atenciÃ³n urgente`;
         takeBtn.classList.remove('hidden');
     } else if (status === 'HUMAN_ACTIVE') {
         banner.classList.add('handoff-banner-human');
-        icon.textContent = '👤';
-        text.textContent = `Es tu turno — ${name} está esperando`;
+        icon.textContent = 'ðŸ‘¤';
+        text.textContent = `Es tu turno â€” ${name} estÃ¡ esperando`;
         takeBtn.classList.add('hidden');
     } else if (status === 'IN_CONVERSATION') {
         banner.classList.add('handoff-banner-in-conversation');
-        icon.textContent = '💬';
-        text.textContent = `Conversación activa con ${name}`;
+        icon.textContent = 'ðŸ’¬';
+        text.textContent = `ConversaciÃ³n activa con ${name}`;
         takeBtn.classList.add('hidden');
     } else {
         // BOT_ACTIVE o desconocido
         banner.classList.add('handoff-banner-bot');
-        icon.textContent = '🤖';
-        text.textContent = 'Sofía está atendiendo en piloto automático';
+        icon.textContent = 'ðŸ¤–';
+        text.textContent = 'SofÃ­a estÃ¡ atendiendo en piloto automÃ¡tico';
         takeBtn.classList.remove('hidden');
     }
 }
 
 /**
- * Toma control desde el botón del banner (cuando Sofía está activa).
+ * Toma control desde el botÃ³n del banner (cuando SofÃ­a estÃ¡ activa).
  * Reutiliza el endpoint de take-control ya definido.
  */
 async function takeControlFromBanner() {
@@ -4178,13 +4178,13 @@ async function takeControlFromBanner() {
 
 /**
  * Muestra/oculta la Columna C (panel de detalles).
- * En pantallas <1280px la columna es un drawer fixed; en ≥1280px se alterna la visibilidad.
+ * En pantallas <1280px la columna es un drawer fixed; en â‰¥1280px se alterna la visibilidad.
  */
 function toggleDetailsPanel() {
     const grid = document.getElementById('mainGrid');
     if (!grid) return;
     if (window.innerWidth < 1280) {
-        // En móvil: drawer fixed
+        // En mÃ³vil: drawer fixed
         const panel = document.getElementById('detailsPanel');
         if (panel) panel.classList.toggle('panel-open');
     } else {
@@ -4194,7 +4194,7 @@ function toggleDetailsPanel() {
 }
 
 // =========================================================================
-// PANEL DE DETALLES (COLUMNA C) — Lead info, datos básicos
+// PANEL DE DETALLES (COLUMNA C) â€” Lead info, datos bÃ¡sicos
 // =========================================================================
 
 /**
@@ -4217,12 +4217,12 @@ function _updateDetailsPanel(contact) {
     if (empty) empty.classList.add('hidden');
     content.classList.remove('hidden');
 
-    // Mostrar botón de agendar solo si hay contactId
+    // Mostrar botÃ³n de agendar solo si hay contactId
     if (scheduleBtn) {
         scheduleBtn.classList.toggle('hidden', !contact.contact_id);
     }
 
-    // Cargar próxima cita, mensaje programado y notas de forma asíncrona
+    // Cargar prÃ³xima cita, mensaje programado y notas de forma asÃ­ncrona
     if (contact.contact_id) {
         loadNextAppointmentForPanel(contact.contact_id);
         loadScheduledMessageForPanel(contact.contact_id);
@@ -4241,7 +4241,7 @@ function _updateDetailsPanel(contact) {
     if (!infoEl) return;
 
     // Stage label desde PIPELINE_STAGES
-    const stageLabel = PIPELINE_STAGES.find(s => s.id === contact.current_stage)?.name || contact.current_stage || '—';
+    const stageLabel = PIPELINE_STAGES.find(s => s.id === contact.current_stage)?.name || contact.current_stage || 'â€”';
 
     infoEl.innerHTML = `
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
@@ -4255,8 +4255,8 @@ function _updateDetailsPanel(contact) {
                 : `<span class="text-xs font-semibold text-gray-800">${stageLabel}</span>`}
         </div>
         <div class="flex items-center justify-between py-1 border-b border-gray-100">
-            <span class="text-gray-500 text-xs">Teléfono</span>
-            <span class="text-xs font-mono text-gray-700">${contact.phone || '—'}</span>
+            <span class="text-gray-500 text-xs">TelÃ©fono</span>
+            <span class="text-xs font-mono text-gray-700">${contact.phone || 'â€”'}</span>
         </div>
         ${contact.owner_name ? `
         <div class="flex items-center justify-between py-1">
@@ -4267,11 +4267,11 @@ function _updateDetailsPanel(contact) {
 }
 
 // =========================================================================
-// CITAS EN COLUMNA C — Próxima cita del contacto seleccionado
+// CITAS EN COLUMNA C â€” PrÃ³xima cita del contacto seleccionado
 // =========================================================================
 
 /**
- * Carga la próxima cita del contacto y la renderiza en la Columna C.
+ * Carga la prÃ³xima cita del contacto y la renderiza en la Columna C.
  * Usa el endpoint existente GET /contacts/{contact_id}/appointments
  * @param {string} contactId - HubSpot contact ID
  */
@@ -4314,14 +4314,14 @@ async function loadNextAppointmentForPanel(contactId) {
             <div class="appt-card">
                 <div class="flex items-start justify-between">
                     <div>
-                        <p class="text-sm font-semibold text-gray-800">📅 ${dateStr}</p>
-                        <p class="text-xs text-gray-600 mt-0.5">⏰ ${timeStr}</p>
-                        ${next.worker_name ? `<p class="text-xs text-gray-500 mt-0.5">👤 ${next.worker_name}</p>` : ''}
+                        <p class="text-sm font-semibold text-gray-800">ðŸ“… ${dateStr}</p>
+                        <p class="text-xs text-gray-600 mt-0.5">â° ${timeStr}</p>
+                        ${next.worker_name ? `<p class="text-xs text-gray-500 mt-0.5">ðŸ‘¤ ${next.worker_name}</p>` : ''}
                         ${next.notes ? `<p class="text-xs text-gray-500 mt-1 italic truncate">${next.notes}</p>` : ''}
                     </div>
                     <span class="text-xs font-semibold ${statusColor} capitalize">${next.status}</span>
                 </div>
-                ${upcoming.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${upcoming.length - 1} cita(s) más</p>` : ''}
+                ${upcoming.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${upcoming.length - 1} cita(s) mÃ¡s</p>` : ''}
             </div>
         `;
 
@@ -4334,7 +4334,7 @@ async function loadNextAppointmentForPanel(contactId) {
 }
 
 // =========================================================================
-// NOTAS INTERNAS — Módulo de Notas en Columna C
+// NOTAS INTERNAS â€” MÃ³dulo de Notas en Columna C
 // =========================================================================
 
 /** Muestra el formulario de nueva nota y pone foco en el textarea. */
@@ -4381,22 +4381,22 @@ async function loadNotes(contactId) {
 }
 
 // =========================================================================
-// MENSAJES PROGRAMADOS — Plantillas WhatsApp en fecha específica
+// MENSAJES PROGRAMADOS â€” Plantillas WhatsApp en fecha especÃ­fica
 // =========================================================================
 
 const SCHEDULABLE_TEMPLATES = [
     {
         sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
         name: 'Aun_interesado',
-        label: '¿Aún estás interesado?',
-        preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
+        label: 'Â¿AÃºn estÃ¡s interesado?',
+        preview: 'Hola {1} ðŸ˜Š Â¿AÃºn continÃºas en la bÃºsqueda de un inmueble para arriendo?',
         vars: [{ key: '1', label: 'Nombre del contacto' }]
     },
     {
         sid: 'HX015a4c21c7aeb082448aeaa97396dbbf',
         name: 'Seguimiento_Personalizado',
         label: 'Seguimiento Personalizado',
-        preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
+        preview: 'Hola {1} Â¿Como se encuentra el dÃ­a de hoy? {2}. EstarÃ© pendiente a su respuesta.',
         vars: [
             { key: '1', label: 'Nombre del contacto' },
             { key: '2', label: 'Mensaje personalizado' }
@@ -4440,15 +4440,15 @@ async function loadScheduledMessageForPanel(contactId) {
             <div class="appt-card">
                 <div class="flex items-start justify-between gap-2">
                     <div class="flex-1 min-w-0">
-                        <p class="text-sm font-semibold text-gray-800">📅 ${dateStr}</p>
-                        <p class="text-xs text-gray-600 mt-0.5">⏰ ${timeStr}</p>
-                        <p class="text-xs text-gray-500 mt-0.5 truncate">📋 ${next.template_name || 'Plantilla'}</p>
+                        <p class="text-sm font-semibold text-gray-800">ðŸ“… ${dateStr}</p>
+                        <p class="text-xs text-gray-600 mt-0.5">â° ${timeStr}</p>
+                        <p class="text-xs text-gray-500 mt-0.5 truncate">ðŸ“‹ ${next.template_name || 'Plantilla'}</p>
                         ${next.notes ? `<p class="text-xs text-gray-400 mt-1 italic truncate">${next.notes}</p>` : ''}
                     </div>
                     <button onclick="cancelScheduledMessage('${next.id}', '${contactId}')"
-                        class="text-gray-400 hover:text-red-500 transition-colors flex-shrink-0 mt-0.5" title="Cancelar mensaje">🗑</button>
+                        class="text-gray-400 hover:text-red-500 transition-colors flex-shrink-0 mt-0.5" title="Cancelar mensaje">ðŸ—‘</button>
                 </div>
-                ${pending.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${pending.length - 1} mensaje(s) más</p>` : ''}
+                ${pending.length > 1 ? `<p class="text-xs text-gray-400 mt-2">+${pending.length - 1} mensaje(s) mÃ¡s</p>` : ''}
             </div>`;
 
     } catch (err) {
@@ -4468,7 +4468,7 @@ function openScheduleMessageModal() {
     document.getElementById('scheduleMessageForm').reset();
     document.getElementById('smResult').classList.add('hidden');
     document.getElementById('smSubmitBtn').disabled = false;
-    document.getElementById('smSubmitBtn').textContent = 'Programar Envío';
+    document.getElementById('smSubmitBtn').textContent = 'Programar EnvÃ­o';
 
     // Poblar dropdown de templates
     const select = document.getElementById('smTemplateSelect');
@@ -4495,7 +4495,7 @@ function onSmTemplateChange() {
     const tpl = SCHEDULABLE_TEMPLATES.find(t => t.name === select.value);
     if (!tpl) return;
 
-    // Renderizar inputs dinámicos para cada variable de la plantilla
+    // Renderizar inputs dinÃ¡micos para cada variable de la plantilla
     varsContainer.innerHTML = tpl.vars.map((v, i) => {
         const existingVal = document.getElementById(`smVar_${v.key}`)?.value || '';
         const defaultVal = v.key === '1' && currentName && !existingVal
@@ -4508,7 +4508,7 @@ function onSmTemplateChange() {
             </label>
             <input type="text" id="smVar_${v.key}" required oninput="updateSmPreview()"
                 class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
-                placeholder="${v.key === '1' ? 'Ej: Carlos' : 'Ej: te escribo para saber si aún estás buscando'}"
+                placeholder="${v.key === '1' ? 'Ej: Carlos' : 'Ej: te escribo para saber si aÃºn estÃ¡s buscando'}"
                 value="${defaultVal}">
         </div>`;
     }).join('');
@@ -4547,7 +4547,7 @@ async function submitScheduleMessage(event) {
     const tpl = SCHEDULABLE_TEMPLATES.find(t => t.name === select.value);
     if (!tpl || !datetimeInput.value) return;
 
-    // Recoger todas las variables dinámicas
+    // Recoger todas las variables dinÃ¡micas
     const templateVariables = {};
     for (const v of tpl.vars) {
         const val = document.getElementById(`smVar_${v.key}`)?.value.trim() || '';
@@ -4585,7 +4585,7 @@ async function submitScheduleMessage(event) {
             const dt = new Date(data.scheduled_dt);
             const dateStr = dt.toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Bogota' });
             const timeStr = dt.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/Bogota' });
-            content.textContent = `✅ Mensaje programado para ${dateStr} a las ${timeStr}`;
+            content.textContent = `âœ… Mensaje programado para ${dateStr} a las ${timeStr}`;
             resultDiv.classList.remove('hidden');
 
             await loadScheduledMessageForPanel(currentContactId);
@@ -4593,20 +4593,20 @@ async function submitScheduleMessage(event) {
             setTimeout(() => closeScheduleMessageModal(), 2000);
         } else {
             content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
-            content.textContent = `❌ ${data.detail || 'Error al programar el mensaje'}`;
+            content.textContent = `âŒ ${data.detail || 'Error al programar el mensaje'}`;
             resultDiv.classList.remove('hidden');
             submitBtn.disabled = false;
-            submitBtn.textContent = 'Programar Envío';
+            submitBtn.textContent = 'Programar EnvÃ­o';
         }
     } catch (err) {
         console.error('[SchedMsg] Error:', err);
         submitBtn.disabled = false;
-        submitBtn.textContent = 'Programar Envío';
+        submitBtn.textContent = 'Programar EnvÃ­o';
     }
 }
 
 async function cancelScheduledMessage(messageId, contactId) {
-    if (!confirm('¿Cancelar este mensaje programado?')) return;
+    if (!confirm('Â¿Cancelar este mensaje programado?')) return;
 
     try {
         const resp = await fetch(`${BASE_URL}/scheduled-messages/${messageId}`, {
@@ -4620,7 +4620,7 @@ async function cancelScheduledMessage(messageId, contactId) {
             showToast('Error al cancelar el mensaje', 'error');
         }
     } catch (err) {
-        showToast('Error de conexión', 'error');
+        showToast('Error de conexiÃ³n', 'error');
     }
 }
 
@@ -4649,10 +4649,10 @@ function renderNotes(notes, contactId) {
             <div id="note-view-${note._id}">
                 <p class="text-sm text-gray-800 leading-snug whitespace-pre-wrap">${note.content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
                 <div class="flex items-center justify-between mt-2">
-                    <span class="text-xs text-gray-400">${note.advisor_name || 'Asesor'} · ${dateStr} ${timeStr}${wasEdited ? ' · editada' : ''}</span>
+                    <span class="text-xs text-gray-400">${note.advisor_name || 'Asesor'} Â· ${dateStr} ${timeStr}${wasEdited ? ' Â· editada' : ''}</span>
                     <div class="flex gap-2">
-                        <button onclick="editNote('${note._id}', '${escapedContent}', '${contactId}')" class="text-xs text-gray-400 hover:text-blue-600 transition-colors" title="Editar">✏️</button>
-                        <button onclick="deleteNote('${note._id}', '${contactId}')" class="text-xs text-gray-400 hover:text-red-500 transition-colors" title="Eliminar">🗑</button>
+                        <button onclick="editNote('${note._id}', '${escapedContent}', '${contactId}')" class="text-xs text-gray-400 hover:text-blue-600 transition-colors" title="Editar">âœï¸</button>
+                        <button onclick="deleteNote('${note._id}', '${contactId}')" class="text-xs text-gray-400 hover:text-red-500 transition-colors" title="Eliminar">ðŸ—‘</button>
                     </div>
                 </div>
             </div>
@@ -4668,7 +4668,7 @@ function renderNotes(notes, contactId) {
 }
 
 /**
- * Muestra el inline editor para una nota específica.
+ * Muestra el inline editor para una nota especÃ­fica.
  * @param {string} noteId
  * @param {string} currentContent
  */
@@ -4682,14 +4682,14 @@ function editNote(noteId, currentContent, _contactId) {
     }
 }
 
-/** Cancela la edición y restaura la vista. */
+/** Cancela la ediciÃ³n y restaura la vista. */
 function cancelEditNote(noteId) {
     document.getElementById(`note-view-${noteId}`)?.classList.remove('hidden');
     document.getElementById(`note-edit-${noteId}`)?.classList.add('hidden');
 }
 
 /**
- * Confirma y guarda la edición de una nota via PATCH.
+ * Confirma y guarda la ediciÃ³n de una nota via PATCH.
  * @param {string} noteId
  * @param {string} contactId
  */
@@ -4722,7 +4722,7 @@ async function confirmEditNote(noteId, contactId) {
  * @param {string} contactId
  */
 async function deleteNote(noteId, contactId) {
-    if (!confirm('¿Eliminar esta nota?')) return;
+    if (!confirm('Â¿Eliminar esta nota?')) return;
 
     try {
         const resp = await fetch(
@@ -4807,25 +4807,25 @@ async function sendMessage(e) {
         }
         const _tplData = templatesData.find(t => t.id === activeTemplateId);
         if (_tplData && !_tplData.content_sid) {
-            // Template sin aprobación Meta (ej: Confirmación de Cita)
-            // → enviar el texto editado directamente como mensaje plano.
-            // El pipeline de extractVariableValues + SafeDict es frágil con emojis/newlines
-            // y causa envío de placeholders crudos ({fecha}, {hora}) cuando falla.
+            // Template sin aprobaciÃ³n Meta (ej: ConfirmaciÃ³n de Cita)
+            // â†’ enviar el texto editado directamente como mensaje plano.
+            // El pipeline de extractVariableValues + SafeDict es frÃ¡gil con emojis/newlines
+            // y causa envÃ­o de placeholders crudos ({fecha}, {hora}) cuando falla.
             console.log('[Panel][Template] Sin content_sid, enviando como texto plano:', activeTemplateId);
             activeTemplateId = null; activeTemplateBody = ''; activeTemplateVars = [];
             const hint = document.getElementById('templateHint');
             if (hint) hint.classList.add('hidden');
-            // NO hacer return → continuar al flujo normal de sendMessage() con el texto editado
+            // NO hacer return â†’ continuar al flujo normal de sendMessage() con el texto editado
         } else {
-            // Template con content_sid → pipeline de extracción (necesario para Twilio Content API)
+            // Template con content_sid â†’ pipeline de extracciÃ³n (necesario para Twilio Content API)
             const vars = extractVariableValues(activeTemplateBody, message, activeTemplateVars) || {};
-            // Verificar que TODAS las variables tienen valor — si no, avisar a la asesora
+            // Verificar que TODAS las variables tienen valor â€” si no, avisar a la asesora
             const missingVars = activeTemplateVars.filter(v => !vars[v] || !vars[v].trim());
             if (missingVars.length > 0) {
                 resultDiv.className = 'mt-2 text-sm text-red-600';
                 resultDiv.textContent =
                     `No se pudieron extraer las variables: ${missingVars.join(', ')}. ` +
-                    `¿Modificaste el texto fijo de la plantilla? Selecciónala de nuevo con /`;
+                    `Â¿Modificaste el texto fijo de la plantilla? SelecciÃ³nala de nuevo con /`;
                 resultDiv.classList.remove('hidden');
                 setTimeout(() => resultDiv.classList.add('hidden'), 6000);
                 return;
@@ -4918,8 +4918,8 @@ async function sendMessage(e) {
             cancelReply();
 
             // OPTIMISTIC UI: Mostrar burbuja inmediatamente sin esperar query a MongoDB
-            // Elimina el "efecto fantasma" (~500ms de chat vacío tras enviar).
-            // renderChatBubbles() limpiará esta burbuja y la reemplazará con el dato real.
+            // Elimina el "efecto fantasma" (~500ms de chat vacÃ­o tras enviar).
+            // renderChatBubbles() limpiarÃ¡ esta burbuja y la reemplazarÃ¡ con el dato real.
             const _chatContainer = document.getElementById('chatMessages');
             if (_chatContainer && currentContactId === contactId) {
                 const _emptyMsg = _chatContainer.querySelector('[data-empty-msg]');
@@ -4944,7 +4944,7 @@ async function sendMessage(e) {
                     const _rpColor = _rp.sender === 'client' ? '#6B7280' : (_rp.sender === 'bot' ? '#D97706' : '#2563EB');
                     let _rpText = escapeHtml((_rp.content || '').substring(0, 80));
                     if (_rp.media_type && !_rp.content) {
-                        _rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[_rp.media_type] || '📎 Archivo';
+                        _rpText = { image: 'ðŸ“· Imagen', audio: 'ðŸŽµ Audio', video: 'ðŸŽ¬ Video', document: 'ðŸ“„ Documento' }[_rp.media_type] || 'ðŸ“Ž Archivo';
                     }
                     _quoteHtml = `
                         <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${_rpColor};">
@@ -5118,7 +5118,7 @@ async function sendTemplateMessage() {
     }
 }
 
-// Envío de template desde el messageInput (slash command flow)
+// EnvÃ­o de template desde el messageInput (slash command flow)
 async function sendTemplateFromInput(templateId, variables) {
     const phone = document.getElementById('selectedPhone').value;
     const contactId = document.getElementById('selectedContactId').value;
@@ -5154,7 +5154,7 @@ async function sendTemplateFromInput(templateId, variables) {
             document.getElementById('messageInput').value = '';
             document.getElementById('windowWarning')?.classList.add('hidden');
             loadChatHistory(contactId);
-            // Re-verificar ventana: el template de reactivación puede haberla abierto
+            // Re-verificar ventana: el template de reactivaciÃ³n puede haberla abierto
             const _phone = document.getElementById('selectedPhone')?.value;
             if (_phone) setTimeout(() => checkWindowStatus(_phone), 1500);
         } else {
@@ -5167,12 +5167,12 @@ async function sendTemplateFromInput(templateId, variables) {
         resultDiv.classList.remove('hidden');
     } finally {
         document.getElementById('sendBtn').disabled = false;
-        // Solo re-habilitar messageInput si la ventana está abierta
+        // Solo re-habilitar messageInput si la ventana estÃ¡ abierta
         if (currentWindowOpen) {
             document.getElementById('messageInput').disabled = false;
             document.getElementById('attachBtn').disabled = false;
         } else {
-            // Ventana sigue cerrada: re-deshabilitar y mostrar botón "/"
+            // Ventana sigue cerrada: re-deshabilitar y mostrar botÃ³n "/"
             const inp = document.getElementById('messageInput');
             if (inp) {
                 inp.disabled = true;
@@ -5189,9 +5189,9 @@ async function sendTemplateFromInput(templateId, variables) {
 // POLLING con Page Visibility API
 // =========================================================================
 
-// Estado de visibilidad de la pestaña
+// Estado de visibilidad de la pestaÃ±a
 let isTabVisible = true;
-let pendingRefresh = false;  // Si hay refresh pendiente cuando la pestaña estaba oculta
+let pendingRefresh = false;  // Si hay refresh pendiente cuando la pestaÃ±a estaba oculta
 
 function startPolling() {
     if (pollingInterval) clearInterval(pollingInterval);
@@ -5200,17 +5200,17 @@ function startPolling() {
     const interval = currentContactId ? POLLING_INTERVAL_ACTIVE : POLLING_INTERVAL_IDLE;
 
     pollingInterval = setInterval(async () => {
-        // Solo hacer polling si la pestaña está visible
+        // Solo hacer polling si la pestaÃ±a estÃ¡ visible
         if (!isTabVisible) {
             pendingRefresh = true;
-            console.log('[Panel] Polling omitido - pestaña inactiva');
+            console.log('[Panel] Polling omitido - pestaÃ±a inactiva');
             return;
         }
 
         // Actualizar lista de contactos
         await loadContacts();
 
-        // Actualizar historial solo si WS no está activo (evita doble carga)
+        // Actualizar historial solo si WS no estÃ¡ activo (evita doble carga)
         const wsActive = ws && ws.readyState === WebSocket.OPEN;
         if (!wsActive && currentContactId) {
             await loadChatHistory(currentContactId);
@@ -5233,7 +5233,7 @@ function stopPolling() {
 }
 
 /**
- * Polling de respaldo cuando el WebSocket está activo.
+ * Polling de respaldo cuando el WebSocket estÃ¡ activo.
  * Solo refresca la lista de contactos (sin historial de chat) cada 10s.
  * El historial lo maneja el WS via contact_updated.
  */
@@ -5250,18 +5250,18 @@ function startFallbackPolling() {
 }
 
 /**
- * Maneja cambios de visibilidad de la pestaña.
- * Optimización: Pausa polling cuando el usuario no está mirando.
+ * Maneja cambios de visibilidad de la pestaÃ±a.
+ * OptimizaciÃ³n: Pausa polling cuando el usuario no estÃ¡ mirando.
  */
 function handleVisibilityChange() {
     if (document.hidden) {
-        // Pestaña oculta: marcar como invisible
+        // PestaÃ±a oculta: marcar como invisible
         isTabVisible = false;
-        console.log('[Panel] Pestaña oculta - polling pausado');
+        console.log('[Panel] PestaÃ±a oculta - polling pausado');
     } else {
-        // Pestaña visible: reactivar
+        // PestaÃ±a visible: reactivar
         isTabVisible = true;
-        console.log('[Panel] Pestaña visible - polling activo');
+        console.log('[Panel] PestaÃ±a visible - polling activo');
 
         // Si hay refresh pendiente, ejecutarlo inmediatamente
         if (pendingRefresh) {
@@ -5273,7 +5273,7 @@ function handleVisibilityChange() {
             }
         }
 
-        // Revisar contactos BOT_ACTIVE sin nombre al volver a la pestaña
+        // Revisar contactos BOT_ACTIVE sin nombre al volver a la pestaÃ±a
         checkSilentBotContacts();
     }
 }
@@ -5309,7 +5309,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Iniciar polling
     startPolling();
 
-    // Revisión periódica de contactos BOT_ACTIVE sin nombre (cada 5 min)
+    // RevisiÃ³n periÃ³dica de contactos BOT_ACTIVE sin nombre (cada 5 min)
     setInterval(checkSilentBotContacts, 5 * 60 * 1000);
 
     // Polling de notificaciones backend (cada 30s)
@@ -5319,23 +5319,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Sin fecha por defecto: el panel arranca mostrando todos los contactos activos.
-    // El usuario elige un día específico para filtrar historial.
+    // El usuario elige un dÃ­a especÃ­fico para filtrar historial.
     (function _initDefaultDates() {})();
 
     // Esc: deseleccionar contacto activo y limpiar URL (solo si no hay modal/picker abierto)
     document.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
-        // Si el template picker está abierto, dejarlo gestionar el Esc
+        // Si el template picker estÃ¡ abierto, dejarlo gestionar el Esc
         const pickerOpen = document.getElementById('templatePicker')?.classList.contains('hidden') === false
             || document.getElementById('templatePickerPopup')?.style.display === 'block';
         if (pickerOpen) return;
-        // Si hay algún modal visible, no deseleccionar
+        // Si hay algÃºn modal visible, no deseleccionar
         const modalOpen = document.querySelector('.fixed.inset-0:not(.hidden)');
         if (modalOpen) return;
         if (currentContactId) deselectContact();
     });
 
-    // Right-click en contactos → menú "Marcar como no leído"
+    // Right-click en contactos â†’ menÃº "Marcar como no leÃ­do"
     const _contactsList = document.getElementById('contactsList');
     if (_contactsList) {
         _contactsList.addEventListener('contextmenu', (e) => {
@@ -5350,12 +5350,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // Boton refresh
     document.getElementById('refreshBtn').addEventListener('click', loadContacts);
 
-    // Cambio en radio de campo de fecha → recargar
+    // Cambio en radio de campo de fecha â†’ recargar
     document.querySelectorAll('input[name="dateField"]').forEach(r => {
         r.addEventListener('change', loadContacts);
     });
 
-    // Cambio en input de fecha → recargar automáticamente
+    // Cambio en input de fecha â†’ recargar automÃ¡ticamente
     const _dateFrom = document.getElementById('dateFrom');
     if (_dateFrom) _dateFrom.addEventListener('change', loadContacts);
 
@@ -5368,7 +5368,7 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('[Panel] ERROR: No se encontro el formulario sendForm');
     }
 
-    // Enviar con Enter (Shift+Enter inserta nueva línea)
+    // Enviar con Enter (Shift+Enter inserta nueva lÃ­nea)
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
         messageInput.addEventListener('keydown', function (e) {
@@ -5397,7 +5397,7 @@ document.addEventListener('visibilitychange', handleVisibilityChange);
 let ws = null;
 let wsReconnectAttempts = 0;
 const WS_MAX_RECONNECT_ATTEMPTS = 5;
-const WS_RECONNECT_DELAY = 3000;  // 3 segundos (legacy — ahora se usa backoff exponencial)
+const WS_RECONNECT_DELAY = 3000;  // 3 segundos (legacy â€” ahora se usa backoff exponencial)
 const WS_BASE_RECONNECT_DELAY = 1000;  // 1s base para backoff exponencial
 let wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
 
@@ -5406,13 +5406,13 @@ let wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
  * Usa el ADVISOR_ID de la URL si esta disponible.
  */
 function connectWebSocket() {
-    // Guard: abortar si ya hay WS activo o conectando — previene conexiones duplicadas
-    // (servidor mostraba Total: 1→2→3 en cada F5, causando múltiples loadContacts() y 429s)
+    // Guard: abortar si ya hay WS activo o conectando â€” previene conexiones duplicadas
+    // (servidor mostraba Total: 1â†’2â†’3 en cada F5, causando mÃºltiples loadContacts() y 429s)
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        console.log('[Panel] WS ya activo (readyState:', ws.readyState, ') — reconexión ignorada');
+        console.log('[Panel] WS ya activo (readyState:', ws.readyState, ') â€” reconexiÃ³n ignorada');
         return;
     }
-    // Si está cerrando: limpiar handlers para evitar bucle recursivo de reconexión
+    // Si estÃ¡ cerrando: limpiar handlers para evitar bucle recursivo de reconexiÃ³n
     if (ws && ws.readyState === WebSocket.CLOSING) {
         ws.onclose = null;
         ws = null;
@@ -5435,11 +5435,11 @@ function connectWebSocket() {
             wsReconnectAttempts = 0;
             wsCurrentDelay = WS_BASE_RECONNECT_DELAY;
 
-            // Cambiar a fallback polling (10s, sin historial) — el WS maneja eventos en tiempo real
+            // Cambiar a fallback polling (10s, sin historial) â€” el WS maneja eventos en tiempo real
             startFallbackPolling();
 
-            // Fix CR-2: resync inmediato al reconectar para recuperar mensajes llegados durante la desconexión.
-            // _lastContactTimestamps detectará actividad nueva → incrementará unreadCounts correctamente.
+            // Fix CR-2: resync inmediato al reconectar para recuperar mensajes llegados durante la desconexiÃ³n.
+            // _lastContactTimestamps detectarÃ¡ actividad nueva â†’ incrementarÃ¡ unreadCounts correctamente.
             loadContacts();
 
             // Notificar que contacto actual esta siendo observado
@@ -5467,9 +5467,9 @@ function connectWebSocket() {
             // Retomar polling activo como fallback (WS no disponible)
             startPolling();
 
-            // Fix CR-2: reconexión infinita con backoff exponencial, sin hard limit.
-            // El exponente se cap en 5 para que el delay máximo sea ~30s (1000 * 2^5 = 32s → clamp 30s).
-            // Sin límite de intentos: si Railway hace un deploy, el panel reconecta solo sin recargar.
+            // Fix CR-2: reconexiÃ³n infinita con backoff exponencial, sin hard limit.
+            // El exponente se cap en 5 para que el delay mÃ¡ximo sea ~30s (1000 * 2^5 = 32s â†’ clamp 30s).
+            // Sin lÃ­mite de intentos: si Railway hace un deploy, el panel reconecta solo sin recargar.
             wsReconnectAttempts++;
             wsCurrentDelay = Math.min(
                 WS_BASE_RECONNECT_DELAY * Math.pow(2, Math.min(wsReconnectAttempts - 1, 5)),
@@ -5489,10 +5489,10 @@ function connectWebSocket() {
 }
 
 /**
- * Actualiza el badge de no-leídos de un contacto directamente en el DOM,
+ * Actualiza el badge de no-leÃ­dos de un contacto directamente en el DOM,
  * sin necesidad de re-renderizar la lista completa.
- * @param {string} phone - Teléfono del contacto
- * @param {number} count - Cantidad de mensajes no leídos
+ * @param {string} phone - TelÃ©fono del contacto
+ * @param {number} count - Cantidad de mensajes no leÃ­dos
  */
 function updateUnreadBadge(phone, count) {
     const contactEl = document.querySelector(`.contact-item[data-phone="${CSS.escape(phone)}"]`);
@@ -5510,7 +5510,7 @@ function updateUnreadBadge(phone, count) {
             avatarWrap.appendChild(badge);
         }
         badge.textContent = count > 9 ? '9+' : String(count);
-        console.log('[Panel][Badge] Badge actualizado →', phone, count, 'no leídos');
+        console.log('[Panel][Badge] Badge actualizado â†’', phone, count, 'no leÃ­dos');
     } else if (badge) {
         badge.remove();
     }
@@ -5518,10 +5518,10 @@ function updateUnreadBadge(phone, count) {
 
 /**
  * Programa un refresco de la lista de contactos con trailing debounce de 150ms.
- * Agrupa múltiples eventos WS rápidos en una sola llamada a loadContacts().
+ * Agrupa mÃºltiples eventos WS rÃ¡pidos en una sola llamada a loadContacts().
  * Fix: era leading-cooldown (50ms, dropeaba eventos posteriores).
  *      Ahora es trailing debounce: resetea el timer en cada llamada, dispara
- *      loadContacts() solo 150ms después del ÚLTIMO evento. Si llegan 10 mensajes
+ *      loadContacts() solo 150ms despuÃ©s del ÃšLTIMO evento. Si llegan 10 mensajes
  *      en 100ms, solo se hace 1 GET /contacts en lugar de 10.
  */
 let _contactsRefreshTimer = null;
@@ -5538,16 +5538,16 @@ function scheduleContactsRefresh() {
  * @param {Object} data - Mensaje parseado
  */
 /**
- * Fix CR-2 (safety net para contactos nuevos): verifica que el contacto esté en la lista
- * después de recibir un evento WS. Cubre el gap residual de ensure_meta_with_channel()
+ * Fix CR-2 (safety net para contactos nuevos): verifica que el contacto estÃ© en la lista
+ * despuÃ©s de recibir un evento WS. Cubre el gap residual de ensure_meta_with_channel()
  * que no puede ser movido antes del WS notify (depende de la respuesta de Sofia).
- * @param {string} phone - Teléfono a buscar
- * @param {number} retriesLeft - Máximo 3 intentos. No aumentar: si el contacto no llega
- *   en 3×700ms=2.1s es un problema del servidor, no de timing.
+ * @param {string} phone - TelÃ©fono a buscar
+ * @param {number} retriesLeft - MÃ¡ximo 3 intentos. No aumentar: si el contacto no llega
+ *   en 3Ã—700ms=2.1s es un problema del servidor, no de timing.
  */
 function ensureContactVisible(phone, retriesLeft = 3) {
     if (retriesLeft <= 0) {
-        console.warn('[Panel][Scroll] ensureContactVisible agotó retries para:', phone);
+        console.warn('[Panel][Scroll] ensureContactVisible agotÃ³ retries para:', phone);
         return;
     }
     const found = allContacts.some(c => (c.phone || '') === phone || (c.whatsapp || '') === phone);
@@ -5565,27 +5565,27 @@ function handleWebSocketMessage(data) {
 
     switch (data.type) {
         case 'contact_updated':
-            // Nuevo mensaje o actividad → reordenar lista INMEDIATAMENTE
+            // Nuevo mensaje o actividad â†’ reordenar lista INMEDIATAMENTE
             console.log('[Panel] contact_updated recibido, action:', data.action, 'phone:', data.phone);
 
             // Fix-B: Guard defensivo contra eventos WS para contactos que NO pertenecen
             // a este asesor. Con Fix-A activo el backend enruta targeted, pero esto protege
             // contra: (1) broadcast de fallback si meta no tiene assigned_owner_id,
-            // (2) backlog durante reconexión WS, (3) cache staleness, (4) regresiones futuras.
-            // Si phone no está en allContacts → silenciar beep/badge y schedule refresh.
+            // (2) backlog durante reconexiÃ³n WS, (3) cache staleness, (4) regresiones futuras.
+            // Si phone no estÃ¡ en allContacts â†’ silenciar beep/badge y schedule refresh.
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
                 const _phoneInList = allContacts.some(c => (c.phone || '') === data.phone);
                 if (!_phoneInList) {
-                    console.warn('[Panel][Guard] Evento WS foráneo (phone no en lista local):', data.phone);
+                    console.warn('[Panel][Guard] Evento WS forÃ¡neo (phone no en lista local):', data.phone);
                     if (!window._foreignProbation) window._foreignProbation = new Set();
                     if (window._foreignProbation.has(data.phone)) {
-                        console.log('[Panel][Guard] Descartado — ya en probación:', data.phone);
+                        console.log('[Panel][Guard] Descartado â€” ya en probaciÃ³n:', data.phone);
                         break;
                     }
                     window._foreignProbation.add(data.phone);
                     setTimeout(() => window._foreignProbation.delete(data.phone), 10000);
-                    // Refresh silencioso: si el contacto es legítimo aparecerá en la próxima carga.
-                    // El siguiente evento WS para el mismo phone ya pasará el guard.
+                    // Refresh silencioso: si el contacto es legÃ­timo aparecerÃ¡ en la prÃ³xima carga.
+                    // El siguiente evento WS para el mismo phone ya pasarÃ¡ el guard.
                     scheduleContactsRefresh();
                     break;
                 }
@@ -5600,19 +5600,19 @@ function handleWebSocketMessage(data) {
                     break;
                 }
                 // Fix dedup-WS: el backend puede disparar 2 notificaciones por el mismo mensaje
-                // (p.ej. bot silenciado + notificación temprana). Si el mismo phone ya incrementó
-                // badge por WS en los últimos 2s, solo actualizar el DOM sin volver a contar.
+                // (p.ej. bot silenciado + notificaciÃ³n temprana). Si el mismo phone ya incrementÃ³
+                // badge por WS en los Ãºltimos 2s, solo actualizar el DOM sin volver a contar.
                 const _now = Date.now();
                 const _alreadyCounted = (_lastWsNotifiedTimestamps[data.phone] || 0) > _now - 2000;
                 _lastWsNotifiedTimestamps[data.phone] = _now;  // Fix CR-4: marcar evento WS
                 if (!_alreadyCounted) {
                     unreadCounts[data.phone] = (unreadCounts[data.phone] || 0) + 1;
-                    console.log('[Panel] Incrementando unreadCounts para', data.phone, '→', unreadCounts[data.phone]);
+                    console.log('[Panel] Incrementando unreadCounts para', data.phone, 'â†’', unreadCounts[data.phone]);
                 } else {
-                    console.log('[Panel][Badge] Dedup WS (<2s) — no incrementar para', data.phone);
+                    console.log('[Panel][Badge] Dedup WS (<2s) â€” no incrementar para', data.phone);
                 }
                 updateUnreadBadge(data.phone, unreadCounts[data.phone]);  // DOM directo, sin re-render
-                // Sonido siempre que llegue mensaje de otro contacto (sin importar si la pestaña está visible)
+                // Sonido siempre que llegue mensaje de otro contacto (sin importar si la pestaÃ±a estÃ¡ visible)
                 if (!_alreadyCounted) playNotificationBeep();
                 if (document.hidden && !_alreadyCounted) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
@@ -5620,8 +5620,8 @@ function handleWebSocketMessage(data) {
             }
 
             // name_updated: actualizar memoria directamente sin recargar desde HubSpot.
-            // HubSpot tarda ~1-3s en propagar el PATCH; scheduleContactsRefresh() aquí
-            // devolvería el nombre viejo y revertería el cambio.
+            // HubSpot tarda ~1-3s en propagar el PATCH; scheduleContactsRefresh() aquÃ­
+            // devolverÃ­a el nombre viejo y reverterÃ­a el cambio.
             if (data.action === 'name_updated' && data.phone && data.display_name) {
                 const ni = allContacts.findIndex(c => c.phone === data.phone);
                 if (ni !== -1) {
@@ -5632,9 +5632,9 @@ function handleWebSocketMessage(data) {
             }
 
             // Fix: para new_message usar scheduleContactsRefresh (trailing debounce 150ms) en
-            // lugar de loadContacts() directo. Si llegan 5 mensajes en 100ms, antes se hacían
-            // 5 GET /contacts concurrentes → 5× enriquecimiento HubSpot → más 429s.
-            // El scroll y ensureContactVisible se ejecutan 200ms después (>150ms debounce).
+            // lugar de loadContacts() directo. Si llegan 5 mensajes en 100ms, antes se hacÃ­an
+            // 5 GET /contacts concurrentes â†’ 5Ã— enriquecimiento HubSpot â†’ mÃ¡s 429s.
+            // El scroll y ensureContactVisible se ejecutan 200ms despuÃ©s (>150ms debounce).
             if (data.action === 'new_message' && data.phone) {
                 const _scrollPhone = data.phone;
                 // [Bug2] Reorder inmediato en memoria sin esperar GET /contacts.
@@ -5644,14 +5644,14 @@ function handleWebSocketMessage(data) {
                 if (_nmIdx > 0) {
                     const _nmContact = allContacts.splice(_nmIdx, 1)[0];
                     allContacts.unshift(_nmContact);
-                    _contactFingerprints.delete(_scrollPhone); // forzar reconstrucción del elemento
+                    _contactFingerprints.delete(_scrollPhone); // forzar reconstrucciÃ³n del elemento
                     _applyFiltersAndRender();
                 } else if (_nmIdx === -1) {
-                    // Contacto no está en allContacts aún (ej: recién creado o fuera del filtro de fechas).
-                    // scheduleContactsRefresh() lo traerá en la posición correcta cuando loadContacts() complete.
-                    console.log('[Panel][Reorder] Contacto no encontrado en lista local:', _scrollPhone, '— loadContacts() lo agregará');
+                    // Contacto no estÃ¡ en allContacts aÃºn (ej: reciÃ©n creado o fuera del filtro de fechas).
+                    // scheduleContactsRefresh() lo traerÃ¡ en la posiciÃ³n correcta cuando loadContacts() complete.
+                    console.log('[Panel][Reorder] Contacto no encontrado en lista local:', _scrollPhone, 'â€” loadContacts() lo agregarÃ¡');
                 }
-                // _nmIdx === 0: contacto ya está en el tope, no necesita reordenarse
+                // _nmIdx === 0: contacto ya estÃ¡ en el tope, no necesita reordenarse
                 scheduleContactsRefresh();
                 setTimeout(() => {
                     ensureContactVisible(_scrollPhone);
@@ -5664,13 +5664,13 @@ function handleWebSocketMessage(data) {
             } else {
                 scheduleContactsRefresh();
             }
-            // Si el chat activo es el que recibió el mensaje, refrescar historial y estado de ventana
+            // Si el chat activo es el que recibiÃ³ el mensaje, refrescar historial y estado de ventana
             if (currentPhone && data.phone && data.phone === currentPhone) {
-                // P3-D canal fix: si el backend hizo merge de canal (ej: ciencuadras → whatsapp),
+                // P3-D canal fix: si el backend hizo merge de canal (ej: ciencuadras â†’ whatsapp),
                 // el evento WS lleva el canal real. Actualizamos currentCanal ANTES de recargar
                 // para que loadChatHistory use el canal correcto y muestre el mensaje nuevo.
                 if (data.canal && data.canal !== currentCanal) {
-                    console.log(`[Panel][P3-D] Canal corregido antes de recargar historial: ${currentCanal} → ${data.canal}`);
+                    console.log(`[Panel][P3-D] Canal corregido antes de recargar historial: ${currentCanal} â†’ ${data.canal}`);
                     currentCanal = data.canal;
                 }
                 loadChatHistory(currentContactId);
@@ -5695,13 +5695,13 @@ function handleWebSocketMessage(data) {
             break;
 
         case 'transfer_accepted':
-            showToast(`Transferencia aceptada — ${data.contact_name || data.phone} es tuyo`, 'success');
+            showToast(`Transferencia aceptada â€” ${data.contact_name || data.phone} es tuyo`, 'success');
             scheduleContactsRefresh();
             closeCreateContactModal();
             break;
 
         case 'transfer_rejected':
-            showToast('El asesor rechazó la transferencia', 'warning');
+            showToast('El asesor rechazÃ³ la transferencia', 'warning');
             break;
 
         case 'template_delivery_failed':
@@ -5727,18 +5727,18 @@ function handleWebSocketMessage(data) {
         }
 
         case 'message_updated': {
-            // Reply context resuelto de forma asíncrona por fetch diferido Twilio API
+            // Reply context resuelto de forma asÃ­ncrona por fetch diferido Twilio API
             if (!currentPhone || data.phone !== currentPhone) break;
             const _updEl = document.querySelector(`[data-msg-id="${data.message_id}"]`);
             if (!_updEl) {
-                // Mensaje no visible aún → recargar historial completo
+                // Mensaje no visible aÃºn â†’ recargar historial completo
                 loadChatHistory(currentContactId);
                 break;
             }
             if (data.reply_to_preview) {
                 const rp = data.reply_to_preview;
                 const rpColor = rp.sender === 'advisor' ? '#3b82f6' : '#6b7280';
-                const rpLabel = rp.sender === 'advisor' ? 'Asesor' : 'Tú';
+                const rpLabel = rp.sender === 'advisor' ? 'Asesor' : 'TÃº';
                 const rpText  = rp.media_type ? `[${rp.media_type}]` : (rp.content || '');
                 const quoteHtml = `<div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${rpColor};" data-injected-quote>
                     <p class="text-xs font-semibold" style="color:${rpColor}">${rpLabel}</p>
@@ -5784,7 +5784,7 @@ function handleWebSocketMessage(data) {
 }
 
 function handleTemplateDeliveryFailed(data) {
-    const msg = data.user_message || `⚠️ Plantilla no entregada al número ${data.phone}.`;
+    const msg = data.user_message || `âš ï¸ Plantilla no entregada al nÃºmero ${data.phone}.`;
     console.warn('[Panel] Template delivery failed:', data);
 
     const div = document.createElement('div');
@@ -5806,7 +5806,7 @@ function handleTemplateDeliveryFailed(data) {
             errBubble.className = 'flex justify-end mb-2';
             errBubble.innerHTML = `
                 <div class="bg-red-100 border border-red-400 text-red-700 rounded-lg px-3 py-2 text-xs max-w-xs">
-                    ❌ Mensaje no entregado — este número no tiene WhatsApp activo.
+                    âŒ Mensaje no entregado â€” este nÃºmero no tiene WhatsApp activo.
                 </div>`;
             chatContainer.appendChild(errBubble);
             chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -5820,7 +5820,7 @@ function handleTemplateDeliveryFailed(data) {
 function handleNewMessageNotification(data) {
     console.log('[Panel] Nuevo mensaje de', data.phone, ':', data.preview);
 
-    // Fix 1: sonido siempre, independiente de si la pestaña está visible o no
+    // Fix 1: sonido siempre, independiente de si la pestaÃ±a estÃ¡ visible o no
     console.log('[Panel][Sound] Disparando beep para', data.phone);
     playNotificationBeep();
 
@@ -5832,7 +5832,7 @@ function handleNewMessageNotification(data) {
         );
     }
 
-    // Tracking de mensajes no leídos (solo si el chat de ese contacto NO está abierto)
+    // Tracking de mensajes no leÃ­dos (solo si el chat de ese contacto NO estÃ¡ abierto)
     if (data.phone && data.phone !== currentPhone) {
         // Guard: ignorar badge si el contacto fue cerrado recientemente
         if (recentlyClosedPhones.has(data.phone)) {
@@ -5851,7 +5851,7 @@ function handleNewMessageNotification(data) {
         updateUnreadBadge(data.phone, unreadCounts[data.phone]); // badge inmediato, sin esperar HTTP
     }
 
-    // Fix CR-2 + Fix 2: carga inmediata + scroll al top para que el contacto en índice 0 sea visible.
+    // Fix CR-2 + Fix 2: carga inmediata + scroll al top para que el contacto en Ã­ndice 0 sea visible.
     if (data.phone) {
         loadContacts().then(() => {
             ensureContactVisible(data.phone);
@@ -5862,7 +5862,7 @@ function handleNewMessageNotification(data) {
             }
         });
     } else {
-        console.warn('[Panel] new_message sin phone — usando scheduleContactsRefresh');
+        console.warn('[Panel] new_message sin phone â€” usando scheduleContactsRefresh');
         scheduleContactsRefresh();
     }
 
@@ -5891,10 +5891,10 @@ function handleContactTransferred(data) {
 
     // Refrescar lista
     loadContacts();
-    // Actualizar badge según dirección de la transferencia
+    // Actualizar badge segÃºn direcciÃ³n de la transferencia
     if (data.phone) {
         if (data.direction === 'incoming' && !_seenPhones.has(data.phone)) {
-            // Transferencia entrante: el asesor aún no ha visto este contacto → badge
+            // Transferencia entrante: el asesor aÃºn no ha visto este contacto â†’ badge
             unreadCounts[data.phone] = 1;
             updateUnreadBadge(data.phone, 1);
             console.log('[Panel][Inbox] Badge transferencia entrante para', data.phone);
@@ -5920,7 +5920,7 @@ function handleStatusChange(data) {
 
     // Refrescar lista para actualizar badges
     loadContacts();
-    // Resetear badge de no leídos si el estado es "cerrado" o similar
+    // Resetear badge de no leÃ­dos si el estado es "cerrado" o similar
     if (data.phone && ['cerrado', 'cerrado ganado', 'cerrado perdido'].includes((data.new_status || '').toLowerCase())) {
         unreadCounts[data.phone] = 0;
         updateUnreadBadge(data.phone, 0);
@@ -5929,13 +5929,13 @@ function handleStatusChange(data) {
 
 
 /**
- * Fix CR-5 + Fix 3: tono corto de notificación usando Web Audio API.
+ * Fix CR-5 + Fix 3: tono corto de notificaciÃ³n usando Web Audio API.
  * AudioContext compartido (_sharedAudioCtx) para resistir autoplay policy de Chrome/Edge.
- * Se desbloquea automáticamente en el primer click del usuario.
+ * Se desbloquea automÃ¡ticamente en el primer click del usuario.
  */
 let _sharedAudioCtx = null;
 
-// Desbloquear AudioContext en la primera interacción del usuario
+// Desbloquear AudioContext en la primera interacciÃ³n del usuario
 document.addEventListener('click', () => {
     if (!_sharedAudioCtx) {
         try { _sharedAudioCtx = new AudioContext(); } catch(e) {}
@@ -5944,16 +5944,16 @@ document.addEventListener('click', () => {
     }
 }, { once: true });
 
-// ========== "MARCAR COMO NO LEÍDO" — Menú contextual ==========
+// ========== "MARCAR COMO NO LEÃDO" â€” MenÃº contextual ==========
 
-/** Cierra cualquier menú contextual de "no leído" abierto */
+/** Cierra cualquier menÃº contextual de "no leÃ­do" abierto */
 function _closeUnreadContextMenu() {
     const existing = document.getElementById('_unreadContextMenu');
     if (existing) existing.remove();
 }
 
 /**
- * Muestra un mini-menú contextual para marcar/desmarcar como no leído.
+ * Muestra un mini-menÃº contextual para marcar/desmarcar como no leÃ­do.
  * Se posiciona donde el usuario hizo right-click.
  */
 function _showUnreadContextMenu(x, y, phone) {
@@ -5968,9 +5968,9 @@ function _showUnreadContextMenu(x, y, phone) {
     const option = document.createElement('div');
     option.className = 'px-4 py-2.5 text-sm hover:bg-gray-100 cursor-pointer flex items-center gap-2 select-none';
     if (isUnread) {
-        option.innerHTML = '<span class="text-green-500">&#10003;</span> Marcar como leído';
+        option.innerHTML = '<span class="text-green-500">&#10003;</span> Marcar como leÃ­do';
     } else {
-        option.innerHTML = '<span class="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span> Marcar como no leído';
+        option.innerHTML = '<span class="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span> Marcar como no leÃ­do';
     }
     option.addEventListener('click', () => {
         if (isUnread) {
@@ -5987,7 +5987,7 @@ function _showUnreadContextMenu(x, y, phone) {
                 if (avatarWrap && !avatarWrap.querySelector('.manual-unread-badge')) {
                     const dot = document.createElement('span');
                     dot.className = 'manual-unread-badge absolute -top-1 -right-1 bg-blue-500 rounded-full w-[12px] h-[12px]';
-                    dot.title = 'Marcado como no leído';
+                    dot.title = 'Marcado como no leÃ­do';
                     avatarWrap.appendChild(dot);
                 }
             }
@@ -6015,7 +6015,7 @@ function _showUnreadContextMenu(x, y, phone) {
 
 // ========== SISTEMA DE NOTIFICACIONES BACKEND-DRIVEN ==========
 
-// ── pollNotifications: obtiene notificaciones del backend cada 30s ──────────
+// â”€â”€ pollNotifications: obtiene notificaciones del backend cada 30s â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function pollNotifications() {
     if (!ADVISOR_ID) return;
@@ -6027,12 +6027,12 @@ async function pollNotifications() {
         const data = await res.json();
         const notifications = data.notifications || [];
 
-        // Detectar notificaciones nuevas (no vistas aún) para mostrar toast
+        // Detectar notificaciones nuevas (no vistas aÃºn) para mostrar toast
         const currentIds = new Set(notifications.map(n => n.id));
         const newNotifs = notifications.filter(n => !_seenNotifIds.has(n.id));
         _seenNotifIds = currentIds;
 
-        // Mostrar toast para cada notificación nueva (máx 3 simultáneos)
+        // Mostrar toast para cada notificaciÃ³n nueva (mÃ¡x 3 simultÃ¡neos)
         newNotifs.slice(0, 3).forEach(n => showNotifToast(n));
 
         // Actualizar badge en campana
@@ -6061,18 +6061,18 @@ function showNotifToast(notif) {
     const isInactivity = notif.type === 'inactivity_24h';
     const isAprobados  = notif.type === 'aprobados_daily';
 
-    let icon = '🔔';
+    let icon = 'ðŸ””';
     let title = '';
     let subtitle = '';
     let borderColor = 'border-l-yellow-400';
 
     if (isInactivity) {
-        icon = '⏰';
+        icon = 'â°';
         title = notif.contact_name || notif.phone || 'Contacto';
         subtitle = `Lleva ${notif.hours_waiting || '+24'}h esperando respuesta`;
         borderColor = 'border-l-red-400';
     } else if (isAprobados) {
-        icon = '📢';
+        icon = 'ðŸ“¢';
         title = 'Contactos aprobados';
         subtitle = notif.message || '';
         borderColor = 'border-l-blue-400';
@@ -6089,7 +6089,7 @@ function showNotifToast(notif) {
             <p class="font-semibold text-sm text-gray-900 truncate">${title}</p>
             <p class="text-xs text-gray-500 mt-0.5 leading-relaxed">${subtitle}</p>
         </div>
-        <button class="flex-shrink-0 text-gray-300 hover:text-gray-500 p-1" onclick="event.stopPropagation();this.closest('[data-notif-id]').remove()">✕</button>
+        <button class="flex-shrink-0 text-gray-300 hover:text-gray-500 p-1" onclick="event.stopPropagation();this.closest('[data-notif-id]').remove()">âœ•</button>
     `;
 
     if (isInactivity && notif.phone) {
@@ -6107,7 +6107,7 @@ function showNotifToast(notif) {
         toast.style.transform = 'translateX(0)';
     });
 
-    // Auto-dismiss después de 6 segundos
+    // Auto-dismiss despuÃ©s de 6 segundos
     setTimeout(() => {
         toast.style.opacity = '0';
         toast.style.transform = 'translateX(20px)';
@@ -6132,10 +6132,10 @@ function renderNotifList(notifications) {
     for (const notif of notifications) {
         const isInactivity = notif.type === 'inactivity_24h';
         const isAprobados  = notif.type === 'aprobados_daily';
-        const icon  = isInactivity ? '⏰' : isAprobados ? '📢' : '🔔';
+        const icon  = isInactivity ? 'â°' : isAprobados ? 'ðŸ“¢' : 'ðŸ””';
         const title = isInactivity
             ? (notif.contact_name || notif.phone || 'Contacto')
-            : isAprobados ? 'Contactos aprobados' : 'Notificación';
+            : isAprobados ? 'Contactos aprobados' : 'NotificaciÃ³n';
         const sub   = isInactivity
             ? `Lleva ${notif.hours_waiting || '+24'}h esperando respuesta`
             : (notif.message || '');
@@ -6150,7 +6150,7 @@ function renderNotifList(notifications) {
                 <p class="text-xs text-gray-500 mt-0.5">${sub}</p>
             </div>
             <button onclick="event.stopPropagation(); dismissNotif('${notif.id}')"
-                    class="flex-shrink-0 text-gray-300 hover:text-gray-500 text-xs p-1" title="Descartar">✕</button>
+                    class="flex-shrink-0 text-gray-300 hover:text-gray-500 text-xs p-1" title="Descartar">âœ•</button>
         `;
 
         if (isInactivity && notif.phone) {
@@ -6174,10 +6174,10 @@ function toggleNotifDropdown(forceState) {
     _notifDropdownOpen = forceState !== undefined ? forceState : !_notifDropdownOpen;
 
     if (_notifDropdownOpen && btn) {
-        // Calcular posición absoluta en viewport (position:fixed escapa overflow-hidden del sidebar)
+        // Calcular posiciÃ³n absoluta en viewport (position:fixed escapa overflow-hidden del sidebar)
         const rect = btn.getBoundingClientRect();
         const dropW = 300;
-        // Colocar debajo del botón; ajustar si se sale por la derecha
+        // Colocar debajo del botÃ³n; ajustar si se sale por la derecha
         let left = rect.left;
         if (left + dropW > window.innerWidth - 8) {
             left = window.innerWidth - dropW - 8;
@@ -6208,7 +6208,7 @@ async function dismissNotif(notifId) {
         _seenNotifIds.delete(notifId);
         await pollNotifications(); // Refrescar inmediatamente
     } catch (e) {
-        console.warn('[Notif] Error descartando notificación:', e);
+        console.warn('[Notif] Error descartando notificaciÃ³n:', e);
     }
 }
 
@@ -6223,11 +6223,11 @@ async function markAllNotifsRead() {
         _seenNotifIds = new Set();
         await pollNotifications();
     } catch (e) {
-        console.warn('[Notif] Error marcando todo leído:', e);
+        console.warn('[Notif] Error marcando todo leÃ­do:', e);
     }
 }
 
-// ── Canal display: permite al asesor cambiar el canal visible del contacto ───
+// â”€â”€ Canal display: permite al asesor cambiar el canal visible del contacto â”€â”€â”€
 
 async function updateCanalDisplay(canalValue, canal) {
     if (!currentPhone) return;
@@ -6248,19 +6248,19 @@ async function updateCanalDisplay(canalValue, canal) {
             showToast('Error al actualizar canal', 'error');
         }
     } catch (e) {
-        showToast('Error de conexión', 'error');
+        showToast('Error de conexiÃ³n', 'error');
     }
 }
 
 // ======================================================
 // checkSilentBotContacts: Safety net de 30 minutos para contactos BOT_ACTIVE sin nombre.
-// Cubre el caso donde la notificación inicial fue perdida (contacto nuevo de portal,
+// Cubre el caso donde la notificaciÃ³n inicial fue perdida (contacto nuevo de portal,
 // Fix-B probation, etc.) y el cliente nunca dio su nombre tras la pregunta de Sofia.
 // Se llama cada 5 minutos para detectar contactos BOT_ACTIVE sin nombre.
 function checkSilentBotContacts() {
     const SILENT_THRESHOLD_MS = 30 * 60 * 1000; // 30 min sin respuesta
     const COOLDOWN_MS         = 2 * 60 * 60 * 1000; // 2 horas entre re-notificaciones
-    const PHONE_RE = /^\+?[\d\s\-()+]{7,}$/;   // Detecta display_name = teléfono
+    const PHONE_RE = /^\+?[\d\s\-()+]{7,}$/;   // Detecta display_name = telÃ©fono
 
     if (!allContacts || !allContacts.length) return;
 
@@ -6275,22 +6275,22 @@ function checkSilentBotContacts() {
         const phone = contact.phone;
         if (!phone) continue;
 
-        // Solo BOT_ACTIVE (Sofia está atendiendo, asesor no ha tomado control)
+        // Solo BOT_ACTIVE (Sofia estÃ¡ atendiendo, asesor no ha tomado control)
         const status = contact.conversation_status || contact.status || '';
         if (status !== 'BOT_ACTIVE') continue;
 
-        // No notificar si el chat está abierto ahora mismo
+        // No notificar si el chat estÃ¡ abierto ahora mismo
         if (phone === currentPhone) continue;
 
-        // Ya tiene badge — no duplicar
+        // Ya tiene badge â€” no duplicar
         if (contact.has_unread || (unreadCounts[phone] > 0)) continue;
 
-        // display_name es el teléfono (sin nombre real) — ej: "+573246895528"
+        // display_name es el telÃ©fono (sin nombre real) â€” ej: "+573246895528"
         const dn = contact.display_name || '';
         const hasNoRealName = !dn || dn === phone || PHONE_RE.test(dn);
         if (!hasNoRealName) continue;
 
-        // Esperar al menos 30 min desde el último mensaje del cliente
+        // Esperar al menos 30 min desde el Ãºltimo mensaje del cliente
         const lastActivityTs = contact.last_activity
             ? new Date(contact.last_activity).getTime() : 0;
         if (!lastActivityTs || (now - lastActivityTs) < SILENT_THRESHOLD_MS) continue;
@@ -6298,12 +6298,12 @@ function checkSilentBotContacts() {
         // Cooldown 2 horas por contacto (sessionStorage persiste entre tabs)
         if (silentShown[phone] && (now - silentShown[phone]) < COOLDOWN_MS) continue;
 
-        // ── Disparar notificación ──
+        // â”€â”€ Disparar notificaciÃ³n â”€â”€
         unreadCounts[phone] = 1;
         updateUnreadBadge(phone, 1);
         refreshNeeded = true;
 
-        // Sonido: máx 3 beeps por invocación para no bombardear
+        // Sonido: mÃ¡x 3 beeps por invocaciÃ³n para no bombardear
         if (beepCount < 3) {
             playNotificationBeep();
             beepCount++;
@@ -6313,10 +6313,10 @@ function checkSilentBotContacts() {
         silentShown[phone] = now;
         try { sessionStorage.setItem('_silentBotShown', JSON.stringify(silentShown)); } catch {}
 
-        console.log('[Panel][SilentBot] Notificación deferred — BOT_ACTIVE sin nombre 30min+:', phone);
+        console.log('[Panel][SilentBot] NotificaciÃ³n deferred â€” BOT_ACTIVE sin nombre 30min+:', phone);
     }
 
-    // Forzar loadContacts para que el backend actualice has_unread=True → 3-tier sort → índice 0
+    // Forzar loadContacts para que el backend actualice has_unread=True â†’ 3-tier sort â†’ Ã­ndice 0
     if (refreshNeeded) {
         scheduleContactsRefresh();
     }
@@ -6331,8 +6331,8 @@ function playNotificationBeep() {
             console.log('[Panel][Sound] AudioContext creado. Estado:', _sharedAudioCtx.state);
         }
         if (_sharedAudioCtx.state === 'suspended') {
-            console.warn('[Panel][Sound] AudioContext suspendido — intentando resume...');
-            _sharedAudioCtx.resume().catch(e => console.error('[Panel][Sound] resume() falló:', e));
+            console.warn('[Panel][Sound] AudioContext suspendido â€” intentando resume...');
+            _sharedAudioCtx.resume().catch(e => console.error('[Panel][Sound] resume() fallÃ³:', e));
         }
         const oscillator = _sharedAudioCtx.createOscillator();
         const gainNode = _sharedAudioCtx.createGain();
@@ -6354,8 +6354,8 @@ function playNotificationBeep() {
  * Muestra notificacion del navegador.
  */
 function showBrowserNotification(title, body) {
-    // Nota: playNotificationBeep() ya se llama en handleNewMessageNotification — no llamar aquí para evitar doble beep
-    console.log('[Panel][Notif] Permiso actual:', Notification.permission, '| título:', title);
+    // Nota: playNotificationBeep() ya se llama en handleNewMessageNotification â€” no llamar aquÃ­ para evitar doble beep
+    console.log('[Panel][Notif] Permiso actual:', Notification.permission, '| tÃ­tulo:', title);
 
     // Verificar si las notificaciones estan soportadas y permitidas
     if (!('Notification' in window)) {
@@ -6369,9 +6369,9 @@ function showBrowserNotification(title, body) {
             icon: 'https://ui-avatars.com/api/?name=P&background=10B981&color=fff&size=64',
             tag: 'panel-notification'  // Evita multiples notificaciones
         });
-        console.log('[Panel][Notif] Notificación mostrada para:', title);
+        console.log('[Panel][Notif] NotificaciÃ³n mostrada para:', title);
     } else if (Notification.permission === 'denied') {
-        console.warn('[Panel][Notif] Permiso denegado — notificación visual no mostrada');
+        console.warn('[Panel][Notif] Permiso denegado â€” notificaciÃ³n visual no mostrada');
     } else {
         // Pedir permiso
         Notification.requestPermission().then(permission => {
@@ -6438,7 +6438,7 @@ function openCreateContactModal() {
         // Limpiar formulario y asegurar que sea visible (puede haberse ocultado por 409)
         const form = document.getElementById('createContactForm');
         if (form) { form.reset(); form.classList.remove('hidden'); }
-        // Poblar portales según el asesor activo
+        // Poblar portales segÃºn el asesor activo
         const sel = document.getElementById('portalOrigenSelect');
         if (sel) {
             const portals = ADVISOR_PORTALS[ADVISOR_ID] || ALL_PORTALS;
@@ -6489,7 +6489,7 @@ async function createManualContact(event) {
     }
 
     try {
-        // Enviar advisor_id del asesor que crea el contacto (para asignación directa)
+        // Enviar advisor_id del asesor que crea el contacto (para asignaciÃ³n directa)
         if (ADVISOR_ID) {
             formData.append('advisor_id', ADVISOR_ID);
         }
@@ -6504,7 +6504,7 @@ async function createManualContact(event) {
         console.log('[Panel] Respuesta creacion:', data);
 
         if (response.status === 409) {
-            // Contacto ya existe — ocultar formulario y mostrar panel de info
+            // Contacto ya existe â€” ocultar formulario y mostrar panel de info
             const createForm = document.getElementById('createContactForm');
             if (createForm) createForm.classList.add('hidden');
 
@@ -6515,10 +6515,10 @@ async function createManualContact(event) {
             const historyLine = `<div class="flex justify-between"><span class="text-gray-500">Mensajes</span><span class="font-medium">${data.message_count} mensaje${data.message_count !== 1 ? 's' : ''}</span></div>`;
 
             const canalLine = data.redis_canal
-                ? `<div class="flex justify-between"><span class="text-gray-500">Activo en panel</span><span class="text-green-600 font-medium">Sí (${data.redis_canal})</span></div>`
+                ? `<div class="flex justify-between"><span class="text-gray-500">Activo en panel</span><span class="text-green-600 font-medium">SÃ­ (${data.redis_canal})</span></div>`
                 : '';
 
-            // Canal a usar: activo en Redis → seleccionado en formulario → fallback
+            // Canal a usar: activo en Redis â†’ seleccionado en formulario â†’ fallback
             const canalParaTakeControl = data.redis_canal
                 || formData.get('canal')
                 || 'whatsapp_directo';
@@ -6535,10 +6535,10 @@ async function createManualContact(event) {
 
             showCreateResult('warning', `
                 <div class="space-y-2 text-sm">
-                    <p class="font-semibold text-yellow-800">⚠ Contacto ya existe</p>
+                    <p class="font-semibold text-yellow-800">âš  Contacto ya existe</p>
                     <div class="bg-white rounded p-2 space-y-1 border border-yellow-200">
                         <div class="flex justify-between"><span class="text-gray-500">Nombre</span><span class="font-medium">${data.display_name}</span></div>
-                        <div class="flex justify-between"><span class="text-gray-500">Teléfono</span><span class="font-mono text-xs">${data.phone}</span></div>
+                        <div class="flex justify-between"><span class="text-gray-500">TelÃ©fono</span><span class="font-mono text-xs">${data.phone}</span></div>
                         ${ownerLine}
                         ${historyLine}
                         ${canalLine}
@@ -6560,7 +6560,7 @@ async function createManualContact(event) {
 
                 // Seleccionar el nuevo contacto automaticamente
                 if (data.contact_id && data.phone) {
-                    // Inicializar badge de no leídos en 0
+                    // Inicializar badge de no leÃ­dos en 0
                     unreadCounts[data.phone] = 0;
                     updateUnreadBadge(data.phone, 0);
                     const selectedCanal = formData.get('canal') || 'whatsapp_directo';
@@ -6602,7 +6602,7 @@ function showCreateResult(type, message) {
     resultDiv.classList.remove('hidden');
 }
 
-// ─── Sistema de Transferencia ────────────────────────────────────────────────
+// â”€â”€â”€ Sistema de Transferencia â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Solicita la transferencia de un contacto al asesor propietario.
@@ -6619,16 +6619,16 @@ async function requestTransfer(contactId, phone, ownerAdvisorId, contactName, ca
         const resp = await fetch(url, { method: 'POST', headers: { 'X-API-Key': API_KEY } });
         const data = await resp.json();
         if (data.status === 'transferred') {
-            // Transferencia inmediata — cerrar modal y refrescar panel
+            // Transferencia inmediata â€” cerrar modal y refrescar panel
             closeCreateContactModal();
             scheduleContactsRefresh();
-            showToast(`Contacto transferido — aparecerá en tu panel`, 'success');
+            showToast(`Contacto transferido â€” aparecerÃ¡ en tu panel`, 'success');
         } else {
             showCreateResult('error', 'Error al tomar contacto');
         }
     } catch (e) {
         console.error('[Panel] Error en requestTransfer:', e);
-        showCreateResult('error', 'Error de conexión');
+        showCreateResult('error', 'Error de conexiÃ³n');
     }
 }
 
@@ -6644,7 +6644,7 @@ function showTransferRequestModal(msg) {
     div.className = 'fixed bottom-4 right-4 bg-white shadow-xl rounded-lg p-4 border border-yellow-300 z-50 max-w-sm';
     div.innerHTML = `
         <div class="flex items-start gap-2">
-            <span class="text-yellow-500 text-lg mt-0.5">📤</span>
+            <span class="text-yellow-500 text-lg mt-0.5">ðŸ“¤</span>
             <div class="flex-1">
                 <p class="font-semibold text-sm text-yellow-800">Solicitud de transferencia</p>
                 <p class="text-sm text-gray-700 mt-1">
@@ -6702,9 +6702,9 @@ async function rejectTransfer(contactId) {
 }
 
 /**
- * Muestra una notificación tipo toast temporal.
+ * Muestra una notificaciÃ³n tipo toast temporal.
  * @param {string} message - Texto a mostrar
- * @param {'success'|'warning'|'error'|'info'} type - Tipo de notificación
+ * @param {'success'|'warning'|'error'|'info'} type - Tipo de notificaciÃ³n
  */
 function showToast(message, type = 'info') {
     const cssClass = {
@@ -6724,7 +6724,7 @@ function showToast(message, type = 'info') {
     }, 3700);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Toma control de un contacto existente (cuando se detecta duplicado).
@@ -6771,7 +6771,7 @@ async function takeControlOfExisting(contactId, phone, canal = 'whatsapp_directo
 // =========================================================================
 
 let advisorsList = [];       // Cache de asesores
-let _advisorsCacheTime = 0;  // Timestamp de última carga (ms)
+let _advisorsCacheTime = 0;  // Timestamp de Ãºltima carga (ms)
 const ADVISORS_CACHE_TTL = 5 * 60 * 1000;  // 5 minutos
 
 /**
@@ -6813,16 +6813,16 @@ function closeTransferModal() {
 
 /**
  * Carga la lista de asesores disponibles para transferencia.
- * Incluye timeout de 5s y retry automático.
+ * Incluye timeout de 5s y retry automÃ¡tico.
  */
 async function loadAdvisorsList() {
     const select = document.getElementById('transferToOwner');
     if (!select) return;
 
-    // Usar caché si está fresca (< 5 min) y hay datos
+    // Usar cachÃ© si estÃ¡ fresca (< 5 min) y hay datos
     const now = Date.now();
     if (advisorsList.length > 0 && (now - _advisorsCacheTime) < ADVISORS_CACHE_TTL) {
-        console.log('[Panel] Asesores desde caché:', advisorsList.length);
+        console.log('[Panel] Asesores desde cachÃ©:', advisorsList.length);
         _populateAdvisorsSelect(select, advisorsList);
         return;
     }
@@ -6856,7 +6856,7 @@ async function loadAdvisorsList() {
 
             _populateAdvisorsSelect(select, advisorsList);
             console.log('[Panel] Asesores cargados y cacheados:', advisorsList.length);
-            return; // Éxito, salir
+            return; // Ã‰xito, salir
 
         } catch (error) {
             lastError = error;
@@ -6869,8 +6869,8 @@ async function loadAdvisorsList() {
     }
 
     // Todos los intentos fallaron
-    console.error('[Panel] Error cargando asesores después de', maxRetries, 'intentos:', lastError);
-    select.innerHTML = '<option value="">Error - Reintentar más tarde</option>';
+    console.error('[Panel] Error cargando asesores despuÃ©s de', maxRetries, 'intentos:', lastError);
+    select.innerHTML = '<option value="">Error - Reintentar mÃ¡s tarde</option>';
 }
 
 function _populateAdvisorsSelect(select, advisors) {
@@ -6883,7 +6883,7 @@ function _populateAdvisorsSelect(select, advisors) {
     }
 }
 
-/** Invalida el caché de asesores (llamar tras crear/eliminar una asesora). */
+/** Invalida el cachÃ© de asesores (llamar tras crear/eliminar una asesora). */
 function invalidateAdvisorsCache() {
     advisorsList = [];
     _advisorsCacheTime = 0;
@@ -6972,17 +6972,17 @@ function showTransferResult(type, message) {
 }
 
 // =========================================================================
-// WORKERS — Gestión del equipo de campo
+// WORKERS â€” GestiÃ³n del equipo de campo
 // =========================================================================
 
 let workersCache = [];       // Cache local de workers para el selector del modal de citas
-let _workersCacheTime = 0;  // Timestamp de última carga (ms)
+let _workersCacheTime = 0;  // Timestamp de Ãºltima carga (ms)
 const WORKERS_CACHE_TTL = 5 * 60 * 1000;  // 5 minutos
 
 async function openWorkersModal() {
     document.getElementById('workersModal').classList.remove('hidden');
 
-    // Mostrar sección de nombre del asesor si hay ADVISOR_ID
+    // Mostrar secciÃ³n de nombre del asesor si hay ADVISOR_ID
     if (ADVISOR_ID) {
         document.getElementById('advisorNameSection').classList.remove('hidden');
         document.getElementById('advisorSeparator').classList.remove('hidden');
@@ -7000,7 +7000,7 @@ function closeWorkersModal() {
 }
 
 /**
- * Guarda el nuevo nombre del asesor en MongoDB y actualiza el título del panel.
+ * Guarda el nuevo nombre del asesor en MongoDB y actualiza el tÃ­tulo del panel.
  */
 async function saveAdvisorName() {
     const input = document.getElementById('advisorNameInput');
@@ -7027,18 +7027,18 @@ async function saveAdvisorName() {
         });
 
         if (response.ok) {
-            // Actualizar variables globales y título del panel
+            // Actualizar variables globales y tÃ­tulo del panel
             ADVISOR_NAMES[ADVISOR_ID] = newName;
             // No podemos reasignar ADVISOR_NAME (const), pero actualizamos el DOM directamente
             document.getElementById('panelTitle').textContent = `Panel de ${newName}`;
 
-            // Actualizar también la lista de advisors para el dropdown de transferencias
+            // Actualizar tambiÃ©n la lista de advisors para el dropdown de transferencias
             const advisorIndex = advisorsList.findIndex(a => a.id === ADVISOR_ID);
             if (advisorIndex >= 0) {
                 advisorsList[advisorIndex].name = newName;
             }
 
-            statusEl.textContent = '✓ Nombre actualizado correctamente';
+            statusEl.textContent = 'âœ“ Nombre actualizado correctamente';
             statusEl.className = 'text-xs mt-1 text-green-600';
             statusEl.classList.remove('hidden');
 
@@ -7050,7 +7050,7 @@ async function saveAdvisorName() {
             statusEl.classList.remove('hidden');
         }
     } catch (e) {
-        statusEl.textContent = 'Error de conexión al guardar';
+        statusEl.textContent = 'Error de conexiÃ³n al guardar';
         statusEl.className = 'text-xs mt-1 text-red-500';
         statusEl.classList.remove('hidden');
         console.error('[Panel] Error guardando nombre del asesor:', e);
@@ -7058,10 +7058,10 @@ async function saveAdvisorName() {
 }
 
 async function loadWorkers(forceRefresh = false) {
-    // Usar caché si está fresca (< 5 min) y hay datos
+    // Usar cachÃ© si estÃ¡ fresca (< 5 min) y hay datos
     const now = Date.now();
     if (!forceRefresh && workersCache.length > 0 && (now - _workersCacheTime) < WORKERS_CACHE_TTL) {
-        console.log('[Panel] Workers desde caché:', workersCache.length);
+        console.log('[Panel] Workers desde cachÃ©:', workersCache.length);
         renderWorkersList(workersCache);
         return;
     }
@@ -7084,7 +7084,7 @@ async function loadWorkers(forceRefresh = false) {
 function renderWorkersList(workers) {
     const container = document.getElementById('workersList');
     if (!workers || workers.length === 0) {
-        container.innerHTML = '<p class="text-sm text-gray-400 text-center py-4">Sin encargados aún. Agrega el primero.</p>';
+        container.innerHTML = '<p class="text-sm text-gray-400 text-center py-4">Sin encargados aÃºn. Agrega el primero.</p>';
         return;
     }
     container.innerHTML = workers.map(w => `
@@ -7128,13 +7128,13 @@ async function saveEditWorker(workerId) {
             body: JSON.stringify({ name: newName })
         });
         if (response.ok) {
-            await loadWorkers(true); // forceRefresh: invalidar caché tras editar
+            await loadWorkers(true); // forceRefresh: invalidar cachÃ© tras editar
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo actualizar'));
         }
     } catch (e) {
-        alert('Error de conexión al actualizar encargado');
+        alert('Error de conexiÃ³n al actualizar encargado');
     }
 }
 
@@ -7151,36 +7151,36 @@ async function createWorker() {
         });
         if (response.ok) {
             input.value = '';
-            await loadWorkers(true); // forceRefresh: invalidar caché tras crear
+            await loadWorkers(true); // forceRefresh: invalidar cachÃ© tras crear
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo crear el encargado'));
         }
     } catch (e) {
-        alert('Error de conexión al crear encargado');
+        alert('Error de conexiÃ³n al crear encargado');
     }
 }
 
 async function deleteWorker(workerId, workerName) {
-    if (!confirm(`¿Eliminar a "${workerName}"? Sus citas históricas se conservan.`)) return;
+    if (!confirm(`Â¿Eliminar a "${workerName}"? Sus citas histÃ³ricas se conservan.`)) return;
     try {
         const response = await fetch(`${BASE_URL}/workers/${workerId}`, {
             method: 'DELETE',
             headers: { 'X-API-Key': API_KEY }
         });
         if (response.ok) {
-            await loadWorkers(true); // forceRefresh: invalidar caché tras eliminar
+            await loadWorkers(true); // forceRefresh: invalidar cachÃ© tras eliminar
         } else {
             const err = await response.json();
             alert('Error: ' + (err.detail || 'No se pudo eliminar'));
         }
     } catch (e) {
-        alert('Error de conexión al eliminar encargado');
+        alert('Error de conexiÃ³n al eliminar encargado');
     }
 }
 
 // =========================================================================
-// APPOINTMENTS — Gestión de citas
+// APPOINTMENTS â€” GestiÃ³n de citas
 // =========================================================================
 
 let currentAppointments = []; // Cache de citas del contacto actual
@@ -7218,7 +7218,7 @@ async function _loadWorkersIntoSelect() {
             workersCache = data.workers || [];
         }
         if (workersCache.length === 0) {
-            select.innerHTML = '<option value="">Sin encargados — agrega uno en ⚙️</option>';
+            select.innerHTML = '<option value="">Sin encargados â€” agrega uno en âš™ï¸</option>';
             return;
         }
         select.innerHTML = '<option value="">-- Seleccionar encargado --</option>' +
@@ -7263,7 +7263,7 @@ async function _loadAppointmentsAndRender() {
         if (scheduled.length > 0) {
             scheduledSection.classList.remove('hidden');
             scheduledList.innerHTML = scheduled.map(a => _renderScheduledAppointment(a)).join('');
-            modalTitle.textContent = '📅 Citas';
+            modalTitle.textContent = 'ðŸ“… Citas';
         } else {
             scheduledSection.classList.add('hidden');
         }
@@ -7297,7 +7297,7 @@ function _renderScheduledAppointment(appt) {
     const dateStr = dt ? dt.toLocaleString('es-CO', {
         weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
         hour: 'numeric', minute: '2-digit', hour12: true
-    }) : '—';
+    }) : 'â€”';
 
     return `
         <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 relative group">
@@ -7305,7 +7305,7 @@ function _renderScheduledAppointment(appt) {
                 <div class="flex-1">
                     <p class="font-medium text-amber-800 text-sm">${dateStr}</p>
                     <p class="text-xs text-gray-600 mt-1">
-                        <span class="font-medium">Encargado:</span> ${appt.worker_name || '—'}
+                        <span class="font-medium">Encargado:</span> ${appt.worker_name || 'â€”'}
                     </p>
                     ${appt.notes ? `<p class="text-xs text-gray-500 mt-1 italic">${appt.notes}</p>` : ''}
                 </div>
@@ -7334,12 +7334,12 @@ function _renderPastAppointment(appt) {
     const dt = appt.appointment_dt ? new Date(appt.appointment_dt) : null;
     const dateStr = dt ? dt.toLocaleString('es-CO', {
         dateStyle: 'short', timeStyle: 'short'
-    }) : '—';
+    }) : 'â€”';
     const isCancelled = appt.status === 'cancelled';
     const statusClass = isCancelled ? 'text-red-400 line-through' : 'text-gray-600';
     const statusBadge = isCancelled ? '<span class="text-red-400 text-xs ml-1">(cancelada)</span>' : '';
 
-    return `<div class="${statusClass}">📅 ${dateStr} — ${appt.worker_name}${appt.notes ? ` | ${appt.notes}` : ''}${statusBadge}</div>`;
+    return `<div class="${statusClass}">ðŸ“… ${dateStr} â€” ${appt.worker_name}${appt.notes ? ` | ${appt.notes}` : ''}${statusBadge}</div>`;
 }
 
 function showAppointmentForm(isEdit = false) {
@@ -7354,9 +7354,9 @@ function showAppointmentForm(isEdit = false) {
         document.getElementById('apptWorkerSelect').value = '';
         document.getElementById('apptNotes').value = '';
         submitBtn.textContent = 'Agendar Cita';
-        modalTitle.textContent = '📅 Nueva Cita';
+        modalTitle.textContent = 'ðŸ“… Nueva Cita';
 
-        // Fecha por defecto: mañana 10AM
+        // Fecha por defecto: maÃ±ana 10AM
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setHours(10, 0, 0, 0);
@@ -7373,7 +7373,7 @@ function hideAppointmentForm() {
     if (currentAppointments.length > 0) {
         document.getElementById('appointmentListView').classList.remove('hidden');
         document.getElementById('appointmentForm').classList.add('hidden');
-        document.getElementById('apptModalTitle').textContent = '📅 Citas';
+        document.getElementById('apptModalTitle').textContent = 'ðŸ“… Citas';
     } else {
         closeAppointmentModal();
     }
@@ -7384,7 +7384,7 @@ function editAppointment(apptId) {
     if (!appt) return;
 
     document.getElementById('editingApptId').value = apptId;
-    document.getElementById('apptModalTitle').textContent = '📅 Editar Cita';
+    document.getElementById('apptModalTitle').textContent = 'ðŸ“… Editar Cita';
     document.getElementById('apptSubmitBtn').textContent = 'Guardar Cambios';
 
     // Cargar datos en el form
@@ -7410,7 +7410,7 @@ function editAppointment(apptId) {
 }
 
 async function deleteAppointment(apptId) {
-    if (!confirm('¿Eliminar esta cita permanentemente?')) return;
+    if (!confirm('Â¿Eliminar esta cita permanentemente?')) return;
 
     try {
         const response = await fetch(`${BASE_URL}/appointments/${apptId}`, {
@@ -7426,7 +7426,7 @@ async function deleteAppointment(apptId) {
             showToast('Error al eliminar cita', 'error');
         }
     } catch (e) {
-        showToast('Error de conexión', 'error');
+        showToast('Error de conexiÃ³n', 'error');
     }
 }
 
@@ -7484,12 +7484,12 @@ async function submitAppointment(event) {
         if (response.ok) {
             content.className = 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
             content.innerHTML = editingId
-                ? `✅ Cita actualizada correctamente`
-                : `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`;
+                ? `âœ… Cita actualizada correctamente`
+                : `âœ… Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`;
             resultDiv.classList.remove('hidden');
 
-            // [Badge] Update optimista: mostrar badge 📅 inmediatamente sin esperar GET /contacts
-            // Solo en citas nuevas (no edición). La confirmación del servidor llega con loadContacts().
+            // [Badge] Update optimista: mostrar badge ðŸ“… inmediatamente sin esperar GET /contacts
+            // Solo en citas nuevas (no ediciÃ³n). La confirmaciÃ³n del servidor llega con loadContacts().
             if (!editingId && currentContactId) {
                 const _badgeTarget = allContacts.find(c => c.contact_id === currentContactId);
                 if (_badgeTarget) {
@@ -7516,7 +7516,7 @@ async function submitAppointment(event) {
         const resultDiv = document.getElementById('appointmentResult');
         const content = resultDiv.querySelector('div');
         content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';
-        content.textContent = 'Error de conexión. Intenta de nuevo.';
+        content.textContent = 'Error de conexiÃ³n. Intenta de nuevo.';
         resultDiv.classList.remove('hidden');
         submitBtn.disabled = false;
         submitBtn.textContent = editingId ? 'Guardar Cambios' : 'Agendar Cita';
@@ -7524,24 +7524,24 @@ async function submitAppointment(event) {
 }
 
 // =========================================================================
-// BULK MESSAGING — Mensaje masivo por embudo (per-asesora)
+// BULK MESSAGING â€” Mensaje masivo por embudo (per-asesora)
 // =========================================================================
 
 const BULK_EXCLUDED_STAGES = [
-    "1326623075",  // En Conversación (stage unificado)
+    "1326623075",  // En ConversaciÃ³n (stage unificado)
     "evangelist",  // Cerrado perdido
     "1326632628",  // Ana Contratos
     "1326632209"   // Pagos y Servicios Publicos
 ];
 
-// Plantillas permitidas para envío masivo. La var key='1' (nombre) siempre se
-// auto-fill desde HubSpot per-contacto. Las demás se escriben en el modal.
+// Plantillas permitidas para envÃ­o masivo. La var key='1' (nombre) siempre se
+// auto-fill desde HubSpot per-contacto. Las demÃ¡s se escriben en el modal.
 const BULK_TEMPLATES = [
     {
         sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
         name: 'aun_en_busqueda',
-        label: '¿Aún estás interesado?',
-        preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
+        label: 'Â¿AÃºn estÃ¡s interesado?',
+        preview: 'Hola {1} ðŸ˜Š Â¿AÃºn continÃºas en la bÃºsqueda de un inmueble para arriendo?',
         vars: [
             { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' }
         ]
@@ -7550,7 +7550,7 @@ const BULK_TEMPLATES = [
         sid: 'HX287a1c005459a6ceaec90a35108330c3',
         name: 'seguimiento_personalizado',
         label: 'Seguimiento Personalizado',
-        preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
+        preview: 'Hola {1} Â¿Como se encuentra el dÃ­a de hoy? {2}. EstarÃ© pendiente a su respuesta.',
         vars: [
             { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' },
             { key: '2', label: 'Mensaje personalizado' }
@@ -7573,7 +7573,7 @@ function _updateBulkButtonVisibility() {
 }
 
 function _formatDateShort(isoStr) {
-    if (!isoStr) return '—';
+    if (!isoStr) return 'â€”';
     try {
         const d = new Date(isoStr);
         if (isNaN(d.getTime())) return isoStr.slice(0, 10);
@@ -7587,7 +7587,7 @@ async function openBulkMessagingModal() {
         return;
     }
     if (!ADVISOR_ID) {
-        alert('No se detectó tu identificador de asesora. Recarga el panel.');
+        alert('No se detectÃ³ tu identificador de asesora. Recarga el panel.');
         return;
     }
 
@@ -7597,7 +7597,7 @@ async function openBulkMessagingModal() {
     document.getElementById('bulkSendCount').textContent = '0';
     document.getElementById('bulkSendBtn').disabled = true;
 
-    // Fechas: últimos 30 días por default
+    // Fechas: Ãºltimos 30 dÃ­as por default
     const today = new Date();
     const thirtyDaysAgo = new Date(today.getTime() - 30 * 86400000);
     document.getElementById('bulkDateFrom').value = thirtyDaysAgo.toISOString().slice(0, 10);
@@ -7616,7 +7616,7 @@ async function openBulkMessagingModal() {
         }
     });
 
-    // Cargar último envío de esta asesora en este embudo
+    // Cargar Ãºltimo envÃ­o de esta asesora en este embudo
     _loadLastBulkCampaignBanner();
 
     document.getElementById('bulkMessagingModal').classList.remove('hidden');
@@ -7648,12 +7648,12 @@ function onBulkTemplateChange() {
 
     container.innerHTML = tpl.vars.map(v => {
         if (v.auto_fill) {
-            // Variable auto-fill per-contacto — info inmutable
+            // Variable auto-fill per-contacto â€” info inmutable
             return `
             <div class="bg-gray-50 border border-gray-200 rounded px-3 py-2">
                 <div class="text-xs text-gray-700 font-medium">{${v.key}} ${v.label}</div>
                 <div class="text-xs text-gray-500 italic mt-0.5">
-                    🔄 Se usará el nombre de cada contacto automáticamente.
+                    ðŸ”„ Se usarÃ¡ el nombre de cada contacto automÃ¡ticamente.
                 </div>
             </div>`;
         }
@@ -7665,7 +7665,7 @@ function onBulkTemplateChange() {
             </label>
             <input type="text" id="bulkVar_${v.key}" required oninput="_updateBulkPreviewBox(); _scheduleBulkPreview();"
                 class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#F5C400]"
-                placeholder="Ej: te escribo para preguntar si aún estás buscando"
+                placeholder="Ej: te escribo para preguntar si aÃºn estÃ¡s buscando"
                 value="${existingVal.replace(/"/g, '&quot;')}">
         </div>`;
     }).join('');
@@ -7713,20 +7713,20 @@ async function _loadLastBulkCampaignBanner() {
         const resp = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
         const data = await resp.json();
         if (!resp.ok || !data.last) {
-            banner.textContent = 'Sin envíos masivos previos en este embudo.';
+            banner.textContent = 'Sin envÃ­os masivos previos en este embudo.';
             return;
         }
         const last = data.last;
         const sent = last.sent_count || 0;
         const total = last.total_contacts || 0;
         banner.innerHTML = `
-            <strong>Último envío:</strong> ${_formatDateShort(last.created_at)} —
-            rango ${last.date_from || '—'} → ${last.date_to || '—'} —
+            <strong>Ãšltimo envÃ­o:</strong> ${_formatDateShort(last.created_at)} â€”
+            rango ${last.date_from || 'â€”'} â†’ ${last.date_to || 'â€”'} â€”
             ${sent}/${total} enviados (${last.status})
         `;
     } catch (e) {
         console.error('[Bulk] Error cargando banner:', e);
-        banner.textContent = 'No se pudo cargar el histórico.';
+        banner.textContent = 'No se pudo cargar el histÃ³rico.';
     }
 }
 
@@ -7774,9 +7774,9 @@ async function _loadBulkCampaignPreview() {
         const totalStage = data.total_in_stage || 0;
         countEl.textContent = total;
         previewEl.innerHTML = `
-            <strong>${total}</strong> contactos serán contactados
+            <strong>${total}</strong> contactos serÃ¡n contactados
             (de ${totalStage} totales en "${data.stage_name}" asignados a ti).
-            ${total !== totalStage ? '<br><span class="text-xs text-gray-600">El rango de fechas filtra por último mensaje del cliente.</span>' : ''}
+            ${total !== totalStage ? '<br><span class="text-xs text-gray-600">El rango de fechas filtra por Ãºltimo mensaje del cliente.</span>' : ''}
         `;
         btn.disabled = total === 0 || collected.hasMissing;
     } catch (e) {
@@ -7801,14 +7801,14 @@ async function submitBulkCampaign() {
     const ok = confirm(
         `Vas a enviar a ${total} contactos TUYOS en "${stageName}".\n\n` +
         `Plantilla: ${collected.template.label}\n` +
-        `Rango: ${dateFrom || 'cualquiera'} → ${dateTo || 'cualquiera'}\n\n` +
-        `Esta acción no se puede deshacer. ¿Continuar?`
+        `Rango: ${dateFrom || 'cualquiera'} â†’ ${dateTo || 'cualquiera'}\n\n` +
+        `Esta acciÃ³n no se puede deshacer. Â¿Continuar?`
     );
     if (!ok) return;
 
     const btn = document.getElementById('bulkSendBtn');
     btn.disabled = true;
-    btn.textContent = 'Creando campaña...';
+    btn.textContent = 'Creando campaÃ±a...';
     try {
         const resp = await fetch(`${BASE_URL}/bulk-campaigns`, {
             method: 'POST',
@@ -7837,7 +7837,7 @@ async function submitBulkCampaign() {
         _showBulkProgressCard(data.stage_name, 0, data.total);
         _startBulkCampaignPolling(data.campaign_id);
     } catch (e) {
-        alert('Error de red al crear la campaña.');
+        alert('Error de red al crear la campaÃ±a.');
         console.error('[Bulk] submit error:', e);
         btn.disabled = false;
         btn.textContent = `Enviar a ${total} contactos`;
@@ -7847,7 +7847,7 @@ async function submitBulkCampaign() {
 function _showBulkProgressCard(stageName, sent, total) {
     const card = document.getElementById('bulkProgressCard');
     if (!card) return;
-    document.getElementById('bulkProgressTitle').textContent = `Campaña: ${stageName}`;
+    document.getElementById('bulkProgressTitle').textContent = `CampaÃ±a: ${stageName}`;
     document.getElementById('bulkProgressText').textContent = `${sent} / ${total} enviados`;
     const pct = total > 0 ? Math.round((sent / total) * 100) : 0;
     document.getElementById('bulkProgressBar').style.width = `${pct}%`;
@@ -7878,7 +7878,7 @@ async function _pollBulkCampaign(campaignId) {
             { headers: { 'X-API-Key': API_KEY } }
         );
         if (!resp.ok) {
-            // 403/404 → detener polling
+            // 403/404 â†’ detener polling
             if (resp.status === 403 || resp.status === 404) {
                 hideBulkProgressCard();
             }
@@ -7888,7 +7888,7 @@ async function _pollBulkCampaign(campaignId) {
         const sent = data.sent_count || 0;
         const failed = data.failed_count || 0;
         const total = data.total_contacts || 0;
-        _showBulkProgressCard(data.stage_name || '—', sent, total);
+        _showBulkProgressCard(data.stage_name || 'â€”', sent, total);
         if (data.status === 'completed' || data.status === 'failed') {
             clearInterval(_bulkPollTimer);
             _bulkPollTimer = null;
@@ -7896,7 +7896,7 @@ async function _pollBulkCampaign(campaignId) {
             const ko = failed;
             setTimeout(() => {
                 hideBulkProgressCard();
-                alert(`Campaña finalizada: ${ok} enviados, ${ko} fallidos.`);
+                alert(`CampaÃ±a finalizada: ${ok} enviados, ${ko} fallidos.`);
             }, 800);
         }
     } catch (e) {
@@ -7904,7 +7904,7 @@ async function _pollBulkCampaign(campaignId) {
     }
 }
 
-// Reanudar polling tras F5 si había campaña activa
+// Reanudar polling tras F5 si habÃ­a campaÃ±a activa
 (function _restoreActiveBulkCampaign() {
     try {
         const raw = sessionStorage.getItem('_activeBulkCampaign');
@@ -7912,12 +7912,7 @@ async function _pollBulkCampaign(campaignId) {
         const obj = JSON.parse(raw);
         if (!obj || !obj.id) return;
         _activeBulkCampaignId = obj.id;
-        _showBulkProgressCard(obj.stage_name || '—', 0, obj.total || 0);
+        _showBulkProgressCard(obj.stage_name || 'â€”', 0, obj.total || 0);
         _startBulkCampaignPolling(obj.id);
     } catch (_) {}
 })();
-        }
-    } catch (err) {
-        console.warn('[BulkCampaign][Poll] Error:', err);
-    }
-}

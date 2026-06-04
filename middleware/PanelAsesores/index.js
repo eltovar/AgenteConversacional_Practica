@@ -4196,7 +4196,7 @@ function toggleDetailsPanel() {
 // =========================================================================
 // PANEL DE DETALLES (COLUMNA C) â€” Lead info, datos bÃ¡sicos
 // =========================================================================
-
+//kjiuhiu
 /**
  * Popula la columna C con los datos del contacto seleccionado.
  * Usa los datos ya disponibles en allContacts (sin fetch adicional).

@@ -33,3 +33,9 @@ cleanup_report_*.csv
 railway_logs_output.txt
 railway_logs_*.txt
 *.log
+# Locales con PII / instaladores externos
+*.docx
+*.xlsx
+INFORME_*
+*.msi
+mongosh*

@@ -42,11 +42,42 @@ except ImportError:
 
 
 def get_mongo_url() -> str:
-    url = os.getenv("MONGO_URL") or os.getenv("MONGO_PUBLIC_URL")
-    if not url:
-        print("[ERROR] Variable de entorno MONGO_URL no encontrada.")
-        print("       Carga con: $env:MONGO_URL = (railway variables --kv | ...)")
+    """
+    Prioridad de URL:
+      1. MONGO_PUBLIC_URL (recomendado para ejecución local — usa proxy externo).
+      2. MONGO_URL (solo válido si tiene un host público o estás dentro de Railway).
+    Si MONGO_URL apunta a *.railway.internal y no estamos en Railway, abortar
+    con instrucciones claras para evitar [Errno 11001] getaddrinfo failed.
+    """
+    public = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGODB_PUBLIC_URL")
+    internal = os.getenv("MONGO_URL") or os.getenv("MONGODB_URL")
+    is_in_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+
+    # Si la única URL disponible apunta a la red interna y NO estamos en Railway,
+    # cortar temprano con guía.
+    if not public and internal and "railway.internal" in internal and not is_in_railway:
+        print("[ERROR] Solo encontré MONGO_URL apuntando a red interna Railway")
+        print("        (mongodb.railway.internal) — no resuelve fuera del cluster.")
+        print()
+        print("        Carga MONGO_PUBLIC_URL en su lugar:")
+        print('          $env:MONGO_URL = (railway variables --kv | Select-String "^MONGO_PUBLIC_URL=" |')
+        print('                             ForEach-Object { $_ -replace "^MONGO_PUBLIC_URL=", "" }).Trim()')
         sys.exit(2)
+
+    url = public or internal
+    if not url:
+        print("[ERROR] No encontré MONGO_PUBLIC_URL ni MONGO_URL en el entorno.")
+        print('       Carga con: $env:MONGO_URL = (railway variables --kv | Select-String "^MONGO_PUBLIC_URL=" |')
+        print('                                    ForEach-Object { $_ -replace "^MONGO_PUBLIC_URL=", "" }).Trim()')
+        sys.exit(2)
+
+    # Validación final: si la URL elegida es internal y no estamos en Railway, abortar
+    if "railway.internal" in url and not is_in_railway:
+        print("[ERROR] La URL configurada apunta a la red interna de Railway.")
+        print("       Ese host solo resuelve dentro del cluster.")
+        print("       Carga la variable MONGO_PUBLIC_URL en su lugar (ver comando arriba).")
+        sys.exit(2)
+
     return url
 
 
@@ -141,6 +172,7 @@ def cmd_apply_ttl(db) -> int:
         print(f"  ❌ Drop falló: {e}")
         return 2
 
+
     print("\n→ createIndex(timestamp:1, expireAfterSeconds=63072000)...")
     try:
         db.messages.create_index(
@@ -179,7 +211,6 @@ def main() -> int:
     print(f"Conectando a MongoDB host={masked_host(url)} (URL length={len(url)})")
     try:
         client = MongoClient(url, serverSelectionTimeoutMS=10000)
-        # Ping
         client.admin.command("ping")
         print("✅ Ping OK")
     except Exception as e:

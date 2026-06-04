@@ -4049,20 +4049,29 @@ async def hydrate_contact_endpoint(
 
 
 @router.get("/conversations/{phone}")
+@limiter.limit("60/minute")
 async def get_conversation_history(
+    request: Request,
     phone: str,
-    # ⚠️ 2026-05-30: default 100 (antes 50), cap 500 (antes 100). Permite ver historial
-    # completo de conversaciones largas sin perder mensajes que MongoDB sí tiene.
+    # ⚠️ 2026-06-02: default bajado de 500 → 100 (carga inicial rápida).
+    # Frontend usa scroll infinito con before_ts para cargar páginas siguientes.
     limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal para filtrar mensajes"),
+    before_ts: Optional[str] = Query(
+        None,
+        description="Cursor ISO 8601 — retorna mensajes con timestamp < before_ts (paginación)"
+    ),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Obtiene el historial de conversación de un contacto por teléfono.
 
-    ARQUITECTURA v2.0:
-    1. Consultar MongoDB primero (fuente de verdad en tiempo real, ~5ms)
-    2. Si MongoDB vacío o no disponible → Fallback a HubSpot (migración)
+    ARQUITECTURA v2.0 + paginación cursor-based (2026-06-02):
+    1. Consultar MongoDB con filtro before_ts si presente (paginación).
+    2. Si MongoDB vacío Y NO es página paginada → Fallback a HubSpot.
+       En páginas paginadas (before_ts presente) NUNCA llamar HubSpot
+       para evitar 25+ requests externos en un scroll.
+    3. Retornar `has_more` y `oldest_ts` para que frontend pagine.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -4077,6 +4086,17 @@ async def get_conversation_history(
     messages = []
     source = "none"
 
+    # ⚠️ Parse del cursor before_ts → datetime
+    before_ts_dt = None
+    if before_ts:
+        try:
+            before_ts_dt = datetime.fromisoformat(before_ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail=f"before_ts inválido: {before_ts}")
+
+    # ⚠️ Guard HubSpot fallback: solo permitido en primera página (sin cursor).
+    hs_fallback_allowed = (before_ts_dt is None)
+
     try:
         # =====================================================================
         # PASO 1: MongoDB - Fuente de verdad en tiempo real
@@ -4085,7 +4105,8 @@ async def get_conversation_history(
         messages = await mongo_manager.get_history(
             phone=phone_normalized,
             limit=limit,
-            channel=canal
+            channel=canal,
+            before_ts=before_ts_dt,
         )
 
         if messages:
@@ -4097,15 +4118,17 @@ async def get_conversation_history(
             messages = await mongo_manager.get_history(
                 phone=phone_normalized,
                 limit=limit,
-                channel=None
+                channel=None,
+                before_ts=before_ts_dt,
             )
             if messages:
                 source = "mongodb"
 
         # =====================================================================
-        # PASO 2: Si MongoDB vacío → Fallback a HubSpot (datos históricos)
+        # PASO 2: Si MongoDB vacío Y es primera página → Fallback HubSpot
+        # ⚠️ 2026-06-02: hs_fallback_allowed bloquea fallback en paginación
         # =====================================================================
-        if not messages:
+        if not messages and hs_fallback_allowed:
             contact_manager = _get_contact_manager()
             contact_id = await contact_manager._search_contact(phone_normalized)
 
@@ -4118,30 +4141,53 @@ async def get_conversation_history(
                 source = "hubspot"
                 logger.debug(f"[Panel] Historial desde HubSpot (fallback): {len(messages)} mensajes")
 
+        # ⚠️ Metadata de paginación
+        has_more = len(messages) == limit  # si recibimos exactamente `limit`, puede haber más
+        oldest_ts = None
+        if messages:
+            # mensajes vienen ordenados cronológicamente (más antiguo primero)
+            oldest_ts = messages[0].get("timestamp")
+
         return {
             "phone": phone_normalized,
             "messages": messages,
             "count": len(messages),
             "source": source,
-            "canal": canal
+            "canal": canal,
+            "has_more": has_more,
+            "oldest_ts": oldest_ts,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Panel] Error obteniendo historial: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/history/{contact_id}")
+@limiter.limit("60/minute")
 async def get_history_by_contact_id(
+    request: Request,
     contact_id: str,
-    # ⚠️ 2026-05-30: default 100 (antes 50), cap 500 (antes 100).
+    # ⚠️ 2026-06-02: default 100 (carga inicial rápida). Frontend pagina con before_ts.
     limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
     phone: Optional[str] = Query(None, description="Teléfono para buscar historial"),
+    before_ts: Optional[str] = Query(
+        None,
+        description="Cursor ISO 8601 — retorna mensajes con timestamp < before_ts (paginación)"
+    ),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Obtiene el historial de conversación por contact_id.
+
+    Paginación cursor-based (2026-06-02):
+    - Sin before_ts: trae últimos N mensajes (página inicial). HubSpot fallback
+      activo si MongoDB tiene ≤20 mensajes.
+    - Con before_ts: trae N mensajes con timestamp < before_ts. HubSpot fallback
+      BLOQUEADO para evitar requests externos en cada scroll.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -4163,14 +4209,32 @@ async def get_history_by_contact_id(
     messages = []
     source = "none"
 
+    # ⚠️ 2026-06-02: Parse del cursor before_ts
+    before_ts_dt = None
+    if before_ts:
+        try:
+            before_ts_dt = datetime.fromisoformat(before_ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"before_ts inválido: {before_ts}"}
+            )
+
+    # Guard HubSpot fallback: solo permitido en primera página (sin cursor).
+    # En páginas paginadas evita 25+ requests a HubSpot durante un scroll continuo.
+    hs_fallback_allowed = (before_ts_dt is None)
+
     try:
         mongo_manager = get_mongo_manager()
 
-        # Lanzar HubSpot en background inmediatamente — corre en paralelo con MongoDB
-        _tl = get_timeline_logger()
-        _hs_task = asyncio.create_task(
-            _tl.get_notes_for_contact(contact_id=contact_id, limit=limit)
-        )
+        # ⚠️ 2026-06-02: Lanzar HubSpot en background SOLO en primera página.
+        # En páginas paginadas no llamamos HubSpot, así que no creamos la task.
+        _hs_task = None
+        if hs_fallback_allowed:
+            _tl = get_timeline_logger()
+            _hs_task = asyncio.create_task(
+                _tl.get_notes_for_contact(contact_id=contact_id, limit=limit)
+            )
 
         # =====================================================================
         # PASO 1: MongoDB por teléfono (preferido - más eficiente)
@@ -4183,7 +4247,8 @@ async def get_history_by_contact_id(
                 messages = await mongo_manager.get_history(
                     phone=validation.normalized,
                     limit=limit,
-                    channel=canal
+                    channel=canal,
+                    before_ts=before_ts_dt,
                 )
                 if messages:
                     source = "mongodb"
@@ -4195,7 +4260,8 @@ async def get_history_by_contact_id(
                     messages = await mongo_manager.get_history(
                         phone=validation.normalized,
                         limit=limit,
-                        channel=None
+                        channel=None,
+                        before_ts=before_ts_dt,
                     )
                     if messages:
                         source = "mongodb"
@@ -4210,19 +4276,20 @@ async def get_history_by_contact_id(
         if not messages:
             messages = await mongo_manager.get_history_by_contact_id(
                 hubspot_contact_id=contact_id,
-                limit=limit
+                limit=limit,
+                before_ts=before_ts_dt,
             )
             if messages:
                 source = "mongodb"
                 logger.debug(f"[Panel] Historial desde MongoDB (contact_id): {len(messages)} msgs")
 
         # =====================================================================
-        # PASO 3: HubSpot — comparar con resultado MongoDB (ya corrió en paralelo)
-        # (parche transitorio: MongoDB puede tener historial incompleto por OOM kills
-        #  hasta migración a Twilio Conversation API — HubSpot tiene el registro completo)
+        # PASO 3: HubSpot fallback — SOLO si es primera página (hs_fallback_allowed).
+        # ⚠️ 2026-06-02: en paginación (before_ts presente) nunca tocamos HubSpot
+        # para evitar 25+ requests externos durante scroll continuo.
         # =====================================================================
         hs_timeout = False  # P2-B: flag para indicar al frontend que HubSpot no respondió a tiempo
-        if len(messages) <= 20:
+        if hs_fallback_allowed and _hs_task is not None and len(messages) <= 20:
             try:
                 hs_messages = await asyncio.wait_for(_hs_task, timeout=15.0)
             except asyncio.TimeoutError:
@@ -4239,15 +4306,28 @@ async def get_history_by_contact_id(
                 )
                 messages = hs_messages
                 source = "hubspot"
-        else:
-            _hs_task.cancel()  # MongoDB ya tiene suficientes — cancelar HubSpot para ahorrar recursos
+        elif _hs_task is not None:
+            # MongoDB ya tiene suficientes o es paginación → cancelar HubSpot para ahorrar recursos
+            _hs_task.cancel()
 
         # Asegurar que messages sea una lista válida
         if messages is None:
             messages = []
 
+        # ⚠️ Metadata de paginación
+        has_more = len(messages) == limit
+        oldest_ts = None
+        if messages:
+            # messages viene ordenado cronológicamente (más antiguo primero) tras formatBubbles
+            # → primer elemento es el más antiguo de la página actual.
+            oldest_ts = messages[0].get("timestamp")
+
         canal_info = f", canal={canal}" if canal else ""
-        logger.info(f"[Panel] Historial cargado: {len(messages)} msgs para contact_id={contact_id}{canal_info} (source={source})")
+        page_info = f", before_ts={before_ts}" if before_ts else ""
+        logger.info(
+            f"[Panel] Historial cargado: {len(messages)} msgs para contact_id={contact_id}"
+            f"{canal_info}{page_info} (source={source}, has_more={has_more})"
+        )
 
         return {
             "contact_id": contact_id,
@@ -4256,7 +4336,9 @@ async def get_history_by_contact_id(
             "canal": canal,
             "phone": phone,
             "source": source,
-            "hs_timeout": hs_timeout
+            "hs_timeout": hs_timeout,
+            "has_more": has_more,
+            "oldest_ts": oldest_ts,
         }
 
     except Exception as e:

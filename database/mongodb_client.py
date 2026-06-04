@@ -474,7 +474,8 @@ class MongoDBManager:
         phone: str,
         limit: int = 50,
         channel: Optional[str] = None,
-        since: Optional[datetime] = None
+        since: Optional[datetime] = None,
+        before_ts: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         """
         Obtiene historial de mensajes en tiempo real desde MongoDB.
@@ -483,10 +484,16 @@ class MongoDBManager:
             phone: Número de teléfono normalizado
             limit: Máximo de mensajes a retornar
             channel: Filtrar por canal específico (opcional)
-            since: Solo mensajes desde esta fecha (opcional)
+            since: Solo mensajes con timestamp >= since (opcional)
+            before_ts: Cursor — solo mensajes con timestamp < before_ts (paginación)
+                       ⚠️ 2026-06-02: para infinite scroll en el panel. Usa el
+                       índice phone_timestamp_idx → O(log N). Si se pasa, este
+                       endpoint NO debe activar el fallback HubSpot (ver
+                       outbound_panel.py — guard `hs_fallback_allowed`).
 
         Returns:
-            Lista de mensajes en orden cronológico (más antiguo primero)
+            Lista de mensajes en orden cronológico (más antiguo primero).
+            Para detectar `has_more` en el caller, comparar `len(result) == limit`.
         """
         if not await self.connect():
             logger.warning("[MongoDB] No conectado - retornando lista vacía")
@@ -499,10 +506,16 @@ class MongoDBManager:
             if channel:
                 query["channel"] = channel
 
+            # since y before_ts pueden coexistir (rango: [since, before_ts))
+            ts_filter: Dict[str, Any] = {}
             if since:
-                query["timestamp"] = {"$gte": since}
+                ts_filter["$gte"] = since
+            if before_ts:
+                ts_filter["$lt"] = before_ts
+            if ts_filter:
+                query["timestamp"] = ts_filter
 
-            # Ejecutar consulta
+            # Ejecutar consulta — usa índice phone_timestamp_idx
             cursor = self.db.messages.find(query).sort("timestamp", DESCENDING).limit(limit)
             messages = await cursor.to_list(length=limit)
 
@@ -551,20 +564,28 @@ class MongoDBManager:
     async def get_history_by_contact_id(
         self,
         hubspot_contact_id: str,
-        limit: int = 50
+        limit: int = 50,
+        before_ts: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         """
         Obtiene historial por ID de contacto de HubSpot.
 
         Útil cuando el frontend solo tiene el contact_id.
+
+        Args:
+            hubspot_contact_id: ID del contacto en HubSpot.
+            limit: Máximo de mensajes a retornar.
+            before_ts: Cursor — solo mensajes con timestamp < before_ts (paginación).
         """
         if not await self.connect():
             return []
 
         try:
-            cursor = self.db.messages.find(
-                {"hubspot_contact_id": hubspot_contact_id}
-            ).sort("timestamp", DESCENDING).limit(limit)
+            query: Dict[str, Any] = {"hubspot_contact_id": hubspot_contact_id}
+            if before_ts:
+                query["timestamp"] = {"$lt": before_ts}
+
+            cursor = self.db.messages.find(query).sort("timestamp", DESCENDING).limit(limit)
 
             messages = await cursor.to_list(length=limit)
 

@@ -187,6 +187,55 @@ let pickerVisibleItems = [];
 let currentWindowOpen = true;
 
 // =========================================================================
+// ⚠️ 2026-06-02: PAGINACIÓN CURSOR-BASED DEL HISTORIAL (scroll infinito)
+// =========================================================================
+// Tamaño de página: 100 mensajes por request. Calibrado para:
+//   • Carga inicial rápida (~300-500ms para conversaciones típicas).
+//   • Suficiente contexto sin saturar DOM (100 burbujas ≈ 500KB DOM).
+//   • Bajo costo MongoDB: query con índice phone_timestamp_idx = O(log N).
+const CHAT_PAGE_SIZE = 100;
+
+// Trigger del scroll: cargar más cuando scrollTop < SCROLL_THRESHOLD_PX.
+// Margen generoso (200px) → la siguiente página llega antes de que el usuario
+// llegue al límite visual = sin "salto" perceptible.
+const SCROLL_THRESHOLD_PX = 200;
+
+// Throttle del listener scroll → máximo 5 evaluaciones/segundo.
+// Combinado con state.loading reduce a máximo 1 fetch real/segundo.
+const SCROLL_THROTTLE_MS = 200;
+
+// State global de paginación del historial. Una sola conversación abierta a la vez,
+// así que un objeto global basta. Se RESETEA al cambiar de contacto.
+const chatHistoryState = {
+    contactId: null,        // contact_id de la conversación activa
+    canal: null,            // canal asociado (para preservar en paginación)
+    phone: null,            // teléfono asociado
+    oldestTs: null,         // cursor: timestamp del mensaje más antiguo cargado
+    hasMore: true,          // si el backend dijo que aún hay mensajes más antiguos
+    loading: false,         // flag anti-doble-fetch (request en vuelo)
+    listenerAttached: false,// si ya montamos el scroll listener al contenedor
+    scrollTimeout: null,    // handle del setTimeout del throttle
+};
+
+function _resetChatHistoryState(contactId, canal, phone) {
+    chatHistoryState.contactId = contactId || null;
+    chatHistoryState.canal = canal || null;
+    chatHistoryState.phone = phone || null;
+    chatHistoryState.oldestTs = null;
+    chatHistoryState.hasMore = true;
+    chatHistoryState.loading = false;
+    if (chatHistoryState.scrollTimeout) {
+        clearTimeout(chatHistoryState.scrollTimeout);
+        chatHistoryState.scrollTimeout = null;
+    }
+    // Limpiar cache de mensajes — pertenece a la conversación que se cierra.
+    window.__chatMessagesCache = [];
+    // Quitar marcador de "inicio de conversación" si quedó de la conversación anterior.
+    const oldMarker = document.getElementById('chatHistoryStartMarker');
+    if (oldMarker) oldMarker.remove();
+}
+
+// =========================================================================
 // HELPER: UI según estado de ventana 24h
 // =========================================================================
 function _applyWindowClosedUI(isClosed) {
@@ -1558,10 +1607,19 @@ async function loadChatHistory(contactId) {
     const requestedPhone = currentPhone;
     const requestedCanal = currentCanal;
 
+    // ⚠️ 2026-06-02: reset del state de paginación al cambiar conversación.
+    // Garantiza que el cursor (oldestTs) y hasMore correspondan SIEMPRE al
+    // contacto actualmente abierto. Sin esto, scroll en conversación nueva
+    // podría usar oldestTs de la conversación anterior.
+    _resetChatHistoryState(requestedContactId, requestedCanal, requestedPhone);
+
     console.log('[Panel] Cargando historial para contact_id:', requestedContactId, 'canal:', requestedCanal, 'phone:', requestedPhone);
     try {
-        // Construir URL con parametros de segregacion por canal
-        let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=50`;
+        // ⚠️ 2026-06-02: paginación cursor-based con scroll infinito.
+        // Carga inicial = 100 mensajes (los más recientes). Si el usuario scrollea
+        // hacia arriba, loadOlderMessages() trae páginas adicionales de 100 con
+        // ?before_ts=<oldest_ts>. Esto evita transferir miles de mensajes upfront.
+        let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=${CHAT_PAGE_SIZE}`;
         if (requestedCanal) {
             historyUrl += `&canal=${encodeURIComponent(requestedCanal)}`;
         }
@@ -1627,6 +1685,22 @@ async function loadChatHistory(contactId) {
         // Renderizar mensajes (puede estar vacio)
         renderChatBubbles(data.messages || []);
 
+        // ⚠️ 2026-06-02: guardar cursor + has_more en state para paginación.
+        // Solo si el contacto sigue siendo el mismo (race condition guard).
+        if (currentContactId === requestedContactId) {
+            chatHistoryState.hasMore = data.has_more === true;
+            chatHistoryState.oldestTs = data.oldest_ts || null;
+            // Inicializar cache de mensajes (necesario para _prependChatMessages).
+            // El cache contiene los mensajes en orden cronológico exacto.
+            window.__chatMessagesCache = (data.messages || []).slice();
+            // Montar listener de scroll si aún no está montado.
+            _attachScrollListener();
+            // Si has_more=false y hay mensajes, mostrar separador de "inicio"
+            if (!chatHistoryState.hasMore && (data.messages?.length || 0) > 0) {
+                _showHistoryStartMarker();
+            }
+        }
+
         // Mostrar mensaje si no hay historial
         if (!data.messages || data.messages.length === 0) {
             console.log('[Panel] Sin mensajes en historial para canal:', requestedCanal);
@@ -1643,6 +1717,198 @@ async function loadChatHistory(contactId) {
             `;
         }
     }
+}
+
+// =========================================================================
+// ⚠️ 2026-06-02: PAGINACIÓN — Scroll infinito hacia el pasado
+// =========================================================================
+//
+// Diseño:
+//   • Scroll listener throttled (200ms) en #chatMessages.
+//   • Trigger: scrollTop < SCROLL_THRESHOLD_PX Y state.hasMore Y !state.loading.
+//   • Fetch /history/{cid}?before_ts=<oldestTs>&limit=100.
+//   • Prepend mensajes ANTERIORES al inicio del DOM SIN saltos visuales:
+//     guardamos scrollHeight antes, calculamos delta, restauramos scrollTop.
+//   • Si recibimos menos de `limit` mensajes → has_more=false → desactivar trigger.
+//   • Si el usuario cambia de conversación durante el fetch, descartamos resultado.
+//
+// Defensa en profundidad (6 capas):
+//   1. state.loading (anti-doble-fetch)
+//   2. state.hasMore=false (terminal: no más fetches)
+//   3. Throttle scroll listener (max 5 evals/s)
+//   4. Threshold 200px desde top (carga ANTES del límite visual)
+//   5. Race condition check (contactId estable durante fetch)
+//   6. renderChatBubbles deduplica por data-msg-id (defensa final natural)
+// =========================================================================
+
+function _attachScrollListener() {
+    if (chatHistoryState.listenerAttached) return;
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    container.addEventListener('scroll', _onChatScroll);
+    chatHistoryState.listenerAttached = true;
+}
+
+function _onChatScroll() {
+    // Throttle: si ya hay un timeout pendiente, no encolar otro.
+    if (chatHistoryState.scrollTimeout) return;
+    chatHistoryState.scrollTimeout = setTimeout(() => {
+        chatHistoryState.scrollTimeout = null;
+        const container = document.getElementById('chatMessages');
+        if (!container) return;
+        if (container.scrollTop < SCROLL_THRESHOLD_PX) {
+            loadOlderMessages();
+        }
+    }, SCROLL_THROTTLE_MS);
+}
+
+async function loadOlderMessages() {
+    // Guards (capas 1, 2, 5 del diseño)
+    if (chatHistoryState.loading) return;
+    if (!chatHistoryState.hasMore) return;
+    if (!chatHistoryState.oldestTs) return;
+    if (!chatHistoryState.contactId) return;
+    if (chatHistoryState.contactId !== currentContactId) return;
+
+    const requestedCid = chatHistoryState.contactId;
+    const requestedCursor = chatHistoryState.oldestTs;
+    chatHistoryState.loading = true;
+    _showLoadingMoreSpinner(true);
+
+    try {
+        let url = `${BASE_URL}/history/${requestedCid}?limit=${CHAT_PAGE_SIZE}`
+                + `&before_ts=${encodeURIComponent(requestedCursor)}`;
+        if (chatHistoryState.canal) {
+            url += `&canal=${encodeURIComponent(chatHistoryState.canal)}`;
+        }
+        if (chatHistoryState.phone) {
+            url += `&phone=${encodeURIComponent(chatHistoryState.phone)}`;
+        }
+
+        const response = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
+        if (!response.ok) {
+            console.warn(`[Panel][Pagination] HTTP ${response.status} cargando página anterior`);
+            return;
+        }
+        const data = await response.json();
+
+        // Race guard (capa 5): si el usuario cambió de conversación, descartar.
+        if (currentContactId !== requestedCid) {
+            console.warn(`[Panel][Pagination] Contacto cambió durante fetch — descartando`);
+            return;
+        }
+
+        const olderMessages = data.messages || [];
+        if (olderMessages.length === 0) {
+            chatHistoryState.hasMore = false;
+            _showHistoryStartMarker();
+            return;
+        }
+
+        // PREPEND con scroll-restore (sin salto visual)
+        const container = document.getElementById('chatMessages');
+        if (!container) return;
+
+        // 1. Guardar scrollHeight ANTES del prepend
+        const scrollHeightBefore = container.scrollHeight;
+        const scrollTopBefore = container.scrollTop;
+
+        // 2. Renderizar y prepend cada mensaje. renderChatBubbles deduplica por
+        // data-msg-id, pero por seguridad usamos un wrapper que inserta al inicio.
+        _prependChatMessages(olderMessages);
+
+        // 3. Restaurar scroll position relativa al contenido nuevo
+        const scrollHeightAfter = container.scrollHeight;
+        container.scrollTop = scrollTopBefore + (scrollHeightAfter - scrollHeightBefore);
+
+        // 4. Actualizar cursor + hasMore
+        chatHistoryState.hasMore = data.has_more === true;
+        chatHistoryState.oldestTs = data.oldest_ts || null;
+        if (!chatHistoryState.hasMore) {
+            _showHistoryStartMarker();
+        }
+
+        console.log(`[Panel][Pagination] +${olderMessages.length} msgs anteriores cargados (total has_more=${chatHistoryState.hasMore})`);
+
+    } catch (err) {
+        console.warn('[Panel][Pagination] Error:', err);
+    } finally {
+        chatHistoryState.loading = false;
+        _showLoadingMoreSpinner(false);
+    }
+}
+
+// ⚠️ Re-render total con cache cronológico.
+// Aproach simple y robusto: limpiar container y re-renderizar el array completo
+// (mensajes antiguos + mensajes existentes) en orden cronológico exacto.
+// El scroll-restore (calculado en loadOlderMessages) mantiene la posición visual
+// del usuario sin saltos perceptibles.
+//
+// Cache: window.__chatMessagesCache contiene los objetos msg en orden cronológico
+// (más antiguo primero, igual que el formato de /history backend response). Se
+// inicializa en loadChatHistory() y se actualiza aquí en cada paginación.
+function _prependChatMessages(messages) {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+
+    // Dedup contra cache existente (defensa final, capa 6 del diseño).
+    const cache = window.__chatMessagesCache || [];
+    const existingIds = new Set(cache.map(m => String(m.id)));
+    const trulyNew = messages.filter(m => m.id && !existingIds.has(String(m.id)));
+    if (trulyNew.length === 0) return;
+
+    // Concatenar: trulyNew (más antiguos) + cache (existentes) = lista cronológica completa.
+    const merged = [...trulyNew, ...cache];
+    window.__chatMessagesCache = merged;
+
+    // Limpiar container completamente para evitar conflictos con el render
+    // incremental de renderChatBubbles. Como currentContactId no cambió,
+    // renderChatBubbles NO va a re-limpiar — hará appendChild secuencial.
+    container.innerHTML = '';
+    // Limpiar también el marcador "inicio de conversación" si existía
+    // (puede reaparecer al final si has_more sigue siendo false).
+    const oldMarker = document.getElementById('chatHistoryStartMarker');
+    if (oldMarker) oldMarker.remove();
+
+    // ⚠️ Flag para que renderChatBubbles NO haga auto-scroll al fondo.
+    // El caller (loadOlderMessages) restaura la posición manualmente.
+    window.__isPaginating = true;
+    try {
+        renderChatBubbles(merged);
+    } finally {
+        // Limpiar flag después de un breve delay para cubrir el setTimeout
+        // interno de renderChatBubbles (100ms). Si la flag se limpia muy
+        // pronto, el setTimeout encolado podría disparar el auto-scroll.
+        setTimeout(() => { window.__isPaginating = false; }, 200);
+    }
+}
+
+function _showLoadingMoreSpinner(show) {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    let spinner = document.getElementById('chatLoadingMoreSpinner');
+    if (show) {
+        if (!spinner) {
+            spinner = document.createElement('div');
+            spinner.id = 'chatLoadingMoreSpinner';
+            spinner.className = 'flex items-center justify-center py-3 text-gray-500 text-xs';
+            spinner.innerHTML = '<span>📜 Cargando mensajes anteriores...</span>';
+            container.insertBefore(spinner, container.firstChild);
+        }
+    } else {
+        if (spinner) spinner.remove();
+    }
+}
+
+function _showHistoryStartMarker() {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    if (document.getElementById('chatHistoryStartMarker')) return; // ya existe
+    const marker = document.createElement('div');
+    marker.id = 'chatHistoryStartMarker';
+    marker.className = 'flex items-center justify-center py-3 text-gray-400 text-xs';
+    marker.innerHTML = '<span>📜 Inicio de la conversación</span>';
+    container.insertBefore(marker, container.firstChild);
 }
 
 async function checkWindowStatus(phone) {
@@ -1736,7 +2002,9 @@ async function loadContactDetail(phone, contactId, canal) {
     const templateSection = document.getElementById('templateSection');
 
     try {
-        let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=50`;
+        // ⚠️ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). El historial
+        // detallado se carga vía loadChatHistory() con paginación cursor.
+        let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=${CHAT_PAGE_SIZE}`;
         if (contactId) url += `&contact_id=${encodeURIComponent(contactId)}`;
         if (canal) url += `&canal=${encodeURIComponent(canal)}`;
 
@@ -2549,8 +2817,12 @@ function renderChatBubbles(messages) {
         if (msgDate) lastRenderedDate = msgDate;
     });
 
-    // Solo hacer scroll si hay contenido nuevo o es la primera carga
-    if (hasNewContent || isFirstChatLoad) {
+    // Solo hacer scroll si hay contenido nuevo o es la primera carga.
+    // ⚠️ 2026-06-02: si estamos en modo paginación (cargando mensajes anteriores
+    // via scroll infinito), NO hacer auto-scroll al fondo — el caller restaura
+    // la posición manualmente con scrollTop = before + delta.
+    const isPaginating = window.__isPaginating === true;
+    if ((hasNewContent || isFirstChatLoad) && !isPaginating) {
         setTimeout(() => {
             container.scrollTo({
                 top: container.scrollHeight,
@@ -7644,3 +7916,8 @@ async function _pollBulkCampaign(campaignId) {
         _startBulkCampaignPolling(obj.id);
     } catch (_) {}
 })();
+        }
+    } catch (err) {
+        console.warn('[BulkCampaign][Poll] Error:', err);
+    }
+}

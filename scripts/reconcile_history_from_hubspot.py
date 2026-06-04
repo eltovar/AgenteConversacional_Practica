@@ -79,6 +79,48 @@ from zoneinfo import ZoneInfo
 # Permitir importar desde la raíz del proyecto sin instalar el paquete
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+
+# ── Local-execution URL patch ──────────────────────────────────────────────
+# Cuando este script corre vía `railway run` desde una máquina externa al
+# cluster, Railway inyecta RAILWAY_ENVIRONMENT + URLs *.railway.internal que
+# solo resuelven dentro del cluster. Si detectamos URLs públicas disponibles,
+# las preferimos y deseteamos RAILWAY_ENVIRONMENT para que el resto del
+# código (mongodb_client, redis client, etc.) tome el path "local".
+# NO afecta producción: en Railway no hay *_PUBLIC_URL variables expuestas
+# al worker, y aunque las hubiera, la URL no contiene "railway.internal".
+def _force_public_urls_for_local_execution() -> None:
+    swaps: List[str] = []
+
+    # MongoDB
+    mongo_current = os.getenv("MONGO_URL") or os.getenv("MONGODB_URL") or ""
+    mongo_public = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGODB_PUBLIC_URL")
+    if mongo_public and "railway.internal" in mongo_current:
+        os.environ["MONGO_URL"] = mongo_public
+        swaps.append("MONGO_URL→public")
+
+    # Redis (opcional — solo si se usa)
+    redis_current = os.getenv("REDIS_URL") or ""
+    redis_public = os.getenv("REDIS_PUBLIC_URL")
+    if redis_public and "railway.internal" in redis_current:
+        os.environ["REDIS_URL"] = redis_public
+        swaps.append("REDIS_URL→public")
+
+    # Si hicimos algún swap, desetar RAILWAY_ENVIRONMENT para que el cliente
+    # de MongoDB no fuerce el path "internal-only" (líneas 61-72 de
+    # mongodb_client.py).
+    if swaps and os.getenv("RAILWAY_ENVIRONMENT"):
+        os.environ.pop("RAILWAY_ENVIRONMENT", None)
+        swaps.append("RAILWAY_ENVIRONMENT=unset")
+
+    if swaps:
+        # No imprimir las URLs — solo qué se cambió (las URLs llevan password).
+        print(f"[INFO] Local-exec env patch: {', '.join(swaps)}", file=sys.stderr)
+
+
+_force_public_urls_for_local_execution()
+# ────────────────────────────────────────────────────────────────────────────
+
+
 from logging_config import logger  # noqa: E402
 
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")

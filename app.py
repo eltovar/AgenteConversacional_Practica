@@ -89,8 +89,6 @@ from audit_endpoint import audit_router
 from middleware.outbound_panel import update_last_client_message
 from middleware.websocket_manager import ws_manager
 
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN INICIAL
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1517,14 +1515,28 @@ async def startup_event():
 
     # Iniciar Redis Pub/Sub listener para broadcast WebSocket cross-worker
     try:
+        import socket as _socket
         import redis.asyncio as _redis_async
         from middleware.websocket_manager import ws_manager as _ws_manager
+
+        # ── Capa 1: TCP keepalive ───────────────────────────────────────────
+
+        _keepalive_opts = {}
+        if hasattr(_socket, "TCP_KEEPIDLE"):  # Linux only (Railway production)
+            _keepalive_opts = {
+                _socket.TCP_KEEPIDLE: 30,    # primer keepalive a los 30s idle
+                _socket.TCP_KEEPINTVL: 10,   # reintentar cada 10s si no hay ACK
+                _socket.TCP_KEEPCNT: 3,      # 3 fallos consecutivos = socket muerto
+            }
 
         async def _make_redis_for_pubsub():
             return _redis_async.from_url(
                 get_redis_url(),
                 encoding="utf-8",
-                decode_responses=True
+                decode_responses=True,
+                socket_keepalive=True,
+                socket_keepalive_options=_keepalive_opts,
+                health_check_interval=30,  # redis-py PING cada 30s
             )
 
         await _ws_manager.start_redis_listener(_make_redis_for_pubsub)

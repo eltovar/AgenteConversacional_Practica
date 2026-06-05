@@ -1809,21 +1809,26 @@ async function loadOlderMessages() {
         const container = document.getElementById('chatMessages');
         if (!container) return;
 
-        // 1. Guardar scrollHeight ANTES del prepend
+        // 1. Snapshot ANTES del prepend
         const scrollHeightBefore = container.scrollHeight;
         const scrollTopBefore = container.scrollTop;
 
-        // 2. Renderizar y prepend cada mensaje. renderChatBubbles deduplica por
-        // data-msg-id, pero por seguridad usamos un wrapper que inserta al inicio.
+        // 2. Actualizar cursor + hasMore PRIMERO (evita race con scroll
+        //    durante el reflow: si el usuario scrollea más rápido que el
+        //    layout, el guard `loading=true` sigue activo pero los flags
+        //    ya están coherentes).
+        chatHistoryState.hasMore = data.has_more === true;
+        chatHistoryState.oldestTs = data.oldest_ts || null;
+
+        // 3. Prepend (O(M) gracias al fix del 2026-06-04)
         _prependChatMessages(olderMessages);
 
-        // 3. Restaurar scroll position relativa al contenido nuevo
+        // 4. Forzar reflow antes de medir scrollHeight (el browser puede
+        //    no haber recalculado layout tras el insertBefore masivo)
+        void container.offsetHeight;
         const scrollHeightAfter = container.scrollHeight;
         container.scrollTop = scrollTopBefore + (scrollHeightAfter - scrollHeightBefore);
 
-        // 4. Actualizar cursor + hasMore
-        chatHistoryState.hasMore = data.has_more === true;
-        chatHistoryState.oldestTs = data.oldest_ts || null;
         if (!chatHistoryState.hasMore) {
             _showHistoryStartMarker();
         }
@@ -1838,48 +1843,51 @@ async function loadOlderMessages() {
     }
 }
 
-// ⚠️ Re-render total con cache cronológico.
-// Aproach simple y robusto: limpiar container y re-renderizar el array completo
-// (mensajes antiguos + mensajes existentes) en orden cronológico exacto.
-// El scroll-restore (calculado en loadOlderMessages) mantiene la posición visual
-// del usuario sin saltos perceptibles.
+// ⚠️ 2026-06-04: prepend O(M) — antes era O(N+M) con re-render total que
+// causaba jank progresivo (1-5s) en chats largos. Ahora reutilizamos
+// renderChatBubbles tal cual (cero duplicación) pero movemos los nodos
+// recién creados al INICIO del container con prepend() nativo.
 //
-// Cache: window.__chatMessagesCache contiene los objetos msg en orden cronológico
-// (más antiguo primero, igual que el formato de /history backend response). Se
-// inicializa en loadChatHistory() y se actualiza aquí en cada paginación.
+// Cache: window.__chatMessagesCache contiene los objetos msg en orden
+// cronológico (más antiguo primero). Se inicializa en loadChatHistory().
 function _prependChatMessages(messages) {
     const container = document.getElementById('chatMessages');
     if (!container) return;
 
-    // Dedup contra cache existente (defensa final, capa 6 del diseño).
+    // Dedup contra cache existente (capa 6 del diseño)
     const cache = window.__chatMessagesCache || [];
     const existingIds = new Set(cache.map(m => String(m.id)));
     const trulyNew = messages.filter(m => m.id && !existingIds.has(String(m.id)));
     if (trulyNew.length === 0) return;
 
-    // Concatenar: trulyNew (más antiguos) + cache (existentes) = lista cronológica completa.
-    const merged = [...trulyNew, ...cache];
-    window.__chatMessagesCache = merged;
+    // Actualizar cache cronológico (viejos primero)
+    window.__chatMessagesCache = [...trulyNew, ...cache];
 
-    // Limpiar container completamente para evitar conflictos con el render
-    // incremental de renderChatBubbles. Como currentContactId no cambió,
-    // renderChatBubbles NO va a re-limpiar — hará appendChild secuencial.
-    container.innerHTML = '';
-    // Limpiar también el marcador "inicio de conversación" si existía
-    // (puede reaparecer al final si has_more sigue siendo false).
+    // Limpiar marcador "inicio de conversación" si existía
     const oldMarker = document.getElementById('chatHistoryStartMarker');
     if (oldMarker) oldMarker.remove();
 
-    // ⚠️ Flag para que renderChatBubbles NO haga auto-scroll al fondo.
-    // El caller (loadOlderMessages) restaura la posición manualmente.
+    // Snapshot: contar hijos actuales para identificar los recién insertados
+    const beforeCount = container.children.length;
+
+    // ⚠️ Flag para que renderChatBubbles NO dispare auto-scroll al fondo
     window.__isPaginating = true;
     try {
-        renderChatBubbles(merged);
+        // renderChatBubbles appendChild al FINAL (con dedup por data-msg-id)
+        renderChatBubbles(trulyNew);
+        // Mover los nodos recién agregados (del beforeCount en adelante) al INICIO
+        const newNodes = Array.from(container.children).slice(beforeCount);
+        if (newNodes.length > 0) container.prepend(...newNodes);
+        // Eliminar date-dividers duplicados (puede haber 1 si el primer msg
+        // viejo y el último msg nuevo cayeron en la misma fecha)
+        const _seenDates = new Set();
+        container.querySelectorAll('.date-divider').forEach(div => {
+            if (_seenDates.has(div.dataset.date)) div.remove();
+            else _seenDates.add(div.dataset.date);
+        });
     } finally {
-        // Limpiar flag después de un breve delay para cubrir el setTimeout
-        // interno de renderChatBubbles (100ms). Si la flag se limpia muy
-        // pronto, el setTimeout encolado podría disparar el auto-scroll.
-        setTimeout(() => { window.__isPaginating = false; }, 200);
+        // Limpiar flag tras el reflow (más rápido y robusto que setTimeout fijo)
+        requestAnimationFrame(() => { window.__isPaginating = false; });
     }
 }
 
@@ -1889,10 +1897,25 @@ function _showLoadingMoreSpinner(show) {
     let spinner = document.getElementById('chatLoadingMoreSpinner');
     if (show) {
         if (!spinner) {
+            // Skeleton: 5 burbujas-fantasma animadas (Tailwind animate-pulse)
+            // alternando lado para imitar el flujo real cliente/asesora.
+            // Da feedback visual instantáneo durante el fetch (200-500ms en
+            // condiciones normales; en chats viejos sin caché puede llegar a 1-2s).
             spinner = document.createElement('div');
             spinner.id = 'chatLoadingMoreSpinner';
-            spinner.className = 'flex items-center justify-center py-3 text-gray-500 text-xs';
-            spinner.innerHTML = '<span>📜 Cargando mensajes anteriores...</span>';
+            spinner.className = 'space-y-3 py-3';
+            const sides = ['justify-start', 'justify-end', 'justify-start', 'justify-end', 'justify-start'];
+            const widths = ['w-32', 'w-48', 'w-40', 'w-24', 'w-56'];
+            spinner.innerHTML = `
+                <div class="flex items-center justify-center text-gray-400 text-xs mb-1">
+                    <span class="animate-pulse">📜 Cargando mensajes anteriores...</span>
+                </div>
+                ${sides.map((side, i) => `
+                    <div class="flex ${side} animate-pulse">
+                        <div class="${widths[i]} h-8 bg-gray-200 rounded-lg"></div>
+                    </div>
+                `).join('')}
+            `;
             container.insertBefore(spinner, container.firstChild);
         }
     } else {

@@ -2024,9 +2024,14 @@ async function loadContactDetail(phone, contactId, canal) {
     const sendBtn = document.getElementById('sendBtn');
     const templateSection = document.getElementById('templateSection');
 
+    // ⚠️ 2026-06-05: inicializar estado de paginación ANTES del fetch.
+    // Sin esto, _attachScrollListener nunca se llama y el scroll infinito
+    // queda muerto (loadOlderMessages aborta por guard de contactId/oldestTs).
+    _resetChatHistoryState(contactId, canal, phone);
+
     try {
-        // ⚠️ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). El historial
-        // detallado se carga vía loadChatHistory() con paginación cursor.
+        // ⚠️ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). Paginación
+        // siguiente se hace vía loadOlderMessages() → GET /history/{cid}.
         let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=${CHAT_PAGE_SIZE}`;
         if (contactId) url += `&contact_id=${encodeURIComponent(contactId)}`;
         if (canal) url += `&canal=${encodeURIComponent(canal)}`;
@@ -2051,6 +2056,17 @@ async function loadContactDetail(phone, contactId, canal) {
 
         // Renderizar mensajes
         renderChatBubbles(data.messages || []);
+
+        // ⚠️ 2026-06-05: engachar scroll infinito al sistema de paginación.
+        // Sin esto, mi fix de _prependChatMessages O(M) queda huérfano.
+        chatHistoryState.hasMore = data.has_more === true;
+        chatHistoryState.oldestTs = data.oldest_ts || null;
+        window.__chatMessagesCache = (data.messages || []).slice();
+        _attachScrollListener();
+        if (!chatHistoryState.hasMore && (data.messages?.length || 0) > 0) {
+            _showHistoryStartMarker();
+        }
+        console.log(`[Panel][Pagination] Init detail: has_more=${chatHistoryState.hasMore} oldest_ts=${chatHistoryState.oldestTs} msgs=${data.messages?.length || 0}`);
 
         // Aplicar estado de ventana 24h
         const statusDiv = document.getElementById('windowStatus');

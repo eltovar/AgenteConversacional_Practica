@@ -3906,6 +3906,12 @@ async def get_contact_detail(
     contact_id: Optional[str] = Query(None, description="ID del contacto en HubSpot"),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
     limit: int = Query(50, ge=1, le=100),
+    # ⚠️ 2026-06-05: cursor para que el panel pueda paginar con scroll infinito.
+    # Si llega, NO se consulta HubSpot (mismo guard que /history/{cid}).
+    before_ts: Optional[str] = Query(
+        None,
+        description="Cursor ISO 8601 — retorna mensajes con timestamp < before_ts"
+    ),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -3926,13 +3932,24 @@ async def get_contact_detail(
     phone_normalized = validation.normalized
     mongo_manager = get_mongo_manager()
 
+    # ⚠️ 2026-06-05: Parse del cursor before_ts (igual que /history/{cid})
+    before_ts_dt = None
+    if before_ts:
+        try:
+            before_ts_dt = datetime.fromisoformat(before_ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail=f"before_ts inválido: {before_ts}")
+    # En paginación nunca consultar HubSpot — solo Mongo (evita N requests externos)
+    hs_fallback_allowed = (before_ts_dt is None)
+
     async def _get_messages():
         try:
             # Paso 1: MongoDB por teléfono + canal
             mongo_msgs = await mongo_manager.get_history(
                 phone=phone_normalized,
                 limit=limit,
-                channel=canal
+                channel=canal,
+                before_ts=before_ts_dt,
             )
 
             # Paso 1.5: si no hay resultados → reintentar sin filtro de canal (red de seguridad).
@@ -3941,7 +3958,8 @@ async def get_contact_detail(
                 mongo_msgs = await mongo_manager.get_history(
                     phone=phone_normalized,
                     limit=limit,
-                    channel=None
+                    channel=None,
+                    before_ts=before_ts_dt,
                 )
                 if mongo_msgs:
                     logger.info(
@@ -3956,12 +3974,14 @@ async def get_contact_detail(
             # Pasos 2 + 3 en PARALELO: MongoDB por contact_id y HubSpot simultáneamente.
             # SIEMPRE se ejecuta cuando mongo_msgs ≤ 20, incluso si Paso 1 devolvió algo,
             # para evitar mostrar historial parcial (ej: 1 mensaje outbound vs 15 en HubSpot).
-            if contact_id and contact_id.isdigit():
+            # ⚠️ Pero NO en paginación (hs_fallback_allowed=False) — solo Mongo.
+            if contact_id and contact_id.isdigit() and hs_fallback_allowed:
                 _tl = get_timeline_logger()
                 mongo2_msgs, hs_messages = await asyncio.gather(
                     mongo_manager.get_history_by_contact_id(
                         hubspot_contact_id=contact_id,
-                        limit=limit
+                        limit=limit,
+                        before_ts=before_ts_dt,
                     ),
                     _tl.get_notes_for_contact(
                         contact_id=contact_id,
@@ -4002,6 +4022,14 @@ async def get_contact_detail(
         check_24h_window(phone_normalized),
     )
 
+    # ⚠️ 2026-06-05: Metadata para que el panel pueda paginar con scroll infinito.
+    # has_more=True si la página llegó al límite (puede haber más antes).
+    # oldest_ts = timestamp del primer mensaje (cronológicamente más antiguo).
+    # Si source='hubspot', has_more=False — HubSpot ya retorna todo lo disponible
+    # y la paginación cursor solo funciona contra MongoDB.
+    has_more = len(messages) >= limit and source == "mongodb"
+    oldest_ts = messages[0].get("timestamp") if messages else None
+
     return {
         "phone": phone_normalized,
         "contact_id": contact_id,
@@ -4010,6 +4038,8 @@ async def get_contact_detail(
         "messages": messages,
         "message_count": len(messages),
         "message_source": source,
+        "has_more": has_more,
+        "oldest_ts": oldest_ts,
         # Ventana 24h
         "window_open": window_status.is_open,
         "last_message_time": window_status.last_message_time.isoformat() if window_status.last_message_time else None,

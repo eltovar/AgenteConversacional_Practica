@@ -4985,15 +4985,95 @@ async def get_active_contacts(
 
         # Solo enriquecer los slots restantes hasta `limit`.
         # Los contactos con has_unread NO cuentan contra el límite (dynamic limit).
-        # Sobre-provisionar 3x para compensar la segregación por canal/equipo (PASO 6).
         _priority_no_unread = sum(1 for c in priority_contacts if not c.get("has_unread", False))
-        remaining_slots = max(0, (limit * 3) - _priority_no_unread)
+        remaining_slots = max(0, (limit * 2) - _priority_no_unread)
         active_contacts = priority_contacts + bot_contacts[:remaining_slots]
         logger.info(
-            f"[Panel] Pre-limitado a {len(active_contacts)} contactos para enriquecimiento "
+            f"[Panel] Pre-limitado a {len(active_contacts)} contactos "
             f"({len(priority_contacts)} prioridad [{_priority_no_unread} sin unread] + "
-            f"{len(bot_contacts[:remaining_slots])} bot)"
+            f"{len(bot_contacts[:remaining_slots])} bot) — pre-segregación"
         )
+
+        # === PASO 6 (MOVIDO ANTES de enriquecimiento): SEGREGACIÓN ESTRICTA por equipo/portal ===
+        # Filtrar ANTES de llamar a HubSpot para reducir llamadas API y evitar 429.
+        # Los campos necesarios (canal_origen, owner_id, assigned_owner_ids) ya están desde Redis/MongoDB.
+        if advisor:
+            if advisor.lower() == "admin":
+                logger.info(f"[Panel] Modo ADMIN: mostrando todos los {len(active_contacts)} contactos (sin segregación)")
+            else:
+                from integrations.hubspot.lead_assigner import LeadAssigner
+
+                advisor_str = str(advisor)
+
+                advisor_team = None
+                advisor_name = "Desconocido"
+                for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
+                    for member in team_members:
+                        if str(member.get("id")) == advisor_str:
+                            advisor_team = team_name
+                            advisor_name = member.get("name", "Desconocido")
+                            break
+                    if advisor_team:
+                        break
+
+                if not advisor_team:
+                    logger.warning(
+                        f"[Panel] Advisor ID {advisor} no encontrado en OWNERS_CONFIG. "
+                        f"Usando equipo 'default' (acceso restringido)"
+                    )
+                    advisor_team = "default"
+
+                allowed_channels = set()
+                for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
+                    if team == advisor_team:
+                        allowed_channels.add(canal)
+                if advisor_team == "default":
+                    for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
+                        if team == "default":
+                            allowed_channels.add(canal)
+
+                all_advisor_ids = set()
+                for team_members in LeadAssigner.OWNERS_CONFIG.values():
+                    for member in team_members:
+                        member_id = member.get("id")
+                        if member_id:
+                            all_advisor_ids.add(str(member_id))
+                other_advisor_ids = all_advisor_ids - {advisor_str}
+
+                filtered_contacts = []
+                excluded_count = 0
+                for contact in active_contacts:
+                    canal_origen = (contact.get("canal_origen") or "").lower().strip()
+                    contact_owner = contact.get("owner_id") or contact.get("assigned_owner_id") or contact.get("hubspot_owner_id")
+                    contact_owner_str = str(contact_owner) if contact_owner else ""
+                    assigned_owner_ids = contact.get("assigned_owner_ids") or []
+                    assigned_owner_ids_str = [str(x) for x in assigned_owner_ids if x]
+
+                    is_owner = contact_owner_str == advisor_str
+                    is_collaborator = advisor_str in assigned_owner_ids_str
+
+                    if is_owner or is_collaborator:
+                        filtered_contacts.append(contact)
+                        continue
+
+                    if canal_origen:
+                        if contact_owner_str and contact_owner_str in other_advisor_ids:
+                            excluded_count += 1
+                            continue
+                        if canal_origen in allowed_channels:
+                            filtered_contacts.append(contact)
+                        else:
+                            excluded_count += 1
+                        continue
+
+                    excluded_count += 1
+
+                active_contacts = filtered_contacts
+                logger.info(
+                    f"[Panel] Segregación pre-enriquecimiento '{advisor_name}' ({advisor_team}): "
+                    f"{len(active_contacts)} visibles, {excluded_count} excluidos. "
+                    f"Canales: {sorted(allowed_channels)}"
+                )
 
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
         contact_manager = _get_contact_manager()
@@ -5271,164 +5351,6 @@ async def get_active_contacts(
                 seen_phones.add(phone)
             if contact_id:
                 seen_contact_ids.add(contact_id)
-
-        # === PASO 6: SEGREGACIÓN ESTRICTA por equipo/portal ===
-        # REGLA DE ORO: Una asesora SOLO ve contactos cuyo canal_origen pertenece a su equipo.
-        # NO hay filtraciones de leads entre portales.
-        if advisor:
-            # Modo admin: mostrar todos sin filtrar (bypass de segregación)
-            if advisor.lower() == "admin":
-                logger.info(f"[Panel] Modo ADMIN: mostrando todos los {len(active_contacts)} contactos (sin segregación)")
-            else:
-                from integrations.hubspot.lead_assigner import LeadAssigner
-
-                advisor_str = str(advisor)
-
-                # ═══════════════════════════════════════════════════════════════
-                # PASO 6.1: Identificar a qué EQUIPO pertenece este advisor
-                # ═══════════════════════════════════════════════════════════════
-                advisor_team = None
-                advisor_name = "Desconocido"
-
-                for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
-                    for member in team_members:
-                        if str(member.get("id")) == advisor_str:
-                            advisor_team = team_name
-                            advisor_name = member.get("name", "Desconocido")
-                            break
-                    if advisor_team:
-                        break
-
-                if not advisor_team:
-                    logger.warning(
-                        f"[Panel] Advisor ID {advisor} no encontrado en OWNERS_CONFIG. "
-                        f"Usando equipo 'default' (acceso restringido)"
-                    )
-                    advisor_team = "default"
-
-                # ═══════════════════════════════════════════════════════════════
-                # PASO 6.2: Obtener los canales PERMITIDOS para este equipo
-                # ═══════════════════════════════════════════════════════════════
-                allowed_channels = set()
-
-                for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
-                    if team == advisor_team:
-                        allowed_channels.add(canal)
-
-                # Si es equipo "default", SOLO permitir canales que mapean a "default"
-                # (NO dar acceso a todos los canales)
-                if advisor_team == "default":
-                    for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items():
-                        if team == "default":
-                            allowed_channels.add(canal)
-
-                logger.info(
-                    f"[Panel] SEGREGACIÓN: Advisor '{advisor_name}' (ID: {advisor}) "
-                    f"pertenece a '{advisor_team}'. "
-                    f"Canales permitidos: {sorted(allowed_channels)}"
-                )
-
-                # ═══════════════════════════════════════════════════════════════
-                # PASO 6.3: Obtener lista de TODOS los advisors conocidos
-                # (para detectar transferencias a otros advisors)
-                # ═══════════════════════════════════════════════════════════════
-                all_advisor_ids = set()
-                for team_members in LeadAssigner.OWNERS_CONFIG.values():
-                    for member in team_members:
-                        member_id = member.get("id")
-                        if member_id:
-                            all_advisor_ids.add(str(member_id))
-                
-                other_advisor_ids = all_advisor_ids - {advisor_str}
-
-                # ═══════════════════════════════════════════════════════════════
-                # PASO 6.4: Filtrar contactos ESTRICTAMENTE
-                # PRIORIDAD: owner_id > canal_origen
-                # ═══════════════════════════════════════════════════════════════
-                filtered_contacts = []
-                excluded_count = 0
-
-                for contact in active_contacts:
-                    canal_origen = (contact.get("canal_origen") or "").lower().strip()
-                    phone = contact.get("phone", "N/A")
-                    
-                    # Obtener owner_id del contacto (puede venir de transferencia)
-                    contact_owner = contact.get("owner_id") or contact.get("assigned_owner_id") or contact.get("hubspot_owner_id")
-                    contact_owner_str = str(contact_owner) if contact_owner else ""
-                    
-                    # Obtener lista de colaboradores (modo collaborative)
-                    assigned_owner_ids = contact.get("assigned_owner_ids") or []
-                    assigned_owner_ids_str = [str(x) for x in assigned_owner_ids if x]
-                    
-                    # REGLA 1: TRANSFERENCIA tiene PRIORIDAD sobre segregación por canal
-                    # Incluir si:
-                    #   a) owner_id coincide con el advisor (transferencia exclusiva), O
-                    #   b) advisor está en assigned_owner_ids (modo colaborativo)
-                    is_owner = contact_owner_str == advisor_str
-                    is_collaborator = advisor_str in assigned_owner_ids_str
-                    
-                    if is_owner or is_collaborator:
-                        filtered_contacts.append(contact)
-                        if is_collaborator and not is_owner:
-                            logger.info(
-                                f"[Panel] ✓ Contacto {phone} INCLUIDO por COLABORACIÓN "
-                                f"(advisor {advisor_str} está en assigned_owner_ids={assigned_owner_ids_str})"
-                            )
-                        elif canal_origen and canal_origen not in allowed_channels:
-                            logger.info(
-                                f"[Panel] ✓ Contacto {phone} INCLUIDO por TRANSFERENCIA "
-                                f"(owner_id={contact_owner_str} coincide, canal '{canal_origen}' es de otro equipo)"
-                            )
-                        else:
-                            logger.debug(
-                                f"[Panel] ✓ Contacto {phone} INCLUIDO "
-                                f"(owner_id coincide directamente)"
-                            )
-                        continue
-
-                    # REGLA 2: Si tiene canal_origen, verificar si pertenece al equipo
-                    # PERO primero verificar si fue TRANSFERIDO a otro advisor
-                    if canal_origen:
-                        # REGLA 2a: Si fue transferido a OTRO advisor conocido, EXCLUIR
-                        if contact_owner_str and contact_owner_str in other_advisor_ids:
-                            excluded_count += 1
-                            logger.info(
-                                f"[Panel] ✗ Contacto {phone} EXCLUIDO por TRANSFERENCIA "
-                                f"(owner_id={contact_owner_str} es otro advisor, "
-                                f"aunque canal '{canal_origen}' pertenece a '{advisor_team}')"
-                            )
-                            continue
-                        
-                        # REGLA 2b: Canal pertenece al equipo y no fue transferido a otro
-                        if canal_origen in allowed_channels:
-                            filtered_contacts.append(contact)
-                            logger.debug(
-                                f"[Panel] ✓ Contacto {phone} INCLUIDO "
-                                f"(canal '{canal_origen}' pertenece a '{advisor_team}')"
-                            )
-                        else:
-                            # Canal NO pertenece al equipo Y no fue transferido a este advisor
-                            excluded_count += 1
-                            logger.debug(
-                                f"[Panel] ✗ Contacto {phone} EXCLUIDO "
-                                f"(canal '{canal_origen}' NO pertenece a '{advisor_team}', "
-                                f"owner={contact_owner_str} != {advisor_str})"
-                            )
-                        continue
-
-                    # REGLA 3: Sin canal_origen y owner no coincide -> EXCLUIR
-                    excluded_count += 1
-                    logger.debug(
-                        f"[Panel] ✗ Contacto {phone} EXCLUIDO "
-                        f"(sin canal_origen y owner_id {contact_owner_str} no coincide con {advisor_str})"
-                    )
-
-                active_contacts = filtered_contacts
-
-                logger.info(
-                    f"[Panel] Segregación estricta completada para '{advisor_name}' ({advisor_team}): "
-                    f"{len(active_contacts)} contactos visibles, {excluded_count} excluidos"
-                )
 
         # === [Sync] Deep link cross-advisor: incluir contacto aunque no pertenezca al advisor ===
         # Hidratación completa via _hydrate_contact — garantiza que el frontend reciba

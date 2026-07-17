@@ -4983,12 +4983,15 @@ async def get_active_contacts(
 
         bot_contacts.sort(key=_sort_key, reverse=True)
 
-        # Solo enriquecer los slots restantes hasta `limit`
-        remaining_slots = max(0, limit - len(priority_contacts))
+        # Solo enriquecer los slots restantes hasta `limit`.
+        # Los contactos con has_unread NO cuentan contra el límite (dynamic limit).
+        _priority_no_unread = sum(1 for c in priority_contacts if not c.get("has_unread", False))
+        remaining_slots = max(0, limit - _priority_no_unread)
         active_contacts = priority_contacts + bot_contacts[:remaining_slots]
         logger.info(
             f"[Panel] Pre-limitado a {len(active_contacts)} contactos para enriquecimiento "
-            f"({len(priority_contacts)} prioridad + {len(bot_contacts[:remaining_slots])} bot)"
+            f"({len(priority_contacts)} prioridad [{_priority_no_unread} sin unread] + "
+            f"{len(bot_contacts[:remaining_slots])} bot)"
         )
 
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===

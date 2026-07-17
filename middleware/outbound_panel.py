@@ -5520,25 +5520,15 @@ async def get_active_contacts(
             if c.get("conversation_status") in waiting_statuses
         ])
 
-        # Log para diagnóstico
+        _unread_in_final = [c for c in contacts_sorted if c.get("has_unread", False)]
+        _read_in_final = [c for c in contacts_sorted if not c.get("has_unread", False)]
+        _dynamic_result = _unread_in_final + _read_in_final[:limit]
+
         logger.info(
             f"[Panel] Retornando {len(_dynamic_result)} contactos "
             f"({len(_unread_in_final)} unread + {len(_read_in_final[:limit])} leidos, "
             f"activos: {active_count}, advisor: {advisor})"
         )
-        for c in _dynamic_result:
-            logger.debug(
-                f"[Panel] -> {c.get('phone', 'N/A')} | "
-                f"active={c.get('is_active')} | "
-                f"canal={c.get('canal_origen', 'N/A')} | "
-                f"owner={c.get('owner_id', 'N/A')} | "
-                f"deal_id={c.get('deal_id', 'NONE')} | "
-                f"stage={c.get('current_stage', 'N/A')}"
-            )
-
-        _unread_in_final = [c for c in contacts_sorted if c.get("has_unread", False)]
-        _read_in_final = [c for c in contacts_sorted if not c.get("has_unread", False)]
-        _dynamic_result = _unread_in_final + _read_in_final[:limit]
 
         _response_data = {
             "contacts": _dynamic_result,

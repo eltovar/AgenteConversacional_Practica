@@ -32,6 +32,9 @@ from datetime import datetime, timedelta, timezone
 # Agregar raíz del proyecto al path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 BOG_TZ = timezone(timedelta(hours=-5))
 BULK_CUTOFF = datetime(2026, 7, 15, 0, 0, 0, tzinfo=BOG_TZ)
 
@@ -46,14 +49,22 @@ async def main(dry_run: bool = True):
     from middleware.conversation_state import ConversationStateManager, ConversationStatus
     import redis.asyncio as aioredis
 
-    redis_url = os.environ.get("REDIS_URL", "")
+    is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+    if is_railway:
+        redis_url = os.environ.get("REDIS_URL", "")
+    else:
+        redis_url = (
+            os.environ.get("REDIS_PUBLIC_URL")
+            or os.environ.get("REDIS_URL")
+            or ""
+        )
     if not redis_url:
-        print("ERROR: REDIS_URL no configurada")
+        print("ERROR: REDIS_URL / REDIS_PUBLIC_URL no configurada")
         return
 
-    hubspot_token = os.environ.get("HUBSPOT_ACCESS_TOKEN", "")
+    hubspot_token = os.environ.get("HUBSPOT_API_KEY") or os.environ.get("HUBSPOT_ACCESS_TOKEN") or ""
     if not hubspot_token:
-        print("ERROR: HUBSPOT_ACCESS_TOKEN no configurado")
+        print("ERROR: HUBSPOT_API_KEY no configurada")
         return
 
     mongo = get_mongo_manager()
@@ -62,7 +73,7 @@ async def main(dry_run: bool = True):
         return
 
     r = aioredis.from_url(redis_url, decode_responses=True, max_connections=5)
-    state_mgr = ConversationStateManager(redis_url)
+    state_mgr = ConversationStateManager()  # usa lógica interna de URL pública/privada
 
     import httpx
     hs_client = httpx.AsyncClient(

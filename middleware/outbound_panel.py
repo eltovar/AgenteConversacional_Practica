@@ -4985,8 +4985,9 @@ async def get_active_contacts(
 
         # Solo enriquecer los slots restantes hasta `limit`.
         # Los contactos con has_unread NO cuentan contra el límite (dynamic limit).
+        # Sobre-provisionar 3x para compensar la segregación por canal/equipo (PASO 6).
         _priority_no_unread = sum(1 for c in priority_contacts if not c.get("has_unread", False))
-        remaining_slots = max(0, limit - _priority_no_unread)
+        remaining_slots = max(0, (limit * 3) - _priority_no_unread)
         active_contacts = priority_contacts + bot_contacts[:remaining_slots]
         logger.info(
             f"[Panel] Pre-limitado a {len(active_contacts)} contactos para enriquecimiento "
@@ -5521,10 +5522,11 @@ async def get_active_contacts(
 
         # Log para diagnóstico
         logger.info(
-            f"[Panel] Retornando {len(contacts_sorted[:limit])} contactos "
-            f"(activos: {active_count}, advisor: {advisor})"
+            f"[Panel] Retornando {len(_dynamic_result)} contactos "
+            f"({len(_unread_in_final)} unread + {len(_read_in_final[:limit])} leidos, "
+            f"activos: {active_count}, advisor: {advisor})"
         )
-        for c in contacts_sorted[:limit]:
+        for c in _dynamic_result:
             logger.debug(
                 f"[Panel] -> {c.get('phone', 'N/A')} | "
                 f"active={c.get('is_active')} | "
@@ -5534,12 +5536,16 @@ async def get_active_contacts(
                 f"stage={c.get('current_stage', 'N/A')}"
             )
 
+        _unread_in_final = [c for c in contacts_sorted if c.get("has_unread", False)]
+        _read_in_final = [c for c in contacts_sorted if not c.get("has_unread", False)]
+        _dynamic_result = _unread_in_final + _read_in_final[:limit]
+
         _response_data = {
-            "contacts": contacts_sorted[:limit],
+            "contacts": _dynamic_result,
             "filter": filter_time,
             "advisor": advisor,
             "active_count": active_count,
-            "historical_count": len(contacts_sorted) - active_count,
+            "historical_count": len(_dynamic_result) - active_count,
             "total_count": total_for_advisor if total_for_advisor is not None else len(contacts_sorted),
             "page": page,
             "limit": limit,

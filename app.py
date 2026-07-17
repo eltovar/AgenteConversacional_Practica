@@ -661,6 +661,40 @@ async def rebuild_zset_from_conversations():
     except Exception as e:
         logger.error("[Rebuild ZSET] Error: %s", e, exc_info=True)
 
+    # ── Limpieza de advisor_inbox stale (BOT_ACTIVE → no necesita badge) ──
+    try:
+        from middleware.conversation_state import ConversationStatus
+        state_mgr = get_state_manager()
+        ACTIVE_ADVISORS = ["89096378", "89096380", "89096379"]
+        cleaned_total = 0
+        for adv_id in ACTIVE_ADVISORS:
+            inbox_key = f"{state_mgr.ADVISOR_INBOX_PREFIX}{adv_id}"
+            members = await state_mgr.redis.zrange(inbox_key, 0, -1)
+            if not members:
+                continue
+            stale = []
+            for m in members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                parts = m.rsplit(":", 1)
+                if len(parts) != 2:
+                    continue
+                phone, canal = parts
+                state_key = f"{state_mgr.STATE_PREFIX}{phone}:{canal}"
+                raw_state = await state_mgr.redis.get(state_key)
+                if raw_state:
+                    if isinstance(raw_state, bytes):
+                        raw_state = raw_state.decode("utf-8", errors="ignore")
+                if not raw_state or raw_state == ConversationStatus.BOT_ACTIVE.value:
+                    stale.append(m)
+            if stale:
+                removed = await state_mgr.redis.zrem(inbox_key, *stale)
+                cleaned_total += removed
+        if cleaned_total:
+            logger.info(f"[Rebuild ZSET] Inbox cleanup: {cleaned_total} entries stale removidas (BOT_ACTIVE/sin estado)")
+    except Exception as _inbox_clean_err:
+        logger.warning(f"[Rebuild ZSET] Inbox cleanup error (non-fatal): {_inbox_clean_err}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE SEGUIMIENTO 24H

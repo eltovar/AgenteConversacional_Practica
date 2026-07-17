@@ -830,6 +830,10 @@ class ConversationStateManager:
             except Exception as _sync_err:
                 logger.debug(f"[ConversationState] sync MongoDB conv no crítico: {_sync_err}")
 
+            _owner = meta.get("assigned_owner_id") if isinstance(meta, dict) else None
+            if _owner:
+                await self.add_to_advisor_inbox(_owner, phone, canal_safe)
+
             return True
         except Exception as e:
             logger.error(f"[ConversationState] Error en request_handoff: {e}")

@@ -7682,6 +7682,72 @@ async def recover_outage(
 
 
 # =============================================================================
+# ONE-SHOT: Limpieza de advisor_inbox stale (BOT_ACTIVE entries)
+# =============================================================================
+
+@router.post("/admin/cleanup-stale-inbox")
+async def cleanup_stale_inbox(
+    dry_run: bool = Query(True, description="True = solo listar, no borrar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Limpia entries de advisor_inbox cuyo contacto está en BOT_ACTIVE o sin estado.
+    Estas entries son badges fantasma que no deberían existir.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    from middleware.conversation_state import ConversationStatus
+    state_mgr = _get_state_manager()
+    ACTIVE_ADVISORS = ["89096378", "89096380", "89096379"]
+    results = {}
+    total_cleaned = 0
+
+    for adv_id in ACTIVE_ADVISORS:
+        inbox_key = f"{state_mgr.ADVISOR_INBOX_PREFIX}{adv_id}"
+        members = await state_mgr.redis.zrange(inbox_key, 0, -1, withscores=True)
+        if not members:
+            results[adv_id] = {"total": 0, "stale": 0, "entries": []}
+            continue
+        stale_members = []
+        stale_details = []
+        for m, score in members:
+            if isinstance(m, bytes):
+                m = m.decode("utf-8", errors="ignore")
+            parts = m.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            phone, canal = parts
+            state_key = f"{state_mgr.STATE_PREFIX}{phone}:{canal}"
+            raw_state = await state_mgr.redis.get(state_key)
+            if raw_state and isinstance(raw_state, bytes):
+                raw_state = raw_state.decode("utf-8", errors="ignore")
+            if not raw_state or raw_state == ConversationStatus.BOT_ACTIVE.value:
+                stale_members.append(m)
+                stale_details.append({
+                    "member": m,
+                    "state": raw_state or "NO_STATE",
+                    "score": score,
+                })
+        removed = 0
+        if stale_members and not dry_run:
+            removed = await state_mgr.redis.zrem(inbox_key, *stale_members)
+            total_cleaned += removed
+        results[adv_id] = {
+            "total": len(members),
+            "stale": len(stale_members),
+            "removed": removed if not dry_run else "dry_run",
+            "entries": stale_details[:50],
+        }
+
+    return {
+        "dry_run": dry_run,
+        "total_cleaned": total_cleaned if not dry_run else "dry_run",
+        "advisors": results,
+    }
+
+
+# =============================================================================
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
 # =============================================================================
 

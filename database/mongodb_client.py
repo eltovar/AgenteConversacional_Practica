@@ -2268,6 +2268,27 @@ class MongoDBManager:
             self._connected = False
             logger.info("[MongoDB] Conexión cerrada")
 
+    async def get_message_previews_batch(self, phones: list) -> dict:
+        if not await self.connect() or not phones:
+            return {}
+        try:
+            cursor = self.db.conversations.find(
+                {"phone": {"$in": phones}},
+                {"phone": 1, "last_message_preview": 1, "last_message_sender": 1, "_id": 0},
+            )
+            result = {}
+            async for doc in cursor:
+                p = doc.get("phone")
+                if p:
+                    result[p] = {
+                        "last_message_preview": doc.get("last_message_preview", ""),
+                        "last_message_sender": doc.get("last_message_sender", ""),
+                    }
+            return result
+        except Exception as e:
+            logger.warning(f"[MongoDB] get_message_previews_batch error: {e}")
+            return {}
+
 
 # Instancia Singleton
 _mongo_manager: Optional[MongoDBManager] = None

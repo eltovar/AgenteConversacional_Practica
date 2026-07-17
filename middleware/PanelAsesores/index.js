@@ -2191,6 +2191,7 @@ function _getContactFingerprint(contact) {
         contact.handoff_reason || '',
         contact.has_appointment ? '1' : '0',
         contactId === currentContactId ? 'active' : '',
+        contact.last_message_preview || '',
     ].join('|');
 }
 
@@ -2305,7 +2306,17 @@ function _buildContactHTML(contact) {
         ? `<span class="absolute -top-1 -left-1 bg-gray-100 rounded-full w-[18px] h-[18px] flex items-center justify-center text-[10px] leading-none" title="Sofía está manejando">🤖</span>`
         : '';
 
-    // Layout 2 filas: [Fila 1] nombre + timeAgo  |  [Fila 2] canal badge + stage select
+    // Fila 3: Preview del último mensaje (estilo WhatsApp)
+    const msgPreview = contact.last_message_preview || '';
+    const msgSender = contact.last_message_sender || '';
+    let senderPrefix = '';
+    if (msgSender === 'advisor') senderPrefix = '<span class="text-gray-600 font-medium">Tú: </span>';
+    else if (msgSender === 'bot') senderPrefix = '<span class="text-gray-600 font-medium">SofIA: </span>';
+    const previewRow = msgPreview
+        ? `<p class="text-xs text-gray-500 truncate mt-0.5">${senderPrefix}${escapeHtml(msgPreview)}</p>`
+        : '';
+
+    // Layout 3 filas: [Fila 1] nombre + timeAgo  |  [Fila 2] canal badge + stage  |  [Fila 3] preview
     return `
         <div class="contact-item p-2.5 border-b cursor-pointer ${bgClass} ${contactId === currentContactId ? 'active' : ''}"
              data-phone="${phone}"
@@ -2332,6 +2343,7 @@ function _buildContactHTML(contact) {
                         ${canalBadge}
                         <div class="min-w-0 overflow-hidden">${stageRow}</div>
                     </div>
+                    ${previewRow}
                     ${contact.handoff_reason ? `<p class="text-xs text-gray-400 truncate mt-0.5">${contact.handoff_reason}</p>` : ''}
                     ${contact.cross_advisor && contact.owner_name ? `<p class="text-xs text-sky-600 truncate mt-0.5 font-medium" title="Asesora asignada">👤 ${contact.owner_name}</p>` : ''}
                 </div>

@@ -5075,6 +5075,23 @@ async def get_active_contacts(
                     f"Canales: {sorted(allowed_channels)}"
                 )
 
+        # === PASO 1.5: Batch MongoDB — inyectar preview del último mensaje ===
+        _phones_need_preview = [
+            c.get("phone") for c in active_contacts
+            if c.get("phone") and not c.get("last_message_preview")
+        ]
+        if _phones_need_preview:
+            try:
+                from database.mongodb_client import get_mongo_manager
+                _previews = await get_mongo_manager().get_message_previews_batch(_phones_need_preview)
+                for c in active_contacts:
+                    _p = _previews.get(c.get("phone"))
+                    if _p:
+                        c.setdefault("last_message_preview", _p.get("last_message_preview", ""))
+                        c.setdefault("last_message_sender", _p.get("last_message_sender", ""))
+            except Exception as _prev_err:
+                logger.warning(f"[Panel] Batch previews falló (non-fatal): {_prev_err}")
+
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
         contact_manager = _get_contact_manager()
         

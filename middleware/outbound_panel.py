@@ -7548,6 +7548,171 @@ async def cleanup_stale_inbox(
     }
 
 
+@router.post("/admin/sync-owners")
+async def sync_owners_with_hubspot(
+    dry_run: bool = Query(True, description="True = solo listar, no aplicar"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Sincroniza assigned_owner_id en Redis meta con hubspot_owner_id de HubSpot.
+    También corrige MongoDB conversations.owner_id y mueve contactos entre
+    ZSET de advisors cuando el owner cambió.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
+
+    state_mgr = _get_state_manager()
+    http = get_httpx_client()
+    ACTIVE_ADVISORS = ["89096378", "89096380", "89096379"]
+    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+
+    mismatches = []
+    correct = 0
+    errors = []
+
+    for adv_id in ACTIVE_ADVISORS:
+        zset_key = f"{state_mgr.ACTIVE_SORTED_PREFIX}{adv_id}"
+        members = await state_mgr.redis.zrange(zset_key, 0, -1)
+        if not members:
+            continue
+
+        for m in members:
+            if isinstance(m, bytes):
+                m = m.decode("utf-8", errors="ignore")
+            parts = m.rsplit(":", 1)
+            if len(parts) != 2:
+                continue
+            phone, canal = parts
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+            raw = await state_mgr.redis.get(meta_key)
+            if not raw:
+                continue
+            import json as _json
+            meta = _json.loads(raw)
+            redis_owner = meta.get("assigned_owner_id")
+
+            contact_id = meta.get("contact_id")
+            if not contact_id:
+                cache_key = f"phone_cache:{phone}"
+                contact_id = await state_mgr.redis.get(cache_key)
+                if isinstance(contact_id, bytes):
+                    contact_id = contact_id.decode()
+
+            if not contact_id:
+                continue
+
+            try:
+                hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
+                resp = await http.get(
+                    f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+                    params={"properties": "hubspot_owner_id"},
+                    headers={"Authorization": f"Bearer {hs_token}"},
+                )
+                if resp.status_code != 200:
+                    continue
+                hs_owner = resp.json().get("properties", {}).get("hubspot_owner_id")
+            except Exception as e:
+                errors.append({"phone": phone, "error": str(e)})
+                continue
+
+            if not hs_owner:
+                continue
+
+            if str(redis_owner) != str(hs_owner):
+                mismatches.append({
+                    "phone": phone,
+                    "canal": canal,
+                    "contact_id": contact_id,
+                    "redis_owner": redis_owner,
+                    "hubspot_owner": hs_owner,
+                    "redis_owner_name": OWNER_NAMES.get(str(redis_owner), "?"),
+                    "hubspot_owner_name": OWNER_NAMES.get(str(hs_owner), "?"),
+                    "display_name": meta.get("display_name", ""),
+                    "zset_source": adv_id,
+                })
+            else:
+                correct += 1
+
+            await asyncio.sleep(0.12)
+
+    fixed_redis = 0
+    fixed_mongo = 0
+    fixed_zset = 0
+
+    if not dry_run and mismatches:
+        mongo_mgr = get_mongo_manager()
+        for m in mismatches:
+            phone, canal = m["phone"], m["canal"]
+            new_owner = m["hubspot_owner"]
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+
+            try:
+                raw = await state_mgr.redis.get(meta_key)
+                if raw:
+                    meta_data = _json.loads(raw)
+                    meta_data["assigned_owner_id"] = new_owner
+                    ttl = await state_mgr.redis.ttl(meta_key)
+                    if ttl > 0:
+                        await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
+                    else:
+                        await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+                    fixed_redis += 1
+            except Exception as e:
+                errors.append({"phone": phone, "error": f"Redis: {e}"})
+
+            try:
+                await mongo_mgr.db.conversations.update_one(
+                    {"phone": phone, "canal": canal},
+                    {"$set": {"owner_id": new_owner}},
+                )
+                fixed_mongo += 1
+            except Exception:
+                pass
+
+            member = f"{phone}:{canal}"
+            old_zset = f"{state_mgr.ACTIVE_SORTED_PREFIX}{m['zset_source']}"
+            new_zset = f"{state_mgr.ACTIVE_SORTED_PREFIX}{new_owner}"
+            try:
+                score = await state_mgr.redis.zscore(old_zset, member)
+                if score is not None:
+                    await state_mgr.redis.zrem(old_zset, member)
+                    await state_mgr.redis.zadd(new_zset, {member: score})
+                    fixed_zset += 1
+            except Exception as e:
+                errors.append({"phone": phone, "error": f"ZSET: {e}"})
+
+            old_inbox = f"{state_mgr.ADVISOR_INBOX_PREFIX}{m['zset_source']}"
+            new_inbox = f"{state_mgr.ADVISOR_INBOX_PREFIX}{new_owner}"
+            try:
+                inbox_score = await state_mgr.redis.zscore(old_inbox, member)
+                if inbox_score is not None:
+                    await state_mgr.redis.zrem(old_inbox, member)
+                    await state_mgr.redis.zadd(new_inbox, {member: inbox_score})
+            except Exception:
+                pass
+
+    return {
+        "dry_run": dry_run,
+        "correct": correct,
+        "mismatches_count": len(mismatches),
+        "mismatches": [
+            {
+                "phone": m["phone"],
+                "display_name": m["display_name"],
+                "from": f"{m['redis_owner_name']} ({m['redis_owner']})",
+                "to": f"{m['hubspot_owner_name']} ({m['hubspot_owner']})",
+            }
+            for m in mismatches
+        ],
+        "applied": {
+            "redis_meta": fixed_redis,
+            "mongodb": fixed_mongo,
+            "zset_moved": fixed_zset,
+        } if not dry_run else "dry_run",
+        "errors": errors[:20],
+    }
+
+
 # =============================================================================
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
 # =============================================================================

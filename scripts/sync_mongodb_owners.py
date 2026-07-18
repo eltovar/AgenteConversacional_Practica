@@ -27,9 +27,9 @@ import json
 import httpx
 from datetime import datetime, timedelta, timezone
 
-MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL")
 REDIS_URL = os.getenv("REDIS_URL")
-HUBSPOT_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN")
+HUBSPOT_TOKEN = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
 APPLY = "--apply" in sys.argv
 FIX_REDIS = "--redis" in sys.argv
 

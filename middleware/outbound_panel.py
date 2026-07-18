@@ -7551,11 +7551,14 @@ async def cleanup_stale_inbox(
 @router.post("/admin/sync-owners")
 async def sync_owners_with_hubspot(
     dry_run: bool = Query(True, description="True = solo listar, no aplicar"),
+    limit: int = Query(50, ge=1, le=500, description="Contactos a procesar por lote"),
+    offset: int = Query(0, ge=0, description="Posición inicial en el ZSET"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
     Sincroniza assigned_owner_id en Redis meta con hubspot_owner_id de HubSpot.
     También corrige MongoDB conversations.owner_id y mueve inbox badges.
+    Usa limit/offset para procesar en lotes y evitar timeouts.
     """
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida o no configurada")
@@ -7567,8 +7570,9 @@ async def sync_owners_with_hubspot(
     OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
     hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
 
+    total_zset = await state_mgr.redis.zcard(state_mgr.ACTIVE_CONTACTS_ZSET)
     all_members = await state_mgr.redis.zrange(
-        state_mgr.ACTIVE_CONTACTS_ZSET, 0, -1, withscores=True,
+        state_mgr.ACTIVE_CONTACTS_ZSET, offset, offset + limit - 1, withscores=True,
     )
 
     mismatches = []
@@ -7635,7 +7639,7 @@ async def sync_owners_with_hubspot(
         else:
             correct += 1
 
-        await asyncio.sleep(0.12)
+        await asyncio.sleep(0.05)
 
     fixed_redis = 0
     fixed_mongo = 0
@@ -7700,6 +7704,13 @@ async def sync_owners_with_hubspot(
             }
             for m in mismatches
         ],
+        "pagination": {
+            "total_zset": total_zset,
+            "offset": offset,
+            "limit": limit,
+            "processed": len(all_members),
+            "next_offset": offset + len(all_members) if offset + len(all_members) < total_zset else None,
+        },
         "applied": {
             "redis_meta": fixed_redis,
             "mongodb": fixed_mongo,

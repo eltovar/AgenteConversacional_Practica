@@ -1,7 +1,7 @@
 # Estado Actual del Proyecto — SofIA Conversacional
 ## Inmobiliaria Proteger — Agente Conversacional Multicanal
 
-**Última actualización:** 2026-06-01  
+**Última actualización:** 2026-06-30  
 **Rama activa:** `twilio-conversations-migration`  
 **Desarrollador:** CyberTovar  
 **Deploy:** Railway Pro — `$20/mes`
@@ -841,6 +841,149 @@ Informe ejecutivo de rendimiento del agente conversacional SofIA para mayo 2026,
 3. **Backfill `conversations`:** Script de agregación desde `messages` para poblar la colección vacía.
 4. **Sincronizar resumen IA a HubSpot:** Timeline notes automáticas al cierre de conversación.
 5. **Flujo fuera de horario:** IA más agresiva capturando datos completos + callback programado.
+
+---
+
+---
+
+## Sesión 2026-06-30 — Auditoría BI de rendimiento Junio 2026
+
+### Objetivo
+Segundo informe ejecutivo mensual de rendimiento del agente conversacional SofIA, esta vez para junio 2026. Mismo formato y nivel de profesionalismo que el informe de mayo, con una sección adicional sobre citas programadas. Documento Word (.docx) no-técnico dirigido a la Gerencia General.
+
+### Metodología
+Misma que mayo: extracción cruzada MongoDB + Twilio + HubSpot CRM. Script `audit_junio_2026.py` adaptado del de mayo con queries adicionales (distribución por día de semana, distribución diaria de todos los mensajes, conteo de mensajes por teléfono de asesora).
+
+### Hallazgos clave — Junio 2026
+- **7,935 mensajes** procesados (4,277 client / 2,227 advisor / 1,327 bot / 104 system).
+- **531 clientes únicos** escribieron. Twilio reportó 532 — diferencia de 1 (0.2%).
+- **481 usuarios nuevos** (primera interacción histórica). HubSpot creó 522 contactos.
+- **Tasa de automatización: 5.5%** — 32 conversaciones resueltas sin asesora humana (mejora vs 2.4% en mayo).
+- **94.5% requirió asesora humana** — distribución: Jubeny 353 (67.6%), Luisa 169 (32.4%).
+- **3 festivos** (8, 15 y 29 de junio — lunes): actividad similar a domingos (~36-44 msgs).
+- **Pico post-festivo**: 9 de junio con 56 clientes y 345 mensajes (efecto rebote martes post-Corpus Christi).
+- **Nuevo canal**: Instagram apareció por primera vez con 6 mensajes.
+- Ventana activa: 8 AM–5 PM concentra el 86.6% del tráfico.
+- **Integridad de datos**: Twilio vs MongoDB = 0.05% de diferencia en mensajes, 0.2% en clientes. Mejor que mayo.
+
+### Comparación Mayo vs Junio
+| Indicador | Mayo | Junio | Variación |
+|-----------|------|-------|-----------|
+| Clientes atendidos | 785 | 531 | -32.4% |
+| Contactos HubSpot | 617 | 522 | -15.4% |
+| Mensajes procesados | 12,807 | 7,935 | -38.0% |
+| Usuarios nuevos | 574 | 481 | -16.2% |
+| Automatización bot | 2.4% | 5.5% | +129% |
+
+La reducción se explica por: (1) mayo incluyó campaña masiva del 6 de mayo (782 msgs extra), (2) junio tuvo 3 festivos vs 0 relevantes en mayo.
+
+### Archivos generados
+| Archivo | Contenido |
+|---------|-----------|
+| `INFORME_SOFIA_JUNIO_2026_GERENCIA.docx` | Informe Word ejecutivo con 8 secciones + calendario + verificación cruzada |
+| `scripts/audit_junio_2026.py` | Script de extracción MongoDB + Twilio para junio |
+
+### Sección nueva: Citas programadas
+HubSpot Meetings API retornó `AUTHORIZATION_ERROR` — la cuenta no tiene scope de meetings. El informe incluye nota indicando que para datos de citas se debe solicitar informe al área de Community Manager, y recomienda implementar registro automático de citas en el panel.
+
+### Observaciones técnicas
+- El sandbox de Claude no puede conectar a MongoDB (Railway proxy) ni a Twilio API directamente. Se usó enfoque híbrido: script local ejecutado por el usuario + HubSpot consultado vía MCP tools.
+- HubSpot paginó 522 contactos en 3 llamadas (200+200+122).
+- docx generado con npm `docx` package, validado con `validate.py` del skill docx (490 paragraphs, all validations PASSED).
+
+---
+
+## Sesión 2026-07-01 — Informe Junio v8 + Plan de Acción Mensajes Masivos
+
+### Objetivo
+Dos entregables: (1) corrección de la sección Email vs WhatsApp del informe de junio con datos reales del script de auditoría, y (2) creación de un documento profesional Word "Plan de Acción: Mensajes Masivos" para la Gerencia General.
+
+### Entregable 1: Informe Junio v8 — Corrección Email vs WhatsApp
+
+**Problema:** La sección de cruce Email vs WhatsApp del informe usaba datos estimados. Se ejecutó `scripts/audit_email_vs_whatsapp.py` para obtener datos reales.
+
+**Resultados del cruce (75 clientes únicos con correo):**
+- 43 (57.3%) — Cliente escribió primero (ambos canales)
+- 24 (32.0%) — Asesora escribió primero (solo email, sin WhatsApp)
+- 8 (10.7%) — Sin mensajes encontrados en MongoDB
+
+**Archivo actualizado:** `INFORME_SOFIA_JUNIO_2026_v8.docx` — sección reemplazada con datos reales, KPI boxes corregidos, tabla de desglose por portal con 6 columnas.
+
+### Entregable 2: Plan de Acción Mensajes Masivos
+
+**Documento:** `PLAN_MENSAJES_MASIVOS_PROTEGER.docx` (262 párrafos, validación OK)
+
+**Contenido del plan:**
+1. **Contexto y objetivo** — 530 clientes/mes, solo 17% agenda cita, 83% sin seguimiento
+2. **Cómo funcionan** — flujo paso a paso del sistema existente + seguridades integradas
+3. **Plantillas aprobadas** — 2 templates masivos (aún_en_búsqueda, seguimiento_personalizado) + 5 individuales
+4. **Costos y fórmula** — tarifas Meta+Twilio Colombia, fórmula: `Costo = N × ($0.02 + Tasa_Respuesta × $0.01)`, 4 escenarios (100-800 contactos)
+5. **Embudos recomendados** — Prioridad alta: No responde, Reubicados, presupuestos. Media: En estudio, Local/Bodega, Aprobado. Bloqueados: En conversación, Cerrado perdido, Ana Contratos
+6. **Calendario** — 2 campañas/mes, martes 9AM (basado en datos de junio)
+7. **Recomendaciones** — plantillas, HubSpot, Twilio, panel de asesoras
+8. **Retorno esperado** — $20 USD/mes → 600 contactos reactivados → 12-18 citas adicionales → costo/cita ~$1.30 USD
+
+**Datos de pricing utilizados (Colombia, abril 2026):**
+| Tipo | Meta | Twilio | Total |
+|------|------|--------|-------|
+| Marketing template (outbound) | ~$0.0149 | $0.005 | ~$0.0199 |
+| Utility template (fuera ventana) | $0.0008 | $0.005 | $0.0058 |
+| Utility (dentro ventana 24h) | GRATIS | $0.005 | $0.005 |
+| Respuesta cliente (inbound) | GRATIS | $0.005 | $0.005 |
+
+### Archivos generados
+| Archivo | Contenido |
+|---------|-----------|
+| `INFORME_SOFIA_JUNIO_2026_v8.docx` | Informe junio con sección email corregida |
+| `PLAN_MENSAJES_MASIVOS_PROTEGER.docx` | Plan de acción mensajes masivos para gerencia |
+| `scripts/audit_email_vs_whatsapp.py` | Script de cruce email vs WhatsApp |
+
+---
+
+## Sesión 2026-07-06 — Auditoría profunda campaña masiva 6 de mayo
+
+**Objetivo:** Investigar en detalle los resultados reales de la primera campaña masiva WhatsApp del 6 de mayo, respondiendo 4 preguntas clave: cuántos recibieron, cuántos respondieron, cuántos positivos vs negativos, y cuántos agendaron cita vs se perdieron por falta de inventario.
+
+### Hallazgos críticos
+
+**Datos corregidos del envío:**
+- Se enviaron **648** mensajes masivos (no 747 como se reportó inicialmente; la diferencia de 99 puede ser envíos fallidos no registrados en MongoDB)
+- Respondieron **203** clientes (31.3%)
+- 445 no respondieron (68.7%)
+
+**Clasificación de respuestas (post-revisión manual):**
+La clasificación automática por keywords tuvo errores significativos. Variantes de "sí" como "sii", "sip", "sib" no se detectaron; "no gracias" quedó como neutral. Totales corregidos:
+
+| Categoría | Cantidad | % de respuestas |
+|-----------|----------|-----------------|
+| Positivos (aún buscan) | 90 | 44.3% |
+| Negativos (ya no buscan) | 58 | 28.6% |
+| Solo saludos (intención no clara) | 40 | 19.7% |
+| Auto-respuestas de negocios (spam) | 11 | 5.4% |
+| Ambiguos/otros | 4 | 2.0% |
+
+**Embudo de conversión completo:**
+```
+648 enviados → 203 respondieron (31.3%) → 90 positivos (44.3%)
+  → 8 con mención de cita (8.9%) → ~2 citas reales (0.3%)
+  → 49 perdidos por falta de inventario (54.4%)
+  → 33 sin desenlace claro (36.7%)
+```
+
+**Problema #1 — Inventario:** El 54.4% de los 90 interesados se perdió porque la inmobiliaria no tiene inmuebles en el rango que buscan (principalmente $1.200.000 - $1.800.000 COP/mes). Enviar más masivos sin ampliar inventario solo daña la marca.
+
+**Problema #2 — Seguimiento:** 101 de 203 (49.8%) respondieron pero NO recibieron seguimiento de asesora humana.
+
+**Problema #3 — Spam:** 11 números en la base son negocios con bots de WhatsApp Business (KukingMonkey, Autosport, floristería, etc.). Deben depurarse.
+
+**Problema #4 — Timing:** 95.1% de respuestas llegaron el mismo día. Si no hay asesoras disponibles ese día, se pierde la oportunidad.
+
+### Archivos generados
+| Archivo | Contenido |
+|---------|-----------|
+| `ANALISIS_CAMPANA_MASIVA_MAYO_2026.docx` | Documento de análisis detallado con datos de MongoDB, clasificación manual, embudo de conversión y recomendaciones. Base de conocimiento para actualizar el Plan de Acción |
+| `scripts/audit_campana_mayo6.py` | Script Python (Motor async) para auditar mensajes masivos del 6 de mayo en MongoDB |
+| `scripts/audit_campana_mayo6_results.json` | Resultados crudos del script de auditoría |
 
 ---
 

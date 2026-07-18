@@ -73,7 +73,7 @@ async def main():
     print()
 
     mongo_client = motor.AsyncIOMotorClient(MONGODB_URI)
-    db = mongo_client.get_default_database()
+    db = mongo_client.get_default_database(default="inmobiliaria_chat")
 
     # Obtener TODAS las conversaciones con owner_id
     cursor = db.conversations.find(

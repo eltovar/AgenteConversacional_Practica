@@ -3832,28 +3832,16 @@ async def get_contact_detail(
 
     async def _get_messages():
         try:
-            # Paso 1: MongoDB por teléfono + canal
+            # Paso 1: MongoDB por teléfono (sin filtro de canal).
+            # Antes filtraba por canal, pero el canal con que el panel abre el chat
+            # (canal_origen de HubSpot) puede diferir del canal con que se guardan los
+            # mensajes (historical_channel de Redis), causando mensajes invisibles.
             mongo_msgs = await mongo_manager.get_history(
                 phone=phone_normalized,
                 limit=limit,
-                channel=canal,
+                channel=None,
                 before_ts=before_ts_dt,
             )
-
-            # Paso 1.5: si no hay resultados → reintentar sin filtro de canal (red de seguridad).
-            # Cubre desincronizaciones donde el canal almacenado difiere del canal_origen.
-            if not mongo_msgs and canal:
-                mongo_msgs = await mongo_manager.get_history(
-                    phone=phone_normalized,
-                    limit=limit,
-                    channel=None,
-                    before_ts=before_ts_dt,
-                )
-                if mongo_msgs:
-                    logger.info(
-                        f"[Panel] Historial sin filtro canal: {len(mongo_msgs)} msgs para "
-                        f"{phone_normalized} (canal={canal} → fallback phone-only)"
-                    )
 
             # Si MongoDB ya tiene historial completo (>20) → retornar sin consultar HubSpot
             if len(mongo_msgs) > 20:
@@ -4162,31 +4150,18 @@ async def get_history_by_contact_id(
             validation = normalizer.normalize(phone)
 
             if validation.is_valid:
+                # Sin filtro de canal: el canal con que el panel abre el chat
+                # (canal_origen de HubSpot) puede diferir del canal con que se
+                # guardan los mensajes (historical_channel de Redis).
                 messages = await mongo_manager.get_history(
                     phone=validation.normalized,
                     limit=limit,
-                    channel=canal,
+                    channel=None,
                     before_ts=before_ts_dt,
                 )
                 if messages:
                     source = "mongodb"
                     logger.debug(f"[Panel] Historial desde MongoDB (phone): {len(messages)} msgs")
-
-                # Fallback sin canal: leads de portal (mercado_libre, ciencuadras) tienen
-                # canal=portal pero mensajes guardados con channel=whatsapp
-                if not messages and canal and canal not in ("whatsapp", "instagram"):
-                    messages = await mongo_manager.get_history(
-                        phone=validation.normalized,
-                        limit=limit,
-                        channel=None,
-                        before_ts=before_ts_dt,
-                    )
-                    if messages:
-                        source = "mongodb"
-                        logger.debug(
-                            f"[Panel] Historial sin filtro canal: {len(messages)} msgs "
-                            f"(canal={canal} → fallback phone-only)"
-                        )
 
         # =====================================================================
         # PASO 2: MongoDB por contact_id (si no hay phone o no hay resultados)

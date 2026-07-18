@@ -1,0 +1,1434 @@
+{
+  "campaign_date": "2026-05-06",
+  "analysis_window": "2026-05-06 a 2026-05-20",
+  "total_sent": 648,
+  "total_responded": 203,
+  "response_rate": 31.3,
+  "no_response": 445,
+  "classifications": {
+    "positive": 83,
+    "negative": 26,
+    "neutral": 92,
+    "ambiguous": 2
+  },
+  "positive_outcomes": {
+    "appointment_mention": 8,
+    "no_match_lost": 49,
+    "no_clear_outcome": 26
+  },
+  "followup": {
+    "with_advisor_followup": 102,
+    "without_followup": 101
+  },
+  "response_distribution_by_date": {
+    "2026-05-06": 193,
+    "2026-05-07": 4,
+    "2026-05-08": 1,
+    "2026-05-09": 1,
+    "2026-05-11": 1,
+    "2026-05-16": 3
+  },
+  "property_type_mentions": {
+    "Apartamento": 4,
+    "Arriendo (genérico)": 3,
+    "Casa": 1,
+    "Habitación": 1
+  },
+  "detailed_positive_responses": [
+    {
+      "phone_last4": "3130",
+      "content": "👋 ¡Hola! Soy Esteban Molina del equipo comercial de Inmobiliaria Proteger \nGracias por comunicarte conmigo.🏡 \nEstoy aquí para darte información personalizada en arriendos o administración de propiedad",
+      "contact_id": "209015468644"
+    },
+    {
+      "phone_last4": "4116",
+      "content": "Si",
+      "contact_id": "212061242154"
+    },
+    {
+      "phone_last4": "8459",
+      "content": "Hola 👋🏼 te damos la bienvenida a KukingMonkey ! \nCreamos experiencias perfectas para ti. Catering , bebidas, menaje, recordatorios , decoración, Wedding planner y propuestas personalizadas para tu eve",
+      "contact_id": "212234027390"
+    },
+    {
+      "phone_last4": "0595",
+      "content": "Hola si señora",
+      "contact_id": "213081603943"
+    },
+    {
+      "phone_last4": "2119",
+      "content": "Si",
+      "contact_id": "212504131590"
+    },
+    {
+      "phone_last4": "3094",
+      "content": "Hola cómo estás yo estoy con ustedes pero quisiera saber si hay posibilidades de cambiarme",
+      "contact_id": "212863007554"
+    },
+    {
+      "phone_last4": "9491",
+      "content": "si",
+      "contact_id": "214131682316"
+    },
+    {
+      "phone_last4": "1070",
+      "content": "Si",
+      "contact_id": "212827939117"
+    },
+    {
+      "phone_last4": "9251",
+      "content": "buenos dias, si aun sigo buscando",
+      "contact_id": "214619229865"
+    },
+    {
+      "phone_last4": "0978",
+      "content": "Hola ✨ Gracias por escribir a Bruma & Brillo.\nCreamos rituales de amor propio a través de maquillaje y velas hechas con intención.\nSi buscas un detalle especial para ti o para regalar, con gusto te as",
+      "contact_id": "215023589476"
+    },
+    {
+      "phone_last4": "9261",
+      "content": "Si",
+      "contact_id": "215524634004"
+    },
+    {
+      "phone_last4": "5433",
+      "content": "Si",
+      "contact_id": "215558502304"
+    },
+    {
+      "phone_last4": "0342",
+      "content": "Holaa\nSi",
+      "contact_id": "214595749539"
+    },
+    {
+      "phone_last4": "1286",
+      "content": "Si",
+      "contact_id": "216203302292"
+    },
+    {
+      "phone_last4": "6170",
+      "content": "Que día. Si",
+      "contact_id": "217017974449"
+    },
+    {
+      "phone_last4": "6662",
+      "content": "Si",
+      "contact_id": "212013116291"
+    },
+    {
+      "phone_last4": "4281",
+      "content": "[Transcripción de Audio]: Muy buenos días, bendición para todos, sí señora, todavía ando buscando, pero mi problema es que yo ando buscando algo económico, como un apartamentico de 1.500.000, que se m",
+      "contact_id": "217357070383"
+    },
+    {
+      "phone_last4": "9160",
+      "content": "Si",
+      "contact_id": "219060019566"
+    },
+    {
+      "phone_last4": "6391",
+      "content": "Si",
+      "contact_id": "215804270771"
+    },
+    {
+      "phone_last4": "2458",
+      "content": "Si",
+      "contact_id": "219121537717"
+    },
+    {
+      "phone_last4": "8427",
+      "content": "Hola buenos días . Si un sigo en la búsqueda",
+      "contact_id": "213559003815"
+    },
+    {
+      "phone_last4": "0040",
+      "content": "Muy buenos días .\nSiii  aun continuamos buscando",
+      "contact_id": "217352721683"
+    },
+    {
+      "phone_last4": "7285",
+      "content": "Hola ! Si",
+      "contact_id": "211831208377"
+    },
+    {
+      "phone_last4": "7110",
+      "content": "Si gracias",
+      "contact_id": "219317389468"
+    },
+    {
+      "phone_last4": "4786",
+      "content": "Si señora",
+      "contact_id": "210177229654"
+    },
+    {
+      "phone_last4": "2209",
+      "content": "Mira realmente es mi hermano el que está buscando te comparto el celular de él 3116307079 se llama Óscar",
+      "contact_id": "213984968373"
+    },
+    {
+      "phone_last4": "0213",
+      "content": "Buen día si",
+      "contact_id": "215578095225"
+    },
+    {
+      "phone_last4": "3325",
+      "content": "Si",
+      "contact_id": "217920389921"
+    },
+    {
+      "phone_last4": "7021",
+      "content": "Buenos días si",
+      "contact_id": "214495669638"
+    },
+    {
+      "phone_last4": "2986",
+      "content": "Si",
+      "contact_id": "216701551178"
+    },
+    {
+      "phone_last4": "1183",
+      "content": "[El cliente envió un audio sin contenido verbal claro]",
+      "contact_id": "215576414619"
+    },
+    {
+      "phone_last4": "4526",
+      "content": "Hola si",
+      "contact_id": "215804972196"
+    },
+    {
+      "phone_last4": "3905",
+      "content": "Si claro",
+      "contact_id": "213050027520"
+    },
+    {
+      "phone_last4": "0560",
+      "content": "Hola sí",
+      "contact_id": "216201843117"
+    },
+    {
+      "phone_last4": "4792",
+      "content": "Si",
+      "contact_id": "218739056206"
+    },
+    {
+      "phone_last4": "2469",
+      "content": "Si",
+      "contact_id": "218179305351"
+    },
+    {
+      "phone_last4": "6322",
+      "content": "Si",
+      "contact_id": "214454100842"
+    },
+    {
+      "phone_last4": "1222",
+      "content": "Si",
+      "contact_id": "216976345201"
+    },
+    {
+      "phone_last4": "6008",
+      "content": "No, quiero comprar",
+      "contact_id": "214255701118"
+    },
+    {
+      "phone_last4": "4425",
+      "content": "Buenos días, no ya encontramos el inmueble para arrendar, muchas gracias",
+      "contact_id": "217430556461"
+    },
+    {
+      "phone_last4": "3506",
+      "content": "Si",
+      "contact_id": "217165655463"
+    },
+    {
+      "phone_last4": "9756",
+      "content": "Hola, si",
+      "contact_id": "217335250214"
+    },
+    {
+      "phone_last4": "7799",
+      "content": "Hola, si",
+      "contact_id": "217291311544"
+    },
+    {
+      "phone_last4": "5269",
+      "content": "Claro porque nadie me confirmó la visita",
+      "contact_id": "217708829325"
+    },
+    {
+      "phone_last4": "5403",
+      "content": "Si",
+      "contact_id": "217898389158"
+    },
+    {
+      "phone_last4": "9547",
+      "content": "Si",
+      "contact_id": "216881817165"
+    },
+    {
+      "phone_last4": "5529",
+      "content": "Hola buenos días si",
+      "contact_id": "218973408419"
+    },
+    {
+      "phone_last4": "7837",
+      "content": "Si",
+      "contact_id": "218203567543"
+    },
+    {
+      "phone_last4": "1625",
+      "content": "si",
+      "contact_id": "219326250006"
+    },
+    {
+      "phone_last4": "3905",
+      "content": "Si",
+      "contact_id": "219330468750"
+    },
+    {
+      "phone_last4": "8664",
+      "content": "Buenos dias.  Sí, en efecto",
+      "contact_id": "219322723874"
+    },
+    {
+      "phone_last4": "2242",
+      "content": "Hola si",
+      "contact_id": "217922814093"
+    },
+    {
+      "phone_last4": "9580",
+      "content": "Inmueble para compra",
+      "contact_id": "215067587629"
+    },
+    {
+      "phone_last4": "6398",
+      "content": "Si",
+      "contact_id": "218706797342"
+    },
+    {
+      "phone_last4": "5220",
+      "content": "Si",
+      "contact_id": "218743852316"
+    },
+    {
+      "phone_last4": "7054",
+      "content": "Hola. Si",
+      "contact_id": "216694344270"
+    },
+    {
+      "phone_last4": "5527",
+      "content": "Si claro",
+      "contact_id": "217995370284"
+    },
+    {
+      "phone_last4": "3364",
+      "content": "Hola 👋🏻 sí, pero lo necesito es para agosto 😬",
+      "contact_id": "217503441839"
+    },
+    {
+      "phone_last4": "7107",
+      "content": "Buenos días , si estamos quietos porque ya pasamos papeles en Santa Fe sobre una casa que cumple con lo que lo que buscamos\nNuestra solicitud ya fue aprobada y estamos estamos esperando lo que sigue",
+      "contact_id": "217711904610"
+    },
+    {
+      "phone_last4": "9488",
+      "content": "Hola, si",
+      "contact_id": null
+    },
+    {
+      "phone_last4": "2234",
+      "content": "Si",
+      "contact_id": "210412810386"
+    },
+    {
+      "phone_last4": "8243",
+      "content": "Buenos días, sí, pero el valor es muy alto, la verdad buscamos para mi mamá un poco mas económico, que no supere 1'800.000",
+      "contact_id": "217331179776"
+    },
+    {
+      "phone_last4": "7186",
+      "content": "Si",
+      "contact_id": "218697391029"
+    },
+    {
+      "phone_last4": "3157",
+      "content": "Sí",
+      "contact_id": "216215837506"
+    },
+    {
+      "phone_last4": "9283",
+      "content": "Me interesado en el que te mandé la dirección",
+      "contact_id": "216051920187"
+    },
+    {
+      "phone_last4": "8305",
+      "content": "Buenos días, si todavía estoy buscando",
+      "contact_id": "218813066855"
+    },
+    {
+      "phone_last4": "4778",
+      "content": "Hola, buenos dias  si estoy buscando un inmueble de 1 o 2 habitaciones en el barrio el Dorado, o la paz o trianon.  De máximo 1.500.000 de presupuesto.",
+      "contact_id": "212580819474"
+    },
+    {
+      "phone_last4": "5775",
+      "content": "Si",
+      "contact_id": "217338593361"
+    },
+    {
+      "phone_last4": "4791",
+      "content": "Hola si",
+      "contact_id": "216808040882"
+    },
+    {
+      "phone_last4": "9331",
+      "content": "Si pero en Cali",
+      "contact_id": "215980568596"
+    },
+    {
+      "phone_last4": "1427",
+      "content": "Si ☺️",
+      "contact_id": "216900243015"
+    },
+    {
+      "phone_last4": "7078",
+      "content": "[Imagen del cliente]: La imagen presenta un contrato de arrendamiento de un inmueble comercial, específicamente una oficina ubicada en el Edificio Colmena en Medellín. Se detallan aspectos como la dur",
+      "contact_id": "219253658964"
+    },
+    {
+      "phone_last4": "6867",
+      "content": "Si",
+      "contact_id": "218614782120"
+    },
+    {
+      "phone_last4": "9000",
+      "content": "Si",
+      "contact_id": "218054591758"
+    },
+    {
+      "phone_last4": "1776",
+      "content": "Hola buenas tardes. Si todavía estoy buscando apto",
+      "contact_id": "215713077351"
+    },
+    {
+      "phone_last4": "1841",
+      "content": "Si",
+      "contact_id": "218784551785"
+    },
+    {
+      "phone_last4": "8013",
+      "content": "Si",
+      "contact_id": "218646296982"
+    },
+    {
+      "phone_last4": "9747",
+      "content": "hola . si hasta 1800",
+      "contact_id": "214794719594"
+    },
+    {
+      "phone_last4": "0507",
+      "content": "Buenas noches como estan...estoy buscando apto o apartaestudio hasta 1.500 en Envigado",
+      "contact_id": "215783280307"
+    },
+    {
+      "phone_last4": "4385",
+      "content": "Si, que tienes disponible?",
+      "contact_id": "210394065935"
+    },
+    {
+      "phone_last4": "2334",
+      "content": "si",
+      "contact_id": "216302035102"
+    },
+    {
+      "phone_last4": "2405",
+      "content": "Estoy interesado en su inmueble 193667109 que vi por www.fincaraiz.com.co/apartamento-en-arriendo-en-escobero-envigado/193667109",
+      "contact_id": "214395916585"
+    },
+    {
+      "phone_last4": "1467",
+      "content": "Si",
+      "contact_id": "217338887693"
+    }
+  ],
+  "detailed_negative_responses": [
+    {
+      "phone_last4": "2192",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "7982",
+      "content": "Ya encontré gracias"
+    },
+    {
+      "phone_last4": "6548",
+      "content": "No, ya conseguí, gracias"
+    },
+    {
+      "phone_last4": "8177",
+      "content": "Hola, ya no"
+    },
+    {
+      "phone_last4": "2364",
+      "content": "No ya encontré muchas gracias"
+    },
+    {
+      "phone_last4": "9562",
+      "content": "Muchas gracias. Ya conseguí"
+    },
+    {
+      "phone_last4": "2466",
+      "content": "No ya encontré"
+    },
+    {
+      "phone_last4": "2454",
+      "content": "Hola, ya no…, gracias"
+    },
+    {
+      "phone_last4": "2188",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "3603",
+      "content": "No ya no.    Mil gracias"
+    },
+    {
+      "phone_last4": "2480",
+      "content": "Hola no ya conseguí"
+    },
+    {
+      "phone_last4": "1610",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "2455",
+      "content": "No gracias ya conseguimos"
+    },
+    {
+      "phone_last4": "0114",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "5075",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "8530",
+      "content": "Ya no muchas gracias"
+    },
+    {
+      "phone_last4": "4146",
+      "content": "hola buen día, ya no muchas gracias"
+    },
+    {
+      "phone_last4": "1301",
+      "content": "No, muchas gracias ya conseguí"
+    },
+    {
+      "phone_last4": "6417",
+      "content": "No\nYa encontré, muchas gracias"
+    },
+    {
+      "phone_last4": "0275",
+      "content": "Hola, no, ya encontré, muchas gracias"
+    },
+    {
+      "phone_last4": "4580",
+      "content": "Hola no muchas gracias ya no"
+    },
+    {
+      "phone_last4": "0688",
+      "content": "No... Ya encontré"
+    },
+    {
+      "phone_last4": "3824",
+      "content": "Ya no muchas gracias"
+    },
+    {
+      "phone_last4": "4098",
+      "content": "No gracias"
+    },
+    {
+      "phone_last4": "7837",
+      "content": "Buenas tardes, ya encontré muchas gracias"
+    },
+    {
+      "phone_last4": "0596",
+      "content": "No ya no"
+    }
+  ],
+  "detailed_neutral_responses": [
+    {
+      "phone_last4": "3473",
+      "content": "Gracias por comunicarte con nosotros ¿Cómo podemos ayudarte? Déjame tu nombre, correo y número de celular para comunicarme contigo lo más pronto posible ☺️"
+    },
+    {
+      "phone_last4": "5831",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "1883",
+      "content": "Noo gracias hace más de 1 conseguimos"
+    },
+    {
+      "phone_last4": "6650",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "9276",
+      "content": "Buenos dias"
+    },
+    {
+      "phone_last4": "5614",
+      "content": "No"
+    },
+    {
+      "phone_last4": "2465",
+      "content": "Sii"
+    },
+    {
+      "phone_last4": "1046",
+      "content": "Hola cómo\nEstás"
+    },
+    {
+      "phone_last4": "0021",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "4745",
+      "content": "Buenos dias como estas?"
+    },
+    {
+      "phone_last4": "9617",
+      "content": "Hola 🤍\nBienvenido/a a Adrián Rosé 🌹\n\nDiseñamos arreglos florales elegantes, desayunos sorpresa y decoraciones para momentos especiales.\n\nCuéntanos:\n✨ ¿Para qué ocasión buscas el detalle?\n📅 ¿Para qué f"
+    },
+    {
+      "phone_last4": "2883",
+      "content": "Gracias por comunicarte con Hyt Escobar. ¿Cómo podemos ayudarte?"
+    },
+    {
+      "phone_last4": "7508",
+      "content": "No, gracias"
+    },
+    {
+      "phone_last4": "9763",
+      "content": "No. Gracias"
+    },
+    {
+      "phone_last4": "2862",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "4842",
+      "content": "holaa sii"
+    },
+    {
+      "phone_last4": "1356",
+      "content": "Bienvenido(a) a Autosport 🚗✨\nEspecialistas en estética y embellecimiento automotriz.\n\nContamos con una amplia variedad de servicios para el cuidado y protección de tu vehículo, además de productos de "
+    },
+    {
+      "phone_last4": "1476",
+      "content": "No, muchas gracias"
+    },
+    {
+      "phone_last4": "2517",
+      "content": "hola!!!"
+    },
+    {
+      "phone_last4": "4077",
+      "content": "Gracias por comunicarte con Ruta18autos.cómo podemos ayudarte."
+    },
+    {
+      "phone_last4": "0803",
+      "content": "Gracias por comunicarte con Vibrarte Estudio Musical. ¿Cómo podemos ayudarte?"
+    },
+    {
+      "phone_last4": "1003",
+      "content": "Buenos días, como están?"
+    },
+    {
+      "phone_last4": "8772",
+      "content": "Ya lo encontre gracias"
+    },
+    {
+      "phone_last4": "8867",
+      "content": "Hola, gracias por escribirnos😊 En un momento te atendemos. Estamos para servirte."
+    },
+    {
+      "phone_last4": "7510",
+      "content": "Buenos días. No señor@"
+    },
+    {
+      "phone_last4": "9399",
+      "content": "Un saludo, he encontrado ya"
+    },
+    {
+      "phone_last4": "0931",
+      "content": "Hola buenos dias"
+    },
+    {
+      "phone_last4": "1983",
+      "content": "¡Bienvenidos a Happy!\nAquí se mezcla el sabor de Happy Asados y HappyMole 🥩🥑\nExperiencias únicas, con el mejor guacamole y asados VIP que te van a encantar.\n¿Cómo te puedo ayudar hoy?"
+    },
+    {
+      "phone_last4": "4361",
+      "content": "No, gracias"
+    },
+    {
+      "phone_last4": "0215",
+      "content": "No"
+    },
+    {
+      "phone_last4": "9213",
+      "content": "Hola buenos días"
+    },
+    {
+      "phone_last4": "0510",
+      "content": "Mantenimiento"
+    },
+    {
+      "phone_last4": "3621",
+      "content": "Hola, buenos días"
+    },
+    {
+      "phone_last4": "1268",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "9258",
+      "content": "Sip"
+    },
+    {
+      "phone_last4": "3324",
+      "content": "Hola buen dia"
+    },
+    {
+      "phone_last4": "9717",
+      "content": "En este momento se aplazó la decisión. Gracias !"
+    },
+    {
+      "phone_last4": "1528",
+      "content": "Hola buen dia"
+    },
+    {
+      "phone_last4": "4150",
+      "content": "Hola buenos días \nNo señora \nMuchas gracias"
+    },
+    {
+      "phone_last4": "7682",
+      "content": "Buen dia no muchas geacias"
+    },
+    {
+      "phone_last4": "8103",
+      "content": "Hola. No"
+    },
+    {
+      "phone_last4": "7539",
+      "content": "Buenos dias"
+    },
+    {
+      "phone_last4": "1193",
+      "content": "Buenos día"
+    },
+    {
+      "phone_last4": "3791",
+      "content": "Hola buenos días"
+    },
+    {
+      "phone_last4": "3749",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "8902",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "3415",
+      "content": "Hola buenos días"
+    },
+    {
+      "phone_last4": "1664",
+      "content": "Sib"
+    },
+    {
+      "phone_last4": "3010",
+      "content": "Buen día"
+    },
+    {
+      "phone_last4": "0851",
+      "content": "No"
+    },
+    {
+      "phone_last4": "5699",
+      "content": "Muy buenos días"
+    },
+    {
+      "phone_last4": "2876",
+      "content": "Hola buenos días, ya lo resolví. Mil gracias. Buen dia"
+    },
+    {
+      "phone_last4": "3880",
+      "content": "Buen día, su señor"
+    },
+    {
+      "phone_last4": "5523",
+      "content": "No"
+    },
+    {
+      "phone_last4": "9015",
+      "content": "Hola no"
+    },
+    {
+      "phone_last4": "5528",
+      "content": "Buenos días no"
+    },
+    {
+      "phone_last4": "1016",
+      "content": "Tienes nuevas opciones?"
+    },
+    {
+      "phone_last4": "5748",
+      "content": "No, muchas gracias, Las opciones que tenían eran demasiado costosas para lo que ofrecían"
+    },
+    {
+      "phone_last4": "4373",
+      "content": "Hola \nCómo están"
+    },
+    {
+      "phone_last4": "7864",
+      "content": "siii"
+    },
+    {
+      "phone_last4": "1452",
+      "content": "Buenos dias, siii"
+    },
+    {
+      "phone_last4": "2944",
+      "content": "Hola sii"
+    },
+    {
+      "phone_last4": "8291",
+      "content": "Hola buenos dias, no , gracias"
+    },
+    {
+      "phone_last4": "0602",
+      "content": "Hola, ya encontramos. gracias!"
+    },
+    {
+      "phone_last4": "8014",
+      "content": "[Transcripción de Audio]: Buen día, muchas gracias. Me voy del país mañana, porque es hoy octubre. Muchas gracias."
+    },
+    {
+      "phone_last4": "2769",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "0252",
+      "content": "Buenas tardes di"
+    },
+    {
+      "phone_last4": "1778",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "1361",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "0120",
+      "content": "No"
+    },
+    {
+      "phone_last4": "4811",
+      "content": "No muchas Gracias"
+    },
+    {
+      "phone_last4": "7045",
+      "content": "Hola bue dia, asi es"
+    },
+    {
+      "phone_last4": "0416",
+      "content": "Buenos días, no muchas gracias"
+    },
+    {
+      "phone_last4": "8275",
+      "content": "Sii"
+    },
+    {
+      "phone_last4": "1375",
+      "content": "Buenos días"
+    },
+    {
+      "phone_last4": "0562",
+      "content": "Hola buenos días"
+    },
+    {
+      "phone_last4": "5601",
+      "content": "Buen día cómo está"
+    },
+    {
+      "phone_last4": "5830",
+      "content": "Hola buenos dias"
+    },
+    {
+      "phone_last4": "3369",
+      "content": "No, gracias"
+    },
+    {
+      "phone_last4": "2381",
+      "content": "Hola buenas"
+    },
+    {
+      "phone_last4": "4183",
+      "content": "Gracias"
+    },
+    {
+      "phone_last4": "2633",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "5396",
+      "content": "No"
+    },
+    {
+      "phone_last4": "9256",
+      "content": "Este apto continúa disponible?"
+    },
+    {
+      "phone_last4": "9526",
+      "content": "Buenas tardes"
+    },
+    {
+      "phone_last4": "1918",
+      "content": "No. Muchas gracias. Ya resolví.\nBendiciones 🙏"
+    },
+    {
+      "phone_last4": "4405",
+      "content": "Buenas"
+    },
+    {
+      "phone_last4": "4913",
+      "content": "No señora. Gracias"
+    },
+    {
+      "phone_last4": "9245",
+      "content": "Buenos dias como estas? no me gusta :("
+    },
+    {
+      "phone_last4": "6221",
+      "content": "Hola"
+    },
+    {
+      "phone_last4": "7113",
+      "content": "Buen día, cómo estás? Está disponible? Código: 9992631"
+    },
+    {
+      "phone_last4": "9610",
+      "content": "Hola!"
+    }
+  ],
+  "appointment_details": [
+    {
+      "phone_last4": "9160",
+      "contact_id": "219060019566",
+      "message_count": 14,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "6391",
+      "contact_id": "215804270771",
+      "message_count": 39,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "8427",
+      "contact_id": "213559003815",
+      "message_count": 18,
+      "first_response": "Hola buenos días . Si un sigo en la búsqueda"
+    },
+    {
+      "phone_last4": "0040",
+      "contact_id": "217352721683",
+      "message_count": 5,
+      "first_response": "Muy buenos días .\nSiii  aun continuamos buscando"
+    },
+    {
+      "phone_last4": "4786",
+      "contact_id": "210177229654",
+      "message_count": 98,
+      "first_response": "Si señora"
+    },
+    {
+      "phone_last4": "5269",
+      "contact_id": "217708829325",
+      "message_count": 5,
+      "first_response": "Claro porque nadie me confirmó la visita"
+    },
+    {
+      "phone_last4": "0507",
+      "contact_id": "215783280307",
+      "message_count": 12,
+      "first_response": "Buenas noches como estan...estoy buscando apto o apartaestudio hasta 1.500 en Envigado"
+    },
+    {
+      "phone_last4": "2405",
+      "contact_id": "214395916585",
+      "message_count": 6,
+      "first_response": "Estoy interesado en su inmueble 193667109 que vi por www.fincaraiz.com.co/apartamento-en-arriendo-en-escobero-envigado/193667109"
+    }
+  ],
+  "no_match_details": [
+    {
+      "phone_last4": "4116",
+      "contact_id": "212061242154",
+      "message_count": 10,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "0595",
+      "contact_id": "213081603943",
+      "message_count": 5,
+      "first_response": "Hola si señora"
+    },
+    {
+      "phone_last4": "2119",
+      "contact_id": "212504131590",
+      "message_count": 13,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "3094",
+      "contact_id": "212863007554",
+      "message_count": 12,
+      "first_response": "Hola cómo estás yo estoy con ustedes pero quisiera saber si hay posibilidades de cambiarme"
+    },
+    {
+      "phone_last4": "9491",
+      "contact_id": "214131682316",
+      "message_count": 11,
+      "first_response": "si"
+    },
+    {
+      "phone_last4": "1070",
+      "contact_id": "212827939117",
+      "message_count": 5,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9251",
+      "contact_id": "214619229865",
+      "message_count": 11,
+      "first_response": "buenos dias, si aun sigo buscando"
+    },
+    {
+      "phone_last4": "0342",
+      "contact_id": "214595749539",
+      "message_count": 5,
+      "first_response": "Holaa\nSi"
+    },
+    {
+      "phone_last4": "1286",
+      "contact_id": "216203302292",
+      "message_count": 11,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "6662",
+      "contact_id": "212013116291",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "2458",
+      "contact_id": "219121537717",
+      "message_count": 8,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "0213",
+      "contact_id": "215578095225",
+      "message_count": 9,
+      "first_response": "Buen día si"
+    },
+    {
+      "phone_last4": "7021",
+      "contact_id": "214495669638",
+      "message_count": 8,
+      "first_response": "Buenos días si"
+    },
+    {
+      "phone_last4": "2986",
+      "contact_id": "216701551178",
+      "message_count": 13,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "1183",
+      "contact_id": "215576414619",
+      "message_count": 17,
+      "first_response": "[El cliente envió un audio sin contenido verbal claro]"
+    },
+    {
+      "phone_last4": "3905",
+      "contact_id": "213050027520",
+      "message_count": 9,
+      "first_response": "Si claro"
+    },
+    {
+      "phone_last4": "0560",
+      "contact_id": "216201843117",
+      "message_count": 13,
+      "first_response": "Hola sí"
+    },
+    {
+      "phone_last4": "4792",
+      "contact_id": "218739056206",
+      "message_count": 4,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "1222",
+      "contact_id": "216976345201",
+      "message_count": 15,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "6008",
+      "contact_id": "214255701118",
+      "message_count": 13,
+      "first_response": "No, quiero comprar"
+    },
+    {
+      "phone_last4": "3506",
+      "contact_id": "217165655463",
+      "message_count": 4,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9756",
+      "contact_id": "217335250214",
+      "message_count": 17,
+      "first_response": "Hola, si"
+    },
+    {
+      "phone_last4": "7799",
+      "contact_id": "217291311544",
+      "message_count": 24,
+      "first_response": "Hola, si"
+    },
+    {
+      "phone_last4": "5529",
+      "contact_id": "218973408419",
+      "message_count": 11,
+      "first_response": "Hola buenos días si"
+    },
+    {
+      "phone_last4": "7837",
+      "contact_id": "218203567543",
+      "message_count": 8,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "1625",
+      "contact_id": "219326250006",
+      "message_count": 10,
+      "first_response": "si"
+    },
+    {
+      "phone_last4": "3905",
+      "contact_id": "219330468750",
+      "message_count": 4,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "2242",
+      "contact_id": "217922814093",
+      "message_count": 12,
+      "first_response": "Hola si"
+    },
+    {
+      "phone_last4": "6398",
+      "contact_id": "218706797342",
+      "message_count": 11,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "5220",
+      "contact_id": "218743852316",
+      "message_count": 14,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "7054",
+      "contact_id": "216694344270",
+      "message_count": 19,
+      "first_response": "Hola. Si"
+    },
+    {
+      "phone_last4": "5527",
+      "contact_id": "217995370284",
+      "message_count": 4,
+      "first_response": "Si claro"
+    },
+    {
+      "phone_last4": "9488",
+      "contact_id": "215782386517",
+      "message_count": 14,
+      "first_response": "Hola, si"
+    },
+    {
+      "phone_last4": "2234",
+      "contact_id": "210412810386",
+      "message_count": 8,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "8243",
+      "contact_id": "217331179776",
+      "message_count": 12,
+      "first_response": "Buenos días, sí, pero el valor es muy alto, la verdad buscamos para mi mamá un poco mas económico, que no supere 1'800.000"
+    },
+    {
+      "phone_last4": "7186",
+      "contact_id": "218697391029",
+      "message_count": 8,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "3157",
+      "contact_id": "216215837506",
+      "message_count": 8,
+      "first_response": "Sí"
+    },
+    {
+      "phone_last4": "8305",
+      "contact_id": "218813066855",
+      "message_count": 12,
+      "first_response": "Buenos días, si todavía estoy buscando"
+    },
+    {
+      "phone_last4": "4778",
+      "contact_id": "212580819474",
+      "message_count": 10,
+      "first_response": "Hola, buenos dias  si estoy buscando un inmueble de 1 o 2 habitaciones en el barrio el Dorado, o la paz o trianon.  De máximo 1.500.000 de presupuesto"
+    },
+    {
+      "phone_last4": "4791",
+      "contact_id": "216808040882",
+      "message_count": 4,
+      "first_response": "Hola si"
+    },
+    {
+      "phone_last4": "1427",
+      "contact_id": "216900243015",
+      "message_count": 16,
+      "first_response": "Si ☺️"
+    },
+    {
+      "phone_last4": "6867",
+      "contact_id": "218614782120",
+      "message_count": 14,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9000",
+      "contact_id": "218054591758",
+      "message_count": 12,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "1776",
+      "contact_id": "215713077351",
+      "message_count": 18,
+      "first_response": "Hola buenas tardes. Si todavía estoy buscando apto"
+    },
+    {
+      "phone_last4": "1841",
+      "contact_id": "218784551785",
+      "message_count": 4,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "8013",
+      "contact_id": "218646296982",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9747",
+      "contact_id": "214794719594",
+      "message_count": 3,
+      "first_response": "hola . si hasta 1800"
+    },
+    {
+      "phone_last4": "4385",
+      "contact_id": "210394065935",
+      "message_count": 13,
+      "first_response": "Si, que tienes disponible?"
+    },
+    {
+      "phone_last4": "2334",
+      "contact_id": "216302035102",
+      "message_count": 13,
+      "first_response": "si"
+    }
+  ],
+  "no_outcome_details": [
+    {
+      "phone_last4": "3130",
+      "contact_id": "209015468644",
+      "message_count": 3,
+      "first_response": "👋 ¡Hola! Soy Esteban Molina del equipo comercial de Inmobiliaria Proteger \nGracias por comunicarte conmigo.🏡 \nEstoy aquí para darte información person"
+    },
+    {
+      "phone_last4": "8459",
+      "contact_id": "212234027390",
+      "message_count": 2,
+      "first_response": "Hola 👋🏼 te damos la bienvenida a KukingMonkey ! \nCreamos experiencias perfectas para ti. Catering , bebidas, menaje, recordatorios , decoración, Weddi"
+    },
+    {
+      "phone_last4": "0978",
+      "contact_id": "215023589476",
+      "message_count": 3,
+      "first_response": "Hola ✨ Gracias por escribir a Bruma & Brillo.\nCreamos rituales de amor propio a través de maquillaje y velas hechas con intención.\nSi buscas un detall"
+    },
+    {
+      "phone_last4": "9261",
+      "contact_id": "215524634004",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "5433",
+      "contact_id": "215558502304",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "6170",
+      "contact_id": "217017974449",
+      "message_count": 7,
+      "first_response": "Que día. Si"
+    },
+    {
+      "phone_last4": "4281",
+      "contact_id": "217357070383",
+      "message_count": 3,
+      "first_response": "[Transcripción de Audio]: Muy buenos días, bendición para todos, sí señora, todavía ando buscando, pero mi problema es que yo ando buscando algo econó"
+    },
+    {
+      "phone_last4": "7285",
+      "contact_id": "211831208377",
+      "message_count": 2,
+      "first_response": "Hola ! Si"
+    },
+    {
+      "phone_last4": "7110",
+      "contact_id": "219317389468",
+      "message_count": 2,
+      "first_response": "Si gracias"
+    },
+    {
+      "phone_last4": "2209",
+      "contact_id": "213984968373",
+      "message_count": 5,
+      "first_response": "Mira realmente es mi hermano el que está buscando te comparto el celular de él 3116307079 se llama Óscar"
+    },
+    {
+      "phone_last4": "3325",
+      "contact_id": "217920389921",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "4526",
+      "contact_id": "215804972196",
+      "message_count": 3,
+      "first_response": "Hola si"
+    },
+    {
+      "phone_last4": "2469",
+      "contact_id": "218179305351",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "6322",
+      "contact_id": "214454100842",
+      "message_count": 2,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "4425",
+      "contact_id": "217430556461",
+      "message_count": 4,
+      "first_response": "Buenos días, no ya encontramos el inmueble para arrendar, muchas gracias"
+    },
+    {
+      "phone_last4": "5403",
+      "contact_id": "217898389158",
+      "message_count": 2,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9547",
+      "contact_id": "216881817165",
+      "message_count": 5,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "8664",
+      "contact_id": "219322723874",
+      "message_count": 7,
+      "first_response": "Buenos dias.  Sí, en efecto"
+    },
+    {
+      "phone_last4": "9580",
+      "contact_id": "215067587629",
+      "message_count": 2,
+      "first_response": "Inmueble para compra"
+    },
+    {
+      "phone_last4": "3364",
+      "contact_id": "217503441839",
+      "message_count": 3,
+      "first_response": "Hola 👋🏻 sí, pero lo necesito es para agosto 😬"
+    },
+    {
+      "phone_last4": "7107",
+      "contact_id": "217711904610",
+      "message_count": 4,
+      "first_response": "Buenos días , si estamos quietos porque ya pasamos papeles en Santa Fe sobre una casa que cumple con lo que lo que buscamos\nNuestra solicitud ya fue a"
+    },
+    {
+      "phone_last4": "9283",
+      "contact_id": "216051920187",
+      "message_count": 21,
+      "first_response": "Me interesado en el que te mandé la dirección"
+    },
+    {
+      "phone_last4": "5775",
+      "contact_id": "217338593361",
+      "message_count": 3,
+      "first_response": "Si"
+    },
+    {
+      "phone_last4": "9331",
+      "contact_id": "215980568596",
+      "message_count": 3,
+      "first_response": "Si pero en Cali"
+    },
+    {
+      "phone_last4": "7078",
+      "contact_id": "219253658964",
+      "message_count": 8,
+      "first_response": "[Imagen del cliente]: La imagen presenta un contrato de arrendamiento de un inmueble comercial, específicamente una oficina ubicada en el Edificio Col"
+    },
+    {
+      "phone_last4": "1467",
+      "contact_id": "217338887693",
+      "message_count": 3,
+      "first_response": "Si"
+    }
+  ]
+}

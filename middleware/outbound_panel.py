@@ -7720,6 +7720,147 @@ async def sync_owners_with_hubspot(
     }
 
 
+@router.post("/admin/sync-owners-mongo")
+async def sync_owners_mongo(
+    dry_run: bool = Query(True),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    advisor: str = Query(None, description="Solo corregir contactos de este advisor (ej: 89096379)"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Escanea MongoDB conversations directamente y corrige owner_id vs HubSpot.
+    Cubre contactos que no están en el ZSET (los que aparecen como 'Historial').
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    import json as _json
+    mongo_mgr = get_mongo_manager()
+    http = get_httpx_client()
+    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+    hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
+
+    query: dict = {"owner_id": {"$exists": True, "$ne": None}}
+    if advisor:
+        query["owner_id"] = advisor
+
+    total = await mongo_mgr.db.conversations.count_documents(query)
+    cursor = mongo_mgr.db.conversations.find(
+        query,
+        {"phone": 1, "canal": 1, "owner_id": 1, "display_name": 1, "contact_id": 1, "_id": 0},
+    ).sort("last_message_at", -1).skip(offset).limit(limit)
+    docs = await cursor.to_list(length=limit)
+
+    mismatches = []
+    correct = 0
+    skipped = 0
+    errors = []
+
+    for d in docs:
+        phone = d.get("phone", "")
+        if not phone:
+            skipped += 1
+            continue
+
+        contact_id = d.get("contact_id")
+        if not contact_id:
+            state_mgr = _get_state_manager()
+            cache_key = f"phone_cache:{phone}"
+            contact_id = await state_mgr.redis.get(cache_key)
+            if isinstance(contact_id, bytes):
+                contact_id = contact_id.decode()
+        if not contact_id:
+            skipped += 1
+            continue
+
+        try:
+            resp = await http.get(
+                f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+                params={"properties": "hubspot_owner_id"},
+                headers={"Authorization": f"Bearer {hs_token}"},
+            )
+            if resp.status_code != 200:
+                skipped += 1
+                continue
+            hs_owner = resp.json().get("properties", {}).get("hubspot_owner_id")
+        except Exception as e:
+            errors.append({"phone": phone, "error": str(e)})
+            continue
+
+        if not hs_owner:
+            skipped += 1
+            continue
+
+        mongo_owner = d.get("owner_id")
+        if str(mongo_owner) != str(hs_owner):
+            mismatches.append({
+                "phone": phone,
+                "canal": d.get("canal", "whatsapp"),
+                "contact_id": contact_id,
+                "mongo_owner": mongo_owner,
+                "hubspot_owner": hs_owner,
+                "display_name": d.get("display_name", ""),
+            })
+        else:
+            correct += 1
+
+        await asyncio.sleep(0.05)
+
+    fixed_mongo = 0
+    fixed_redis = 0
+
+    if not dry_run and mismatches:
+        state_mgr = _get_state_manager()
+        for m in mismatches:
+            phone, canal = m["phone"], m["canal"]
+            new_owner = m["hubspot_owner"]
+
+            try:
+                await mongo_mgr.db.conversations.update_one(
+                    {"phone": phone, "canal": canal},
+                    {"$set": {"owner_id": new_owner}},
+                )
+                fixed_mongo += 1
+            except Exception:
+                pass
+
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+            try:
+                raw = await state_mgr.redis.get(meta_key)
+                if raw:
+                    meta_data = _json.loads(raw)
+                    if str(meta_data.get("assigned_owner_id")) != str(new_owner):
+                        meta_data["assigned_owner_id"] = new_owner
+                        ttl = await state_mgr.redis.ttl(meta_key)
+                        if ttl > 0:
+                            await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
+                        else:
+                            await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+                        fixed_redis += 1
+            except Exception:
+                pass
+
+    return {
+        "dry_run": dry_run,
+        "source": "mongodb",
+        "filter_advisor": advisor,
+        "pagination": {"total": total, "offset": offset, "limit": limit, "processed": len(docs),
+                        "next_offset": offset + len(docs) if offset + len(docs) < total else None},
+        "correct": correct,
+        "skipped": skipped,
+        "mismatches_count": len(mismatches),
+        "mismatches": [
+            {"phone": m["phone"], "display_name": m["display_name"],
+             "from": f"{OWNER_NAMES.get(str(m['mongo_owner']), '?')} ({m['mongo_owner']})",
+             "to": f"{OWNER_NAMES.get(str(m['hubspot_owner']), '?')} ({m['hubspot_owner']})"}
+            for m in mismatches
+        ],
+        "applied": {"mongodb": fixed_mongo, "redis_meta": fixed_redis} if not dry_run else "dry_run",
+        "errors": errors[:20],
+    }
+
+
 # =============================================================================
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
 # =============================================================================

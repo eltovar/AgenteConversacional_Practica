@@ -736,9 +736,9 @@ async def _process_message_deferred(
         # Sincronizar owner_id en MongoDB conversations (espejo del fix Redis)
         if hubspot_owner_id:
             try:
-                from database.mongodb_client import get_mongo_manager
+                _mongo = get_mongo_manager()
                 asyncio.create_task(
-                    get_mongo_manager().update_conversation_meta(
+                    _mongo.update_conversation_meta(
                         phone=phone_normalized,
                         canal=final_channel or "whatsapp",
                         owner_id=hubspot_owner_id,

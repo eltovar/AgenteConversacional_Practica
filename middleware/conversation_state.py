@@ -1148,14 +1148,20 @@ class ConversationStateManager:
                 if display_name and not meta.get("display_name"):
                     meta["display_name"] = display_name
                 
-                # ✅ FIX: Actualizar assigned_owner_id si se proporciona y no existe en meta
-                # Esto es CRÍTICO para que el panel de asesores filtre correctamente
-                if owner_id and not meta.get("assigned_owner_id"):
+                # Sincronizar assigned_owner_id con HubSpot (fuente de verdad)
+                if owner_id and meta.get("assigned_owner_id") != owner_id:
+                    old_owner = meta.get("assigned_owner_id")
                     meta["assigned_owner_id"] = owner_id
-                    logger.info(
-                        f"[ConversationState] assigned_owner_id asignado en meta: {owner_id} "
-                        f"(teléfono: {phone})"
-                    )
+                    if old_owner:
+                        logger.info(
+                            f"[ConversationState] assigned_owner_id actualizado: "
+                            f"{old_owner} → {owner_id} (teléfono: {phone})"
+                        )
+                    else:
+                        logger.info(
+                            f"[ConversationState] assigned_owner_id asignado en meta: {owner_id} "
+                            f"(teléfono: {phone})"
+                        )
                 
                 meta["last_activity"] = now_iso
 

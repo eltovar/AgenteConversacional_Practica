@@ -399,7 +399,6 @@ class ConversationStateManager:
                     pipe2.ttl(f"{self.STATE_PREFIX}{phone}:{c}")  # TTL
                 results2 = await pipe2.execute()
 
-                bot_ghosts = []
                 for i, member in enumerate(bot_to_process):
                     phone, canal = member.split(":", 1)
                     base = i * 3
@@ -442,13 +441,6 @@ class ConversationStateManager:
                         "deal_stage": meta.deal_stage,
                         "last_advisor_message": meta.last_advisor_message,
                     })
-
-                # ⚠️ 2026-05-30: bot_ghosts ya no se srem aquí — job nocturno los valida.
-                if bot_ghosts:
-                    logger.info(
-                        f"[ConversationState] {len(bot_ghosts)} ghost(s) detectados en BOT_CONTROLLED_SET "
-                        f"— preservados para validación nocturna"
-                    )
 
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")

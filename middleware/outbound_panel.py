@@ -76,9 +76,6 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # Configuración y constantes
 # ============================================================================
 
-# API Key para autenticación del panel
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
-
 # API Key de HubSpot
 HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY", "")
 
@@ -553,12 +550,6 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
     except Exception as e:
         logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {e}", exc_info=True)
         return {}
-
-
-# Caché temporal para datos de contactos (se llena con batch, se consume en enriquecimiento)
-# Max 500 entradas para evitar crecimiento sin límite en memoria
-_batch_contact_cache: Dict[str, Dict[str, Any]] = {}
-_BATCH_CACHE_MAX = 500
 
 
 # ============================================================================
@@ -1124,36 +1115,6 @@ async def _init_default_templates():
         logger.error(f"[Templates] Error inicializando templates: {e}")
 
 
-# ============================================================================
-# Caché de templates en memoria (evita SCAN costoso en cada request)
-# ============================================================================
-_TEMPLATES_CACHE: list = []
-_TEMPLATES_CACHE_TS: float = 0
-_TEMPLATES_CACHE_TTL: float = 60.0  # 60 segundos de caché
-
-
-async def _get_all_templates() -> list:
-    """
-    Obtiene todos los templates de Redis con caché en memoria.
-    
-    Optimización: KEYS es más rápido que SCAN para <100 keys porque
-    es un solo roundtrip vs múltiples iteraciones de SCAN.
-    
-    Caché: Los templates raramente cambian, así que cacheamos 60s.
-    """
-    import time
-    global _TEMPLATES_CACHE, _TEMPLATES_CACHE_TS
-    
-    _t0 = time.monotonic()
-    
-    # Verificar caché primero
-    if _TEMPLATES_CACHE and (time.monotonic() - _TEMPLATES_CACHE_TS) < _TEMPLATES_CACHE_TTL:
-        logger.debug(f"[Templates][TIMING] Cache HIT: {len(_TEMPLATES_CACHE)} templates")
-        return _TEMPLATES_CACHE
-    
-    # Cambiado: ahora requiere advisor_id como argumento
-    raise NotImplementedError("Usar _get_all_templates_by_advisor(advisor_id)")
-
 async def _get_all_templates_by_advisor(advisor_id: str) -> list:
     import time
     r = await _get_redis_client()
@@ -1187,11 +1148,6 @@ async def _get_all_templates_by_advisor(advisor_id: str) -> list:
     return templates
 
 
-async def _get_template(template_id: str) -> Optional[dict]:
-    """Obtiene un template específico de Redis."""
-    # Cambiado: ahora requiere advisor_id como argumento
-    raise NotImplementedError("Usar _get_template_by_advisor(advisor_id, template_id)")
-
 async def _get_template_by_advisor(advisor_id: str, template_id: str) -> Optional[dict]:
     r = await _get_redis_client()
     key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
@@ -1208,18 +1164,6 @@ async def _get_template_by_advisor(advisor_id: str, template_id: str) -> Optiona
     return None
 
 
-def _invalidate_templates_cache():
-    """Invalida el caché de templates forzando recarga en próximo request."""
-    global _TEMPLATES_CACHE_TS
-    _TEMPLATES_CACHE_TS = 0
-    logger.debug("[Templates] Caché invalidado")
-
-
-async def _save_template(template_data: dict) -> bool:
-    """Guarda o actualiza un template en Redis."""
-    # Cambiado: ahora requiere advisor_id como argumento
-    raise NotImplementedError("Usar _save_template_by_advisor(advisor_id, template_data)")
-
 async def _save_template_by_advisor(advisor_id: str, template_data: dict) -> bool:
     r = await _get_redis_client()
     template_id = template_data.get("id")
@@ -1230,11 +1174,6 @@ async def _save_template_by_advisor(advisor_id: str, template_data: dict) -> boo
     logger.info(f"[Templates] Template guardado: {template_id} para {advisor_id}")
     return True
 
-
-async def _delete_template(template_id: str) -> bool:
-    """Elimina un template de Redis."""
-    # Cambiado: ahora requiere advisor_id como argumento
-    raise NotImplementedError("Usar _delete_template_by_advisor(advisor_id, template_id)")
 
 async def _delete_template_by_advisor(advisor_id: str, template_id: str) -> bool:
     r = await _get_redis_client()
@@ -3705,57 +3644,6 @@ async def get_pipeline_stages(
         "stages": PIPELINE_STAGES_LIST,
         "count": len(PIPELINE_STAGES_LIST)
     }
-
-
-@router.get("/debug/aprobados-stage-discovery")
-async def debug_aprobados_stage_discovery(
-    x_api_key: str = Header(None, alias="X-API-Key"),
-):
-    """
-    TEMPORAL/DIAGNÓSTICO: Distribuye lifecyclestage de contactos por asesor.
-    Usar para descubrir el stage_id correcto para los 'Aprobados'.
-    Remover tras confirmar el valor correcto.
-    """
-    if not _validate_api_key(x_api_key):
-        raise HTTPException(status_code=401, detail="API Key inválida")
-
-    from integrations.hubspot import hubspot_client as _hs_diag
-    from integrations.hubspot.lead_assigner import lead_assigner
-
-    discovery: dict = {}
-    for team_members in lead_assigner.OWNERS_CONFIG.values():
-        for member in team_members:
-            if not member.get("active") or not member.get("id"):
-                continue
-            aid = str(member["id"])
-            if aid in discovery:
-                continue
-            try:
-                resp = await _hs_diag._request(
-                    "POST",
-                    "/crm/v3/objects/contacts/search",
-                    {
-                        "filterGroups": [{"filters": [
-                            {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": aid}
-                        ]}],
-                        "properties": ["lifecyclestage"],
-                        "limit": 100,
-                    }
-                )
-                stage_dist: dict = {}
-                for c in resp.get("results", []):
-                    s = (c.get("properties") or {}).get("lifecyclestage") or "null"
-                    stage_dist[s] = stage_dist.get(s, 0) + 1
-                discovery[aid] = {
-                    "name": member["name"],
-                    "hs_total": resp.get("total", 0),
-                    "sampled": len(resp.get("results", [])),
-                    "stages": stage_dist,
-                }
-            except Exception as e:
-                discovery[aid] = {"name": member["name"], "error": str(e)}
-
-    return {"advisors": discovery}
 
 
 @router.post("/reset-bot/{phone}")

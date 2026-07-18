@@ -212,19 +212,6 @@ class MongoDBManager:
                 default_language="spanish"
             )
 
-            # Índices para colección contacts
-            await self.db.contacts.create_index(
-                "phone",
-                name="contact_phone_idx",
-                unique=True
-            )
-
-            await self.db.contacts.create_index(
-                "hubspot_id",
-                name="contact_hubspot_idx",
-                sparse=True
-            )
-
             # Índices para appointment_workers (equipo de campo)
             await self.db.appointment_workers.create_index(
                 "name",
@@ -312,17 +299,6 @@ class MongoDBManager:
 
         except Exception as e:
             logger.warning(f"[MongoDB] Error creando índices: {e}")
-
-    async def is_connected(self) -> bool:
-        """Verifica si la conexión está activa."""
-        if not self._connected or not self.client:
-            return False
-        try:
-            await self.client.admin.command('ping')
-            return True
-        except Exception:
-            self._connected = False
-            return False
 
     # =========================================================================
     # OPERACIONES DE MENSAJES
@@ -766,26 +742,6 @@ class MongoDBManager:
             logger.error(f"[MongoDB] Error marcando mensaje como sincronizado: {e}")
             return False
 
-    async def get_unsynced_messages(self, limit: int = 100) -> List[Dict]:
-        """
-        Obtiene mensajes pendientes de sincronizar con HubSpot.
-
-        Útil para un job de reconciliación periódico.
-        """
-        if not await self.connect():
-            return []
-
-        try:
-            cursor = self.db.messages.find(
-                {"synced_to_hubspot": False}
-            ).sort("timestamp", ASCENDING).limit(limit)
-
-            return await cursor.to_list(length=limit)
-
-        except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo mensajes no sincronizados: {e}")
-            return []
-
     async def update_delivery_status(
         self,
         message_sid: str,
@@ -977,74 +933,6 @@ class MongoDBManager:
     # OPERACIONES DE CONTACTOS
     # =========================================================================
 
-    async def upsert_contact(
-        self,
-        phone: str,
-        hubspot_id: Optional[str] = None,
-        name: Optional[str] = None,
-        channel: Optional[str] = None,
-        metadata: Optional[Dict] = None
-    ) -> bool:
-        """
-        Crea o actualiza un contacto en MongoDB.
-
-        Útil para cache local de información de contactos.
-        """
-        if not await self.connect():
-            return False
-
-        try:
-            update_data = {
-                "phone": phone,
-                "updated_at": datetime.utcnow()
-            }
-
-            if hubspot_id:
-                update_data["hubspot_id"] = hubspot_id
-            if name:
-                update_data["name"] = name
-            if channel:
-                update_data["last_channel"] = channel
-            if metadata:
-                update_data["metadata"] = metadata
-
-            await self.db.contacts.update_one(
-                {"phone": phone},
-                {
-                    "$set": update_data,
-                    "$setOnInsert": {"created_at": datetime.utcnow()}
-                },
-                upsert=True
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando contacto: {e}")
-            return False
-
-    async def get_contact(self, phone: str) -> Optional[Dict]:
-        """Obtiene información de un contacto."""
-        if not await self.connect():
-            return None
-
-        try:
-            return await self.db.contacts.find_one({"phone": phone})
-        except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo contacto: {e}")
-            return None
-
-    async def get_contact_by_hubspot_id(self, hubspot_id: str) -> Optional[Dict]:
-        """Obtiene contacto por ID de HubSpot."""
-        if not await self.connect():
-            return None
-
-        try:
-            return await self.db.contacts.find_one({"hubspot_id": hubspot_id})
-        except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo contacto por hubspot_id: {e}")
-            return None
-
     # =========================================================================
     # UTILIDADES
     # =========================================================================
@@ -1068,45 +956,6 @@ class MongoDBManager:
             return await self.db.messages.count_documents({"phone": phone})
         except Exception:
             return 0
-
-    async def get_recent_conversations(
-        self,
-        hours: int = 24,
-        limit: int = 50
-    ) -> List[Dict]:
-        """
-        Obtiene conversaciones recientes (para el panel).
-
-        Agrupa por teléfono y retorna el último mensaje de cada uno.
-        """
-        if not await self.connect():
-            return []
-
-        try:
-            since = datetime.utcnow() - timedelta(hours=hours)
-
-            pipeline = [
-                {"$match": {"timestamp_utc": {"$gte": since}}},
-                {"$sort": {"timestamp": -1}},
-                {"$group": {
-                    "_id": "$phone",
-                    "last_message": {"$first": "$content"},
-                    "last_sender": {"$first": "$sender"},
-                    "last_timestamp": {"$first": "$timestamp"},
-                    "channel": {"$first": "$channel"},
-                    "hubspot_contact_id": {"$first": "$hubspot_contact_id"},
-                    "message_count": {"$sum": 1}
-                }},
-                {"$sort": {"last_timestamp": -1}},
-                {"$limit": limit}
-            ]
-
-            cursor = self.db.messages.aggregate(pipeline)
-            return await cursor.to_list(length=limit)
-
-        except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo conversaciones recientes: {e}")
-            return []
 
     # =========================================================================
     # OPERACIONES DE ADVISORS (ASESORES DEL PANEL)
@@ -2144,24 +1993,6 @@ class MongoDBManager:
             logger.warning(f"[MongoDB][conv] Error update_conversation_meta {phone}: {e}")
             return False
 
-    async def get_conversation(
-        self, phone: str, canal: str = "whatsapp"
-    ) -> Optional[Dict[str, Any]]:
-        """Lookup individual de conversación por (phone, canal)."""
-        if not phone or not await self.connect():
-            return None
-        try:
-            canal_safe = (canal or "whatsapp").lower()
-            doc = await self.db.conversations.find_one(
-                {"phone": phone, "canal": canal_safe}
-            )
-            if doc:
-                doc["_id"] = str(doc["_id"])
-            return doc
-        except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error get_conversation {phone}: {e}")
-            return None
-
     async def find_conversations_by_owner(
         self,
         owner_id: str,
@@ -2214,51 +2045,6 @@ class MongoDBManager:
             return docs
         except Exception as e:
             logger.warning(f"[MongoDB][conv] Error find_recent_conversations: {e}")
-            return []
-
-    async def search_conversations(
-        self,
-        owner_id: Optional[str] = None,
-        query_text: Optional[str] = None,
-        date_from: Optional[datetime] = None,
-        date_to: Optional[datetime] = None,
-        limit: int = 50,
-    ) -> List[Dict[str, Any]]:
-        """
-        Búsqueda histórica para el panel — combina filtro por owner + texto + rango fechas.
-        El texto busca en display_name y last_message_preview (regex case-insensitive).
-        """
-        if not await self.connect():
-            return []
-        try:
-            query: Dict[str, Any] = {"archived": {"$ne": True}}
-            if owner_id:
-                query["owner_id"] = owner_id
-            if query_text:
-                # Escapar regex special chars básico
-                import re as _re
-                safe = _re.escape(query_text)
-                query["$or"] = [
-                    {"display_name": {"$regex": safe, "$options": "i"}},
-                    {"last_message_preview": {"$regex": safe, "$options": "i"}},
-                    {"phone": {"$regex": safe, "$options": "i"}},
-                ]
-            if date_from or date_to:
-                date_filter: Dict[str, Any] = {}
-                if date_from:
-                    date_filter["$gte"] = date_from
-                if date_to:
-                    date_filter["$lte"] = date_to
-                query["last_message_at"] = date_filter
-            cursor = self.db.conversations.find(query).sort(
-                "last_message_at", DESCENDING
-            ).limit(limit)
-            docs = await cursor.to_list(length=limit)
-            for d in docs:
-                d["_id"] = str(d["_id"])
-            return docs
-        except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error search_conversations: {e}")
             return []
 
     async def close(self):

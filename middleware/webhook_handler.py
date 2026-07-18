@@ -22,7 +22,7 @@ from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
 
 from logging_config import logger
-from .phone_normalizer import PhoneNormalizer, normalize_colombian_phone
+from .phone_normalizer import PhoneNormalizer
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
 from .sofia_brain import SofiaBrain
@@ -59,17 +59,6 @@ from utils.twilio_client import twilio_client
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
 
-# Gestor de citas (para confirmar automáticamente cuando el cliente responde)
-from .appointment_manager import get_appointment_manager
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONVERSATIONS API — Feature flag
-# Cuando TWILIO_CONVERSATIONS_ENABLED=true el webhook parsea JSON (Conversations).
-# Cuando es false (default) sigue usando form-encoded (Programmable Messaging).
-# Activar SOLO después de mover el número al Messaging Service en Twilio Console.
-# ─────────────────────────────────────────────────────────────────────────────
-CONVERSATIONS_ENABLED = os.getenv("TWILIO_CONVERSATIONS_ENABLED", "false").lower() == "true"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -743,7 +732,21 @@ async def _process_message_deferred(
             owner_id=hubspot_owner_id,
             add_to_zset=_add_to_panel
         )
-        
+
+        # Sincronizar owner_id en MongoDB conversations (espejo del fix Redis)
+        if hubspot_owner_id:
+            try:
+                from database.mongodb_client import get_mongo_manager
+                asyncio.create_task(
+                    get_mongo_manager().update_conversation_meta(
+                        phone=phone_normalized,
+                        canal=final_channel or "whatsapp",
+                        owner_id=hubspot_owner_id,
+                    )
+                )
+            except Exception:
+                pass
+
         # ════════════════════════════════════════════════════════════
         # PASO 6: Verificar horario y estado final
         # ════════════════════════════════════════════════════════════
@@ -1656,73 +1659,6 @@ async def _check_bulk_no_responde_promotion(phone_normalized: str):
         logger.warning(f"[BulkNoResponde] Error en promoción (non-fatal): {e}")
 
 
-async def _update_contact_channel(contact_id: str, canal_origen: str):
-    """
-    Actualiza el canal_origen de un contacto existente en HubSpot.
-    
-    Se usa cuando detectamos un canal más específico (ej: Instagram, Facebook)
-    para un contacto que ya existía con canal genérico (whatsapp_directo).
-    
-    Esto es CRÍTICO para que las métricas de redes sociales sean correctas.
-    
-    Args:
-        contact_id: ID del contacto en HubSpot
-        canal_origen: Nuevo canal detectado (instagram, facebook, etc.)
-    """
-    try:
-        contact_manager = get_contact_manager()
-        await contact_manager.update_contact_info(
-            contact_id=contact_id,
-            properties={"canal_origen": canal_origen}
-        )
-        logger.info(
-            f"[Webhook] Canal actualizado en HubSpot: contact_id={contact_id}, "
-            f"canal_origen={canal_origen}"
-        )
-    except Exception as e:
-        # No fallar si HubSpot no acepta la actualización
-        logger.warning(f"[Webhook] No se pudo actualizar canal_origen en HubSpot: {e}")
-
-
-async def _check_followup_response(phone_normalized: str) -> tuple:
-    """
-    Verifica si el mensaje es respuesta a un template de seguimiento de cita.
-
-    Busca en Redis si hay un flag de followup pendiente para este contacto.
-    Si existe, lo elimina y retorna información para activar HUMAN_ACTIVE.
-
-    Returns:
-        Tupla (found: bool, canal: Optional[str]) - True y el canal si hay followup pendiente
-    """
-    r = None
-    try:
-        config = get_config()
-        import redis.asyncio as redis_async
-        r = redis_async.from_url(config.redis_url, encoding="utf-8", decode_responses=True)
-
-        # Buscar si hay followup pendiente para cualquier canal
-        found = False
-        canal = None
-        async for key in r.scan_iter(match=f"appointment_followup_pending:{phone_normalized}:*"):
-            # Extraer el canal del key (formato: appointment_followup_pending:{phone}:{canal})
-            parts = key.split(":")
-            if len(parts) >= 3:
-                canal = parts[-1]  # Último segmento es el canal
-
-            # Encontrado - eliminar el flag y marcar como encontrado
-            await r.delete(key)
-            found = True
-            logger.info(f"[Webhook] Followup pendiente detectado y eliminado: {key} (canal: {canal})")
-            break  # Solo necesitamos encontrar uno
-
-        return found, canal
-
-    except Exception as e:
-        logger.error("[Webhook] Error verificando followup response: %s", e)
-        return False, None
-    finally:
-        if r:
-            await r.aclose()
 
 
 def _create_twiml_response(message: str) -> Response:
@@ -1864,69 +1800,6 @@ async def _sync_message_to_hubspot(
         logger.error("[HubSpot Sync] Error sincronizando mensaje: %s", e)
     except Exception as e:
         logger.error("[HubSpot Sync] Error inesperado sincronizando mensaje: %s", e)
-
-
-async def _sync_conversation_to_hubspot(
-    contact_id: str,
-    user_message: str,
-    bot_response: str,
-    phone: str
-) -> None:
-    """
-    Sincroniza una interacción completa (pregunta + respuesta) a HubSpot Timeline.
-
-    Registra ambos mensajes en el Timeline del contacto para que los asesores
-    puedan ver el historial completo de la conversación.
-    """
-    try:
-        timeline_logger = get_timeline_logger()
-
-        # 1. Registrar mensaje del cliente en Timeline
-        await timeline_logger.log_client_message(
-            contact_id=contact_id,
-            content=user_message,
-            session_id=phone
-        )
-
-        # 2. Registrar respuesta de Sofía en Timeline
-        await timeline_logger.log_bot_message(
-            contact_id=contact_id,
-            content=bot_response,
-            session_id=phone
-        )
-
-        # 3. Actualizar propiedades del contacto (backup/resumen)
-        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
-        from datetime import timezone
-        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-        contact_manager = get_contact_manager()
-        sofia = get_sofia_brain()
-        summary = await sofia.get_conversation_summary(phone)
-
-        properties = {
-            "chatbot_conversation": summary[-3000:],
-            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
-        }
-
-        try:
-            await contact_manager.update_contact_info(contact_id, properties)
-        except Exception as prop_err:
-            # Loguear pero NO fallar
-            if "PROPERTY_DOESNT_EXIST" in str(prop_err):
-                logger.error(
-                    f"[HubSpot Sync] ❌ Propiedades no configuradas en HubSpot: "
-                    f"{list(properties.keys())}"
-                )
-            else:
-                logger.error(f"[HubSpot Sync] Error actualizando propiedades: {prop_err}")
-
-        logger.debug(f"[HubSpot Sync] Conversación sincronizada en Timeline para {phone}")
-
-    except (ValueError, KeyError, TypeError) as e:
-        logger.error("[HubSpot Sync] Error procesando conversación: %s", e)
-    except Exception as e:
-        logger.error("[HubSpot Sync] Error sincronizando conversación: %s", e)
 
 
 async def _sync_conversation_with_analysis_to_hubspot(
@@ -2248,86 +2121,6 @@ async def _sync_conversation_with_analysis_to_hubspot(
         except Exception as _crm_err:
             logger.warning("[HubSpot Sync] Error escribiendo Datos Sofia en Contacto: %s", _crm_err)
 
-
-
-async def _notify_high_priority_lead(
-    contact_id: str,
-    phone: str,
-    analysis
-) -> None:
-    """
-    Notifica sobre un lead de alta prioridad.
-
-    Se llama cuando el análisis detecta handoff_priority="high",
-    por ejemplo cuando el cliente expresa intención de visitar o
-    envía un link de redes sociales con un inmueble.
-    """
-    try:
-        contact_manager = get_contact_manager()
-
-        # Construir razón del lead caliente
-        reasons = []
-        if analysis.intencion_visita:
-            reasons.append("Intención de visita")
-        if analysis.link_redes_sociales:
-            reasons.append("Link de red social")
-            # Si tiene info del portal, incluirla
-            if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
-                portal = analysis.social_media_info.get("portal", "")
-                if portal:
-                    reasons.append(f"Portal: {portal}")
-
-        reason_str = ", ".join(reasons) if reasons else f"Handoff: {analysis.handoff_priority}"
-
-        # Actualizar propiedades para marcar como lead caliente
-        # HubSpot requiere que chatbot_timestamp sea medianoche UTC (no hora exacta)
-        from datetime import timezone
-        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-        # Propiedades base (deberían existir en HubSpot)
-        base_properties = {
-            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
-        }
-
-        # Propiedades opcionales (pueden no existir en HubSpot)
-        optional_properties = {
-            "chatbot_hot_lead": "true",
-            "chatbot_hot_lead_reason": reason_str,
-        }
-
-        # Agregar URL del link si existe
-        if hasattr(analysis, 'social_media_info') and analysis.social_media_info:
-            url = analysis.social_media_info.get("url")
-            if url:
-                optional_properties["chatbot_social_media_url"] = url[:500]
-
-        # Actualizar propiedades base primero
-        try:
-            await contact_manager.update_contact_info(contact_id, base_properties)
-        except Exception as base_err:
-            logger.warning(f"[Webhook] Error actualizando propiedades base: {base_err}")
-
-        # Intentar actualizar propiedades opcionales (ignorar si no existen)
-        try:
-            await contact_manager.update_contact_info(contact_id, optional_properties)
-        except Exception as opt_err:
-            if "PROPERTY_DOESNT_EXIST" in str(opt_err):
-                logger.warning(
-                    f"[Webhook] Propiedades de hot lead no configuradas en HubSpot: "
-                    f"{list(optional_properties.keys())} - Ignorando"
-                )
-            else:
-                logger.warning(f"[Webhook] Error actualizando propiedades de hot lead: {opt_err}")
-
-        logger.info(
-            f"[Webhook] Lead de alta prioridad marcado: {phone} | "
-            f"Razón: {reason_str}"
-        )
-
-    except (ValueError, KeyError, TypeError) as e:
-        logger.error("[Webhook] Error procesando lead de alta prioridad: %s", e)
-    except Exception as e:
-        logger.error("[Webhook] Error notificando lead: %s", e)
 
 
 # ════════════════════════════════════════════════════════════════════

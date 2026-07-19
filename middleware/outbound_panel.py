@@ -25,7 +25,7 @@ import redis.asyncio as redis
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
-from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso
+from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso, TIMEZONE_BOGOTA
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
@@ -7857,6 +7857,217 @@ async def sync_owners_mongo(
             for m in mismatches
         ],
         "applied": {"mongodb": fixed_mongo, "redis_meta": fixed_redis} if not dry_run else "dry_run",
+        "errors": errors[:20],
+    }
+
+
+@router.post("/admin/recover-lost-conversations")
+async def recover_lost_conversations(
+    dry_run: bool = Query(True),
+    hours: int = Query(72, ge=1, le=168, description="Ventana de tiempo en horas"),
+    advisor: str = Query(None, description="Solo recuperar para este advisor"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Recupera conversaciones perdidas donde el último mensaje fue del CLIENTE
+    y no ha recibido respuesta dentro de la ventana de tiempo.
+
+    Lógica:
+    1. Busca en MongoDB `messages` los últimos mensajes por teléfono
+    2. Filtra solo aquellos donde el último fue sender='client' (sin respuesta)
+    3. Verifica que esté dentro de la ventana de horas
+    4. Obtiene el owner correcto de HubSpot
+    5. Corrige owner_id en MongoDB/Redis si es necesario
+    6. Agrega al inbox del advisor correcto (badge de no-leído)
+    7. Envía notificación WebSocket en tiempo real
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    import json as _json
+    from datetime import timedelta
+
+    mongo_mgr = get_mongo_manager()
+    state_mgr = _get_state_manager()
+    http = get_httpx_client()
+    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+    hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
+
+    cutoff = get_bogota_now() - timedelta(hours=hours)
+
+    pipeline = [
+        {"$match": {"timestamp": {"$gte": cutoff}}},
+        {"$sort": {"phone": 1, "timestamp": -1}},
+        {"$group": {
+            "_id": "$phone",
+            "last_sender": {"$first": "$sender"},
+            "last_content": {"$first": "$content"},
+            "last_timestamp": {"$first": "$timestamp"},
+            "last_channel": {"$first": "$channel"},
+            "contact_id": {"$first": "$hubspot_contact_id"},
+        }},
+        {"$match": {"last_sender": "client"}},
+        {"$sort": {"last_timestamp": -1}},
+    ]
+
+    try:
+        results = await mongo_mgr.db.messages.aggregate(pipeline).to_list(length=500)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Aggregation error: {e}")
+
+    recovered = []
+    already_in_inbox = 0
+    skipped = 0
+    errors = []
+
+    for doc in results:
+        phone = doc["_id"]
+        if not phone:
+            continue
+
+        canal = doc.get("last_channel", "whatsapp")
+        contact_id = doc.get("contact_id")
+        last_msg = doc.get("last_content", "")
+        last_ts = doc.get("last_timestamp")
+
+        if not contact_id:
+            cache_key = f"phone_cache:{phone}"
+            contact_id = await state_mgr.redis.get(cache_key)
+            if isinstance(contact_id, bytes):
+                contact_id = contact_id.decode()
+
+        hs_owner = None
+        display_name = ""
+        if contact_id:
+            try:
+                resp = await http.get(
+                    f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+                    params={"properties": "hubspot_owner_id,firstname,lastname"},
+                    headers={"Authorization": f"Bearer {hs_token}"},
+                )
+                if resp.status_code == 200:
+                    props = resp.json().get("properties", {})
+                    hs_owner = props.get("hubspot_owner_id")
+                    display_name = f"{props.get('firstname', '')} {props.get('lastname', '')}".strip()
+            except Exception as e:
+                errors.append({"phone": phone, "error": str(e)})
+                continue
+            await asyncio.sleep(0.05)
+
+        if not hs_owner:
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+            raw_meta = await state_mgr.redis.get(meta_key)
+            if raw_meta:
+                m = _json.loads(raw_meta)
+                hs_owner = m.get("assigned_owner_id")
+                if not display_name:
+                    display_name = m.get("display_name", "")
+
+        if not hs_owner:
+            skipped += 1
+            continue
+
+        if advisor and str(hs_owner) != str(advisor):
+            skipped += 1
+            continue
+
+        member = f"{phone}:{canal}"
+        inbox_key = f"{state_mgr.ADVISOR_INBOX_PREFIX}{hs_owner}"
+        existing_score = await state_mgr.redis.zscore(inbox_key, member)
+        if existing_score is not None:
+            already_in_inbox += 1
+            continue
+
+        time_ago = ""
+        if last_ts:
+            try:
+                _ts = last_ts.replace(tzinfo=TIMEZONE_BOGOTA) if last_ts.tzinfo is None else last_ts
+                delta = get_bogota_now() - _ts
+                hrs = int(delta.total_seconds() / 3600)
+                time_ago = f"{hrs}h" if hrs < 48 else f"{hrs // 24}d"
+            except Exception:
+                time_ago = "?"
+
+        entry = {
+            "phone": phone,
+            "canal": canal,
+            "display_name": display_name or phone,
+            "advisor": hs_owner,
+            "advisor_name": OWNER_NAMES.get(str(hs_owner), "?"),
+            "last_message": last_msg[:80] if last_msg else "",
+            "last_timestamp": last_ts.isoformat() if last_ts else None,
+            "time_ago": time_ago,
+            "contact_id": contact_id,
+        }
+
+        if not dry_run:
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+            raw_meta = await state_mgr.redis.get(meta_key)
+            if raw_meta:
+                meta_data = _json.loads(raw_meta)
+                if str(meta_data.get("assigned_owner_id")) != str(hs_owner):
+                    meta_data["assigned_owner_id"] = hs_owner
+                    ttl = await state_mgr.redis.ttl(meta_key)
+                    if ttl > 0:
+                        await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
+                    else:
+                        await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+
+            zset_member = f"{phone}:{canal}"
+            msg_ts = last_ts.timestamp() if last_ts else get_bogota_now().timestamp()
+            await state_mgr.redis.zadd(
+                state_mgr.ACTIVE_CONTACTS_ZSET, {zset_member: msg_ts}
+            )
+
+            await state_mgr.add_to_advisor_inbox(hs_owner, phone, canal, score=msg_ts)
+
+            await mongo_mgr.db.conversations.update_one(
+                {"phone": phone, "canal": canal},
+                {"$set": {"owner_id": hs_owner}},
+                upsert=False,
+            )
+
+            try:
+                _rc = await _get_redis_client()
+                await ws_manager.notify_new_message(
+                    phone=phone,
+                    canal=canal,
+                    message_preview=last_msg[:50] if last_msg else "Mensaje sin respuesta",
+                    sender="client",
+                    contact_name=display_name or phone,
+                    redis_client=_rc,
+                    assigned_owner_id=hs_owner,
+                    state_manager=state_mgr,
+                )
+            except Exception:
+                pass
+
+        recovered.append(entry)
+
+    by_advisor = {}
+    for r in recovered:
+        name = r["advisor_name"]
+        by_advisor.setdefault(name, []).append(r)
+
+    return {
+        "dry_run": dry_run,
+        "window_hours": hours,
+        "filter_advisor": advisor,
+        "total_client_last_message": len(results),
+        "already_in_inbox": already_in_inbox,
+        "skipped_no_owner": skipped,
+        "recovered_count": len(recovered),
+        "recovered_by_advisor": {
+            name: {
+                "count": len(items),
+                "contacts": [
+                    {"phone": i["phone"], "name": i["display_name"],
+                     "last_msg": i["last_message"], "time_ago": i["time_ago"]}
+                    for i in items
+                ],
+            }
+            for name, items in by_advisor.items()
+        },
         "errors": errors[:20],
     }
 

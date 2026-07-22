@@ -4945,7 +4945,6 @@ async def get_active_contacts(
         ]
         if _phones_need_preview:
             try:
-                from database.mongodb_client import get_mongo_manager
                 _previews = await get_mongo_manager().get_message_previews_batch(_phones_need_preview)
                 for c in active_contacts:
                     _p = _previews.get(c.get("phone"))

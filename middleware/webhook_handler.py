@@ -205,9 +205,7 @@ async def _fetch_reply_context_deferred(
 
         # Notificar al panel via WebSocket para que refresque el mensaje
         try:
-            import redis.asyncio as aioredis
-            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-            rc = aioredis.from_url(redis_url, decode_responses=True)
+            rc = get_state_manager().redis
             payload = {
                 "type":       "message_updated",
                 "phone":      phone,
@@ -219,7 +217,6 @@ async def _fetch_reply_context_deferred(
                 await ws_manager.publish_to_advisor(rc, advisor_id, payload)
             else:
                 await ws_manager.publish_broadcast(rc, payload)
-            await rc.aclose()
         except Exception as ws_err:
             logger.warning(f"[ReplyFetch] WS notify fallo: {ws_err}")
 
@@ -1575,15 +1572,20 @@ async def whatsapp_status_callback(
                             break
 
                     if ErrorCode == "63024":
-                        user_msg = f"⚠️ Plantilla NO entregada: el número {phone_normalized} no tiene WhatsApp activo."
+                        user_msg = f"⚠️ Mensaje NO entregado: el número {phone_normalized} no tiene WhatsApp activo."
+                    elif ErrorCode == "63049":
+                        user_msg = (
+                            f"⚠️ Mensaje NO entregado al número {phone_normalized}. "
+                            f"La sesión de WhatsApp expiró o el contacto bloqueó el número."
+                        )
                     else:
                         user_msg = (
-                            f"⚠️ Plantilla NO entregada al número {phone_normalized}. "
+                            f"⚠️ Mensaje NO entregado al número {phone_normalized}. "
                             f"Error Twilio: {ErrorCode or 'desconocido'}."
                         )
 
                     notification = {
-                        "type": "template_delivery_failed",
+                        "type": "message_delivery_failed",
                         "phone": phone_normalized,
                         "message_sid": MessageSid,
                         "error_code": ErrorCode,

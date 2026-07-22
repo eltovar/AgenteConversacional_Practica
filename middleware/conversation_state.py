@@ -1408,6 +1408,11 @@ class ConversationStateManager:
         """
         Agrega o actualiza un contacto en el inbox de no-leídos del asesor.
         ZADD es idempotente — si ya estaba, solo actualiza el score.
+
+        También asegura que el contacto esté en el ZSET principal y que
+        in_panel=True. Sin esto, contactos cerrados que reciben un nuevo
+        mensaje quedan con badge en el inbox pero invisibles en el panel
+        (el ZSET no los incluye si in_panel=False).
         """
         try:
             if not advisor_id or not phone:
@@ -1418,6 +1423,24 @@ class ConversationStateManager:
             key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
             await self.redis.zadd(key, {member: _score})
             await self.redis.expire(key, self.ADVISOR_INBOX_TTL)
+
+            # Asegurar visibilidad en el panel: re-agregar al ZSET + in_panel=True
+            await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {member: _score})
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+            raw_meta = await self.redis.get(meta_key)
+            if raw_meta:
+                try:
+                    meta = json.loads(raw_meta)
+                    if not meta.get("in_panel", True):
+                        meta["in_panel"] = True
+                        ttl = await self.redis.ttl(meta_key)
+                        if not ttl or ttl <= 0:
+                            ttl = self.PANEL_TTL_SECONDS
+                        await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                        logger.info(f"[Inbox][Add] Re-activado in_panel=True para {phone}")
+                except Exception:
+                    pass
+
             logger.info(
                 f"[Inbox][Add] advisor={advisor_id} phone={phone} "
                 f"canal={canal_safe} ts={_score:.0f}"

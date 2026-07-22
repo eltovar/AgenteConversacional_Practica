@@ -1502,12 +1502,20 @@ async function loadContacts() {
 
     } catch (error) {
         console.error('Error cargando contactos:', error);
-        document.getElementById('contactsList').innerHTML = `
-            <div class="p-4 text-center text-red-500">
-                <p>Error al cargar contactos</p>
-                <p class="text-sm">${error.message}</p>
-            </div>
-        `;
+        // Si ya tenemos contactos cargados, mantener la lista anterior (micro-caída del server)
+        // y reintentar silenciosamente en 3s. Solo mostrar error si es la carga inicial.
+        if (allContacts.length > 0) {
+            console.warn('[Panel] Manteniendo lista anterior tras error de red — reintentando en 3s');
+            setTimeout(() => loadContacts(), 3000);
+        } else {
+            document.getElementById('contactsList').innerHTML = `
+                <div class="p-4 text-center text-gray-400">
+                    <p>Conectando con el servidor...</p>
+                    <p class="text-sm mt-1">Reintentando automáticamente</p>
+                </div>
+            `;
+            setTimeout(() => loadContacts(), 3000);
+        }
     }
 }
 
@@ -1645,11 +1653,21 @@ async function loadChatHistory(contactId) {
         // P2-C: verificar HTTP status antes de parsear — distingue error de "sin mensajes"
         if (!response.ok) {
             console.error(`[Panel] Error cargando historial: HTTP ${response.status}`);
+            // Retry silencioso en micro-caídas (502/503/504 = worker reiniciando)
+            if ([502, 503, 504].includes(response.status)) {
+                console.warn('[Panel] Server reiniciando — reintentando historial en 3s');
+                setTimeout(() => {
+                    if (currentContactId === requestedContactId) {
+                        loadChatHistory(contactId);
+                    }
+                }, 3000);
+                return;
+            }
             const chatMessages = document.getElementById('chatMessages');
             if (chatMessages) {
                 chatMessages.innerHTML = `
-                    <div class="flex flex-col items-center justify-center h-full text-red-500 py-8 text-sm gap-2">
-                        <span>Error al cargar el historial (${response.status})</span>
+                    <div class="flex flex-col items-center justify-center h-full text-gray-400 py-8 text-sm gap-2">
+                        <span>No se pudo cargar el historial</span>
                         <button onclick="loadChatHistory('${requestedContactId}')"
                                 class="text-blue-500 underline text-xs">Reintentar</button>
                     </div>`;
@@ -1710,9 +1728,19 @@ async function loadChatHistory(contactId) {
         // Solo mostrar error si el contacto sigue siendo el mismo
         if (currentContactId === requestedContactId) {
             console.error('[Panel] Error cargando historial:', error);
+            // Network error (worker reiniciando) — retry silencioso
+            if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+                console.warn('[Panel] Error de red — reintentando historial en 3s');
+                setTimeout(() => {
+                    if (currentContactId === requestedContactId) {
+                        loadChatHistory(contactId);
+                    }
+                }, 3000);
+                return;
+            }
             document.getElementById('chatMessages').innerHTML = `
-                <div class="flex items-center justify-center h-full text-red-500">
-                    <p>Error al cargar historial: ${error.message}</p>
+                <div class="flex items-center justify-center h-full text-gray-400">
+                    <p>No se pudo cargar el historial</p>
                 </div>
             `;
         }
@@ -2104,9 +2132,19 @@ async function loadContactDetail(phone, contactId, canal) {
     } catch (error) {
         if (currentContactId !== requestedContactId) return;
         console.error('[Panel] Error en loadContactDetail:', error);
-        // Fallback: mostrar error en chat, habilitar inputs
+        // Network error → retry silencioso (worker reiniciando)
+        if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+            console.warn('[Panel] Error de red en detalle — reintentando en 3s');
+            setTimeout(() => {
+                if (currentContactId === requestedContactId) {
+                    loadContactDetail(contactId);
+                }
+            }, 3000);
+            return;
+        }
+        // Fallback: mostrar error neutro en chat, habilitar inputs
         document.getElementById('chatMessages').innerHTML =
-            `<div class="flex items-center justify-center h-full text-red-500"><p>Error al cargar: ${error.message}</p></div>`;
+            `<div class="flex items-center justify-center h-full text-gray-400"><p>No se pudo cargar el contacto</p></div>`;
         windowWarning.classList.add('hidden');
         document.getElementById('windowStatus').classList.add('hidden');
         if (messageInput) messageInput.disabled = false;
@@ -5756,7 +5794,8 @@ function handleWebSocketMessage(data) {
             break;
 
         case 'template_delivery_failed':
-            handleTemplateDeliveryFailed(data);
+        case 'message_delivery_failed':
+            handleMessageDeliveryFailed(data);
             break;
 
         case 'message_edited': {
@@ -5834,13 +5873,14 @@ function handleWebSocketMessage(data) {
     }
 }
 
-function handleTemplateDeliveryFailed(data) {
-    const msg = data.user_message || `⚠️ Plantilla no entregada al número ${data.phone}.`;
-    console.warn('[Panel] Template delivery failed:', data);
+function handleTemplateDeliveryFailed(data) { handleMessageDeliveryFailed(data); }
+function handleMessageDeliveryFailed(data) {
+    const msg = data.user_message || `⚠️ Mensaje no entregado al número ${data.phone}.`;
+    console.warn('[Panel] Message delivery failed:', data);
 
     const div = document.createElement('div');
     div.className = 'fixed top-4 right-4 z-50 px-4 py-3 rounded-lg text-sm font-medium toast-error';
-    div.style.maxWidth = '360px';
+    div.style.maxWidth = '400px';
     div.style.lineHeight = '1.4';
     div.textContent = msg;
     document.body.appendChild(div);
@@ -5848,19 +5888,24 @@ function handleTemplateDeliveryFailed(data) {
         div.style.transition = 'opacity 0.4s';
         div.style.opacity = '0';
         setTimeout(() => div.remove(), 400);
-    }, 7000);
+    }, 10000);
 
     if (data.phone && data.phone === currentPhone) {
-        const chatContainer = document.getElementById('chat-messages');
+        const chatContainer = document.getElementById('chatMessages');
         if (chatContainer) {
             const errBubble = document.createElement('div');
             errBubble.className = 'flex justify-end mb-2';
+            const errorDetail = data.error_code === '63024'
+                ? 'Este número no tiene WhatsApp activo'
+                : data.error_code === '63049'
+                ? 'Sesión expirada o número bloqueado'
+                : `Error de envío (código: ${data.error_code || 'desconocido'})`;
             errBubble.innerHTML = `
                 <div class="bg-red-100 border border-red-400 text-red-700 rounded-lg px-3 py-2 text-xs max-w-xs">
-                    ❌ Mensaje no entregado — este número no tiene WhatsApp activo.
+                    ❌ Mensaje no entregado — ${errorDetail}
                 </div>`;
             chatContainer.appendChild(errBubble);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
         }
     }
 }

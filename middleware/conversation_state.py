@@ -681,29 +681,40 @@ class ConversationStateManager:
             # 2. Guardar metadata
             now_iso = get_bogota_now_iso()
 
-            # Preservar last_activity real del último mensaje para que el polling del panel
-            # no detecte el click del asesor como "nuevo mensaje" → badge/índice-0 falso.
+            # Merge con meta existente para preservar campos acumulados
+            # (assigned_owner_id, assigned_owner_ids, transfer_history, etc.)
             meta_key = f"{self.META_PREFIX}{phone_num}:{canal_safe}"
-            existing_last_activity = now_iso  # fallback si no existe meta previo
+            existing_meta = {}
             try:
                 existing_raw = await self.redis.get(meta_key)
                 if existing_raw:
                     existing_meta = json.loads(existing_raw)
-                    if existing_meta.get("last_activity"):
-                        existing_last_activity = existing_meta["last_activity"]
             except Exception:
-                pass  # best-effort
+                pass
+
+            # Preservar last_activity real del último mensaje
+            existing_last_activity = existing_meta.get("last_activity") or now_iso
+
+            # Resolver assigned_owner_id: parámetro explícito > existente > None
+            resolved_owner = owner_id or existing_meta.get("assigned_owner_id")
+            if owner_id and existing_meta.get("assigned_owner_id") and owner_id != existing_meta["assigned_owner_id"]:
+                logger.info(
+                    f"[ConversationState] activate_human cambió owner: "
+                    f"{existing_meta['assigned_owner_id']} → {owner_id} ({phone_num})"
+                )
 
             meta = {
+                **existing_meta,
                 "phone_normalized": phone_num,
-                "contact_id": contact_id,
+                "contact_id": contact_id or existing_meta.get("contact_id"),
                 "status": ConversationStatus.HUMAN_ACTIVE.value,
                 "last_activity": existing_last_activity,
                 "handoff_reason": reason,
-                "assigned_owner_id": owner_id,
-                "canal_origen": canal_origen,
-                "display_name": display_name,
-                "created_at": now_iso
+                "assigned_owner_id": resolved_owner,
+                "canal_origen": canal_origen or existing_meta.get("canal_origen") or "whatsapp",
+                "display_name": display_name or existing_meta.get("display_name"),
+                "created_at": existing_meta.get("created_at") or now_iso,
+                "in_panel": True,
             }
             # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
             await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
@@ -729,11 +740,11 @@ class ConversationStateManager:
                     _gmm().update_conversation_meta(
                         phone=phone_num,
                         canal=canal_safe,
-                        owner_id=owner_id,
-                        display_name=display_name,
+                        owner_id=resolved_owner,
+                        display_name=display_name or existing_meta.get("display_name"),
                         status=ConversationStatus.HUMAN_ACTIVE.value,
-                        contact_id=contact_id,
-                        canal_origen=canal_origen,
+                        contact_id=contact_id or existing_meta.get("contact_id"),
+                        canal_origen=canal_origen or existing_meta.get("canal_origen") or "whatsapp",
                     )
                 )
             except Exception as _sync_err:

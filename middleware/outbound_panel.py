@@ -4325,10 +4325,27 @@ async def take_control_of_conversation(
             }
 
         # Si era BOT_ACTIVE o no existía, activar HUMAN_ACTIVE
+        # Preservar owner existente: take-control pausa SofIA, NO reasigna propiedad.
+        # Sin este guard, click de asesora X en contacto de asesora Y sobrescribe el owner.
+        effective_owner = advisor_id
+        meta_key = f"conv_meta:{phone_normalized}:{canal or 'whatsapp'}"
+        try:
+            _existing_raw = await state_manager.redis.get(meta_key)
+            if _existing_raw:
+                _existing_owner = json.loads(_existing_raw).get("assigned_owner_id")
+                if _existing_owner and _existing_owner != advisor_id:
+                    effective_owner = _existing_owner
+                    logger.info(
+                        f"[Panel] Take Control: preservando owner existente "
+                        f"{_existing_owner} (click de {advisor_id}) para {phone_normalized}"
+                    )
+        except Exception:
+            pass
+
         await state_manager.activate_human(
             phone_normalized=phone_normalized,
             canal_origen=canal or "whatsapp",
-            owner_id=advisor_id,
+            owner_id=effective_owner,
             contact_id=contact_id,
             reason="Asesora seleccionó contacto en panel"
         )

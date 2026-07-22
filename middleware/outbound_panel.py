@@ -5242,6 +5242,12 @@ async def get_active_contacts(
             if contact_id and contact_id in seen_contact_ids:
                 continue
 
+            # Filtrar por advisor: solo incluir históricos que pertenecen al advisor actual
+            if advisor:
+                hs_owner = contact.get("hubspot_owner_id") or ""
+                if hs_owner and str(hs_owner) != str(advisor):
+                    continue
+
             active_contacts.append(contact)
             if phone:
                 seen_phones.add(phone)

@@ -1164,7 +1164,7 @@ class TimelineLogger:
                 batch_endpoint = f"{self.base_url}/crm/v3/objects/contacts/batch/read"
                 batch_payload = {
                     "inputs": [{"id": cid} for cid in contact_ids_list],
-                    "properties": ["firstname", "lastname", "phone", "email"]
+                    "properties": ["firstname", "lastname", "phone", "email", "hubspot_owner_id"]
                 }
 
                 batch_response = await self._rate_limited_request(
@@ -1183,6 +1183,7 @@ class TimelineLogger:
                             "lastname": props.get("lastname", ""),
                             "phone": props.get("phone", ""),
                             "email": props.get("email", ""),
+                            "hubspot_owner_id": props.get("hubspot_owner_id", ""),
                         })
 
                 _result = {

@@ -6,7 +6,7 @@ Cliente MongoDB para almacenamiento en tiempo real de mensajes.
 import asyncio
 import os
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -2046,6 +2046,20 @@ class MongoDBManager:
         except Exception as e:
             logger.warning(f"[MongoDB][conv] Error find_recent_conversations: {e}")
             return []
+
+    async def check_conversations_exist(self, phones: List[str]) -> Set[str]:
+        if not await self.connect() or not phones:
+            return set()
+        try:
+            cursor = self.db.conversations.find(
+                {"phone": {"$in": phones}},
+                {"phone": 1, "_id": 0}
+            )
+            docs = await cursor.to_list(length=len(phones))
+            return {d["phone"] for d in docs if "phone" in d}
+        except Exception as e:
+            logger.warning(f"[MongoDB] check_conversations_exist error: {e}")
+            return set(phones)
 
     async def close(self):
         """Cierra la conexión."""

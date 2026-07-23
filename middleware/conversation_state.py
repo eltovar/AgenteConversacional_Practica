@@ -306,10 +306,6 @@ class ConversationStateManager:
                             # El job nocturno valida contra MongoDB `conversations` y solo
                             # purga miembros cuya conversación NO existe en MongoDB.
                             ghosts_detected.append(member)
-                            logger.warning(
-                                f"[ConversationState] meta+state expirados para {phone}:{canal} "
-                                f"— se mantiene en ZSET. Job nocturno validará contra MongoDB."
-                            )
                             # Re-hidratación mínima para que el panel pueda mostrar la fila
                             # con datos básicos hasta que el job de rebuild la enriquezca
                             # o el cliente vuelva a escribir.
@@ -383,6 +379,12 @@ class ConversationStateManager:
                         f"state_keys re-extendidos a {self.HUMAN_PANEL_STATE_TTL}s"
                     )
 
+            if ghosts_detected:
+                logger.info(
+                    "[ConversationState] ZSET: %d ghosts sin meta (job nocturno purgará)",
+                    len(ghosts_detected)
+                )
+
             # ── Paso 4: BOT_CONTROLLED_SET — pipeline separado (1 round-trip) ─────────
             # Contactos BOT_ACTIVE >48h: visibles pero sin notificaciones
             bot_controlled = await self.redis.smembers(self.BOT_CONTROLLED_SET)
@@ -399,6 +401,7 @@ class ConversationStateManager:
                     pipe2.ttl(f"{self.STATE_PREFIX}{phone}:{c}")  # TTL
                 results2 = await pipe2.execute()
 
+                bot_ghost_count = 0
                 for i, member in enumerate(bot_to_process):
                     phone, canal = member.split(":", 1)
                     base = i * 3
@@ -408,15 +411,7 @@ class ConversationStateManager:
 
                     meta = self._parse_meta_raw(meta_raw)
                     if not meta:
-                        # ⚠️ 2026-05-30: NO eliminar del BOT_CONTROLLED_SET aquí.
-                        # El job nocturno rebuild_zset_from_conversations valida
-                        # contra MongoDB `conversations` antes de hacer srem.
-                        # Antes esto borraba conversaciones del panel cuando el
-                        # meta_key expiraba (TTL 365d post-handoff o 48h dinámico).
-                        logger.warning(
-                            f"[ConversationState] BOT_CONTROLLED ghost {phone}:{canal} "
-                            f"— se preserva. Job nocturno validará vs MongoDB."
-                        )
+                        bot_ghost_count += 1
                         continue
 
                     status = status_raw or ConversationStatus.BOT_ACTIVE.value
@@ -441,6 +436,12 @@ class ConversationStateManager:
                         "deal_stage": meta.deal_stage,
                         "last_advisor_message": meta.last_advisor_message,
                     })
+
+                if bot_ghost_count:
+                    logger.info(
+                        "[ConversationState] BOT_CONTROLLED: %d ghosts sin meta (job nocturno purgará)",
+                        bot_ghost_count
+                    )
 
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_active_contacts: {e}")

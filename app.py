@@ -695,6 +695,61 @@ async def rebuild_zset_from_conversations():
     except Exception as _inbox_clean_err:
         logger.warning(f"[Rebuild ZSET] Inbox cleanup error (non-fatal): {_inbox_clean_err}")
 
+    # ── Paso 3: Purga de BOT_CONTROLLED_SET ghosts contra MongoDB ──
+    try:
+        bot_members_raw = await state_mgr.redis.smembers(state_mgr.BOT_CONTROLLED_SET)
+        if bot_members_raw:
+            bot_members = []
+            for m in bot_members_raw:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                if ":" in m:
+                    bot_members.append(m)
+
+            pipe_meta = state_mgr.redis.pipeline(transaction=False)
+            for m in bot_members:
+                pipe_meta.exists(f"{state_mgr.META_PREFIX}{m}")
+            meta_exists = await pipe_meta.execute()
+
+            ghosts = [m for m, has_meta in zip(bot_members, meta_exists)
+                      if not has_meta]
+
+            if not ghosts:
+                logger.info(
+                    "[Rebuild ZSET] BOT_CONTROLLED: %d miembros, 0 ghosts",
+                    len(bot_members)
+                )
+            else:
+                phones_to_check = list({
+                    m.rsplit(":", 1)[0] for m in ghosts
+                })
+                existing_phones = await mongo.check_conversations_exist(
+                    phones_to_check
+                )
+
+                to_purge = [
+                    m for m in ghosts
+                    if m.rsplit(":", 1)[0] not in existing_phones
+                ]
+                backed_by_mongo = len(ghosts) - len(to_purge)
+
+                if to_purge:
+                    await state_mgr.redis.srem(
+                        state_mgr.BOT_CONTROLLED_SET, *to_purge
+                    )
+
+                logger.info(
+                    "[Rebuild ZSET] BOT_CONTROLLED ghost cleanup: "
+                    "%d total, %d ghosts, %d purgados, %d preservados (Mongo)",
+                    len(bot_members), len(ghosts),
+                    len(to_purge), backed_by_mongo
+                )
+    except Exception as _bot_clean_err:
+        logger.warning(
+            "[Rebuild ZSET] BOT_CONTROLLED cleanup error (non-fatal): %s",
+            _bot_clean_err
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE SEGUIMIENTO 24H

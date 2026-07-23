@@ -5332,7 +5332,7 @@ function startFallbackPolling() {
     // Reducir cadencia a 30s para no saturar HubSpot ni el cache.
     const _intervalMs = activeStageFilter ? 30000 : POLLING_INTERVAL_IDLE;
     pollingInterval = setInterval(async () => {
-        if (!isTabVisible) return;
+        if (!isTabVisible) { pendingRefresh = true; return; }
         await loadContacts();
     }, _intervalMs);
     console.log(`[Panel] Fallback polling activo (WS conectado): ${_intervalMs / 1000}s${activeStageFilter ? ' [stage filter]' : ''}`);
@@ -5669,6 +5669,7 @@ function handleWebSocketMessage(data) {
                     if (!window._foreignProbation) window._foreignProbation = new Set();
                     if (window._foreignProbation.has(data.phone)) {
                         console.log('[Panel][Guard] Descartado — ya en probación:', data.phone);
+                        pendingRefresh = true;
                         break;
                     }
                     window._foreignProbation.add(data.phone);

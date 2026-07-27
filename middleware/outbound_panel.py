@@ -105,8 +105,8 @@ PROTECTED_STAGES_POST_VISITA = {
 BULK_EXCLUDED_STAGES = {
     "1326623075",  # En Conversación (stage unificado)
     "evangelist",  # Cerrado perdido
-    "1326632628",  # Ana Contratos
-    "1326632209",  # Pagos y Servicios Publicos
+    "1326632628",  # Otros Municipios
+    "1326632209",  # Otras Areas
 }
 BULK_PROCESSOR_LOCK_KEY = "bulk_processor_lock"
 BULK_PROCESSOR_LOCK_TTL = 30
@@ -205,9 +205,9 @@ PIPELINE_STAGES = {
     "1326632625": "Hasta 2.5M",
     "1326631574": "De 3M en adelante",
     "1326623539": "Local o Bodega",
-    "1326632628": "Ana Contratos",
+    "1326632628": "Otros Municipios",
     "1326623069": "Propietarios",
-    "1326632209": "Pagos y Servicios Publicos",
+    "1326632209": "Otras Areas",
     "1326623541": "Ya encontro",
     "subscriber": "Reubicados",
     "lead": "Aprobado",
@@ -228,9 +228,9 @@ PIPELINE_STAGES_LIST = [
     {"id": "1326632625", "name": "Hasta 2.5M"},
     {"id": "1326631574", "name": "De 3M en adelante"},
     {"id": "1326623539", "name": "Local o Bodega"},
-    {"id": "1326632628", "name": "Ana Contratos"},
+    {"id": "1326632628", "name": "Otros Municipios"},
     {"id": "1326623069", "name": "Propietarios"},
-    {"id": "1326632209", "name": "Pagos y Servicios Publicos"},
+    {"id": "1326632209", "name": "Otras Areas"},
     {"id": "1326623541", "name": "Ya encontro"},
     {"id": "subscriber", "name": "Reubicados"},
     {"id": "lead", "name": "Aprobado"},

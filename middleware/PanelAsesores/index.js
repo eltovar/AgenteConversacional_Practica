@@ -95,9 +95,9 @@ const PIPELINE_STAGES = [
     { id: "1326632625", name: "Hasta 2.5M" },
     { id: "1326631574", name: "De 3M en adelante" },
     { id: "1326623539", name: "Local o Bodega" },
-    { id: "1326632628", name: "Ana Contratos" },
+    { id: "1326632628", name: "Otros Municipios" },
     { id: "1326623069", name: "Propietarios" },
-    { id: "1326632209", name: "Pagos y Servicios Publicos" },
+    { id: "1326632209", name: "Otras Areas" },
     { id: "1326623541", name: "Ya encontro" },
     { id: "subscriber", name: "Reubicados" },
     { id: "lead", name: "Aprobado" },
@@ -7627,8 +7627,8 @@ async function submitAppointment(event) {
 const BULK_EXCLUDED_STAGES = [
     "1326623075",  // En Conversación (stage unificado)
     "evangelist",  // Cerrado perdido
-    "1326632628",  // Ana Contratos
-    "1326632209"   // Pagos y Servicios Publicos
+    "1326632628",  // Otros Municipios
+    "1326632209"   // Otras Areas
 ];
 
 // Plantillas permitidas para envío masivo. La var key='1' (nombre) siempre se

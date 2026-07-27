@@ -58,8 +58,8 @@ class TestSecurityValidations:
     @pytest.mark.parametrize("excluded_stage", [
         "1326623075",  # En Conversación (stage unificado)
         "evangelist",  # Cerrado perdido
-        "1326632628",  # Ana Contratos
-        "1326632209",  # Pagos y Servicios Publicos
+        "1326632628",  # Otros Municipios
+        "1326632209",  # Otras Areas
     ])
     def test_excluded_stage_rejected_400(self, excluded_stage):
         from fastapi.testclient import TestClient

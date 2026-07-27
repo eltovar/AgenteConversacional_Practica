@@ -57,8 +57,8 @@ STAGE_NAMES = {
     "subscriber": "Reubicados",
     "lead": "Aprobado",
     "1353539189": "Venta",
-    "1326632628": "Ana Contratos",
-    "1326632209": "Pagos y Servicios Públicos",
+    "1326632628": "Otros Municipios",
+    "1326632209": "Otras Areas",
 }
 
 ACTIVE_ADVISORS = {

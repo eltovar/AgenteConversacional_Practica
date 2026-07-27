@@ -170,6 +170,34 @@
     box-shadow: 0 0 0 2px rgba(245,196,0,0.25);
 }
 
+/* Marcador visual de Seguimiento — separador en el chat */
+.seguimiento-marker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 16px;
+    margin: 12px 0;
+    position: relative;
+}
+.seguimiento-marker::before,
+.seguimiento-marker::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: rgba(124, 58, 237, 0.3);
+}
+.seguimiento-marker-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #7c3aed;
+    background: rgba(124, 58, 237, 0.08);
+    padding: 3px 10px;
+    border-radius: 10px;
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+}
+
 /* Chip Plantilla — discreto al inicio de la burbuja */
 .tpl-chip {
     display: inline-flex;

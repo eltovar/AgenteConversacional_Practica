@@ -101,7 +101,8 @@ const PIPELINE_STAGES = [
     { id: "1326623541", name: "Ya encontro" },
     { id: "subscriber", name: "Reubicados" },
     { id: "lead", name: "Aprobado" },
-    { id: "1353539189", name: "Venta" }
+    { id: "1353539189", name: "Venta" },
+    { id: "1407668893", name: "Seguimiento" }
 ];
 
 // Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.
@@ -233,6 +234,8 @@ function _resetChatHistoryState(contactId, canal, phone) {
     // Quitar marcador de "inicio de conversación" si quedó de la conversación anterior.
     const oldMarker = document.getElementById('chatHistoryStartMarker');
     if (oldMarker) oldMarker.remove();
+    const oldSeguimiento = document.getElementById('seguimientoMarker');
+    if (oldSeguimiento) oldSeguimiento.remove();
 }
 
 // =========================================================================
@@ -482,11 +485,25 @@ async function updateDealStage(contactId, stageId) {
         }
     }
 
+    if (stageId === '1407668893') {
+        const ok = confirm(
+            "Mover a 'Seguimiento'?\n\n" +
+            "- El contacto se transferira a Luisa automaticamente\n" +
+            "- Desaparecera de tu panel\n" +
+            "- Luisa lo atendera en el embudo Seguimiento"
+        );
+        if (!ok) {
+            const previous = contactDealCache[contactId]?.current_stage || '';
+            if (dropdownEl && previous) dropdownEl.value = previous;
+            return;
+        }
+    }
+
     try {
         showLoader();
 
         const body = { stage_id: stageId };
-        if (stageId === 'other' && contact) {
+        if ((stageId === 'other' || stageId === '1407668893') && contact) {
             body.phone = contact.phone;
             body.canal = contact.canal || 'whatsapp';
         }
@@ -535,6 +552,11 @@ async function updateDealStage(contactId, stageId) {
             } else if (stageId === 'other' && data.close_error) {
                 console.warn('[Panel] Auto-cierre falló:', data.close_error);
                 alert("Etapa actualizada, pero el cierre automatico fallo. Cierra manualmente con el boton 'Cerrar'.");
+            }
+
+            if (stageId === '1407668893' && data.transfer_error) {
+                console.warn('[Panel] Seguimiento transfer falló:', data.transfer_error);
+                alert("Etapa actualizada en HubSpot, pero la transferencia a Luisa fallo. Transfiere manualmente.");
             }
         } else {
             throw new Error(data.detail || 'Error actualizando etapa');
@@ -1251,6 +1273,7 @@ function _initStageFilter() {
     const sel = document.getElementById('stageFilter');
     if (!sel) return;
     PIPELINE_STAGES.forEach(s => {
+        if (s.id === '1407668893' && ADVISOR_ID === '89096378') return;
         const opt = document.createElement('option');
         opt.value = s.id;
         opt.textContent = s.name;
@@ -1717,6 +1740,7 @@ async function loadChatHistory(contactId) {
             if (!chatHistoryState.hasMore && (data.messages?.length || 0) > 0) {
                 _showHistoryStartMarker();
             }
+            _insertSeguimientoMarker();
         }
 
         // Mostrar mensaje si no hay historial
@@ -1860,6 +1884,9 @@ async function loadOlderMessages() {
         if (!chatHistoryState.hasMore) {
             _showHistoryStartMarker();
         }
+        const _oldSeg = document.getElementById('seguimientoMarker');
+        if (_oldSeg) _oldSeg.remove();
+        _insertSeguimientoMarker();
 
         console.log(`[Panel][Pagination] +${olderMessages.length} msgs anteriores cargados (total has_more=${chatHistoryState.hasMore})`);
 
@@ -1960,6 +1987,45 @@ function _showHistoryStartMarker() {
     marker.className = 'flex items-center justify-center py-3 text-gray-400 text-xs';
     marker.innerHTML = '<span>📜 Inicio de la conversación</span>';
     container.insertBefore(marker, container.firstChild);
+}
+
+function _insertSeguimientoMarker() {
+    const container = document.getElementById('chatMessages');
+    if (!container) return;
+    if (document.getElementById('seguimientoMarker')) return;
+    const contact = allContacts.find(c => String(c.contact_id) === String(currentContactId));
+    const originTs = contact?.seguimiento_origin;
+    if (!originTs) return;
+
+    const originDate = new Date(originTs);
+    if (isNaN(originDate.getTime())) return;
+
+    const formatted = originDate.toLocaleDateString('es-CO', {
+        timeZone: 'America/Bogota', day: 'numeric', month: 'short', year: 'numeric'
+    }) + ' ' + originDate.toLocaleTimeString('es-CO', {
+        timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: true
+    });
+
+    const marker = document.createElement('div');
+    marker.id = 'seguimientoMarker';
+    marker.className = 'seguimiento-marker';
+    marker.innerHTML = `<span class="seguimiento-marker-label">Seguimiento desde ${formatted}</span>`;
+
+    const bubbles = container.querySelectorAll('[data-timestamp]');
+    let insertBefore = null;
+    for (const bubble of bubbles) {
+        const bubbleTs = bubble.dataset.timestamp;
+        if (bubbleTs && new Date(bubbleTs) >= originDate) {
+            insertBefore = bubble;
+            break;
+        }
+    }
+
+    if (insertBefore) {
+        container.insertBefore(marker, insertBefore);
+    } else {
+        container.appendChild(marker);
+    }
 }
 
 async function checkWindowStatus(phone) {
@@ -2094,6 +2160,7 @@ async function loadContactDetail(phone, contactId, canal) {
         if (!chatHistoryState.hasMore && (data.messages?.length || 0) > 0) {
             _showHistoryStartMarker();
         }
+        _insertSeguimientoMarker();
         console.log(`[Panel][Pagination] Init detail: has_more=${chatHistoryState.hasMore} oldest_ts=${chatHistoryState.oldestTs} msgs=${data.messages?.length || 0}`);
 
         // Aplicar estado de ventana 24h

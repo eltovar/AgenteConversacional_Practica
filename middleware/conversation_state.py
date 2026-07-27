@@ -94,6 +94,7 @@ class ConversationMeta:
     deal_stage: Optional[str] = None
     last_advisor_message: Optional[str] = None
     canal_display: Optional[str] = None  # Canal visible en UI (editable por asesor), no afecta routing
+    seguimiento_origin: Optional[str] = None  # Timestamp ISO de cuándo se movió al embudo Seguimiento
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -435,6 +436,7 @@ class ConversationStateManager:
                         "deal_id": meta.deal_id,
                         "deal_stage": meta.deal_stage,
                         "last_advisor_message": meta.last_advisor_message,
+                        "seguimiento_origin": meta.seguimiento_origin,
                     })
 
                 if bot_ghost_count:

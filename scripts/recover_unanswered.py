@@ -59,6 +59,7 @@ STAGE_NAMES = {
     "1353539189": "Venta",
     "1326632628": "Otros Municipios",
     "1326632209": "Otras Areas",
+    "1407668893": "Seguimiento"
 }
 
 ACTIVE_ADVISORS = {

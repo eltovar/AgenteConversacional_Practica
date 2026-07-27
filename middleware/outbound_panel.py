@@ -211,7 +211,8 @@ PIPELINE_STAGES = {
     "1326623541": "Ya encontro",
     "subscriber": "Reubicados",
     "lead": "Aprobado",
-    "1353539189": "Venta"
+    "1353539189": "Venta",
+    "1407668893": "Seguimiento"
 }
 
 # Lista ordenada de etapas para el frontend
@@ -234,7 +235,8 @@ PIPELINE_STAGES_LIST = [
     {"id": "1326623541", "name": "Ya encontro"},
     {"id": "subscriber", "name": "Reubicados"},
     {"id": "lead", "name": "Aprobado"},
-    {"id": "1353539189", "name": "Venta"}
+    {"id": "1353539189", "name": "Venta"},
+    {"id": "1407668893", "name": "Seguimiento"}
 ]
 
 @dataclass

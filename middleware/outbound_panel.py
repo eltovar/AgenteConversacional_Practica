@@ -1,4 +1,4 @@
-t# middleware/outbound_panel.py
+# middleware/outbound_panel.py
 """
 Este módulo proporciona endpoints API y UI para que los asesores envíen
 mensajes de WhatsApp directamente, sustituyendo el Inbox bloqueado de HubSpot.

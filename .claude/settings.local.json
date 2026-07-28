@@ -11,7 +11,12 @@
       "Bash(node --check middleware/PanelAsesores/index.js)",
       "PowerShell(python -m py_compile \"C:\\\\Users\\\\Salo\\\\Desktop\\\\AgenteConversacional_Practica\\\\middleware\\\\outbound_panel.py\"; if \\($?\\) { \"OK\" })",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash([ -f \"$USERSETTINGS\" ])",
+      "Read(//c/Users/Salo/AppData/Roaming/Code/User/**)",
+      "Bash(grep -iE \"sk-|AC[a-f0-9]{30,}|pat-na1-[a-z0-9]|api_key|token|password|secret\")",
+      "Bash(git rm *)",
+      "Bash(git push *)"
     ],
     "deny": [],
     "ask": []

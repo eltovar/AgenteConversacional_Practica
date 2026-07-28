@@ -3433,14 +3433,7 @@ async def _transfer_to_luisa(
     stage_id: str,
 ) -> dict:
     """
-    Cadena atómica cuando Jubeny mueve un contacto a un embudo de Luisa:
-    1. Cerrar conversación en panel de Jubeny
-    2. Transferir owner a Luisa en Redis
-    3. Activar en panel de Luisa con HUMAN_ACTIVE
-    4. Guardar transfer_origin en meta
-    5. Agregar al inbox de Luisa
-    6. Actualizar hubspot_owner_id en HubSpot (async, no bloquea)
-    7. Notificar vía WebSocket a ambas asesoras
+    Cadena atómica cuando Jubeny mueve un contacto a un embudo de Luisa: 1. Cerrar conversación en panel de Jubeny 2. Transferir owner a Luisa en Redis 3. Activar en panel de Luisa con HUMAN_ACTIVE 4. Guardar transfer_origin en meta 5. Agregar al inbox de Luisa 6. Actualizar hubspot_owner_id en HubSpot (async, no bloquea)7. Notificar vía WebSocket a ambas asesoras
     """
     stage_name = STAGES_TRANSFER_TO_LUISA.get(stage_id, stage_id)
     tag = f"[Transfer:{stage_name}]"

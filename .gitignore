@@ -34,11 +34,9 @@ cleanup_report_*.csv
 # Carpetas bases
 /scripts/
 /docs/
-/knowledge_base/
 /backup_pre_migration_20260423/
 /tests/
 /test/
-/rag/
 
 # Archivos
 DEPLOYMENT_REPORT_4FIXES.md

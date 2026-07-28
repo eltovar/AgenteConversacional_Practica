@@ -94,9 +94,17 @@ HUBSPOT_PIPELINE_ID = "854756009"
 HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Stage unificado (entrada de todos los leads)
 HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
 HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
+LUISA_TRANSFER_TARGET = "89096380"  # Luisa — destino fijo de transferencia
+STAGES_TRANSFER_TO_LUISA = {
+    "1407668893": "Seguimiento",
+    "1326623067": "Hasta 1.5M",
+    "1326631573": "Hasta 2M",
+    "1326632625": "Hasta 2.5M",
+}
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {
-    "salesqualifiedlead", "opportunity", "customer", "evangelist"
+    "salesqualifiedlead", "opportunity", "customer", "evangelist",
+    "1407668893", "1326623067", "1326631573", "1326632625",
 }
 
 # ============================================================================
@@ -3414,6 +3422,149 @@ async def mark_contact_read(
 
 
 # ============================================================================
+# Helper: Transferencia automática a Luisa por embudo
+# Soporta: Seguimiento, Hasta 1.5M, Hasta 2M, Hasta 2.5M
+# ============================================================================
+
+async def _transfer_to_luisa(
+    phone: str,
+    canal: Optional[str],
+    contact_id: Optional[str],
+    stage_id: str,
+) -> dict:
+    """
+    Cadena atómica cuando Jubeny mueve un contacto a un embudo de Luisa:
+    1. Cerrar conversación en panel de Jubeny
+    2. Transferir owner a Luisa en Redis
+    3. Activar en panel de Luisa con HUMAN_ACTIVE
+    4. Guardar transfer_origin en meta
+    5. Agregar al inbox de Luisa
+    6. Actualizar hubspot_owner_id en HubSpot (async, no bloquea)
+    7. Notificar vía WebSocket a ambas asesoras
+    """
+    stage_name = STAGES_TRANSFER_TO_LUISA.get(stage_id, stage_id)
+    tag = f"[Transfer:{stage_name}]"
+    result = {"closed": False, "transferred": False, "transfer_error": None}
+    state_manager = _get_state_manager()
+    canal_safe = (canal or "whatsapp").lower()
+    phone_normalized = phone
+
+    try:
+        normalizer = PhoneNormalizer()
+        validation = normalizer.normalize(phone)
+        if validation.is_valid:
+            phone_normalized = validation.normalized
+    except Exception:
+        pass
+
+    # ① Cerrar conversación de Jubeny
+    try:
+        await _close_conversation_internal(phone_normalized, canal_safe)
+        result["closed"] = True
+    except Exception as e_close:
+        logger.error(f"{tag} Close falló para {phone_normalized}: {e_close}")
+        result["transfer_error"] = f"Close falló: {e_close}"
+
+    # ② Transferir owner en Redis (exclusive)
+    meta_key = f"conv_meta:{phone_normalized}:{canal_safe}"
+    try:
+        r = await _get_redis_client()
+        raw_meta = await r.get(meta_key)
+        if raw_meta:
+            transfer_result = await state_manager.transfer_contact(
+                phone=phone_normalized,
+                to_owner_id=LUISA_TRANSFER_TARGET,
+                canal=canal_safe,
+                mode="exclusive",
+                reason=f"Embudo {stage_name} — transferencia automática"
+            )
+            if transfer_result.get("status") != "success":
+                logger.warning(f"{tag} Transfer Redis falló: {transfer_result}")
+                result["transfer_error"] = transfer_result.get("message")
+        else:
+            logger.info(f"{tag} Sin meta previa para {phone_normalized} — creando directo")
+    except Exception as e_transfer:
+        logger.error(f"{tag} Transfer Redis error: {e_transfer}")
+        result["transfer_error"] = str(e_transfer)
+
+    # ③ Activar en panel de Luisa con HUMAN_ACTIVE
+    try:
+        existing_meta = {}
+        try:
+            r = await _get_redis_client()
+            raw = await r.get(meta_key)
+            if raw:
+                existing_meta = json.loads(raw)
+        except Exception:
+            pass
+
+        await state_manager.activate_human(
+            phone_normalized=phone_normalized,
+            canal_origen=canal_safe,
+            owner_id=LUISA_TRANSFER_TARGET,
+            reason=f"{stage_name} — transferido desde Jubeny",
+            display_name=existing_meta.get("display_name"),
+            contact_id=contact_id or existing_meta.get("contact_id"),
+        )
+        result["transferred"] = True
+    except Exception as e_activate:
+        logger.error(f"{tag} Activate human falló: {e_activate}")
+        if not result["transfer_error"]:
+            result["transfer_error"] = str(e_activate)
+
+    # ④ Guardar transfer_origin en meta
+    try:
+        r = await _get_redis_client()
+        raw = await r.get(meta_key)
+        if raw:
+            meta_dict = json.loads(raw)
+            from middleware.conversation_state import get_bogota_now_iso
+            meta_dict["seguimiento_origin"] = get_bogota_now_iso()
+            meta_dict["assigned_owner_id"] = LUISA_TRANSFER_TARGET
+            ttl = await r.ttl(meta_key)
+            ex = ttl if ttl and ttl > 0 else state_manager.PANEL_TTL_SECONDS
+            await r.set(meta_key, json.dumps(meta_dict), ex=ex)
+    except Exception as e_meta:
+        logger.warning(f"{tag} Meta update falló (non-fatal): {e_meta}")
+
+    # ⑤ Agregar al inbox de Luisa
+    try:
+        await state_manager.add_to_advisor_inbox(
+            LUISA_TRANSFER_TARGET, phone_normalized, canal_safe
+        )
+    except Exception as e_inbox:
+        logger.warning(f"{tag} Inbox add falló (non-fatal): {e_inbox}")
+
+    # ⑥ HubSpot owner (async — no bloquea respuesta)
+    if contact_id:
+        asyncio.create_task(
+            _reassign_hubspot_owner(contact_id, LUISA_TRANSFER_TARGET, phone_normalized)
+        )
+
+    # ⑦ WebSocket notify
+    try:
+        meta = await state_manager.get_meta(phone_normalized, canal_safe)
+        contact_name = meta.display_name if meta else phone_normalized
+        await ws_manager.notify_contact_transferred(
+            phone=phone_normalized,
+            from_advisor="89096378",
+            to_advisor=LUISA_TRANSFER_TARGET,
+            contact_name=contact_name,
+            mode="exclusive",
+            redis_client=state_manager.redis
+        )
+    except Exception as e_ws:
+        logger.warning(f"{tag} WS notify falló (non-fatal): {e_ws}")
+
+    result["to_owner"] = LUISA_TRANSFER_TARGET
+    logger.info(
+        f"{tag} Transferencia completada — phone={phone_normalized} "
+        f"contact={contact_id} closed={result['closed']} transferred={result['transferred']}"
+    )
+    return result
+
+
+# ============================================================================
 # Endpoint para actualizar lifecyclestage del Contact en HubSpot
 # ============================================================================
 
@@ -3480,6 +3631,25 @@ async def update_contact_stage(
                         f"[Panel] Auto-cierre falló para contact={contact_id} phone={phone}: {e_close}"
                     )
                     payload["close_error"] = str(e_close)
+
+            if stage_id in STAGES_TRANSFER_TO_LUISA and phone:
+                try:
+                    transfer_result = await _transfer_to_luisa(phone, canal, contact_id, stage_id)
+                    payload["closed"] = transfer_result.get("closed", False)
+                    payload["transferred"] = transfer_result.get("transferred", False)
+                    payload["to_owner"] = transfer_result.get("to_owner")
+                    if transfer_result.get("transfer_error"):
+                        payload["transfer_error"] = transfer_result["transfer_error"]
+                    stage_label = STAGES_TRANSFER_TO_LUISA.get(stage_id, stage_id)
+                    logger.info(
+                        f"[Panel] Transfer {stage_label} — contact={contact_id} phone={phone} "
+                        f"closed={payload['closed']} transferred={payload['transferred']}"
+                    )
+                except Exception as e_seg:
+                    logger.error(
+                        f"[Panel] Transfer falló para contact={contact_id} stage={stage_id}: {e_seg}"
+                    )
+                    payload["transfer_error"] = str(e_seg)
 
             return payload
         else:

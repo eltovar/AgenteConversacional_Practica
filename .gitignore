@@ -38,7 +38,6 @@ cleanup_report_*.csv
 /backup_pre_migration_20260423/
 /tests/
 /test/
-/prompts/
 /rag/
 
 # Archivos

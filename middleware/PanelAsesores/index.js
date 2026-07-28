@@ -469,6 +469,7 @@ async function updateDealStage(contactId, stageId) {
         '1326623067': 'Hasta 1.5M',
         '1326631573': 'Hasta 2M',
         '1326632625': 'Hasta 2.5M',
+        '1326631574': 'De 3M en adelante',
     };
     // Localizar el contacto: necesario para el body (auto-cierre) y para revertir
     // el dropdown si el usuario cancela la confirmación de "No responde".
@@ -1280,7 +1281,7 @@ function _initStageFilter() {
     const sel = document.getElementById('stageFilter');
     if (!sel) return;
     PIPELINE_STAGES.forEach(s => {
-        const JUBENY_HIDDEN_STAGES = ['1407668893', '1326623067', '1326631573', '1326632625'];
+        const JUBENY_HIDDEN_STAGES = ['1407668893', '1326623067', '1326631573', '1326632625', '1326631574'];
         if (JUBENY_HIDDEN_STAGES.includes(s.id) && ADVISOR_ID === '89096378') return;
         const opt = document.createElement('option');
         opt.value = s.id;
@@ -2019,6 +2020,7 @@ function _insertSeguimientoMarker() {
         '1326623067': 'Hasta 1.5M',
         '1326631573': 'Hasta 2M',
         '1326632625': 'Hasta 2.5M',
+        '1326631574': 'De 3M en adelante',
     };
     const currentStage = contact?.lifecyclestage || contact?.current_stage || '';
     const label = TRANSFER_STAGE_NAMES[currentStage] || 'Transferido';

@@ -100,11 +100,12 @@ STAGES_TRANSFER_TO_LUISA = {
     "1326623067": "Hasta 1.5M",
     "1326631573": "Hasta 2M",
     "1326632625": "Hasta 2.5M",
+    "1326631574": "De 3M en adelante",
 }
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {
     "salesqualifiedlead", "opportunity", "customer", "evangelist",
-    "1407668893", "1326623067", "1326631573", "1326632625",
+    "1407668893", "1326623067", "1326631573", "1326632625", "1326631574",
 }
 
 # ============================================================================

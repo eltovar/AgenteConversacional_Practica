@@ -1,1 +1,0 @@
-{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_"},{"v":{"$numberInt":"2"},"key":{"contact_id":{"$numberInt":"1"},"is_deleted":{"$numberInt":"1"},"created_at":{"$numberInt":"-1"}},"name":"note_contact_created_idx"}],"uuid":"48322bd142354d3790d6f77463022bda","collectionName":"contact_notes","type":"collection"}

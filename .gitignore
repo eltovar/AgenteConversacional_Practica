@@ -31,6 +31,22 @@ htmlcov/
 *.cover
 cleanup_report_*.csv
 
+# Carpetas bases
+/scripts/
+/docs/
+/knowledge_base/
+/backup_pre_migration_20260423/
+/tests/
+/test/
+/prompts/
+/rag/
+
+# Archivos
+DEPLOYMENT_REPORT_4FIXES.md
+railway.json
+migrate_checkpoint.json
+
+
 # Logs y outputs locales (contienen PII de clientes)
 railway_logs_output.txt
 railway_logs_*.txt
@@ -41,3 +57,5 @@ railway_logs_*.txt
 INFORME_*
 *.msi
 mongosh*
+
+

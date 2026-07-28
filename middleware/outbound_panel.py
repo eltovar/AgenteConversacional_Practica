@@ -4179,7 +4179,7 @@ async def get_conversation_history(
             source = "mongodb"
             logger.debug(f"[Panel] Historial desde MongoDB: {len(messages)} mensajes")
 
-        # Fallback sin canal: lead de portal (mercado_libre/ciencuadras) → mensajes en channel=whatsapp
+        # Fallback sin canal: lead de portal (mercado_libre/ciencuadras) → mensajes en seguimiento_transfer()channel=whatsapp
         if not messages and canal and canal not in ("whatsapp", "instagram"):
             messages = await mongo_manager.get_history(
                 phone=phone_normalized,

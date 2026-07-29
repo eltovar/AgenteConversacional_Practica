@@ -563,7 +563,7 @@ class ContactManager:
             contact_id del lead creado
         """
         # Obtener owner basado en el canal de origen
-        owner_id = lead_assigner.get_next_owner(source_channel)
+        owner_id = await asyncio.to_thread(lead_assigner.get_next_owner, source_channel)
 
         # HubSpot no acepta "whatsapp" como valor de canal_origen; mapear a "whatsapp_directo"
         hs_canal = "whatsapp_directo" if source_channel == "whatsapp" else source_channel
@@ -739,7 +739,7 @@ class ContactManager:
         """
         try:
             # 1. Obtener owner basado en el canal
-            owner_id = lead_assigner.get_next_owner(source_channel)
+            owner_id = await asyncio.to_thread(lead_assigner.get_next_owner, source_channel)
             
             if not owner_id:
                 logger.warning(

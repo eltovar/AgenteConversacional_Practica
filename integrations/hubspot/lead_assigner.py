@@ -54,61 +54,11 @@ class LeadAssigner:
         ],
     }
 
-    # Mapeo de canal_origen → equipo
-    # Clave: identificador del canal (se detecta del mensaje o metadata)
-    # Valor: nombre del equipo en OWNERS_CONFIG
-    CHANNEL_TO_TEAM = {
-        # === PORTALES INMOBILIARIOS + WHATSAPP DIRECTO (ID: 89096378) ===
-        "mercado_libre": "equipo_portales",
-        "linkedin": "equipo_portales",
-        "whatsapp_directo": "equipo_portales",
-        "whatsapp": "equipo_portales",  # Alias para compatibilidad con webhook
-
-        # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
-        "pagina_web": "equipo_directo",
-        "youtube": "equipo_directo",
-        "finca_raiz": "equipo_directo",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
-        "metrocuadrado": "equipo_directo",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)
-
-        # === REDES SOCIALES + CIENCUADRAS (ID: 89096378) ===
-        "facebook": "equipo_portales",
-        "instagram": "equipo_portales",
-        "ciencuadras": "equipo_portales",
-        "tiktok": "equipo_portales",
-        "charly": "equipo_portales",
-
-        # === FALLBACK (Round robin entre portales y directo) ===
-        "desconocido": "default",
-        "google_ads": "default",
-        "referido": "default",
-    }
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # MAPEO DIRECTO CANAL → OWNER ID (para filtro del panel)
-    # ═══════════════════════════════════════════════════════════════════════════
-    CHANNEL_TO_OWNER = {
-        # Asesor Portales + WhatsApp Directo (89096378)
-        "mercado_libre": "89096378",
-        "linkedin": "89096378",
-        "whatsapp_directo": "89096378",
-        "whatsapp": "89096378",  # Alias para compatibilidad con webhook
-
-        # Asesor Directo + Portales Especiales (89096380)
-        "pagina_web": "89096380",
-        "youtube": "89096380",
-        "finca_raiz": "89096380",  # ✓ CAMBIO: Finca Raíz → 89096380 (Asesor Directo)
-        "metrocuadrado": "89096380",  # ✓ CAMBIO: MetroCuadrado → 89096380 (Asesor Directo)
-
-        # Redes Sociales + Ciencuadras (89096378)
-        "facebook": "89096378",
-        "instagram": "89096378",
-        "ciencuadras": "89096378",
-        "tiktok": "89096378",
-        "charly": "89096378",
-    }
-
-    # Canales para métricas de analista de redes sociales
-    SOCIAL_MEDIA_CHANNELS = ["facebook", "instagram", "linkedin", "youtube", "tiktok"]
+    # Mapeo canal → equipo (generado desde channels_registry.py)
+    from utils.channels_registry import get_channel_to_team, get_channel_to_owner, get_social_media_channels
+    CHANNEL_TO_TEAM = get_channel_to_team()
+    CHANNEL_TO_OWNER = get_channel_to_owner()
+    SOCIAL_MEDIA_CHANNELS = get_social_media_channels()
 
     # Prefijo para claves de Redis
     REDIS_KEY_PREFIX = "lead_assigner"

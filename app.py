@@ -750,6 +750,196 @@ async def rebuild_zset_from_conversations():
             _bot_clean_err
         )
 
+    # ── Paso 4: Garbage collector de conv_meta huérfanos ──
+    # Purga keys conv_meta:*, conv_state:*, conv_was_panel:* cuyo
+    # last_activity supera META_GC_THRESHOLD_DAYS y que NO están en el ZSET
+    # ni en BOT_CONTROLLED_SET ni en estado HUMAN_ACTIVE/IN_CONVERSATION.
+    try:
+        import json
+        from middleware.conversation_state import ConversationStatus, parse_datetime_safe
+        state_mgr = get_state_manager()
+        gc_threshold = state_mgr.META_GC_THRESHOLD_DAYS
+        cutoff = get_bogota_now() - timedelta(days=gc_threshold)
+        cutoff_ts = cutoff.timestamp()
+
+        zset_members = set(await state_mgr.redis.zrange(
+            state_mgr.ACTIVE_CONTACTS_ZSET, 0, -1
+        ))
+        bot_set_members = set()
+        try:
+            raw_bot = await state_mgr.redis.smembers(state_mgr.BOT_CONTROLLED_SET)
+            for m in raw_bot:
+                bot_set_members.add(
+                    m if isinstance(m, str) else m.decode("utf-8", errors="ignore")
+                )
+        except Exception:
+            pass
+
+        active_members = zset_members | bot_set_members
+
+        gc_scanned = 0
+        gc_purged = 0
+        gc_skipped_active = 0
+        gc_skipped_state = 0
+        gc_cap = 2000
+
+        _cursor = "0"
+        while gc_scanned < gc_cap:
+            _cursor, keys = await state_mgr.redis.scan(
+                cursor=_cursor, match=f"{state_mgr.META_PREFIX}*", count=200
+            )
+            if not keys and _cursor in (0, "0", b"0"):
+                break
+            for key in keys:
+                if isinstance(key, bytes):
+                    key = key.decode("utf-8", errors="ignore")
+                gc_scanned += 1
+                member = key[len(state_mgr.META_PREFIX):]
+                if member in active_members:
+                    gc_skipped_active += 1
+                    continue
+
+                raw = await state_mgr.redis.get(key)
+                if not raw:
+                    continue
+                try:
+                    meta = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode("utf-8", errors="ignore"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+                la = meta.get("last_activity", "")
+                if la:
+                    try:
+                        la_dt = parse_datetime_safe(la)
+                        if la_dt.timestamp() > cutoff_ts:
+                            continue
+                    except Exception:
+                        pass
+
+                state_key = f"{state_mgr.STATE_PREFIX}{member}"
+                raw_state = await state_mgr.redis.get(state_key)
+                if raw_state:
+                    sv = raw_state if isinstance(raw_state, str) else raw_state.decode("utf-8", errors="ignore")
+                    if sv in (ConversationStatus.HUMAN_ACTIVE.value,
+                              ConversationStatus.IN_CONVERSATION.value,
+                              ConversationStatus.PENDING_HANDOFF.value):
+                        gc_skipped_state += 1
+                        continue
+
+                parts = member.rsplit(":", 1)
+                phone_part = parts[0] if len(parts) == 2 else member
+                canal_part = parts[1] if len(parts) == 2 else "whatsapp"
+                keys_to_del = [
+                    key,
+                    state_key,
+                    f"conv_was_panel:{phone_part}:{canal_part}",
+                ]
+                await state_mgr.redis.delete(*keys_to_del)
+                gc_purged += 1
+
+            if _cursor in (0, "0", b"0"):
+                break
+
+        if gc_purged > 0 or gc_scanned > 0:
+            logger.info(
+                "[Rebuild ZSET] Meta GC: scanned=%d, purged=%d, "
+                "skipped_active=%d, skipped_state=%d (threshold=%dd)",
+                gc_scanned, gc_purged,
+                gc_skipped_active, gc_skipped_state, gc_threshold
+            )
+    except Exception as _gc_err:
+        logger.warning(
+            "[Rebuild ZSET] Meta GC error (non-fatal): %s", _gc_err
+        )
+
+
+async def reconcile_owner_ids():
+    """
+    Cada 6h: cross-referencia Redis assigned_owner_id vs MongoDB owner_id
+    vs HubSpot hubspot_owner_id.  HubSpot es la fuente autoritativa;
+    cualquier divergencia se corrige en Redis + MongoDB.
+    Cap: 200 contactos por ejecución para no saturar HubSpot API.
+    """
+    await apply_jitter()
+    try:
+        from database.mongodb_client import get_mongo_manager
+        from middleware.outbound_panel import get_httpx_client
+        import json as _json
+
+        mongo = get_mongo_manager()
+        state_mgr = get_state_manager()
+        http = get_httpx_client()
+        hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
+        if not hs_token:
+            logger.warning("[Reconcile] Sin HUBSPOT token — skip")
+            return
+
+        cursor = mongo.db.conversations.find(
+            {"owner_id": {"$exists": True, "$ne": None}, "contact_id": {"$exists": True, "$ne": None}},
+            {"phone": 1, "canal": 1, "owner_id": 1, "contact_id": 1, "_id": 0},
+        ).sort("last_message_at", -1).limit(200)
+        docs = await cursor.to_list(length=200)
+
+        fixed_mongo = 0
+        fixed_redis = 0
+        skipped = 0
+
+        for d in docs:
+            phone = d.get("phone", "")
+            contact_id = d.get("contact_id")
+            canal = (d.get("canal") or "whatsapp").lower()
+            mongo_owner = str(d.get("owner_id", ""))
+            if not phone or not contact_id:
+                skipped += 1
+                continue
+
+            try:
+                resp = await http.get(
+                    f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+                    params={"properties": "hubspot_owner_id"},
+                    headers={"Authorization": f"Bearer {hs_token}"},
+                )
+                if resp.status_code != 200:
+                    skipped += 1
+                    continue
+                hs_owner = str(resp.json().get("properties", {}).get("hubspot_owner_id", ""))
+            except Exception:
+                skipped += 1
+                continue
+
+            if not hs_owner:
+                skipped += 1
+                continue
+
+            if mongo_owner != hs_owner:
+                try:
+                    await mongo.db.conversations.update_one(
+                        {"phone": phone, "canal": canal},
+                        {"$set": {"owner_id": hs_owner}},
+                    )
+                    fixed_mongo += 1
+                except Exception:
+                    pass
+
+            meta_key = f"{state_mgr.META_PREFIX}{phone}:{canal}"
+            raw = await state_mgr.redis.get(meta_key)
+            if raw:
+                meta = _json.loads(raw)
+                if str(meta.get("assigned_owner_id", "")) != hs_owner:
+                    meta["assigned_owner_id"] = hs_owner
+                    await state_mgr.redis.set(meta_key, _json.dumps(meta))
+                    fixed_redis += 1
+
+            await asyncio.sleep(0.05)
+
+        logger.info(
+            "[Reconcile] Completado: %d docs, %d skipped, "
+            "fixed_mongo=%d, fixed_redis=%d",
+            len(docs), skipped, fixed_mongo, fixed_redis,
+        )
+    except Exception as e:
+        logger.error("[Reconcile] Error: %s", e, exc_info=True)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE SEGUIMIENTO 24H
@@ -1594,6 +1784,17 @@ async def startup_event():
             logger.info("[STARTUP] ✅ Rebuild ZSET nocturno HABILITADO (3:00 AM Bogotá)")
         except Exception as _erz:
             logger.error("[STARTUP] ❌ FALLO registrando rebuild_zset_nightly: %s", _erz, exc_info=True)
+
+        try:
+            scheduler.add_job(
+                reconcile_owner_ids,
+                trigger=IntervalTrigger(hours=6),
+                id="reconcile_owner_ids",
+                replace_existing=True,
+            )
+            logger.info("[STARTUP] Reconciliación owner_ids HABILITADA (cada 6h)")
+        except Exception as _erc:
+            logger.error("[STARTUP] FALLO registrando reconcile_owner_ids: %s", _erc, exc_info=True)
 
         scheduler.start()
         registered_job_ids = [j.id for j in scheduler.get_jobs()]

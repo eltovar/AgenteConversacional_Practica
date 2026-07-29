@@ -38,62 +38,24 @@ class LinkDetectionResult:
     metadata_extra: Dict[str, Any]
 
 
+def _build_patrones_portales():
+    from utils.channels_registry import CHANNELS
+    result = {}
+    for name, cfg in CHANNELS.items():
+        if cfg["link_patterns"]:
+            try:
+                result[PortalOrigen(name)] = cfg["link_patterns"]
+            except ValueError:
+                pass
+    return result
+
+
 class LinkDetector:
     """
     Detecta y clasifica links de portales inmobiliarios en mensajes de WhatsApp
     """
 
-    # Patrones de URL por portal (orden importa: más específicos primero)
-    PATRONES_PORTALES = {
-        PortalOrigen.FINCA_RAIZ: [
-            r'https?://(?:www\.)?fincaraiz\.com\.co/[^\s]+',
-            r'fincaraiz\.com\.co/[^\s]+',
-        ],
-        PortalOrigen.METRO_CUADRADO: [
-            r'https?://(?:www\.)?metrocuadrado\.com/[^\s]+',
-            r'metrocuadrado\.com/[^\s]+',
-        ],
-        PortalOrigen.MERCADO_LIBRE: [
-            r'https?://(?:www\.)?(?:inmuebles\.)?mercadolibre\.com\.co/[^\s]+',
-            r'mercadolibre\.com\.co/[^\s]+',
-        ],
-        PortalOrigen.CIENCUADRAS: [
-            r'https?://(?:www\.)?ciencuadras\.com/[^\s]+',
-            r'ciencuadras\.com/[^\s]+',
-        ],
-        PortalOrigen.INSTAGRAM: [
-            r'https?://(?:www\.)?instagram\.com/[^\s]+',
-            r'instagram\.com/[^\s]+',
-            r'https?://instagr\.am/[^\s]+',
-        ],
-        PortalOrigen.FACEBOOK: [
-            r'https?://(?:www\.)?facebook\.com/[^\s]+',
-            r'https?://(?:www\.)?fb\.com/[^\s]+',
-            r'https?://m\.facebook\.com/[^\s]+',
-            r'facebook\.com/marketplace/[^\s]+',
-        ],
-        PortalOrigen.LINKEDIN: [
-            r'https?://(?:www\.)?linkedin\.com/[^\s]+',
-            r'linkedin\.com/[^\s]+',
-            r'https?://(?:www\.)?lnkd\.in/[^\s]+',  # Short links
-        ],
-        PortalOrigen.YOUTUBE: [
-            r'https?://(?:www\.)?youtube\.com/[^\s]+',
-            r'https?://youtu\.be/[^\s]+',
-            r'youtube\.com/[^\s]+',
-            r'https?://(?:www\.)?youtube\.com/shorts/[^\s]+',
-        ],
-        PortalOrigen.TIKTOK: [
-            r'https?://(?:www\.)?tiktok\.com/[^\s]+',
-            r'https?://vm\.tiktok\.com/[^\s]+',  # Short links
-            r'tiktok\.com/@[^\s]+',
-        ],
-        PortalOrigen.PAGINA_WEB: [
-            # Dominio de Inmobiliaria Proteger (ajustar según dominio real)
-            r'https?://(?:www\.)?inmobiliariaproteger\.com[^\s]*',
-            r'https?://(?:www\.)?proteger\.com\.co[^\s]*',
-        ],
-    }
+    PATRONES_PORTALES = _build_patrones_portales()
 
     # Palabras clave que indican que es un link a inmueble específico
     KEYWORDS_INMUEBLE = [

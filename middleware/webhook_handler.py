@@ -679,20 +679,11 @@ async def _process_message_deferred(
             pending_handoff = True
             handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
         elif analysis.handoff_priority == "high":
-            # Solo activar handoff si ya tenemos el nombre del cliente.
-            # Si no, el bot sigue activo para capturarlo en el siguiente mensaje.
-            has_name = bool(analysis.nombre_detectado or lead_context.get("firstname"))
-            if has_name:
-                reason_parts = []
-                if analysis.intencion_visita:
-                    reason_parts.append("Intención de visita")
-                pending_handoff = True
-                handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
-            else:
-                logger.info(
-                    f"[DeferredProcess] Handoff diferido para {phone_normalized}: "
-                    f"esperando nombre antes de activar PENDING_HANDOFF"
-                )
+            pending_handoff = True
+            reason_parts = []
+            if analysis.intencion_visita:
+                reason_parts.append("Intención de visita")
+            handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
         
         # update_activity() fue movido antes del WS notify (Fix CR-1 — ver líneas anteriores)
 
@@ -966,18 +957,9 @@ def detect_channel_dynamic(body: str, current_redis_channel: Optional[str]) -> s
 # LÓGICA HÍBRIDA: should_bot_respond
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Lista de canales a verificar para HUMAN_ACTIVE
-# IMPORTANTE: Debe coincidir con PortalOrigen en link_detector.py
-CANALES_A_VERIFICAR = [
-    # WhatsApp directo
-    "whatsapp", "whatsapp_directo",
-    # Redes Sociales
-    "instagram", "facebook", "linkedin", "youtube", "tiktok",
-    # Portales Inmobiliarios
-    "finca_raiz", "metrocuadrado", "mercado_libre", "ciencuadras",
-    # Otros
-    "pagina_web", "default", "desconocido"
-]
+from utils.channels_registry import get_all_channel_names
+
+CANALES_A_VERIFICAR = get_all_channel_names()
 
 async def should_bot_respond(
     phone_normalized: str,

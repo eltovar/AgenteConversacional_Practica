@@ -30,25 +30,9 @@ def normalize_phone_e164(phone: str) -> str:
     return clean_phone
 
 
-# Bonus de score por canal de origen
-# Los leads de portales inmobiliarios vienen con inmueble en mente (alta intención)
-CHANNEL_SCORE_BONUS = {
-    # Portales inmobiliarios (alta intención de compra/arriendo)
-    "finca_raiz": 25,
-    "metrocuadrado": 25,
-    "mercado_libre": 20,
-    "ciencuadras": 20,
-    "pagina_web": 15,
-    # Redes sociales (engagement pero menos intención directa)
-    "instagram": 10,
-    "facebook": 10,
-    "linkedin": 10,
-    "youtube": 10,
-    "tiktok": 10,
-    # Directo (sin contexto)
-    "whatsapp_directo": 0,
-    "desconocido": 0,
-}
+from utils.channels_registry import get_score_bonuses
+
+CHANNEL_SCORE_BONUS = get_score_bonuses()
 
 
 def calculate_lead_score(lead_data: Dict[str, Any]) -> int:

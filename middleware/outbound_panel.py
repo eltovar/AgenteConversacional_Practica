@@ -101,11 +101,17 @@ STAGES_TRANSFER_TO_LUISA = {
     "1326631573": "Hasta 2M",
     "1326632625": "Hasta 2.5M",
     "1326631574": "De 3M en adelante",
+    "other": "No responde",
+    "1326623069": "Propietarios",
+    "1326632628": "Otros Municipios",
+    "1326623539": "Local o Bodega",
+    "subscriber": "Reubicados",
 }
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {
     "salesqualifiedlead", "opportunity", "customer", "evangelist",
     "1407668893", "1326623067", "1326631573", "1326632625", "1326631574",
+    "1326623069", "1326632628", "1326623539",
 }
 
 # ============================================================================
@@ -3576,20 +3582,6 @@ async def update_contact_stage(
                 "stage_name": stage_name,
                 "closed": False,
             }
-
-            if stage_id == "other" and phone:
-                try:
-                    close_result = await _close_conversation_internal(phone, canal)
-                    payload["closed"] = True
-                    payload["close_result"] = close_result
-                    logger.info(
-                        f"[Panel] Auto-cierre por 'No responde' — contact={contact_id} phone={phone}"
-                    )
-                except Exception as e_close:
-                    logger.error(
-                        f"[Panel] Auto-cierre falló para contact={contact_id} phone={phone}: {e_close}"
-                    )
-                    payload["close_error"] = str(e_close)
 
             if stage_id in STAGES_TRANSFER_TO_LUISA and phone:
                 try:

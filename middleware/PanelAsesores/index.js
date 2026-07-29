@@ -470,27 +470,16 @@ async function updateDealStage(contactId, stageId) {
         '1326631573': 'Hasta 2M',
         '1326632625': 'Hasta 2.5M',
         '1326631574': 'De 3M en adelante',
+        'other': 'No responde',
+        '1326623069': 'Propietarios',
+        '1326632628': 'Otros Municipios',
+        '1326623539': 'Local o Bodega',
+        'subscriber': 'Reubicados',
     };
     // Localizar el contacto: necesario para el body (auto-cierre) y para revertir
     // el dropdown si el usuario cancela la confirmación de "No responde".
     const contact = allContacts.find(c => String(c.contact_id) === String(contactId));
     const dropdownEl = document.querySelector(`select[data-contact-id="${contactId}"]`);
-
-    // Confirmación específica para "No responde" (stage_id === "other") — evita
-    // cierres accidentales por click incorrecto en el dropdown del embudo.
-    if (stageId === 'other') {
-        const ok = confirm(
-            "Marcar como 'No responde'?\n\n" +
-            "- El contacto se movera al embudo 'No responde' en HubSpot\n" +
-            "- La conversacion se cerrara y desaparecera del panel\n" +
-            "- Sofia se reactivara si el cliente vuelve a escribir"
-        );
-        if (!ok) {
-            const previous = contactDealCache[contactId]?.current_stage || '';
-            if (dropdownEl && previous) dropdownEl.value = previous;
-            return;
-        }
-    }
 
     if (LUISA_TRANSFER_STAGES[stageId]) {
         const stageName = LUISA_TRANSFER_STAGES[stageId];
@@ -557,9 +546,6 @@ async function updateDealStage(contactId, stageId) {
             // que el botón "Cerrar". Se basa en data.closed devuelto por el endpoint.
             if (data.closed && body.phone) {
                 _performCloseCleanup(body.phone);
-            } else if (stageId === 'other' && data.close_error) {
-                console.warn('[Panel] Auto-cierre falló:', data.close_error);
-                alert("Etapa actualizada, pero el cierre automatico fallo. Cierra manualmente con el boton 'Cerrar'.");
             }
 
             if (LUISA_TRANSFER_STAGES[stageId] && data.transfer_error) {
@@ -1281,7 +1267,7 @@ function _initStageFilter() {
     const sel = document.getElementById('stageFilter');
     if (!sel) return;
     PIPELINE_STAGES.forEach(s => {
-        const JUBENY_HIDDEN_STAGES = ['1407668893', '1326623067', '1326631573', '1326632625', '1326631574'];
+        const JUBENY_HIDDEN_STAGES = ['1407668893', '1326623067', '1326631573', '1326632625', '1326631574', 'other', '1326623069', '1326632628', '1326623539', 'subscriber'];
         if (JUBENY_HIDDEN_STAGES.includes(s.id) && ADVISOR_ID === '89096378') return;
         const opt = document.createElement('option');
         opt.value = s.id;
@@ -2021,6 +2007,11 @@ function _insertSeguimientoMarker() {
         '1326631573': 'Hasta 2M',
         '1326632625': 'Hasta 2.5M',
         '1326631574': 'De 3M en adelante',
+        'other': 'No responde',
+        '1326623069': 'Propietarios',
+        '1326632628': 'Otros Municipios',
+        '1326623539': 'Local o Bodega',
+        'subscriber': 'Reubicados',
     };
     const currentStage = contact?.lifecyclestage || contact?.current_stage || '';
     const label = TRANSFER_STAGE_NAMES[currentStage] || 'Transferido';

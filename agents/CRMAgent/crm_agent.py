@@ -39,11 +39,11 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from logging_config import logger
 import json
 
-# Singleton Redis para CRMAgent (evita crear pool por cada sync/handoff)
+# Singleton Redis para CRMAgent (partial sync — handoff migrado a ConversationStateManager)
 _crm_redis: aioredis.Redis = None
 
 def _get_crm_redis() -> aioredis.Redis:
-    """Singleton Redis para operaciones CRM (partial sync, handoff)."""
+    """Singleton Redis para operaciones CRM (partial sync)."""
     global _crm_redis
     if _crm_redis is None:
         is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
@@ -53,6 +53,22 @@ def _get_crm_redis() -> aioredis.Redis:
         _crm_redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
         logger.info("[CRMAgent] Redis singleton inicializado")
     return _crm_redis
+
+# Singleton ConversationStateManager para handoff (misma URL Redis que _crm_redis)
+from middleware.conversation_state import ConversationStateManager as _CSM
+_crm_state_manager: _CSM = None
+
+def _get_crm_state_manager() -> _CSM:
+    """Singleton CSM para operaciones de handoff del CRM Agent."""
+    global _crm_state_manager
+    if _crm_state_manager is None:
+        is_railway = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        redis_url = os.getenv("REDIS_URL") if is_railway else (
+            os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL", "redis://localhost:6379")
+        )
+        _crm_state_manager = _CSM(redis_url)
+        logger.info("[CRMAgent] ConversationStateManager singleton inicializado")
+    return _crm_state_manager
 
 
 class CRMAgent:
@@ -545,7 +561,7 @@ class CRMAgent:
             pipeline_config = get_target_pipeline(channel_origin)
             analytics_source = get_analytics_source(channel_origin)
 
-            owner_id = self.assigner.get_next_owner(channel_origin)
+            owner_id = await asyncio.to_thread(self.assigner.get_next_owner, channel_origin)
             logger.info(f"[CRMAgent] Canal: {channel_origin}, Pipeline: {'Redes Sociales' if pipeline_config.get('is_social_media') else 'General'}")
 
             # PROPIEDADES DEL CONTACTO
@@ -845,65 +861,27 @@ class CRMAgent:
         """
         Activa HUMAN_ACTIVE en Redis para que el contacto aparezca
         automáticamente en el panel de asesores.
+
+        Delega a ConversationStateManager.activate_human() para usar
+        TTL correcto (365d), merge con meta existente, sync MongoDB,
+        y marker key conv_was_panel.
         """
-        import json
-
-        # Configuración
-        STATE_PREFIX = "conv_state:"
-        META_PREFIX = "conv_meta:"
-        HANDOFF_TTL_SECONDS = 72 * 60 * 60  # 72 horas (igual que ConversationStateManager)
-        DEFAULT_CANAL = "default"
-
-        # Usar canal o default
-        canal_safe = canal_origen or DEFAULT_CANAL
-
-        try:
-            r = _get_crm_redis()
-
-            # 1. Guardar estado HUMAN_ACTIVE con TTL y CANAL
-            # Key con canal: conv_state:{phone}:{canal}
-            state_key = f"{STATE_PREFIX}{phone_normalized}:{canal_safe}"
-            await r.set(state_key, "HUMAN_ACTIVE", ex=HANDOFF_TTL_SECONDS)
-
-            # 2. Guardar metadata para el panel
-            # IMPORTANTE: Usar timezone de Bogotá para consistencia con outbound_panel.py
-            now = datetime.now(TIMEZONE_BOGOTA)
-            expires_at = now + timedelta(seconds=HANDOFF_TTL_SECONDS)
-
-            meta = {
-                "phone_normalized": phone_normalized,
-                "contact_id": contact_id,
-                "status": "HUMAN_ACTIVE",
-                "last_activity": now.isoformat(),
-                "handoff_reason": reason,
-                "assigned_owner_id": owner_id,
-                "canal_origen": canal_origen,
-                "display_name": display_name,
-                "message_count": 0,
-                "created_at": now.isoformat()
-            }
-
-            # Key con canal: conv_meta:{phone}:{canal}
-            meta_key = f"{META_PREFIX}{phone_normalized}:{canal_safe}"
-            await r.set(meta_key, json.dumps(meta), ex=HANDOFF_TTL_SECONDS)
-
-            # 3. CRÍTICO: Agregar al ZSET de contactos activos con timestamp como score
-            # Sin esto, get_all_human_active_contacts() NO encuentra el contacto
-            ACTIVE_CONTACTS_ZSET = "active_conversations_sorted"
-            index_member = f"{phone_normalized}:{canal_safe}"
-            score = now.timestamp()
-            await r.zadd(ACTIVE_CONTACTS_ZSET, {index_member: score})
-
+        csm = _get_crm_state_manager()
+        result = await csm.activate_human(
+            phone_normalized=phone_normalized,
+            canal_origen=canal_origen or "default",
+            owner_id=owner_id,
+            reason=reason,
+            display_name=display_name,
+            contact_id=contact_id,
+        )
+        if result:
             logger.info(
-                f"[CRMAgent] HUMAN_ACTIVE activado: {phone_normalized}:{canal_safe} "
-                f"(owner: {owner_id or 'sin asignar'}, "
-                f"expira: {expires_at.strftime('%H:%M:%S')}, "
-                f"agregado al índice)"
+                f"[CRMAgent] HUMAN_ACTIVE activado via CSM: {phone_normalized}:{canal_origen or 'default'} "
+                f"(owner: {owner_id or 'sin asignar'})"
             )
-
-        except Exception as e:
-            logger.error(f"[CRMAgent] Error activando HUMAN_ACTIVE en Redis: {e}")
-            raise
+        else:
+            raise RuntimeError(f"CSM.activate_human retornó False para {phone_normalized}")
 
 
 # Instancia global (Singleton)

@@ -111,9 +111,10 @@ class ConversationStateManager:
     HANDOFF_TTL_SECONDS = 172800  # Default 48h
     HANDOFF_TTL_WEEKEND = 259200  # 72h para fines de semana
     INACTIVITY_THRESHOLD = 172800  # 48h — umbral para mover BOT_ACTIVE del ZSET a BOT_CONTROLLED_SET
-    PANEL_TTL_SECONDS = 365 * 86400  # 1 año — meta_key de contactos que tuvieron handoff no expira en la práctica
+    PANEL_TTL_SECONDS = None  # Sin expiración — meta es cache de MongoDB (write-through)
     HUMAN_PANEL_STATE_TTL = 7 * 86400  # 7 días — state_key de HUMAN_ACTIVE/IN_CONVERSATION sobrevive el fin de semana
     STATE_REFRESH_THRESHOLD = 2 * 86400  # 2 días — umbral para refresh-on-read de state_key en get_active_contacts
+    META_GC_THRESHOLD_DAYS = 90  # Días sin actividad para purgar conv_meta huérfanos
     
     # Horario laboral: Lunes-Viernes 8:00-18:00 (Bogotá)
     WORK_HOURS_START = 8
@@ -719,11 +720,9 @@ class ConversationStateManager:
                 "created_at": existing_meta.get("created_at") or now_iso,
                 "in_panel": True,
             }
-            # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
-            await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
-            # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días
+            await self.redis.set(meta_key, json.dumps(meta))
             marker_key = f"conv_was_panel:{phone_num}:{canal_safe}"
-            await self.redis.set(marker_key, "1", ex=self.PANEL_TTL_SECONDS)
+            await self.redis.set(marker_key, "1")
 
             # 3. Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
@@ -805,11 +804,9 @@ class ConversationStateManager:
                     "canal_origen": canal,
                     "created_at": now_iso,
                 }
-            # meta_key usa TTL largo (365d): contacto permanece visible en panel aunque state_key expire a 48h
-            await self.redis.set(meta_key, json.dumps(meta), ex=self.PANEL_TTL_SECONDS)
-            # Marcador permanente: garantiza re-aparición en panel aunque meta_key expire tras 365 días
+            await self.redis.set(meta_key, json.dumps(meta))
             marker_key = f"conv_was_panel:{phone}:{canal_safe}"
-            await self.redis.set(marker_key, "1", ex=self.PANEL_TTL_SECONDS)
+            await self.redis.set(marker_key, "1")
 
             # Agregar al índice de contactos activos (ZSET ordenado por timestamp)
             # Y remover del BOT_CONTROLLED_SET si estaba ahí (re-activación)
@@ -860,14 +857,7 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_activity"] = get_bogota_now_iso()
-                # ⚠️ 2026-05-30: TTL meta unificado a PANEL_TTL_SECONDS (365d).
-                # Antes: TTL dinámico 48-72h hacía que meta expirara antes del handoff
-                # y luego el ghost cleanup borraba el contacto del ZSET para siempre.
-                # Ahora: meta siempre 365d. El state_key sigue con TTL corto (lifecycle real).
-                ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
-                    ttl = self.PANEL_TTL_SECONDS
-                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                await self.redis.set(meta_key, json.dumps(meta))
 
                 # Actualizar score en ZSET para reordenamiento
                 # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
@@ -895,9 +885,7 @@ class ConversationStateManager:
                     "_temp_meta": True,
                     "_needs_hydration": True,
                 }
-                # ⚠️ 2026-05-30: TTL unificado a 365d incluso para meta temporal.
-                # La hidratación async reescribirá con datos reales pero preserva TTL largo.
-                await self.redis.set(meta_key, json.dumps(minimal_meta), ex=self.PANEL_TTL_SECONDS)
+                await self.redis.set(meta_key, json.dumps(minimal_meta))
                 index_member = f"{phone}:{canal_safe}"
                 score = get_bogota_now().timestamp()
                 await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
@@ -1050,7 +1038,7 @@ class ConversationStateManager:
 
                         # 3) Marker: copiar marcador de re-entrada al panel
                         if await self.redis.exists(s_marker_key):
-                            await self.redis.set(wa_marker_key, "1", ex=self.PANEL_TTL_SECONDS)
+                            await self.redis.set(wa_marker_key, "1")
 
                         # 4) Cleanup: eliminar keys stale
                         await self.redis.delete(s_meta_key, s_state_key, s_marker_key)
@@ -1058,11 +1046,7 @@ class ConversationStateManager:
                     # Guardar meta mergeado en whatsapp
                     wa_meta.pop("_temp_meta", None)
                     wa_meta["in_panel"] = True
-                    # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico si no había handoff).
-                    wa_ttl = await self.redis.ttl(wa_meta_key)
-                    if not wa_ttl or wa_ttl <= 0 or wa_ttl < self.PANEL_TTL_SECONDS:
-                        wa_ttl = self.PANEL_TTL_SECONDS
-                    await self.redis.set(wa_meta_key, json.dumps(wa_meta), ex=wa_ttl)
+                    await self.redis.set(wa_meta_key, json.dumps(wa_meta))
 
                     # Promover status si el stale tenía prioridad mayor
                     if best_status and best_status != wa_status:
@@ -1168,6 +1152,17 @@ class ConversationStateManager:
                             f"[ConversationState] assigned_owner_id asignado en meta: {owner_id} "
                             f"(teléfono: {phone})"
                         )
+                    # Sync MongoDB para que el fallback refleje el owner correcto
+                    try:
+                        import asyncio as _asyncio
+                        from database.mongodb_client import get_mongo_manager as _gmm
+                        _asyncio.create_task(
+                            _gmm().update_conversation_meta(
+                                phone=phone, canal=canal_safe, owner_id=owner_id,
+                            )
+                        )
+                    except Exception:
+                        pass
                 
                 meta["last_activity"] = now_iso
 
@@ -1186,11 +1181,7 @@ class ConversationStateManager:
                         f"[ConversationState] {phone} removido del ZSET (señal baja, sin intent comercial)"
                     )
 
-                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
-                ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
-                    ttl = self.PANEL_TTL_SECONDS
-                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                await self.redis.set(meta_key, json.dumps(meta))
 
             else:
                 # Meta no existe - crear nuevo
@@ -1216,11 +1207,7 @@ class ConversationStateManager:
                     meta["in_panel"] = True
                     logger.info(f"[ConversationState] ↩ Re-entrada al panel (fue handoff antes): {phone}")
 
-                # ⚠️ 2026-05-30: TTL meta unificado a 365d incluso para meta nuevo sin handoff.
-                # Causa: contactos que entraban al panel via update_activity (lead nuevo)
-                # tenían meta de 48-72h y al expirar el ghost cleanup los borraba.
-                ttl = self.PANEL_TTL_SECONDS
-                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                await self.redis.set(meta_key, json.dumps(meta))
 
                 # Agregar al ZSET solo si tiene intención comercial (add_to_zset=True)
                 # Contactos de consulta general (info) no deben aparecer en el panel
@@ -1303,12 +1290,7 @@ class ConversationStateManager:
                 meta["assigned_owner_ids"] = owners
                 meta["primary_owner_id"] = to_owner_id  # El nuevo es el principal
 
-            # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
-            # transfer_contact siempre debe extender meta a TTL largo — es operación humana explícita.
-            ttl = await self.redis.ttl(meta_key)
-            if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
-                ttl = self.PANEL_TTL_SECONDS
-            await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+            await self.redis.set(meta_key, json.dumps(meta))
 
             logger.info(
                 f"[ConversationState] Contacto {phone} transferido: "
@@ -1316,6 +1298,9 @@ class ConversationStateManager:
             )
 
             # ⚠️ 2026-05-30: Sincronizar transferencia a MongoDB `conversations`.
+            # En modo colaborativo, assigned_owner_id NO cambia (el primary owner se mantiene).
+            # MongoDB debe reflejar el mismo owner que Redis para evitar divergencia.
+            _mongo_owner = meta.get("assigned_owner_id", to_owner_id)
             try:
                 import asyncio as _asyncio
                 from database.mongodb_client import get_mongo_manager as _gmm
@@ -1323,7 +1308,7 @@ class ConversationStateManager:
                     _gmm().update_conversation_meta(
                         phone=phone,
                         canal=canal_safe,
-                        owner_id=to_owner_id,
+                        owner_id=_mongo_owner,
                     )
                 )
             except Exception as _sync_err:
@@ -1342,6 +1327,94 @@ class ConversationStateManager:
             logger.error(f"[ConversationState] Error en transfer_contact: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def transfer_ownership(
+        self,
+        phone: str,
+        canal: str,
+        to_owner_id: str,
+        from_owner_id: str = None,
+        contact_id: str = None,
+        reason: str = "transfer",
+        mode: str = "exclusive",
+    ) -> dict:
+        """
+        Punto centralizado de transferencia de propiedad.
+        Sincroniza Redis + MongoDB + HubSpot en una sola llamada.
+        """
+        try:
+            result = await self.transfer_contact(
+                phone=phone,
+                to_owner_id=to_owner_id,
+                from_owner_id=from_owner_id,
+                canal=canal,
+                mode=mode,
+                reason=reason,
+            )
+            if result.get("status") != "success":
+                return result
+
+            _cid = contact_id
+            if not _cid:
+                canal_safe = canal.lower() if canal else "whatsapp"
+                meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+                raw = await self.redis.get(meta_key)
+                if raw:
+                    _cid = json.loads(raw).get("contact_id")
+
+            if _cid and mode == "exclusive":
+                import asyncio as _aio
+                _aio.create_task(
+                    self._sync_hubspot_owner(_cid, to_owner_id, phone)
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"[ConversationState] Error en transfer_ownership: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def _sync_hubspot_owner(
+        self, contact_id: str, owner_id: str, phone: str = None
+    ) -> bool:
+        """Fire-and-forget: actualiza hubspot_owner_id + url_chat."""
+        try:
+            import os as _os
+            from middleware.outbound_panel import get_httpx_client
+            from urllib.parse import quote as _quote
+
+            api_key = _os.getenv("HUBSPOT_API_KEY")
+            if not api_key or not contact_id:
+                return False
+
+            props = {"hubspot_owner_id": owner_id}
+            panel_base = _os.getenv("PANEL_BASE_URL", "").rstrip("/")
+            admin_key = _os.getenv("ADMIN_API_KEY", "")
+            if phone and panel_base and admin_key:
+                props["url_chat"] = (
+                    f"{panel_base}/whatsapp/panel/"
+                    f"?key={admin_key}&advisor={owner_id}&phone={_quote(phone, safe='')}"
+                )
+
+            client = get_httpx_client()
+            resp = await client.patch(
+                f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+                json={"properties": props},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code == 200:
+                logger.info(
+                    f"[TransferOwnership] HubSpot owner actualizado: {contact_id} -> {owner_id}"
+                )
+                return True
+            logger.warning(f"[TransferOwnership] HubSpot falló: {resp.status_code}")
+            return False
+        except Exception as e:
+            logger.warning(f"[TransferOwnership] HubSpot sync error (non-fatal): {e}")
+            return False
+
     async def update_client_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
         """
         Actualiza el timestamp del último mensaje del cliente.
@@ -1355,11 +1428,7 @@ class ConversationStateManager:
             if data:
                 meta = json.loads(data)
                 meta["last_client_message"] = get_bogota_now_iso()
-                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
-                ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
-                    ttl = self.PANEL_TTL_SECONDS
-                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                await self.redis.set(meta_key, json.dumps(meta))
 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
                 # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
@@ -1389,11 +1458,7 @@ class ConversationStateManager:
                 _now_iso = get_bogota_now_iso()
                 meta["last_advisor_message"] = _now_iso
                 meta["last_activity"] = _now_iso      # FIX: actualizar last_activity para sort correcto en GET /contacts
-                # ⚠️ 2026-05-30: TTL unificado a 365d (antes: dinámico 48-72h).
-                ttl = await self.redis.ttl(meta_key)
-                if not ttl or ttl <= 0 or ttl < self.PANEL_TTL_SECONDS:
-                    ttl = self.PANEL_TTL_SECONDS
-                await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                await self.redis.set(meta_key, json.dumps(meta))
 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
                 index_member = f"{phone}:{canal_safe}"
@@ -1447,10 +1512,7 @@ class ConversationStateManager:
                     meta = json.loads(raw_meta)
                     if not meta.get("in_panel", True):
                         meta["in_panel"] = True
-                        ttl = await self.redis.ttl(meta_key)
-                        if not ttl or ttl <= 0:
-                            ttl = self.PANEL_TTL_SECONDS
-                        await self.redis.set(meta_key, json.dumps(meta), ex=ttl)
+                        await self.redis.set(meta_key, json.dumps(meta))
                         logger.info(f"[Inbox][Add] Re-activado in_panel=True para {phone}")
                 except Exception:
                     pass

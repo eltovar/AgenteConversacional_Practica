@@ -13,23 +13,10 @@ from logging_config import logger
 # CONFIGURACIÓN DE CANALES
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Canales que van al Pipeline de Redes Sociales
-CANALES_REDES_SOCIALES = [
-    "instagram",
-    "facebook",
-    "linkedin",
-    "youtube",
-    "tiktok",
-]
+from utils.channels_registry import get_social_media_channels, get_portal_channels
 
-# Canales que van al Pipeline de Ventas General (Portales Inmobiliarios)
-CANALES_PORTALES = [
-    "finca_raiz",
-    "metrocuadrado",
-    "mercado_libre",
-    "ciencuadras",
-    "pagina_web",
-]
+CANALES_REDES_SOCIALES = get_social_media_channels()
+CANALES_PORTALES = get_portal_channels()
 
 # Mapeo de canal a categoría de HubSpot Analytics
 CANAL_TO_ANALYTICS_SOURCE = {

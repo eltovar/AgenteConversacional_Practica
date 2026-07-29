@@ -1334,7 +1334,16 @@ async def send_message(
             logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {phone_normalized}{canal_info}")
         else:
             # Era BOT_ACTIVE o CLOSED, activar humano y cambiar a IN_CONVERSATION
-            await state_manager.activate_human(phone_normalized, canal_origen=canal_final)
+            _existing_owner = None
+            try:
+                _sm_meta = await state_manager.get_meta(phone_normalized, canal_final)
+                if _sm_meta:
+                    _existing_owner = _sm_meta.assigned_owner_id
+            except Exception:
+                pass
+            await state_manager.activate_human(
+                phone_normalized, canal_origen=canal_final, owner_id=_existing_owner
+            )
             await state_manager.set_status(
                 phone_normalized,
                 ConversationStatus.IN_CONVERSATION,
@@ -2657,7 +2666,7 @@ async def create_manual_contact(
         logger.info(f"[Panel] Contacto asignado directamente al asesor creador: {advisor_id}")
     else:
         from integrations.hubspot.lead_assigner import lead_assigner
-        owner_id = lead_assigner.get_next_owner(canal)
+        owner_id = await asyncio.to_thread(lead_assigner.get_next_owner, canal)
         if not owner_id:
             logger.warning(f"[Panel] No se pudo asignar owner para canal: {canal}")
         else:
@@ -2821,63 +2830,23 @@ async def transfer_contact(
     if mode not in ["exclusive", "collaborative"]:
         raise HTTPException(status_code=400, detail="Modo debe ser 'exclusive' o 'collaborative'")
 
-    # === 1. Transferir en Redis ===
+    # === 1. Transferir en Redis + MongoDB + HubSpot (centralizado) ===
     state_manager = _get_state_manager()
 
-    result = await state_manager.transfer_contact(
+    result = await state_manager.transfer_ownership(
         phone=phone_normalized,
-        to_owner_id=to_owner_id,
         canal=canal,
+        to_owner_id=to_owner_id,
+        contact_id=contact_id,
         mode=mode,
-        reason=reason
+        reason=reason,
     )
 
     if result.get("status") != "success":
         raise HTTPException(status_code=400, detail=result.get("message", "Error en transferencia"))
 
     from_owner = result.get("from_owner")
-
-    # === 2. Actualizar HubSpot en background (no bloquear la respuesta) ===
-    hubspot_updated = "queued"
-    if mode == "exclusive" and contact_id:
-        import httpx
-        hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
-
-        if hubspot_api_key:
-            _cid = contact_id
-            _oid = to_owner_id
-            _key = hubspot_api_key
-
-            async def _update_hubspot_owner():
-                try:
-                    from urllib.parse import quote as _quote
-                    _props = {"hubspot_owner_id": _oid}
-                    _panel_base = os.getenv("PANEL_BASE_URL", "").rstrip("/")
-                    _admin_key = os.getenv("ADMIN_API_KEY", "")
-                    if _panel_base and _admin_key and phone_normalized:
-                        _props["url_chat"] = (
-                            f"{_panel_base}/whatsapp/panel/"
-                            f"?key={_admin_key}&advisor={_oid}&phone={_quote(phone_normalized, safe='')}"
-                        )
-                    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{_cid}"
-                    client = get_httpx_client()
-                    response = await client.patch(
-                        url,
-                        json={"properties": _props},
-                        headers={
-                            "Authorization": f"Bearer {_key}",
-                            "Content-Type": "application/json"
-                        }
-                    )
-                    if response.status_code == 200:
-                        logger.info(f"[Panel] HubSpot owner actualizado: {_cid} -> {_oid}"
-                                    + (" + url_chat actualizado" if "url_chat" in _props else ""))
-                    else:
-                        logger.warning(f"[Panel] Error actualizando HubSpot: {response.status_code}")
-                except Exception as e:
-                    logger.warning(f"[Panel] Error actualizando HubSpot (no crítico): {e}")
-
-            asyncio.create_task(_update_hubspot_owner())
+    hubspot_updated = "queued" if contact_id and mode == "exclusive" else "skipped"
 
     # === 3. Notificar vía WebSocket ===
     try:
@@ -3016,8 +2985,9 @@ async def request_transfer(
     except Exception as e:
         logger.warning(f"[Panel] activate_human en transfer-request falló: {e}")
 
-    # 2. Reasignar owner en HubSpot en background (no bloquear respuesta)
-    asyncio.create_task(_reassign_hubspot_owner(contact_id, to_owner_id=requesting_advisor_id, phone=phone))
+    # 2. Reasignar owner en HubSpot via centralizado
+    _sm_hs = _get_state_manager()
+    asyncio.create_task(_sm_hs._sync_hubspot_owner(contact_id, requesting_advisor_id, phone))
 
     # 3-5. Un cliente redis para phone_cache + notificaciones + broadcast
     _rc_transfer = await _get_redis_client()
@@ -3078,21 +3048,24 @@ async def accept_transfer(
     phone = req_data["phone"]
     contact_name = req_data.get("contact_name", phone)
 
-    # 1. Reasignar owner en HubSpot
-    await _reassign_hubspot_owner(contact_id, to_owner_id=requester_id, phone=phone)
-
-    # 2. Actualizar assigned_owner_id en Redis conv_meta si el contacto está activo
+    # 1+2. Transferir ownership centralizado (Redis + MongoDB + HubSpot)
+    _sm_accept = _get_state_manager()
     try:
         _meta_keys = await _rc.keys(f"conv_meta:{phone}:*")
         for mk in _meta_keys:
-            raw_meta = await _rc.get(mk)
-            if raw_meta:
-                meta = json.loads(raw_meta)
-                meta["assigned_owner_id"] = requester_id
-                ttl = await _rc.ttl(mk)
-                await _rc.set(mk, json.dumps(meta), ex=max(ttl, 1))
+            if isinstance(mk, bytes):
+                mk = mk.decode("utf-8", errors="ignore")
+            _canal = mk.split(":")[-1] if mk.count(":") >= 2 else "whatsapp"
+            await _sm_accept.transfer_ownership(
+                phone=phone,
+                canal=_canal,
+                to_owner_id=requester_id,
+                from_owner_id=by_advisor_id,
+                contact_id=contact_id,
+                reason="transfer_accepted",
+            )
     except Exception as e:
-        logger.warning(f"[Panel] Error actualizando conv_meta en transfer-accept: {e}")
+        logger.warning(f"[Panel] Error en transfer_ownership en transfer-accept: {e}")
 
     # 3. Limpiar solicitud pendiente
     await _rc.delete(f"transfer_req:{contact_id}")
@@ -3229,11 +3202,7 @@ async def update_contact_name(
                             try:
                                 _meta = json.loads(_raw)
                                 _meta["display_name"] = _display
-                                _ttl = await _rc.ttl(_meta_key)
-                                if _ttl > 0:
-                                    await _rc.setex(_meta_key, _ttl, json.dumps(_meta))
-                                else:
-                                    await _rc.set(_meta_key, json.dumps(_meta))
+                                await _rc.set(_meta_key, json.dumps(_meta))
                             except (json.JSONDecodeError, Exception):
                                 pass
                     logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
@@ -3332,9 +3301,7 @@ async def _close_conversation_internal(
             try:
                 meta_close = json.loads(raw_close)
                 meta_close["in_panel"] = False
-                ttl_close = await r.ttl(meta_key_close)
-                ex_close = ttl_close if ttl_close and ttl_close > 0 else state_manager.PANEL_TTL_SECONDS
-                await r.set(meta_key_close, json.dumps(meta_close), ex=ex_close)
+                await r.set(meta_key_close, json.dumps(meta_close))
             except Exception as e_meta:
                 logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {phone_normalized}: {e_meta}")
     except Exception as e:
@@ -3515,9 +3482,7 @@ async def _transfer_to_luisa(
             from middleware.conversation_state import get_bogota_now_iso
             meta_dict["seguimiento_origin"] = get_bogota_now_iso()
             meta_dict["assigned_owner_id"] = LUISA_TRANSFER_TARGET
-            ttl = await r.ttl(meta_key)
-            ex = ttl if ttl and ttl > 0 else state_manager.PANEL_TTL_SECONDS
-            await r.set(meta_key, json.dumps(meta_dict), ex=ex)
+            await r.set(meta_key, json.dumps(meta_dict))
     except Exception as e_meta:
         logger.warning(f"{tag} Meta update falló (non-fatal): {e_meta}")
 
@@ -3709,8 +3674,7 @@ async def update_contact_canal_display(
 
         meta_dict = json.loads(raw)
         meta_dict["canal_display"] = canal_display_clean
-        ttl = await state_manager.redis.ttl(meta_key)
-        await state_manager.redis.set(meta_key, json.dumps(meta_dict), ex=max(ttl, 86400) if ttl > 0 else state_manager.PANEL_TTL_SECONDS)
+        await state_manager.redis.set(meta_key, json.dumps(meta_dict))
 
         logger.info(f"[Panel] canal_display actualizado: {phone_normalized}:{canal_meta} → {canal_display_clean}")
         return {"status": "success", "phone": phone_normalized, "canal_display": canal_display_clean}
@@ -7434,12 +7398,8 @@ async def restore_panel_from_hubspot(
                     pipe = state_manager.redis.pipeline(transaction=False)
                     # Refrescar ZSET score
                     pipe.zadd(state_manager.ACTIVE_CONTACTS_ZSET, {zset_member: now_ts})
-                    # Recrear conv_state con TTL 365d (puede haber expirado si fue
-                    # creado antes del fix de TTL permanente)
-                    pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value,
-                             ex=state_manager.PANEL_TTL_SECONDS)
-                    # Refrescar TTL del meta también
-                    pipe.expire(meta_key, state_manager.PANEL_TTL_SECONDS)
+                    pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value)
+                    pipe.persist(meta_key)
                     await pipe.execute()
                     already_active += 1
                     continue
@@ -7460,8 +7420,8 @@ async def restore_panel_from_hubspot(
                 # Sin él → fuerza BOT_ACTIVE → contacto queda excluido del panel.
                 state_key = f"conv_state:{phone_norm}:{canal_safe}"
                 pipe = state_manager.redis.pipeline(transaction=False)
-                pipe.set(meta_key, json.dumps(meta), ex=state_manager.PANEL_TTL_SECONDS)
-                pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value, ex=state_manager.PANEL_TTL_SECONDS)
+                pipe.set(meta_key, json.dumps(meta))
+                pipe.set(state_key, ConversationStatus.HUMAN_ACTIVE.value)
                 pipe.zadd(state_manager.ACTIVE_CONTACTS_ZSET, {f"{phone_norm}:{canal_safe}": now_ts})
                 await pipe.execute()
                 restored += 1
@@ -7846,11 +7806,7 @@ async def sync_owners_with_hubspot(
                 if raw:
                     meta_data = _json.loads(raw)
                     meta_data["assigned_owner_id"] = new_owner
-                    ttl = await state_mgr.redis.ttl(meta_key)
-                    if ttl > 0:
-                        await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
-                    else:
-                        await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+                    await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
                     fixed_redis += 1
             except Exception as e:
                 errors.append({"phone": phone, "error": f"Redis: {e}"})
@@ -8020,11 +7976,7 @@ async def sync_owners_mongo(
                     meta_data = _json.loads(raw)
                     if str(meta_data.get("assigned_owner_id")) != str(new_owner):
                         meta_data["assigned_owner_id"] = new_owner
-                        ttl = await state_mgr.redis.ttl(meta_key)
-                        if ttl > 0:
-                            await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
-                        else:
-                            await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+                        await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
                         fixed_redis += 1
             except Exception:
                 pass
@@ -8195,11 +8147,7 @@ async def recover_lost_conversations(
                 meta_data = _json.loads(raw_meta)
                 if str(meta_data.get("assigned_owner_id")) != str(hs_owner):
                     meta_data["assigned_owner_id"] = hs_owner
-                    ttl = await state_mgr.redis.ttl(meta_key)
-                    if ttl > 0:
-                        await state_mgr.redis.setex(meta_key, ttl, _json.dumps(meta_data))
-                    else:
-                        await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
+                    await state_mgr.redis.set(meta_key, _json.dumps(meta_data))
 
             zset_member = f"{phone}:{canal}"
             msg_ts = last_ts.timestamp() if last_ts else get_bogota_now().timestamp()

@@ -213,32 +213,73 @@ class ConversationStateManager:
             return None
 
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:
-        """Recupera metadatos de Redis filtrando campos inválidos de forma segura."""
-        meta_key = f"{self.META_PREFIX}{phone}:{canal.lower()}"
+        """Recupera metadatos de Redis filtrando campos inválidos de forma segura.
+        Cache-miss: si Redis no tiene el dato, intenta recargar desde MongoDB."""
+        canal_safe = canal.lower() if canal else "whatsapp"
+        meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
         try:
             data = await self.redis.get(meta_key)
-            if not data: return None
+
+            if not data:
+                return await self._reload_meta_from_mongo(phone, canal_safe, meta_key)
+
             payload = json.loads(data)
-            
-            # Mapeos de compatibilidad para datos legacy
-            if 'advisor' in payload and not payload.get('assigned_owner_id'):
-                payload['assigned_owner_id'] = payload['advisor']
-            # ✅ FIX: Mapear owner_id → assigned_owner_id (campo usado por ensure_meta_with_channel)
-            if 'owner_id' in payload and not payload.get('assigned_owner_id'):
-                payload['assigned_owner_id'] = payload['owner_id']
-            if 'phone' in payload and not payload.get('phone_normalized'):
-                payload['phone_normalized'] = payload['phone']
-            if 'name' in payload and not payload.get('display_name'):
-                payload['display_name'] = payload['name']
-                
-            # --- SOLUCIÓN AL ERROR DE INTROSPECCIÓN ---
-            # Usamos la función fields() de dataclasses para obtener los nombres válidos
-            valid_fields = {f.name for f in fields(ConversationMeta)}
-            filtered_payload = {k: v for k, v in payload.items() if k in valid_fields}
-            
-            return ConversationMeta(**filtered_payload)
+            return self._parse_meta_payload(payload)
         except Exception as e:
             logger.error(f"[ConversationState] Error en get_meta para {phone}: {e}")
+            return None
+
+    def _parse_meta_payload(self, payload: dict) -> ConversationMeta:
+        """Normaliza y parsea un dict de meta a ConversationMeta."""
+        if 'advisor' in payload and not payload.get('assigned_owner_id'):
+            payload['assigned_owner_id'] = payload['advisor']
+        if 'owner_id' in payload and not payload.get('assigned_owner_id'):
+            payload['assigned_owner_id'] = payload['owner_id']
+        if 'phone' in payload and not payload.get('phone_normalized'):
+            payload['phone_normalized'] = payload['phone']
+        if 'name' in payload and not payload.get('display_name'):
+            payload['display_name'] = payload['name']
+
+        valid_fields = {f.name for f in fields(ConversationMeta)}
+        filtered_payload = {k: v for k, v in payload.items() if k in valid_fields}
+        return ConversationMeta(**filtered_payload)
+
+    async def _reload_meta_from_mongo(
+        self, phone: str, canal: str, meta_key: str
+    ) -> Optional[ConversationMeta]:
+        """Cache-miss fallback: recarga meta desde MongoDB y re-cachea en Redis."""
+        try:
+            from database.mongodb_client import get_mongo_manager
+            mongo = get_mongo_manager()
+            doc = await mongo.db.conversations.find_one(
+                {"phone": phone, "canal": canal},
+                {
+                    "owner_id": 1, "contact_id": 1, "display_name": 1,
+                    "canal": 1, "phone": 1, "last_message_at": 1,
+                    "_id": 0,
+                },
+            )
+            if not doc or not doc.get("owner_id"):
+                return None
+
+            meta = {
+                "phone_normalized": phone,
+                "assigned_owner_id": str(doc["owner_id"]),
+                "contact_id": doc.get("contact_id"),
+                "display_name": doc.get("display_name"),
+                "canal_origen": canal,
+                "status": "BOT_ACTIVE",
+                "last_activity": doc.get("last_message_at", get_bogota_now_iso()),
+                "in_panel": True,
+            }
+            await self.redis.set(meta_key, json.dumps(meta))
+            logger.info(
+                f"[ConversationState] Cache-miss reload: {phone}:{canal} "
+                f"(owner: {meta['assigned_owner_id']})"
+            )
+            return self._parse_meta_payload(meta)
+        except Exception as e:
+            logger.debug(f"[ConversationState] Cache-miss reload falló (non-fatal): {e}")
             return None
 
     async def get_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:

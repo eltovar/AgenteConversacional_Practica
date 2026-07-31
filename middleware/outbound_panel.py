@@ -2910,48 +2910,6 @@ def _get_advisor_name(advisor_id: str) -> str:
     return "Asesor"
 
 
-async def _reassign_hubspot_owner(contact_id: str, to_owner_id: str, phone: str = None) -> bool:
-    """PATCH hubspot_owner_id (y url_chat si se proporciona phone) en HubSpot."""
-    try:
-        import httpx
-        from urllib.parse import quote
-        hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
-        if not hubspot_api_key or not contact_id:
-            return False
-
-        properties = {"hubspot_owner_id": to_owner_id}
-
-        # Actualizar url_chat si tenemos phone y las env vars necesarias
-        panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
-        admin_api_key = os.getenv("ADMIN_API_KEY", "")
-        if phone and panel_base_url and admin_api_key:
-            phone_encoded = quote(phone, safe='')
-            properties["url_chat"] = (
-                f"{panel_base_url}/whatsapp/panel/"
-                f"?key={admin_api_key}&advisor={to_owner_id}&phone={phone_encoded}"
-            )
-
-        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        client = get_httpx_client()
-        response = await client.patch(
-            url,
-            json={"properties": properties},
-            headers={
-                "Authorization": f"Bearer {hubspot_api_key}",
-                "Content-Type": "application/json"
-            }
-        )
-        if response.status_code == 200:
-            logger.info(f"[Panel] HubSpot owner reasignado: {contact_id} -> {to_owner_id}"
-                        + (" + url_chat actualizado" if "url_chat" in properties else ""))
-            return True
-        logger.warning(f"[Panel] HubSpot reasignación falló: {response.status_code}")
-        return False
-    except Exception as e:
-        logger.warning(f"[Panel] Error reasignando HubSpot owner: {e}")
-        return False
-
-
 # ============================================================================
 # Endpoints de Solicitud de Transferencia
 # ============================================================================
@@ -3407,7 +3365,13 @@ async def _transfer_to_luisa(
     stage_id: str,
 ) -> dict:
     """
-    Cadena atómica cuando Jubeny mueve un contacto a un embudo de Luisa: 1. Cerrar conversación en panel de Jubeny 2. Transferir owner a Luisa en Redis 3. Activar en panel de Luisa con HUMAN_ACTIVE 4. Guardar transfer_origin en meta 5. Agregar al inbox de Luisa 6. Actualizar hubspot_owner_id en HubSpot (async, no bloquea)7. Notificar vía WebSocket a ambas asesoras
+    Cadena atómica cuando Jubeny mueve un contacto a un embudo de Luisa:
+    1. Cerrar conversación en panel de Jubeny
+    2. transfer_ownership() — Redis + MongoDB + HubSpot en una sola llamada
+    3. Activar en panel de Luisa con HUMAN_ACTIVE
+    4. Guardar transfer_origin en meta
+    5. Agregar al inbox de Luisa
+    6. Notificar vía WebSocket a ambas asesoras
     """
     stage_name = STAGES_TRANSFER_TO_LUISA.get(stage_id, stage_id)
     tag = f"[Transfer:{stage_name}]"
@@ -3432,26 +3396,27 @@ async def _transfer_to_luisa(
         logger.error(f"{tag} Close falló para {phone_normalized}: {e_close}")
         result["transfer_error"] = f"Close falló: {e_close}"
 
-    # ② Transferir owner en Redis (exclusive)
+    # ② Transferir owner en Redis + MongoDB + HubSpot (centralizado)
     meta_key = f"conv_meta:{phone_normalized}:{canal_safe}"
     try:
         r = await _get_redis_client()
         raw_meta = await r.get(meta_key)
         if raw_meta:
-            transfer_result = await state_manager.transfer_contact(
+            transfer_result = await state_manager.transfer_ownership(
                 phone=phone_normalized,
-                to_owner_id=LUISA_TRANSFER_TARGET,
                 canal=canal_safe,
+                to_owner_id=LUISA_TRANSFER_TARGET,
+                contact_id=contact_id,
+                reason=f"Embudo {stage_name} — transferencia automática",
                 mode="exclusive",
-                reason=f"Embudo {stage_name} — transferencia automática"
             )
             if transfer_result.get("status") != "success":
-                logger.warning(f"{tag} Transfer Redis falló: {transfer_result}")
+                logger.warning(f"{tag} Transfer falló: {transfer_result}")
                 result["transfer_error"] = transfer_result.get("message")
         else:
             logger.info(f"{tag} Sin meta previa para {phone_normalized} — creando directo")
     except Exception as e_transfer:
-        logger.error(f"{tag} Transfer Redis error: {e_transfer}")
+        logger.error(f"{tag} Transfer error: {e_transfer}")
         result["transfer_error"] = str(e_transfer)
 
     # ③ Activar en panel de Luisa con HUMAN_ACTIVE
@@ -3500,13 +3465,7 @@ async def _transfer_to_luisa(
     except Exception as e_inbox:
         logger.warning(f"{tag} Inbox add falló (non-fatal): {e_inbox}")
 
-    # ⑥ HubSpot owner (async — no bloquea respuesta)
-    if contact_id:
-        asyncio.create_task(
-            _reassign_hubspot_owner(contact_id, LUISA_TRANSFER_TARGET, phone_normalized)
-        )
-
-    # ⑦ WebSocket notify
+    # ⑥ WebSocket notify
     try:
         meta = await state_manager.get_meta(phone_normalized, canal_safe)
         contact_name = meta.display_name if meta else phone_normalized

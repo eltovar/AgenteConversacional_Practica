@@ -23,14 +23,12 @@ class LeadAssigner:
     # Este es el ÚNICO lugar donde se definen los nombres — mongodb_client.py y
     # outbound_panel.py los leen automáticamente desde aquí.
     OWNERS_CONFIG = {
-        # === PORTALES INMOBILIARIOS + WHATSAPP DIRECTO (ID: 89096378) ===
-        # Portales: Mercado Libre, LinkedIn, Facebook, Instagram, Ciencuadras, TikTok, Charly + WhatsApp Directo
+        # === TODOS LOS CANALES EXCEPTO FINCA RAÍZ Y METROCUADRADO (ID: 89096378) ===
         "equipo_portales": [
             {"name": "Jubeny", "id": "89096378", "active": True},
         ],
 
-        # === DIRECTO + PORTALES ESPECIALES (ID: 89096380) ===
-        # Directo: Página Web, YouTube + Portales: MetroCuadrado, Finca Raíz
+        # === SOLO FINCA RAÍZ + METROCUADRADO (ID: 89096380) ===
         "equipo_directo": [
             {"name": "Luisa", "id": "89096380", "active": True},
         ],
@@ -47,10 +45,9 @@ class LeadAssigner:
             {"name": "Monica", "id": "89096379", "active": False},  # Inactivo para asignación automática
         ],
 
-        # Equipo default (fallback - round robin entre portales y directo)
+        # Equipo default (fallback — Jubeny recibe todo lo no clasificado)
         "default": [
             {"name": "Jubeny", "id": "89096378", "active": True},
-            {"name": "Luisa",  "id": "89096380", "active": True},
         ],
     }
 

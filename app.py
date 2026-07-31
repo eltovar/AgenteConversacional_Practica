@@ -82,9 +82,6 @@ from middleware.appointment_manager import AppointmentManager
 # Importar el router de webhooks de salida HubSpot -> WhatsApp
 from integrations.hubspot import get_outbound_router, get_timeline_logger
 
-# Importar endpoint de auditoría temporal
-from audit_endpoint import audit_router
-
 # Importar función para actualizar ventana de 24h
 from middleware.outbound_panel import update_last_client_message
 from middleware.websocket_manager import ws_manager
@@ -188,7 +185,6 @@ if PANEL_STATIC_PATH.exists():
 app.include_router(get_whatsapp_router())
 app.include_router(get_outbound_panel_router())
 app.include_router(get_outbound_router())
-app.include_router(audit_router)  # Endpoint de auditoría temporal
 
 # Registrar la ruta de media del panel (handler definido arriba)
 app.get("/whatsapp/panel/media/{message_id}")(get_panel_media)

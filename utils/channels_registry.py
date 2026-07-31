@@ -64,8 +64,8 @@ CHANNELS: Dict[str, dict] = {
         ],
     },
     "pagina_web": {
-        "team": "equipo_directo",
-        "owner_id": "89096380",
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.PORTAL,
         "score_bonus": 15,
         "link_patterns": [
@@ -112,8 +112,8 @@ CHANNELS: Dict[str, dict] = {
         ],
     },
     "youtube": {
-        "team": "equipo_directo",
-        "owner_id": "89096380",
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.SOCIAL,
         "score_bonus": 10,
         "link_patterns": [
@@ -154,32 +154,32 @@ CHANNELS: Dict[str, dict] = {
     },
 
     # ═══════════════════════════════════════════════════════════════
-    # FALLBACK / ROUND-ROBIN
+    # OTROS (ads, referidos, fallback)
     # ═══════════════════════════════════════════════════════════════
     "desconocido": {
-        "team": "default",
-        "owner_id": None,
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.OTHER,
         "score_bonus": 0,
         "link_patterns": [],
     },
     "google_ads": {
-        "team": "default",
-        "owner_id": None,
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.OTHER,
         "score_bonus": 0,
         "link_patterns": [],
     },
     "referido": {
-        "team": "default",
-        "owner_id": None,
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.OTHER,
         "score_bonus": 0,
         "link_patterns": [],
     },
     "default": {
-        "team": "default",
-        "owner_id": None,
+        "team": "equipo_portales",
+        "owner_id": "89096378",
         "category": ChannelCategory.OTHER,
         "score_bonus": 0,
         "link_patterns": [],

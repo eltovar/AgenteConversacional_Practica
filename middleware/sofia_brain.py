@@ -133,9 +133,16 @@ class SofiaBrain:
         self.redis_url = redis_url
         self.use_single_stream = use_single_stream
 
+        # Pool Redis sync compartido para todas las RedisChatMessageHistory.
+        # Sin esto, cada instancia crea su propio pool ilimitado → OOM.
+        import redis as _sync_redis
+        self._shared_redis_client = _sync_redis.from_url(
+            redis_url, encoding="utf-8", decode_responses=True, max_connections=10,
+        )
+
         # LRU cache para RedisChatMessageHistory — evita crear pool Redis por mensaje
         self._history_cache: Dict[str, RedisChatMessageHistory] = {}
-        self._history_cache_max = 100  # máximo 100 sesiones cacheadas
+        self._history_cache_max = 100
 
         # Inicializar LLM
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -188,18 +195,9 @@ class SofiaBrain:
         if session_id in self._history_cache:
             return self._history_cache[session_id]
 
-        # Evict oldest si se excede el límite — cerrar Redis pool interno
         if len(self._history_cache) >= self._history_cache_max:
             oldest_key = next(iter(self._history_cache))
-            evicted = self._history_cache.pop(oldest_key)
-            try:
-                # RedisChatMessageHistory almacena un redis.Redis client internamente.
-                # .close() NO destruye el ConnectionPool — disconnect() libera TCP sockets.
-                if hasattr(evicted, 'redis_client') and evicted.redis_client:
-                    evicted.redis_client.connection_pool.disconnect()
-                    evicted.redis_client.close()
-            except Exception:
-                pass
+            self._history_cache.pop(oldest_key)
 
         history = RedisChatMessageHistory(
             session_id=session_id,
@@ -207,6 +205,15 @@ class SofiaBrain:
             key_prefix="message_store:",
             ttl=self.SESSION_TTL,
         )
+        # RedisChatMessageHistory auto-crea un redis.Redis con pool ilimitado.
+        # Reemplazarlo con el client compartido (max_connections=10).
+        _auto_client = history.redis_client
+        history.redis_client = self._shared_redis_client
+        try:
+            _auto_client.connection_pool.disconnect()
+            _auto_client.close()
+        except Exception:
+            pass
         self._history_cache[session_id] = history
         return history
 

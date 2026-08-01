@@ -105,9 +105,24 @@ def get_redis_url() -> str:
     return os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
 
 
+# ── Singleton Redis async para scheduled jobs (followups, mensajes programados) ──
+# Sin esto, cada ejecución de job crea un pool nuevo → ~60 pools/hora → OOM SIGKILL ~2h15m.
+import redis.asyncio as _redis_async_mod
+_app_redis_pool = None
+
+
+async def _get_app_redis():
+    global _app_redis_pool
+    if _app_redis_pool is None:
+        _app_redis_pool = _redis_async_mod.from_url(
+            get_redis_url(), encoding="utf-8", decode_responses=True,
+            max_connections=10,
+        )
+        logger.info("[Redis] App-level async pool inicializado (max=10)")
+    return _app_redis_pool
+
+
 # Singleton del ConversationStateManager — evita crear una nueva pool Redis por request.
-# Sin esto, process_aggregated_messages() creaba una pool completa por cada mensaje entrante,
-# acumulando cientos de conexiones TCP huérfanas en RAM.
 _global_state_manager: Optional[ConversationStateManager] = None
 
 
@@ -952,17 +967,13 @@ async def check_and_send_followups():
 
     await apply_jitter()
 
-    redis_url = get_redis_url()
     now = get_bogota_now()
 
     logger.info("[FOLLOWUP] Iniciando verificación de seguimientos pendientes...")
     logger.info("[FOLLOWUP] Hora actual (Bogotá): %s", now.strftime('%Y-%m-%d %H:%M:%S %Z'))
 
-    r = None
     try:
-        import redis.asyncio as redis_async
-
-        r = redis_async.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        r = await _get_app_redis()
 
         LAST_MSG_PREFIX = "last_client_msg:"
         FOLLOWUP_SENT_PREFIX = "followup_sent:"
@@ -1059,9 +1070,6 @@ async def check_and_send_followups():
 
     except Exception as e:
         logger.error("[FOLLOWUP] Error general: %s", e, exc_info=True)
-    finally:
-        if r:
-            await r.aclose()
 
 
 async def check_24h_advisor_notifications():
@@ -1669,7 +1677,6 @@ async def startup_event():
             para garantizar un único envío aunque el job se solape.
             """
             from datetime import datetime as _dt, timezone as _utc_tz
-            import redis.asyncio as _redis_async
 
             now_utc = _dt.now(_utc_tz.utc)
             mongo_mgr = get_mongo_manager()
@@ -1680,11 +1687,8 @@ async def startup_event():
 
             logger.info("[SchedMsg] %d mensaje(s) pendiente(s) para enviar", len(pending))
 
-            r = None
             try:
-                r = _redis_async.from_url(
-                    get_redis_url(), encoding="utf-8", decode_responses=True
-                )
+                r = await _get_app_redis()
                 for msg in pending:
                     msg_id = msg["_id"]
                     lock_key = f"sched_msg_lock:{msg_id}"
@@ -1718,9 +1722,6 @@ async def startup_event():
 
             except Exception as e:
                 logger.error("[SchedMsg] Error en ciclo: %s", e, exc_info=True)
-            finally:
-                if r:
-                    await r.aclose()
 
         scheduler.add_job(
             check_scheduled_messages,

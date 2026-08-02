@@ -122,6 +122,26 @@ def test_04_leak3_langchain_history_no_cap():
         return False
 
 
+def test_04b_shared_client_must_not_decode():
+    """
+    REGRESION: el shared client NO debe usar decode_responses=True.
+    RedisChatMessageHistory.messages hace m.decode("utf-8") sobre cada item;
+    si Redis devuelve str, todo el historial de Sofia rompe.
+    """
+    content = _read("middleware/sofia_brain.py")
+
+    idx = content.index('self._shared_redis_client = ')
+    block = content[idx:idx + 300]
+    block = block[:block.index(')') + 1]
+
+    assert 'decode_responses=True' not in block, (
+        "shared client con decode_responses=True — rompe history.messages"
+    )
+    assert 'max_connections' in block, "shared client sin max_connections"
+
+    print("  [PASS] shared client con bytes (decode_responses=False) y max_connections")
+
+
 def test_05_brain_cache_eviction_exists():
     """Verifica que el cache de historial tiene eviction."""
     content = _read("middleware/sofia_brain.py")
@@ -247,6 +267,7 @@ def run_all():
         ("DIAG 2: LEAK check_scheduled_messages", test_02_leak1_scheduled_messages_creates_pool),
         ("DIAG 3: LEAK check_and_send_followups", test_03_leak2_followup_creates_pool),
         ("DIAG 4: LEAK RedisChatMessageHistory", test_04_leak3_langchain_history_no_cap),
+        ("REGR 4b: shared client sin decode_responses", test_04b_shared_client_must_not_decode),
         ("DIAG 5: SofiaBrain cache eviction", test_05_brain_cache_eviction_exists),
         ("DIAG 6: Pools sin max_connections", test_06_pools_without_max_connections),
         ("FUNC 7: Singleton _get_redis_client", test_07_singleton_redis_pool_exists),

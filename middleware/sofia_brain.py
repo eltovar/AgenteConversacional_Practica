@@ -135,9 +135,11 @@ class SofiaBrain:
 
         # Pool Redis sync compartido para todas las RedisChatMessageHistory.
         # Sin esto, cada instancia crea su propio pool ilimitado → OOM.
+        # decode_responses DEBE quedar en False: RedisChatMessageHistory.messages
+        # hace m.decode("utf-8") sobre cada item y rompe si Redis devuelve str.
         import redis as _sync_redis
         self._shared_redis_client = _sync_redis.from_url(
-            redis_url, encoding="utf-8", decode_responses=True, max_connections=10,
+            redis_url, max_connections=10,
         )
 
         # LRU cache para RedisChatMessageHistory — evita crear pool Redis por mensaje

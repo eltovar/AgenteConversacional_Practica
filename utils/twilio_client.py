@@ -11,6 +11,7 @@ En lugar de responder via TwiML, enviamos mensajes directamente via API.
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 import httpx
@@ -325,6 +326,19 @@ class TwilioClient:
             await asyncio.sleep(wait_s)
         return resp
 
+    async def _chat_service_of(self, conversation_sid: str) -> Optional[str]:
+        """Devuelve el ChatServiceSid de una conversación, o None si no se puede leer."""
+        sid, token, _ = self._resolve_credentials()
+        try:
+            resp = await self._get_http_client().get(
+                f"{TWILIO_CONV_BASE}/Conversations/{conversation_sid}", auth=(sid, token)
+            )
+            if resp.status_code == 200:
+                return resp.json().get("chat_service_sid")
+        except Exception as e:
+            logger.warning(f"[TwilioClient] No se pudo leer chat_service_sid: {e}")
+        return None
+
     async def _create_conversation_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
         """Crea una Conversation con el número como participante WhatsApp.
 
@@ -375,16 +389,35 @@ class TwilioClient:
                 },
             )
             if p_resp.status_code not in (200, 201):
-                # Sin participante la conversación es inútil: se limpia para no
-                # dejar recursos huérfanos acumulándose por cada intento fallido.
-                logger.error(
-                    f"[TwilioClient][ConvAuto] No se pudo agregar participante: "
-                    f"{p_resp.status_code} - {p_resp.text[:200]}"
-                )
+                # 50416: el par (cliente, sender) ya está enlazado en otra
+                # conversación. Twilio nombra cuál en el propio mensaje de error,
+                # así que se reutiliza esa en vez de fallar. Pasa siempre que un
+                # envío anterior creó la conversación pero no llegó a persistirse
+                # en MongoDB, por ejemplo si el mensaje falló después.
+                existing = None
+                if p_resp.status_code == 409:
+                    m = re.search(r"CH[0-9a-f]{32}", p_resp.text or "")
+                    if m:
+                        existing = m.group(0)
+
+                # La conversación recién creada quedó sin participante: se borra
+                # para no acumular recursos huérfanos por cada intento.
                 try:
                     await client.delete(_conv_url(conv_sid, svc_sid), auth=(sid, token))
                 except Exception:
                     pass
+
+                if existing:
+                    logger.info(
+                        f"[TwilioClient][ConvAuto] Participante ya enlazado — "
+                        f"reutilizando conversación {existing[:12]}..."
+                    )
+                    return existing, await self._chat_service_of(existing)
+
+                logger.error(
+                    f"[TwilioClient][ConvAuto] No se pudo agregar participante: "
+                    f"{p_resp.status_code} - {p_resp.text[:200]}"
+                )
                 return None, None
 
             logger.info(
@@ -517,6 +550,20 @@ class TwilioClient:
             # 20003. Se crea una al vuelo para poder salir por Conversations.
             if not conv_sid and TWILIO_FORCE_CONVERSATIONS:
                 conv_sid, svc_sid = await self._create_conversation_for_phone(to)
+                if not conv_sid:
+                    # Sin conversación no hay salida: continuar caería a
+                    # /Messages.json, que devolvería 20003 y ocultaría la causa.
+                    logger.error(
+                        "[TwilioClient] No se pudo obtener conversación y "
+                        "TWILIO_FORCE_CONVERSATIONS está activo — sin fallback"
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            "No se pudo crear ni reutilizar una conversación de Twilio. "
+                            "Revisa los logs de [ConvAuto]."
+                        ),
+                    }
             if conv_sid:
                 conv_result = await self._send_via_conversations(
                     conversation_sid=conv_sid,

@@ -26,6 +26,22 @@ TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxx
 # (/Messages.json) y evita el cargo MAU de Conversations API ($0.05/usuario activo)
 TWILIO_USE_CONVERSATIONS = os.getenv("TWILIO_USE_CONVERSATIONS", "true").lower() == "true"
 
+# Workaround del bloqueo de compliance (error 20003).
+#
+# Why: una cuenta Twilio sin primary compliance profile aprobado tiene BLOQUEADO
+# POST /Messages.json — devuelve 401/20003 antes incluso de validar el destino.
+# El endpoint de Conversations NO pasa por ese control: verificado en producción
+# el 4-ago-2026, donde el mismo envío devolvió 63016 (fuera de ventana 24h) en vez
+# de 20003, o sea que salió de Twilio y llegó hasta WhatsApp.
+#
+# Con este flag activo, cuando no exista una Conversation previa para el número se
+# crea una al vuelo (Conversation + Participant) en lugar de caer a /Messages.json.
+# Sin el flag el comportamiento es idéntico al de siempre.
+#
+# Desactivar en cuanto Twilio apruebe el compliance profile: el camino normal es
+# más simple y no crea recursos Conversation por contacto.
+TWILIO_FORCE_CONVERSATIONS = os.getenv("TWILIO_FORCE_CONVERSATIONS", "false").lower() == "true"
+
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
@@ -309,6 +325,77 @@ class TwilioClient:
             await asyncio.sleep(wait_s)
         return resp
 
+    async def _create_conversation_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
+        """Crea una Conversation con el número como participante WhatsApp.
+
+        Usada solo con TWILIO_FORCE_CONVERSATIONS activo, cuando no existe una
+        conversación previa para el destino. Devuelve (conversation_sid, chat_service_sid).
+
+        Why: sortea el bloqueo 20003 de /Messages.json en cuentas sin compliance
+        profile aprobado. El endpoint de Conversations no aplica ese control.
+        """
+        sid, token, phone = self._resolve_credentials()
+        if not self._available:
+            return None, None
+
+        proxy = phone or ""
+        if proxy and not proxy.startswith("whatsapp:"):
+            proxy = f"whatsapp:{proxy}"
+        if not proxy:
+            logger.error("[TwilioClient][ConvAuto] Sin TWILIO_PHONE_NUMBER para usar de proxy")
+            return None, None
+
+        client = self._get_http_client()
+        try:
+            resp = await self._post_with_429_retry(
+                client,
+                f"{TWILIO_CONV_BASE}/Conversations",
+                auth=(sid, token),
+                data={"FriendlyName": f"auto-{to.replace('whatsapp:', '')}"},
+            )
+            if resp.status_code not in (200, 201):
+                logger.error(
+                    f"[TwilioClient][ConvAuto] No se pudo crear conversación: "
+                    f"{resp.status_code} - {resp.text[:200]}"
+                )
+                return None, None
+            data = resp.json()
+            conv_sid = data.get("sid")
+            svc_sid = data.get("chat_service_sid")
+
+            # El participante enlaza el número del cliente con nuestro sender.
+            # Sin él la conversación existe pero no despacha a WhatsApp.
+            p_resp = await self._post_with_429_retry(
+                client,
+                _conv_url(conv_sid, svc_sid, suffix="/Participants"),
+                auth=(sid, token),
+                data={
+                    "MessagingBinding.Address": to,
+                    "MessagingBinding.ProxyAddress": proxy,
+                },
+            )
+            if p_resp.status_code not in (200, 201):
+                # Sin participante la conversación es inútil: se limpia para no
+                # dejar recursos huérfanos acumulándose por cada intento fallido.
+                logger.error(
+                    f"[TwilioClient][ConvAuto] No se pudo agregar participante: "
+                    f"{p_resp.status_code} - {p_resp.text[:200]}"
+                )
+                try:
+                    await client.delete(_conv_url(conv_sid, svc_sid), auth=(sid, token))
+                except Exception:
+                    pass
+                return None, None
+
+            logger.info(
+                f"[TwilioClient][ConvAuto] Conversación creada {conv_sid[:12]}... "
+                f"para {to[-6:]} (workaround compliance)"
+            )
+            return conv_sid, svc_sid
+        except Exception as e:
+            logger.error(f"[TwilioClient][ConvAuto] Excepción creando conversación: {e}")
+            return None, None
+
     async def _send_via_conversations(
         self,
         conversation_sid: str,
@@ -426,6 +513,10 @@ class TwilioClient:
                 svc_sid = chat_service_sid
             else:
                 conv_sid, svc_sid = await self._resolve_conv_sid_for_phone(to)
+            # Workaround compliance: sin conversación previa, /Messages.json daría
+            # 20003. Se crea una al vuelo para poder salir por Conversations.
+            if not conv_sid and TWILIO_FORCE_CONVERSATIONS:
+                conv_sid, svc_sid = await self._create_conversation_for_phone(to)
             if conv_sid:
                 conv_result = await self._send_via_conversations(
                     conversation_sid=conv_sid,
@@ -438,6 +529,14 @@ class TwilioClient:
                     conv_result.setdefault("to", to)
                     conv_result.setdefault("message_status", "queued")
                     conv_result.setdefault("chat_service_sid", svc_sid)
+                    return conv_result
+                if TWILIO_FORCE_CONVERSATIONS:
+                    # Con el workaround activo /Messages.json devolvería 20003 seguro,
+                    # enmascarando la causa real. Se devuelve el error de Conversations.
+                    logger.error(
+                        f"[TwilioClient] Conversations falló (code={conv_result.get('code')}) "
+                        f"y TWILIO_FORCE_CONVERSATIONS está activo — sin fallback"
+                    )
                     return conv_result
                 logger.warning(
                     f"[TwilioClient] Conversations endpoint falló "

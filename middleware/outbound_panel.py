@@ -138,21 +138,10 @@ HUBSPOT_BULK_SEARCH_CACHE_PREFIX = "hubspot_bulk_search:"
 # Plantillas permitidas para envío masivo. Mapeo SID → metadata.
 # La variable key="1" (nombre) SIEMPRE se auto-fill desde HubSpot firstname per-contacto.
 # Las demás variables se reciben del frontend como texto literal (aplicado a todos).
-BULK_ALLOWED_TEMPLATES = {
-    "HX550a2475d09a5fb3b5410e6d36eadf3f": {
-        "name": "aun_en_busqueda",
-        "label": "¿Aún estás interesado?",
-        "vars": [{"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"}],
-    },
-    "HX287a1c005459a6ceaec90a35108330c3": {
-        "name": "seguimiento_personalizado",
-        "label": "Seguimiento Personalizado",
-        "vars": [
-            {"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"},
-            {"key": "2", "label": "Mensaje personalizado"},
-        ],
-    },
-}
+# Los SIDs viven en middleware/templates/content_sids.py — cambian al migrar de cuenta Twilio.
+from middleware.templates import content_sids as _content_sids
+
+BULK_ALLOWED_TEMPLATES = _content_sids.BULK_ALLOWED_TEMPLATES
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
@@ -2395,6 +2384,25 @@ async def send_template_message(
 # ============================================================================
 # Endpoints CRUD de Templates
 # ============================================================================
+
+@router.get("/config/template-sids")
+async def get_template_sids(
+    advisor_id: str = Query(...),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Sirve al panel los Content SIDs vigentes de masivos y programados.
+
+    Why: los SIDs estaban duplicados en el frontend. Al migrar de cuenta Twilio
+    cambian todos, y un frontend desactualizado envía SIDs que el backend rechaza.
+    Sirviéndolos desde aquí, cambiar las env vars de Railway basta para ambos lados.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    return {
+        "bulk": _content_sids.BULK_TEMPLATES,
+        "schedulable": _content_sids.SCHEDULABLE_TEMPLATES,
+    }
+
 
 @router.get("/templates")
 async def list_templates(

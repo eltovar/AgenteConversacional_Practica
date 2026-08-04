@@ -4550,18 +4550,20 @@ async function loadNotes(contactId) {
 // MENSAJES PROGRAMADOS — Plantillas WhatsApp en fecha específica
 // =========================================================================
 
-const SCHEDULABLE_TEMPLATES = [
+// Fallback si /config/template-sids no responde. La fuente de verdad es el backend
+// (middleware/templates/content_sids.py): estos SIDs cambian al migrar de cuenta Twilio.
+let SCHEDULABLE_TEMPLATES = [
     {
-        sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
+        sid: 'HXfd6fcb949b5747ca39d7b19af4f988fe',
         name: 'Aun_interesado',
         label: '¿Aún estás interesado?',
         preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
         vars: [{ key: '1', label: 'Nombre del contacto' }]
     },
     {
-        sid: 'HX015a4c21c7aeb082448aeaa97396dbbf',
-        name: 'Seguimiento_Personalizado',
-        label: 'Seguimiento Personalizado',
+        sid: 'HXbca931e16b226053193dc3e003e06372',
+        name: 'Mensaje_Personalizado',
+        label: 'Mensaje Personalizado',
         preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
         vars: [
             { key: '1', label: 'Nombre del contacto' },
@@ -6596,6 +6598,9 @@ document.addEventListener('DOMContentLoaded', () => {
             Notification.requestPermission();
         }, { once: true });
     }
+
+    // Traer los Content SIDs vigentes del backend (masivos + programados).
+    syncTemplateSids();
 });
 
 // =========================================================================
@@ -7710,9 +7715,10 @@ const BULK_EXCLUDED_STAGES = [
 
 // Plantillas permitidas para envío masivo. La var key='1' (nombre) siempre se
 // auto-fill desde HubSpot per-contacto. Las demás se escriben en el modal.
-const BULK_TEMPLATES = [
+// Fallback — ver nota en SCHEDULABLE_TEMPLATES. Se sobreescribe desde el backend.
+let BULK_TEMPLATES = [
     {
-        sid: 'HX550a2475d09a5fb3b5410e6d36eadf3f',
+        sid: 'HXfd6fcb949b5747ca39d7b19af4f988fe',
         name: 'aun_en_busqueda',
         label: '¿Aún estás interesado?',
         preview: 'Hola {1} 😊 ¿Aún continúas en la búsqueda de un inmueble para arriendo?',
@@ -7721,9 +7727,9 @@ const BULK_TEMPLATES = [
         ]
     },
     {
-        sid: 'HX287a1c005459a6ceaec90a35108330c3',
-        name: 'seguimiento_personalizado',
-        label: 'Seguimiento Personalizado',
+        sid: 'HXbca931e16b226053193dc3e003e06372',
+        name: 'mensaje_personalizado',
+        label: 'Mensaje Personalizado',
         preview: 'Hola {1} ¿Como se encuentra el día de hoy? {2}. Estaré pendiente a su respuesta.',
         vars: [
             { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' },
@@ -7735,6 +7741,32 @@ const BULK_TEMPLATES = [
 let _bulkPreviewDebounce = null;
 let _bulkPollTimer = null;
 let _activeBulkCampaignId = null;
+
+/**
+ * Sincroniza los Content SIDs con el backend.
+ * Si falla, se conservan los arrays hardcodeados como fallback: el panel sigue
+ * funcionando, pero tras una migración de cuenta Twilio los SIDs quedarían viejos
+ * y el backend rechazaría los envíos. Por eso el fallo se loguea como warning.
+ */
+async function syncTemplateSids() {
+    try {
+        const response = await fetch(
+            `${BASE_URL}/config/template-sids?advisor_id=${encodeURIComponent(ADVISOR_ID)}`,
+            { headers: { 'X-API-Key': API_KEY } }
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (Array.isArray(data.bulk) && data.bulk.length) {
+            BULK_TEMPLATES = data.bulk;
+        }
+        if (Array.isArray(data.schedulable) && data.schedulable.length) {
+            SCHEDULABLE_TEMPLATES = data.schedulable;
+        }
+        console.log('[Panel] Content SIDs sincronizados con el backend');
+    } catch (error) {
+        console.warn('[Panel] No se pudieron sincronizar los Content SIDs, usando fallback local:', error);
+    }
+}
 
 function _updateBulkButtonVisibility() {
     const btn = document.getElementById('bulkMessagingBtn');

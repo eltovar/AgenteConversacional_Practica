@@ -1354,6 +1354,9 @@ async def send_message(
     # =========================================================================
     permanent_media_url = None
     media_type = None
+    # Inicializados aquí porque el envío los referencia aunque no haya adjunto.
+    file_bytes = None
+    content_type = None
 
     if media_file and media_file.filename:
         try:
@@ -1426,11 +1429,17 @@ async def send_message(
             body_for_twilio = inject_quote(message_body, parsed_reply_preview, is_caption=is_caption)
             logger.info(f"[Panel][QuoteInject] Quote inyectada (is_caption={is_caption})")
 
-    # Enviar mensaje con multimedia si corresponde
+    # Enviar mensaje con multimedia si corresponde.
+    # Los bytes van además del media_url: con TWILIO_FORCE_CONVERSATIONS activo se
+    # suben al Media Content Service de Twilio, porque Conversations no acepta URLs
+    # externas. Bunny sigue siendo la fuente de verdad del historial y del panel.
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
         body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
-        media_url=permanent_media_url
+        media_url=permanent_media_url,
+        media_bytes=file_bytes if permanent_media_url else None,
+        media_content_type=content_type if permanent_media_url else None,
+        media_filename=(media_file.filename if media_file else None),
     )
 
     if result["status"] == "success":

@@ -55,6 +55,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from agents.orchestrator import process_message
 from utils.twilio_client import twilio_client
+from middleware.templates import content_sids as tpl_sids
 from logging_config import logger
 import uvicorn
 import os
@@ -444,7 +445,7 @@ async def check_appointment_reminders():
 
             # Enviar vía Twilio
             if twilio_client.is_available:
-                _reminder_sid = os.getenv("TWILIO_REMINDER_TEMPLATE_SID")
+                _reminder_sid = tpl_sids.RECORDATORIO_CITA
                 if _reminder_sid:
                     result = await twilio_client.send_whatsapp_message(
                         to=apt.phone_normalized,
@@ -1287,10 +1288,7 @@ async def check_appointment_followups():
                 )
 
                 if twilio_client.is_available:
-                    _followup_sid = os.getenv(
-                        "TWILIO_FOLLOWUP1_TEMPLATE_SID",
-                        "HXd27d74d382aef9fdbd9d8a409be5fedc",
-                    )
+                    _followup_sid = tpl_sids.FOLLOWUP_1
                     result = await twilio_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body="",
@@ -1412,10 +1410,7 @@ async def check_appointment_followup2():
                     )
                     continue
 
-                _followup2_sid = os.getenv(
-                    "TWILIO_FOLLOWUP2_TEMPLATE_SID",
-                    "HXe4a60594744f0687233b663fdccc087d",
-                )
+                _followup2_sid = tpl_sids.FOLLOWUP_2
 
                 if twilio_client.is_available:
                     result = await twilio_client.send_whatsapp_message(

@@ -8,23 +8,14 @@ content_sid          : Content-SID de Twilio (HXxxx...) asignado tras aprobació
 content_variables_map: Orden de variables que se pasan como {{1}}, {{2}}... al template
                        de Twilio. Debe coincidir con el orden definido en el Content
                        Template Builder de Twilio.
+
+Los content_sid se resuelven desde `content_sids.py` (variables de entorno con el
+SID vigente como default). No hardcodear SIDs aquí: cambian al migrar de cuenta Twilio.
 """
 
+from . import content_sids as _sids
+
 DEFAULT_TEMPLATES = {
-    "reactivacion_general": {
-        "id": "reactivacion_general",
-        "name": "Reactivación General",
-        "category": "reactivacion",
-        "body": (
-            "¡Hola, {nombre}! Te habla la asesora {asesor} del Area comercial "
-            "Inmobiliaria Proteger ¿Cómo te encuentras el día de hoy?"
-        ),
-        "variables": ["nombre", "asesor"],
-        # Twilio: saludo_reactivador — aprobado Meta (business + user initiated)
-        "content_sid": "HXb8ecec6e492b6820ce67d54a6e709a97",
-        "content_variables_map": ["nombre", "asesor"],  # {{1}}=nombre, {{2}}=asesor
-        "is_default": True,
-    },
     "cita_confirmacion": {
         "id": "cita_confirmacion",
         "name": "Confirmación de Cita",
@@ -71,28 +62,8 @@ DEFAULT_TEMPLATES = {
         ),
         "variables": [],
         # Twilio: saludo_reactivador_inmueble — aprobado Meta
-        "content_sid": "HX3a6e93c829bb7704476d398dc9639f21",
+        "content_sid": _sids.SALUDO_INMUEBLE,
         "content_variables_map": [],
-        "is_default": True,
-    },
-    "seguimiento_cita": {
-        "id": "seguimiento_cita",
-        "name": "Seguimiento Post-Cita",
-        "category": "seguimiento",
-        "body": (
-            "¡Hola {nombre}! 😊 Esperamos que la visita haya sido de tu agrado. "
-            "Cuéntanos, ¿Te ha gustado el inmueble?\n"
-            "Para nosotros es importante conocer tu experiencia y seguir "
-            "mejorando la calidad de nuestro servicio. 📈\n"
-            "¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
-            "Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
-            "para optimizar nuestros procesos de atención. 💪\n\n"
-            "¡Gracias por confiar en Inmobiliaria Proteger! 💛"
-        ),
-        "variables": ["nombre"],
-        # {{1}}=nombre — Twilio: seguimiento_cita (aprobado Meta)
-        "content_sid": "HX9696fc73c9dbb5f76382bd77b5f410c8",
-        "content_variables_map": ["nombre"],
         "is_default": True,
     },
     "reactivacion_inmueble_link": {
@@ -108,7 +79,7 @@ DEFAULT_TEMPLATES = {
         ),
         "variables": ["asesor", "inmueble"],
         # {{1}}=asesor, {{2}}=inmueble
-        "content_sid": "HX00e43ed82eb07074ca930e5974e18b09",
+        "content_sid": _sids.REACTIVACION_LINK,
         "content_variables_map": ["asesor", "inmueble"],
         "is_default": True,
     },
@@ -122,7 +93,7 @@ DEFAULT_TEMPLATES = {
         ),
         "variables": ["nombre", "tema"],
         # {{1}}=nombre, {{2}}=tema
-        "content_sid": "HX015a4c21c7aeb082448aeaa97396dbbf",
+        "content_sid": _sids.MENSAJE_PERSONALIZADO,
         "content_variables_map": ["nombre", "tema"],
         "is_default": True,
     },

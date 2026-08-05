@@ -788,11 +788,21 @@ class MongoDBManager:
             if error_message:
                 update_data["delivery_error_message"] = error_message
             
+            # Why: el mensaje puede estar guardado bajo tres SIDs distintos según la
+            # ruta de envío. Por /Messages.json `message_sid` es el SM; por
+            # Conversations es el IM, y el SM llega aparte como `channel_message_sid`.
+            # El callback de Twilio siempre manda el SM, así que buscar solo por
+            # `message_sid` no encontraba nada en los envíos por Conversations y el
+            # estado de entrega —incluida la alerta de no-entregado— quedaba ciego.
             result = await self.db.messages.update_one(
-                {"message_sid": message_sid},
+                {"$or": [
+                    {"message_sid": message_sid},
+                    {"conversations_message_sid": message_sid},
+                    {"channel_message_sid": message_sid},
+                ]},
                 {"$set": update_data}
             )
-            
+
             if result.matched_count > 0:
                 logger.debug(f"[MongoDB] Delivery status actualizado: {message_sid} -> {status}")
                 return True

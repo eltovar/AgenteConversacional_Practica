@@ -138,21 +138,10 @@ HUBSPOT_BULK_SEARCH_CACHE_PREFIX = "hubspot_bulk_search:"
 # Plantillas permitidas para envío masivo. Mapeo SID → metadata.
 # La variable key="1" (nombre) SIEMPRE se auto-fill desde HubSpot firstname per-contacto.
 # Las demás variables se reciben del frontend como texto literal (aplicado a todos).
-BULK_ALLOWED_TEMPLATES = {
-    "HX550a2475d09a5fb3b5410e6d36eadf3f": {
-        "name": "aun_en_busqueda",
-        "label": "¿Aún estás interesado?",
-        "vars": [{"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"}],
-    },
-    "HX287a1c005459a6ceaec90a35108330c3": {
-        "name": "seguimiento_personalizado",
-        "label": "Seguimiento Personalizado",
-        "vars": [
-            {"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"},
-            {"key": "2", "label": "Mensaje personalizado"},
-        ],
-    },
-}
+# Los SIDs viven en middleware/templates/content_sids.py — cambian al migrar de cuenta Twilio.
+from middleware.templates import content_sids as _content_sids
+
+BULK_ALLOWED_TEMPLATES = _content_sids.BULK_ALLOWED_TEMPLATES
 
 # Singleton de connection pool Redis (evita crear nueva conexión por request)
 _redis_pool: Optional[redis.Redis] = None
@@ -1365,6 +1354,10 @@ async def send_message(
     # =========================================================================
     permanent_media_url = None
     media_type = None
+    # Inicializados aquí porque el envío los referencia aunque no haya adjunto.
+    file_bytes = None
+    content_type = None
+    media_subido: Dict[str, Any] = {}
 
     if media_file and media_file.filename:
         try:
@@ -1380,11 +1373,17 @@ async def send_message(
             if content_type.startswith("video/") and len(file_bytes) > MAX_VIDEO_SIZE_BYTES:
                 raise HTTPException(status_code=413, detail="El video excede el límite de 16MB")
 
-            # Subir a Bunny.net Storage (CDN)
+            # Subir a Bunny.net Storage (CDN).
+            # `media_subido` recoge los bytes REALMENTE subidos: el audio se convierte
+            # a MP3 aquí dentro, y son esos bytes —no los originales— los que hay que
+            # mandar al MCS de Twilio. Con los originales, un WebM del grabador del
+            # panel viajaría sin convertir y WhatsApp lo rechazaría con 63021.
+            # (ya inicializado arriba)
             permanent_media_url = await media_processor.upload_outgoing_media(
                 file_bytes=file_bytes,
                 content_type=content_type,
-                phone=phone_normalized
+                phone=phone_normalized,
+                salida=media_subido,
             )
 
             logger.info(f"[Panel] 📤 Bunny.net URL obtenida: {permanent_media_url}")
@@ -1437,11 +1436,17 @@ async def send_message(
             body_for_twilio = inject_quote(message_body, parsed_reply_preview, is_caption=is_caption)
             logger.info(f"[Panel][QuoteInject] Quote inyectada (is_caption={is_caption})")
 
-    # Enviar mensaje con multimedia si corresponde
+    # Enviar mensaje con multimedia si corresponde.
+    # Los bytes van además del media_url: con TWILIO_FORCE_CONVERSATIONS activo se
+    # suben al Media Content Service de Twilio, porque Conversations no acepta URLs
+    # externas. Bunny sigue siendo la fuente de verdad del historial y del panel.
     result = await twilio_client.send_whatsapp_message(
         to=phone_normalized,
         body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
-        media_url=permanent_media_url
+        media_url=permanent_media_url,
+        media_bytes=media_subido.get("bytes") if permanent_media_url else None,
+        media_content_type=media_subido.get("content_type") if permanent_media_url else None,
+        media_filename=(media_file.filename if media_file else None),
     )
 
     if result["status"] == "success":
@@ -2395,6 +2400,25 @@ async def send_template_message(
 # ============================================================================
 # Endpoints CRUD de Templates
 # ============================================================================
+
+@router.get("/config/template-sids")
+async def get_template_sids(
+    advisor_id: str = Query(...),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """Sirve al panel los Content SIDs vigentes de masivos y programados.
+
+    Why: los SIDs estaban duplicados en el frontend. Al migrar de cuenta Twilio
+    cambian todos, y un frontend desactualizado envía SIDs que el backend rechaza.
+    Sirviéndolos desde aquí, cambiar las env vars de Railway basta para ambos lados.
+    """
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+    return {
+        "bulk": _content_sids.BULK_TEMPLATES,
+        "schedulable": _content_sids.SCHEDULABLE_TEMPLATES,
+    }
+
 
 @router.get("/templates")
 async def list_templates(

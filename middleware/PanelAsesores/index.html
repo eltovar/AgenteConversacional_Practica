@@ -5,7 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Panel de Asesores - Proteger Inmobiliaria</title>
     <link rel="icon" type="image/png" href="/whatsapp/panel/static/icono.png">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind autoalojado. Antes venía de https://cdn.tailwindcss.com, que no es
+         una hoja de estilos sino un compilador JIT que corre en el navegador: si no
+         bajaba (CDN caído, bloqueador, proxy, caché expirada) el panel se veía sin
+         layout, todo apilado. Servirlo desde aquí lo ata a nuestro propio servidor.
+         Regenerar con scripts/build_tailwind.sh al añadir clases nuevas. -->
+    <link rel="stylesheet" href="/whatsapp/panel/static/tailwind.css">
     <link rel="stylesheet" href="/whatsapp/panel/static/style.css">
     <style>
         /* Estilos para grabacion de audio */

@@ -1025,7 +1025,8 @@ class MediaProcessor:
         self,
         file_bytes: bytes,
         content_type: str,
-        phone: str
+        phone: str,
+        salida: Optional[dict] = None,
     ) -> str:
         """
         Sube archivo enviado por la ASESORA desde el Panel a Bunny.net.
@@ -1042,6 +1043,13 @@ class MediaProcessor:
         Formatos que NO se convierten:
         - MP3: Compatible universal con WhatsApp
         - OGG/Opus: También funciona (pero usamos MP3 por mejor compatibilidad)
+
+        Args:
+            salida: dict opcional donde se reportan los bytes REALMENTE subidos y su
+                MIME final (`bytes`, `content_type`, `filename`). Lo necesita el envío
+                por Conversations, que sube esos mismos bytes al Media Content Service
+                de Twilio: si mandara los originales, el audio convertido a MP3 aquí
+                viajaría como WebM y WhatsApp lo rechazaría con 63021.
         """
         content_lower = content_type.lower()
 
@@ -1062,6 +1070,12 @@ class MediaProcessor:
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
             logger.info(f"[MediaProcessor] Subiendo documento asesor: formato={doc_fmt}")
+            if salida is not None:
+                salida.update({
+                    "bytes": file_bytes,
+                    "content_type": final_content_type,
+                    "filename": filename,
+                })
             return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_video:
@@ -1073,6 +1087,12 @@ class MediaProcessor:
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
             logger.info(f"[MediaProcessor] Subiendo video asesor: formato={vid_format}")
+            if salida is not None:
+                salida.update({
+                    "bytes": file_bytes,
+                    "content_type": final_content_type,
+                    "filename": filename,
+                })
             return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_audio:
@@ -1167,6 +1187,12 @@ class MediaProcessor:
         clean_phone = phone.replace("+", "").replace(" ", "")
         filename = f"{clean_phone}_{int(time.time())}{extension}"
 
+        if salida is not None:
+            salida.update({
+                "bytes": file_bytes,
+                "content_type": final_content_type,
+                "filename": filename,
+            })
         # Pasar el Content-Type correcto a Bunny.net
         return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 

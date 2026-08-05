@@ -1357,6 +1357,7 @@ async def send_message(
     # Inicializados aquí porque el envío los referencia aunque no haya adjunto.
     file_bytes = None
     content_type = None
+    media_subido: Dict[str, Any] = {}
 
     if media_file and media_file.filename:
         try:
@@ -1372,11 +1373,17 @@ async def send_message(
             if content_type.startswith("video/") and len(file_bytes) > MAX_VIDEO_SIZE_BYTES:
                 raise HTTPException(status_code=413, detail="El video excede el límite de 16MB")
 
-            # Subir a Bunny.net Storage (CDN)
+            # Subir a Bunny.net Storage (CDN).
+            # `media_subido` recoge los bytes REALMENTE subidos: el audio se convierte
+            # a MP3 aquí dentro, y son esos bytes —no los originales— los que hay que
+            # mandar al MCS de Twilio. Con los originales, un WebM del grabador del
+            # panel viajaría sin convertir y WhatsApp lo rechazaría con 63021.
+            # (ya inicializado arriba)
             permanent_media_url = await media_processor.upload_outgoing_media(
                 file_bytes=file_bytes,
                 content_type=content_type,
-                phone=phone_normalized
+                phone=phone_normalized,
+                salida=media_subido,
             )
 
             logger.info(f"[Panel] 📤 Bunny.net URL obtenida: {permanent_media_url}")
@@ -1437,8 +1444,8 @@ async def send_message(
         to=phone_normalized,
         body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
         media_url=permanent_media_url,
-        media_bytes=file_bytes if permanent_media_url else None,
-        media_content_type=content_type if permanent_media_url else None,
+        media_bytes=media_subido.get("bytes") if permanent_media_url else None,
+        media_content_type=media_subido.get("content_type") if permanent_media_url else None,
         media_filename=(media_file.filename if media_file else None),
     )
 

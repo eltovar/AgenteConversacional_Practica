@@ -1,0 +1,19 @@
+/* Entrada para compilar el CSS de Tailwind que sirve el panel.
+ *
+ * Why: el panel cargaba Tailwind desde https://cdn.tailwindcss.com, que no es una
+ * hoja de estilos sino un compilador JIT de ~400 KB que corre en el navegador. La
+ * documentación de Tailwind dice explícitamente que no es para producción. Si ese
+ * script no bajaba —caída del CDN, bloqueador, proxy corporativo, caché expirada—
+ * el panel se renderizaba sin una sola regla de layout: todo apilado en vertical.
+ * Pasaba de forma intermitente y "se arreglaba solo" al recargar, porque dependía
+ * del navegador y la red de cada asesora, no del servidor.
+ *
+ * Compilar: ver scripts/build_tailwind.sh (o el comando en docs/PANEL_TAILWIND.md)
+ * Salida:   tailwind.css, servido desde /whatsapp/panel/static/ junto a style.css
+ *
+ * Regenerar SIEMPRE que se añadan clases nuevas de Tailwind al HTML o al JS.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

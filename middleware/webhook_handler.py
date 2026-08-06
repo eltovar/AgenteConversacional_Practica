@@ -669,22 +669,6 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         state_manager = get_state_manager()
         
-        # Capturar intención de handoff sin ejecutarlo todavía.
-        # El handoff se ejecutará DESPUÉS de enviar el mensaje al cliente,
-        # para que el cliente reciba la notificación antes de que el bot se bloquee.
-        pending_handoff = False
-        handoff_reason = ""
-
-        if analysis.handoff_priority == "immediate":
-            pending_handoff = True
-            handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
-        elif analysis.handoff_priority == "high":
-            pending_handoff = True
-            reason_parts = []
-            if analysis.intencion_visita:
-                reason_parts.append("Intención de visita")
-            handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
-        
         # update_activity() fue movido antes del WS notify (Fix CR-1 — ver líneas anteriores)
 
         # ✅ FIX: Persistir canal_origen y owner_id en Redis para asignación correcta de asesores
@@ -699,6 +683,24 @@ async def _process_message_deferred(
         if property_code_result.has_code and analysis and analysis.handoff_priority not in ("immediate", "high"):
             analysis.handoff_priority = "high"
             analysis.intencion_visita = True
+
+        # Capturar intención de handoff sin ejecutarlo todavía.
+        # El handoff se ejecutará DESPUÉS de enviar el mensaje al cliente,
+        # para que el cliente reciba la notificación antes de que el bot se bloquee.
+        # Se evalúa después de los overrides de prioridad: calcularlo antes dejaba
+        # pending_handoff=False aunque el override subiera la prioridad a "high".
+        pending_handoff = False
+        handoff_reason = ""
+
+        if analysis.handoff_priority == "immediate":
+            pending_handoff = True
+            handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
+        elif analysis.handoff_priority == "high":
+            pending_handoff = True
+            reason_parts = []
+            if analysis.intencion_visita:
+                reason_parts.append("Intención de visita")
+            handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
 
       # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
         # Contactos que regresan (is_new=False): su meta ya existe, el bloque

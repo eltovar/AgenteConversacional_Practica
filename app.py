@@ -865,6 +865,105 @@ async def rebuild_zset_from_conversations():
         )
 
 
+# Minutos que un lead con señal comercial puede seguir en BOT_ACTIVE antes de
+# que el job lo escale. Cubre al cliente que escribe una vez y se va: el rescate
+# in-request de webhook_handler necesita turnos nuevos, este no.
+RESCUE_TIMEOUT_MINUTES = 15
+# Tope de contactos por corrida — el ZSET está ordenado por actividad reciente,
+# así que los primeros son los que más importan.
+RESCUE_SCAN_LIMIT = 200
+
+
+async def rescue_stalled_leads():
+    """
+    Cada 5 min: escala leads que llevan >RESCUE_TIMEOUT_MINUTES en BOT_ACTIVE
+    pese a haber mostrado señal comercial.
+
+    Complementa el rescate in-request de webhook_handler.py, que solo dispara
+    cuando llega un mensaje nuevo. Un cliente que escribe, muestra interés y no
+    vuelve a escribir jamás alcanzaría el umbral de turnos; este job lo recoge.
+
+    Solo mira contactos del ZSET (ya filtrado por señal comercial) que sigan en
+    BOT_ACTIVE y tengan had_signal=True.
+    """
+    await apply_jitter()
+    try:
+        import json as _json
+        from middleware.conversation_state import parse_datetime_safe
+
+        state_mgr = get_state_manager()
+        redis = state_mgr.redis
+        now = get_bogota_now()
+
+        members = await redis.zrevrange(
+            state_mgr.ACTIVE_CONTACTS_ZSET, 0, RESCUE_SCAN_LIMIT - 1
+        )
+        valid = [m for m in members if ":" in m]
+        if not valid:
+            return
+
+        pipe = redis.pipeline(transaction=False)
+        for member in valid:
+            phone, canal = member.split(":", 1)
+            c = canal.lower()
+            pipe.get(f"{state_mgr.STATE_PREFIX}{phone}:{c}")
+            pipe.get(f"{state_mgr.META_PREFIX}{phone}:{c}")
+        results = await pipe.execute()
+
+        scanned = 0
+        rescued = 0
+
+        for i, member in enumerate(valid):
+            phone, canal = member.split(":", 1)
+            canal_safe = canal.lower()
+            status_raw = results[i * 2]
+            meta_raw = results[i * 2 + 1]
+
+            # Solo interesa lo que sigue en manos del bot.
+            if status_raw != ConversationStatus.BOT_ACTIVE.value:
+                continue
+            if not meta_raw:
+                continue
+
+            try:
+                meta = _json.loads(meta_raw)
+            except Exception:
+                continue
+
+            if not meta.get("had_signal"):
+                continue
+
+            first_turn_at = meta.get("first_turn_at")
+            if not first_turn_at:
+                continue
+
+            scanned += 1
+            elapsed_min = (now - parse_datetime_safe(first_turn_at)).total_seconds() / 60
+            if elapsed_min < RESCUE_TIMEOUT_MINUTES:
+                continue
+
+            ok = await state_mgr.request_handoff(
+                phone,
+                reason=f"Rescate automático — {int(elapsed_min)} min sin escalar",
+                contact_id=meta.get("contact_id"),
+                canal=canal_safe,
+            )
+            if ok:
+                rescued += 1
+                logger.info(
+                    "[Rescue] Lead escalado por timeout: %s:%s (%.0f min, turnos=%s)",
+                    phone, canal_safe, elapsed_min, meta.get("bot_turns", "?")
+                )
+
+        if rescued:
+            logger.info(
+                "[Rescue] Corrida completada: %d candidatos, %d escalados",
+                scanned, rescued
+            )
+    except Exception as e:
+        logger.error("[Rescue] Error en rescue_stalled_leads: %s", e, exc_info=True)
+
+
 async def reconcile_owner_ids():
     """
     Cada 6h: cross-referencia Redis assigned_owner_id vs MongoDB owner_id
@@ -1787,6 +1886,20 @@ async def startup_event():
             logger.info("[STARTUP] Reconciliación owner_ids HABILITADA (cada 6h)")
         except Exception as _erc:
             logger.error("[STARTUP] FALLO registrando reconcile_owner_ids: %s", _erc, exc_info=True)
+
+        try:
+            scheduler.add_job(
+                rescue_stalled_leads,
+                trigger=IntervalTrigger(minutes=5),
+                id="rescue_stalled_leads",
+                replace_existing=True,
+            )
+            logger.info(
+                "[STARTUP] Rescate de leads estancados HABILITADO (cada 5min, timeout %dmin)",
+                RESCUE_TIMEOUT_MINUTES
+            )
+        except Exception as _ers:
+            logger.error("[STARTUP] FALLO registrando rescue_stalled_leads: %s", _ers, exc_info=True)
 
         scheduler.start()
         registered_job_ids = [j.id for j in scheduler.get_jobs()]

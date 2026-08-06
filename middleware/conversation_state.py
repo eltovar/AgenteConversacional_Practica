@@ -8,7 +8,7 @@ import json
 import uuid
 import os
 from enum import Enum
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, fields
 from zoneinfo import ZoneInfo
@@ -835,6 +835,12 @@ class ConversationStateManager:
                 })
                 if contact_id:
                     meta["contact_id"] = contact_id
+                # El contacto ya escaló: se borra el rastro de turnos del bot para
+                # que el job de rescate no lo vuelva a evaluar con datos viejos si
+                # más adelante regresa a BOT_ACTIVE.
+                meta.pop("bot_turns", None)
+                meta.pop("had_signal", None)
+                meta.pop("first_turn_at", None)
             else:
                 meta = {
                     "phone_normalized": phone,
@@ -882,6 +888,47 @@ class ConversationStateManager:
         except Exception as e:
             logger.error(f"[ConversationState] Error en request_handoff: {e}")
             return False
+
+    async def track_bot_turn(
+        self, phone: str, canal: str = "whatsapp", has_signal: bool = False
+    ) -> Tuple[int, bool]:
+        """
+        Registra un turno atendido por el bot y devuelve (turnos, hubo_señal).
+
+        Alimenta el rescate de leads estancados. Persiste en el meta:
+          - bot_turns:        turnos que el bot lleva atendiendo sin escalar
+          - had_signal:       si en algún turno el análisis marcó interés comercial
+          - first_turn_at:    timestamp del primer turno (base del timeout del job)
+
+        `has_signal` viene del llamador según handoff_priority. El flag es
+        acumulativo: una vez marcado, sigue en True aunque turnos posteriores
+        bajen a "none", porque el interés ya quedó demostrado.
+
+        Devuelve (0, False) si el meta no existe o si hubo error, para que el
+        llamador nunca dispare un rescate sobre datos incompletos.
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            raw = await self.redis.get(meta_key)
+            if not raw:
+                return (0, False)
+
+            meta = json.loads(raw)
+            turns = int(meta.get("bot_turns", 0)) + 1
+            had_signal = bool(meta.get("had_signal", False)) or has_signal
+
+            meta["bot_turns"] = turns
+            meta["had_signal"] = had_signal
+            if not meta.get("first_turn_at"):
+                meta["first_turn_at"] = get_bogota_now_iso()
+
+            await self.redis.set(meta_key, json.dumps(meta))
+            return (turns, had_signal)
+        except Exception as e:
+            logger.warning(f"[ConversationState] track_bot_turn falló: {e}")
+            return (0, False)
 
     async def update_activity(self, phone: str, canal: str = "whatsapp") -> bool:
         """

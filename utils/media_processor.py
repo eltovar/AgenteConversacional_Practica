@@ -39,6 +39,11 @@ client_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
+# Media Content Service — host REGIONAL obligatorio. `mcs.twilio.com` (sin región)
+# devuelve 301 hacia la web pública y luego 403. Configurable por si la cuenta
+# se mueve a otra región (ie1, au1...).
+TWILIO_MCS_BASE = os.getenv("TWILIO_MCS_BASE", "https://mcs.us1.twilio.com").rstrip("/")
+
 # Bunny.net Storage Configuration
 BUNNY_STORAGE_ZONE = os.getenv("BUNNY_STORAGE_ZONE_NAME")
 BUNNY_API_KEY = os.getenv("BUNNY_STORAGE_API_KEY")
@@ -438,6 +443,70 @@ class MediaProcessor:
     # =========================================================================
     # SUBIDA A BUNNY.NET STORAGE
     # =========================================================================
+
+    async def upload_to_twilio_mcs(
+        self,
+        file_bytes: bytes,
+        content_type: str,
+        chat_service_sid: str,
+        filename: Optional[str] = None,
+    ) -> Optional[str]:
+        """Sube bytes al Media Content Service de Twilio y devuelve el MediaSid (ME...).
+
+        Why: Conversations API no acepta MediaUrl — exige un MediaSid de su propio
+        servicio. Es el único camino para enviar multimedia mientras el bloqueo de
+        compliance (20003) mantiene cerrado /Messages.json.
+
+        Bunny sigue siendo la fuente de verdad del historial y de lo que ve el panel;
+        el MCS es solo vehículo de entrega y Twilio lo recolecta solo.
+
+        ⚠️ Twilio elimina el media si no se adjunta a un mensaje en 5 MINUTOS, así que
+        esta subida debe ocurrir inmediatamente antes del envío, nunca por adelantado.
+
+        Verificado el 5-ago-2026 contra la cuenta de producción:
+        - Host regional obligatorio: `mcs.us1.twilio.com` (mcs.twilio.com redirige a la web)
+        - El nombre de archivo va como query param `?Filename=` (F mayúscula; en
+          minúscula se ignora, y la cabecera Content-Disposition también)
+        - 12 MB suben en ~6s con POST simple; no hace falta multipart
+
+        Returns:
+            El MediaSid, o None si falla — el llamador decide el fallback.
+        """
+        sid = TWILIO_ACCOUNT_SID or os.getenv("TWILIO_ACCOUNT_SID")
+        token = TWILIO_AUTH_TOKEN or os.getenv("TWILIO_AUTH_TOKEN")
+        if not (sid and token):
+            logger.error("[MCS] Sin credenciales de Twilio para subir media")
+            return None
+        if not chat_service_sid:
+            logger.error("[MCS] Falta chat_service_sid — no se puede resolver el servicio")
+            return None
+
+        url = f"{TWILIO_MCS_BASE}/v1/Services/{chat_service_sid}/Media"
+        params = {"Filename": filename} if filename else None
+
+        try:
+            resp = await self._get_http_client().post(
+                url,
+                auth=(sid, token),
+                params=params,
+                content=file_bytes,
+                headers={"Content-Type": content_type or "application/octet-stream"},
+                timeout=120.0,  # videos grandes tardan; el default de 60s se queda corto
+            )
+            if resp.status_code in (200, 201):
+                media_sid = resp.json().get("sid")
+                logger.info(
+                    f"[MCS] ✅ Subido {len(file_bytes)} bytes ({content_type}) "
+                    f"-> {media_sid} filename={filename!r}"
+                )
+                return media_sid
+            logger.error(
+                f"[MCS] ❌ Error subiendo media: {resp.status_code} - {resp.text[:200]}"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"[MCS] ❌ Excepción subiendo media: {e}")
+            return None
 
     async def upload_to_bunny(
         self,
@@ -956,7 +1025,8 @@ class MediaProcessor:
         self,
         file_bytes: bytes,
         content_type: str,
-        phone: str
+        phone: str,
+        salida: Optional[dict] = None,
     ) -> str:
         """
         Sube archivo enviado por la ASESORA desde el Panel a Bunny.net.
@@ -973,6 +1043,13 @@ class MediaProcessor:
         Formatos que NO se convierten:
         - MP3: Compatible universal con WhatsApp
         - OGG/Opus: También funciona (pero usamos MP3 por mejor compatibilidad)
+
+        Args:
+            salida: dict opcional donde se reportan los bytes REALMENTE subidos y su
+                MIME final (`bytes`, `content_type`, `filename`). Lo necesita el envío
+                por Conversations, que sube esos mismos bytes al Media Content Service
+                de Twilio: si mandara los originales, el audio convertido a MP3 aquí
+                viajaría como WebM y WhatsApp lo rechazaría con 63021.
         """
         content_lower = content_type.lower()
 
@@ -993,6 +1070,12 @@ class MediaProcessor:
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
             logger.info(f"[MediaProcessor] Subiendo documento asesor: formato={doc_fmt}")
+            if salida is not None:
+                salida.update({
+                    "bytes": file_bytes,
+                    "content_type": final_content_type,
+                    "filename": filename,
+                })
             return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_video:
@@ -1004,6 +1087,12 @@ class MediaProcessor:
             clean_phone = phone.replace("+", "").replace(" ", "")
             filename = f"{clean_phone}_{int(time.time())}{extension}"
             logger.info(f"[MediaProcessor] Subiendo video asesor: formato={vid_format}")
+            if salida is not None:
+                salida.update({
+                    "bytes": file_bytes,
+                    "content_type": final_content_type,
+                    "filename": filename,
+                })
             return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 
         if is_audio:
@@ -1098,6 +1187,12 @@ class MediaProcessor:
         clean_phone = phone.replace("+", "").replace(" ", "")
         filename = f"{clean_phone}_{int(time.time())}{extension}"
 
+        if salida is not None:
+            salida.update({
+                "bytes": file_bytes,
+                "content_type": final_content_type,
+                "filename": filename,
+            })
         # Pasar el Content-Type correcto a Bunny.net
         return await self.upload_to_bunny(file_bytes, folder, filename, final_content_type)
 

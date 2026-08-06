@@ -59,6 +59,27 @@ from utils.twilio_client import twilio_client
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESCATE DE LEADS ESTANCADOS
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sofia asigna handoff_priority "medium"/"none" a clientes con interés comercial
+# real, y el escalamiento solo corre con "high"/"immediate". Esos contactos quedan
+# en BOT_ACTIVE indefinidamente: aparecen en el panel pero sin badge, así que las
+# asesoras no los distinguen de un chat que el bot atiende bien.
+#
+# Prioridades que el prompt define como "el cliente se beneficiaría de un asesor"
+# ("low": podría beneficiarse, "medium": necesita asesor pero no es urgente).
+# "none" queda fuera a propósito: el prompt lo define como "continuar normalmente",
+# y escalar por eso inundaría el panel con consultas informativas.
+RESCUE_SIGNAL_PRIORITIES = ("low", "medium")
+# Turnos con señal antes de forzar el escalamiento.
+RESCUE_SIGNAL_TURNS = 3
+# Escape para el cliente que insiste sin que Sofia le reconozca señal alguna: a
+# partir de este número de turnos se escala igual. Cubre el caso observado en
+# producción de contactos con score alto que el análisis dejó en "none" toda la
+# conversación y nunca llegaron a una asesora.
+RESCUE_ENGAGEMENT_TURNS = 5
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -669,22 +690,6 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         state_manager = get_state_manager()
         
-        # Capturar intención de handoff sin ejecutarlo todavía.
-        # El handoff se ejecutará DESPUÉS de enviar el mensaje al cliente,
-        # para que el cliente reciba la notificación antes de que el bot se bloquee.
-        pending_handoff = False
-        handoff_reason = ""
-
-        if analysis.handoff_priority == "immediate":
-            pending_handoff = True
-            handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
-        elif analysis.handoff_priority == "high":
-            pending_handoff = True
-            reason_parts = []
-            if analysis.intencion_visita:
-                reason_parts.append("Intención de visita")
-            handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
-        
         # update_activity() fue movido antes del WS notify (Fix CR-1 — ver líneas anteriores)
 
         # ✅ FIX: Persistir canal_origen y owner_id en Redis para asignación correcta de asesores
@@ -699,6 +704,44 @@ async def _process_message_deferred(
         if property_code_result.has_code and analysis and analysis.handoff_priority not in ("immediate", "high"):
             analysis.handoff_priority = "high"
             analysis.intencion_visita = True
+
+        # Rescate de leads estancados: Sofia deja en "medium"/"none" a clientes con
+        # interés real y esos contactos nunca escalan — quedan en BOT_ACTIVE, sin badge
+        # en el panel, indistinguibles de un chat que el bot atiende bien.
+        # No se condiciona a tener el nombre: en producción se observaron contactos que
+        # sí lo dieron y aun así quedaron atrapados.
+        if analysis and analysis.handoff_priority not in ("immediate", "high"):
+            _has_signal = analysis.handoff_priority in RESCUE_SIGNAL_PRIORITIES
+            _turns, _had_signal = await state_manager.track_bot_turn(
+                phone_normalized, final_channel, has_signal=_has_signal
+            )
+            _rescue_by_signal = _had_signal and _turns >= RESCUE_SIGNAL_TURNS
+            _rescue_by_engagement = _turns >= RESCUE_ENGAGEMENT_TURNS
+            if _rescue_by_signal or _rescue_by_engagement:
+                analysis.handoff_priority = "high"
+                _motivo = "señal comercial" if _rescue_by_signal else "insistencia sin señal"
+                logger.info(
+                    f"[Rescue] Escalamiento forzado tras {_turns} turnos "
+                    f"({_motivo}, canal: {final_channel})"
+                )
+
+        # Capturar intención de handoff sin ejecutarlo todavía.
+        # El handoff se ejecutará DESPUÉS de enviar el mensaje al cliente,
+        # para que el cliente reciba la notificación antes de que el bot se bloquee.
+        # Se evalúa después de los overrides de prioridad: calcularlo antes dejaba
+        # pending_handoff=False aunque el override subiera la prioridad a "high".
+        pending_handoff = False
+        handoff_reason = ""
+
+        if analysis.handoff_priority == "immediate":
+            pending_handoff = True
+            handoff_reason = f"Cliente urgente - Emoción: {analysis.emocion}"
+        elif analysis.handoff_priority == "high":
+            pending_handoff = True
+            reason_parts = []
+            if analysis.intencion_visita:
+                reason_parts.append("Intención de visita")
+            handoff_reason = ", ".join(reason_parts) if reason_parts else "Cliente potencial"
 
       # Solo agregar al panel (ZSET) si el contacto tiene señal comercial.
         # Contactos que regresan (is_new=False): su meta ya existe, el bloque

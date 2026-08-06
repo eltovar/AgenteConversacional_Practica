@@ -4,8 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard de Métricas - Inmobiliaria Proteger</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Tailwind y Chart.js autoalojados: antes venían de CDN externo y el
+         dashboard quedaba sin estilos (o sin gráficos) cuando la descarga fallaba.
+         Ver el comentario en index.html y docs/PANEL_TAILWIND.md -->
+    <link rel="stylesheet" href="/whatsapp/panel/static/tailwind.css">
+    <script src="/whatsapp/panel/static/chart.umd.js"></script>
     <link rel="stylesheet" href="/whatsapp/panel/static/metrics.css?v=2">
 </head>
 <body class="bg-gray-100 min-h-screen">

@@ -11,6 +11,7 @@ En lugar de responder via TwiML, enviamos mensajes directamente via API.
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 import httpx
@@ -25,6 +26,22 @@ TWILIO_MESSAGING_SERVICE_SID = os.getenv("TWILIO_MESSAGING_SERVICE_SID")  # MGxx
 # Feature flag para routing outbound. False → fuerza Programmable Messaging
 # (/Messages.json) y evita el cargo MAU de Conversations API ($0.05/usuario activo)
 TWILIO_USE_CONVERSATIONS = os.getenv("TWILIO_USE_CONVERSATIONS", "true").lower() == "true"
+
+# Workaround del bloqueo de compliance (error 20003).
+#
+# Why: una cuenta Twilio sin primary compliance profile aprobado tiene BLOQUEADO
+# POST /Messages.json — devuelve 401/20003 antes incluso de validar el destino.
+# El endpoint de Conversations NO pasa por ese control: verificado en producción
+# el 4-ago-2026, donde el mismo envío devolvió 63016 (fuera de ventana 24h) en vez
+# de 20003, o sea que salió de Twilio y llegó hasta WhatsApp.
+#
+# Con este flag activo, cuando no exista una Conversation previa para el número se
+# crea una al vuelo (Conversation + Participant) en lugar de caer a /Messages.json.
+# Sin el flag el comportamiento es idéntico al de siempre.
+#
+# Desactivar en cuanto Twilio apruebe el compliance profile: el camino normal es
+# más simple y no crea recursos Conversation por contacto.
+TWILIO_FORCE_CONVERSATIONS = os.getenv("TWILIO_FORCE_CONVERSATIONS", "false").lower() == "true"
 
 # URL base de Twilio API
 TWILIO_API_URL = "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
@@ -309,6 +326,185 @@ class TwilioClient:
             await asyncio.sleep(wait_s)
         return resp
 
+    async def _capture_delivery_receipt_deferred(
+        self,
+        conversation_sid: str,
+        im_sid: str,
+        chat_service_sid: Optional[str] = None,
+        delay: float = 8.0,
+        retries: int = 4,
+    ) -> None:
+        """Consulta Receipts tras enviar y persiste el SM SID + el estado de entrega.
+
+        Why: por la ruta de Conversations guardamos `message_sid = IM...`, pero el
+        callback de estado de Twilio siempre llega con el SM. La búsqueda no casaba y
+        el estado nunca se actualizaba — se perdían los ✓✓ y, sobre todo, la alerta
+        de "mensaje NO entregado", que es lo que permite al asesor saber que una
+        plantilla no llegó.
+
+        El endpoint Receipts entrega `channel_message_sid` (el SM), `status` y
+        `error_code` en una sola llamada, así que no depende de que el callback
+        llegue ni de cuándo: es autosuficiente.
+
+        Fire-and-forget con reintentos espaciados — el recibo tarda unos segundos en
+        materializarse. Mismo patrón que _capture_outbound_wamid_deferred.
+        """
+        try:
+            from database.mongodb_client import get_mongo_manager
+        except Exception:
+            return
+
+        sid, token, _ = self._resolve_credentials()
+        url = _conv_url(conversation_sid, chat_service_sid, suffix=f"/Messages/{im_sid}/Receipts")
+
+        for intento in range(retries):
+            await asyncio.sleep(delay if intento == 0 else 15.0)
+            try:
+                resp = await self._get_http_client().get(url, auth=(sid, token), params={"PageSize": "5"})
+                if resp.status_code != 200:
+                    continue
+                recibos = resp.json().get("delivery_receipts") or []
+                if not recibos:
+                    continue
+
+                # Con un solo participante WhatsApp hay un recibo; se toma el más
+                # avanzado por si Twilio ya reportó read además de delivered.
+                orden = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "undelivered": 4, "failed": 5}
+                recibo = max(recibos, key=lambda r: orden.get(r.get("status"), 0))
+                sm_sid = recibo.get("channel_message_sid")
+                estado = recibo.get("status")
+                cod_error = recibo.get("error_code")
+
+                mm = get_mongo_manager()
+                if not await mm.connect():
+                    return
+                # Mongo rechaza un $set vacío, así que solo se escribe si hay SM.
+                if sm_sid:
+                    await mm.db.messages.update_one(
+                        {"conversations_message_sid": im_sid},
+                        {"$set": {"channel_message_sid": sm_sid}},
+                    )
+                if estado in ("delivered", "read", "failed", "undelivered"):
+                    normalizado = "delivered" if estado in ("delivered", "read") else "failed"
+                    await mm.update_delivery_status(
+                        message_sid=im_sid,
+                        status=normalizado,
+                        delivered_at=datetime.utcnow() if normalizado == "delivered" else None,
+                        error_code=str(cod_error) if cod_error else None,
+                    )
+                    logger.info(
+                        f"[Receipts] IM={im_sid[:20]} SM={sm_sid} estado={estado} "
+                        f"error_code={cod_error}"
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"[Receipts] Intento {intento + 1} falló para IM={im_sid[:20]}: {e}")
+
+        logger.info(f"[Receipts] Sin recibo resoluble para IM={im_sid[:20]} tras {retries} intentos")
+
+    async def _chat_service_of(self, conversation_sid: str) -> Optional[str]:
+        """Devuelve el ChatServiceSid de una conversación, o None si no se puede leer."""
+        sid, token, _ = self._resolve_credentials()
+        try:
+            resp = await self._get_http_client().get(
+                f"{TWILIO_CONV_BASE}/Conversations/{conversation_sid}", auth=(sid, token)
+            )
+            if resp.status_code == 200:
+                return resp.json().get("chat_service_sid")
+        except Exception as e:
+            logger.warning(f"[TwilioClient] No se pudo leer chat_service_sid: {e}")
+        return None
+
+    async def _create_conversation_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
+        """Crea una Conversation con el número como participante WhatsApp.
+
+        Usada solo con TWILIO_FORCE_CONVERSATIONS activo, cuando no existe una
+        conversación previa para el destino. Devuelve (conversation_sid, chat_service_sid).
+
+        Why: sortea el bloqueo 20003 de /Messages.json en cuentas sin compliance
+        profile aprobado. El endpoint de Conversations no aplica ese control.
+        """
+        sid, token, phone = self._resolve_credentials()
+        if not self._available:
+            return None, None
+
+        proxy = phone or ""
+        if proxy and not proxy.startswith("whatsapp:"):
+            proxy = f"whatsapp:{proxy}"
+        if not proxy:
+            logger.error("[TwilioClient][ConvAuto] Sin TWILIO_PHONE_NUMBER para usar de proxy")
+            return None, None
+
+        client = self._get_http_client()
+        try:
+            resp = await self._post_with_429_retry(
+                client,
+                f"{TWILIO_CONV_BASE}/Conversations",
+                auth=(sid, token),
+                data={"FriendlyName": f"auto-{to.replace('whatsapp:', '')}"},
+            )
+            if resp.status_code not in (200, 201):
+                logger.error(
+                    f"[TwilioClient][ConvAuto] No se pudo crear conversación: "
+                    f"{resp.status_code} - {resp.text[:200]}"
+                )
+                return None, None
+            data = resp.json()
+            conv_sid = data.get("sid")
+            svc_sid = data.get("chat_service_sid")
+
+            # El participante enlaza el número del cliente con nuestro sender.
+            # Sin él la conversación existe pero no despacha a WhatsApp.
+            p_resp = await self._post_with_429_retry(
+                client,
+                _conv_url(conv_sid, svc_sid, suffix="/Participants"),
+                auth=(sid, token),
+                data={
+                    "MessagingBinding.Address": to,
+                    "MessagingBinding.ProxyAddress": proxy,
+                },
+            )
+            if p_resp.status_code not in (200, 201):
+                # 50416: el par (cliente, sender) ya está enlazado en otra
+                # conversación. Twilio nombra cuál en el propio mensaje de error,
+                # así que se reutiliza esa en vez de fallar. Pasa siempre que un
+                # envío anterior creó la conversación pero no llegó a persistirse
+                # en MongoDB, por ejemplo si el mensaje falló después.
+                existing = None
+                if p_resp.status_code == 409:
+                    m = re.search(r"CH[0-9a-f]{32}", p_resp.text or "")
+                    if m:
+                        existing = m.group(0)
+
+                # La conversación recién creada quedó sin participante: se borra
+                # para no acumular recursos huérfanos por cada intento.
+                try:
+                    await client.delete(_conv_url(conv_sid, svc_sid), auth=(sid, token))
+                except Exception:
+                    pass
+
+                if existing:
+                    logger.info(
+                        f"[TwilioClient][ConvAuto] Participante ya enlazado — "
+                        f"reutilizando conversación {existing[:12]}..."
+                    )
+                    return existing, await self._chat_service_of(existing)
+
+                logger.error(
+                    f"[TwilioClient][ConvAuto] No se pudo agregar participante: "
+                    f"{p_resp.status_code} - {p_resp.text[:200]}"
+                )
+                return None, None
+
+            logger.info(
+                f"[TwilioClient][ConvAuto] Conversación creada {conv_sid[:12]}... "
+                f"para {to[-6:]} (workaround compliance)"
+            )
+            return conv_sid, svc_sid
+        except Exception as e:
+            logger.error(f"[TwilioClient][ConvAuto] Excepción creando conversación: {e}")
+            return None, None
+
     async def _send_via_conversations(
         self,
         conversation_sid: str,
@@ -316,12 +512,15 @@ class TwilioClient:
         content_sid: Optional[str] = None,
         content_variables: Optional[dict] = None,
         chat_service_sid: Optional[str] = None,
+        media_sid: Optional[str] = None,
     ) -> dict:
         """Envía mensaje vía endpoint Conversations (billing por sesión 24h).
 
         Endpoint: POST /v1/[Services/{ISxxx}/]Conversations/{CHsid}/Messages
         Reduce costo de $0.005/mensaje a $0.005/sesión-24h ilimitada.
-        No soporta MediaUrl directo (requiere upload previo a Media Content Service).
+
+        Para multimedia no acepta MediaUrl: exige un `media_sid` (ME...) ya subido al
+        Media Content Service — ver MediaProcessor.upload_to_twilio_mcs().
         """
         sid, token, _ = self._resolve_credentials()
         if not self._available:
@@ -333,10 +532,14 @@ class TwilioClient:
             payload["ContentSid"] = content_sid
             if content_variables:
                 payload["ContentVariables"] = json.dumps(content_variables)
+        elif media_sid:
+            # WhatsApp no admite caption junto a media en Conversations: el Body se
+            # ignora. El panel ya maneja el texto acompañante como mensaje aparte.
+            payload["MediaSid"] = media_sid
         elif body:
             payload["Body"] = body
         else:
-            return {"status": "error", "message": "Sin body ni content_sid"}
+            return {"status": "error", "message": "Sin body, media_sid ni content_sid"}
 
         try:
             client = self._get_http_client()
@@ -354,6 +557,18 @@ class TwilioClient:
                 # (Twilio no expone el WAMid vía REST API GET).
                 # La captura del WAMid depende del webhook bounce-back con
                 # Source=API, manejado en webhook_handler.py.
+
+                # Receipts sí funciona para salientes y da el SM SID + el estado.
+                # Sin esto el callback de Twilio (que llega con SM) no encuentra el
+                # documento guardado con el IM, y la alerta de no-entregado no salta.
+                if im_sid:
+                    asyncio.create_task(
+                        self._capture_delivery_receipt_deferred(
+                            conversation_sid=conversation_sid,
+                            im_sid=im_sid,
+                            chat_service_sid=chat_service_sid,
+                        )
+                    )
                 return {
                     "status": "success",
                     "message_sid": im_sid,
@@ -384,6 +599,9 @@ class TwilioClient:
         content_variables: Optional[dict] = None,
         conversation_sid: Optional[str] = None,
         chat_service_sid: Optional[str] = None,
+        media_bytes: Optional[bytes] = None,
+        media_content_type: Optional[str] = None,
+        media_filename: Optional[str] = None,
     ) -> dict:
         """
         Envía un mensaje de WhatsApp usando la API de Twilio.
@@ -420,24 +638,83 @@ class TwilioClient:
 
         # Ruta preferida: Conversations endpoint (billing por sesión 24h)
         # Solo aplica si no hay media (Conversations requiere MCS upload para MediaSid).
-        if not media_url and TWILIO_USE_CONVERSATIONS:
+        # Con media, la ruta de Conversations solo es viable si tenemos los bytes para
+        # subirlos al MCS: el endpoint no acepta MediaUrl. Sin bytes se mantiene el
+        # comportamiento histórico (media siempre por /Messages.json).
+        _media_via_mcs = bool(media_bytes) and TWILIO_FORCE_CONVERSATIONS
+        if (not media_url or _media_via_mcs) and TWILIO_USE_CONVERSATIONS:
             if conversation_sid:
                 conv_sid = conversation_sid
                 svc_sid = chat_service_sid
             else:
                 conv_sid, svc_sid = await self._resolve_conv_sid_for_phone(to)
+            # Workaround compliance: sin conversación previa, /Messages.json daría
+            # 20003. Se crea una al vuelo para poder salir por Conversations.
+            if not conv_sid and TWILIO_FORCE_CONVERSATIONS:
+                conv_sid, svc_sid = await self._create_conversation_for_phone(to)
+                if not conv_sid:
+                    # Sin conversación no hay salida: continuar caería a
+                    # /Messages.json, que devolvería 20003 y ocultaría la causa.
+                    logger.error(
+                        "[TwilioClient] No se pudo obtener conversación y "
+                        "TWILIO_FORCE_CONVERSATIONS está activo — sin fallback"
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            "No se pudo crear ni reutilizar una conversación de Twilio. "
+                            "Revisa los logs de [ConvAuto]."
+                        ),
+                    }
+            # Subida al MCS DESPUÉS de resolver la conversación: hace falta su
+            # chat_service_sid, y Twilio recolecta el media si no se adjunta en 5 min,
+            # así que se sube lo más tarde posible.
+            media_sid = None
+            if conv_sid and _media_via_mcs:
+                from utils.media_processor import media_processor
+                # El MCS necesita el ChatServiceSid. Si la conversación venía de
+                # MongoDB puede no traerlo, así que se resuelve contra Twilio.
+                mcs_service = svc_sid or await self._chat_service_of(conv_sid)
+                media_sid = await media_processor.upload_to_twilio_mcs(
+                    file_bytes=media_bytes,
+                    content_type=media_content_type,
+                    chat_service_sid=mcs_service,
+                    filename=media_filename,
+                )
+                if not media_sid:
+                    logger.error(
+                        "[TwilioClient] Falló la subida al MCS — sin fallback posible "
+                        "(/Messages.json daría 20003 con TWILIO_FORCE_CONVERSATIONS)"
+                    )
+                    return {
+                        "status": "error",
+                        "message": (
+                            "No se pudo subir el archivo a Twilio. "
+                            "El archivo sí quedó guardado en Bunny. Revisa los logs de [MCS]."
+                        ),
+                    }
+
             if conv_sid:
                 conv_result = await self._send_via_conversations(
                     conversation_sid=conv_sid,
-                    body=body if not content_sid else None,
+                    body=body if not (content_sid or media_sid) else None,
                     content_sid=content_sid,
                     content_variables=content_variables,
                     chat_service_sid=svc_sid,
+                    media_sid=media_sid,
                 )
                 if conv_result.get("status") == "success":
                     conv_result.setdefault("to", to)
                     conv_result.setdefault("message_status", "queued")
                     conv_result.setdefault("chat_service_sid", svc_sid)
+                    return conv_result
+                if TWILIO_FORCE_CONVERSATIONS:
+                    # Con el workaround activo /Messages.json devolvería 20003 seguro,
+                    # enmascarando la causa real. Se devuelve el error de Conversations.
+                    logger.error(
+                        f"[TwilioClient] Conversations falló (code={conv_result.get('code')}) "
+                        f"y TWILIO_FORCE_CONVERSATIONS está activo — sin fallback"
+                    )
                     return conv_result
                 logger.warning(
                     f"[TwilioClient] Conversations endpoint falló "

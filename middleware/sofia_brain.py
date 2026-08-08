@@ -52,6 +52,13 @@ class MessageAnalysis:
     ubicacion: Optional[str] = None
     presupuesto: Optional[str] = None
     caracteristicas: Optional[list] = None
+    # True cuando este análisis NO proviene del LLM sino de un fallback de error.
+    # Sin esta marca, un fallo del LLM es indistinguible de un análisis legítimo que
+    # concluyó "sin interés": ambos llegan con handoff_priority="none" y el contacto
+    # se queda en BOT_ACTIVE sin que nadie lo atienda. Ver el incidente del 7-ago-2026,
+    # cuando la cuenta de OpenAI se quedó sin créditos y dos días de leads murieron en
+    # silencio porque el sistema los leyó como desinteresados.
+    analysis_failed: bool = False
 
     def __post_init__(self):
         if self.suspicious_indicators is None:
@@ -400,10 +407,12 @@ class SofiaBrain:
 
         except Exception as e:
             logger.error(f"[SofiaBrain] Error en Single-Stream: {e}", exc_info=True)
-            # Retornar respuesta de error con análisis por defecto
+            # El LLM no respondió: el análisis se marca como fallido para que el
+            # webhook escale a una asesora en vez de leer el "none" por defecto
+            # como ausencia de interés.
             return SingleStreamResponse(
                 respuesta=MIDDLEWARE_MESSAGES["error_processing"],
-                analisis=MessageAnalysis()
+                analisis=MessageAnalysis(analysis_failed=True)
             )
 
     def _parse_single_stream_response(self, raw_content: str) -> SingleStreamResponse:
@@ -452,12 +461,17 @@ class SofiaBrain:
             if _match:
                 _respuesta = _match.group(1).replace('\\"', '"').replace('\\n', '\n')
                 logger.info(f"[SofiaBrain] Respuesta extraída por regex: {_respuesta[:80]}...")
-                return SingleStreamResponse(respuesta=_respuesta, analisis=MessageAnalysis())
+                # Se rescató el texto, pero el análisis se perdió: sin marcarlo, el
+                # contacto viajaría con handoff_priority="none" sin que nadie lo evaluara.
+                return SingleStreamResponse(
+                    respuesta=_respuesta,
+                    analisis=MessageAnalysis(analysis_failed=True)
+                )
             # Fallback final: mensaje genérico (nunca enviar JSON crudo al usuario)
             logger.error(f"[SofiaBrain] No se pudo parsear ni extraer respuesta. raw[:200]: {raw_content[:200]}")
             return SingleStreamResponse(
                 respuesta="Entendido, déjame verificar eso y te respondo en un momento.",
-                analisis=MessageAnalysis()
+                analisis=MessageAnalysis(analysis_failed=True)
             )
 
     def _format_lead_context(self, lead_context: Dict[str, Any]) -> str:

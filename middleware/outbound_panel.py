@@ -182,10 +182,19 @@ def get_httpx_client() -> httpx.AsyncClient:
             max_connections=20,
             keepalive_expiry=30.0
         )
+        # Hooks de instrumentación — miden latencia por llamada a HubSpot.
+        # Dict vacío si el profiler está apagado (sin overhead alguno).
+        try:
+            from middleware.query_profiler import build_httpx_event_hooks
+            _event_hooks = build_httpx_event_hooks()
+        except Exception:
+            _event_hooks = {}
+
         _httpx_client = httpx.AsyncClient(
             timeout=httpx.Timeout(15.0, connect=5.0),
             limits=limits,
-            http2=False  # HTTP/2 puede causar problemas con algunos CDNs
+            http2=False,  # HTTP/2 puede causar problemas con algunos CDNs
+            event_hooks=_event_hooks,
         )
         logger.info("[Panel] Cliente HTTP global inicializado con connection pooling")
     return _httpx_client

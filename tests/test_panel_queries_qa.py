@@ -103,7 +103,7 @@ def test_03_search_endpoint_uses_singleton():
 
 def _cache_params_expression(src):
     """Extrae el texto de la asignacion de _cache_params en GET /contacts."""
-    m = re.search(r"_cache_params\s*=\s*\(?(.*?)\)?\n\s*_contacts_cache_key", src, re.S)
+    m = re.search(r"_cache_params\s*=\s*\(?(.*?)\)?\n\s*_contacts_cache_key", src, re.DOTALL)
     assert m, "No se encontro la asignacion de _cache_params"
     return m.group(1)
 

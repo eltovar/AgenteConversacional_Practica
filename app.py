@@ -141,6 +141,14 @@ def get_state_manager() -> ConversationStateManager:
 app = FastAPI(title="Sofía IA - Middleware", version="2.0.0")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PROFILER DE CONSULTAS — desglose de latencia por capa (Mongo / HubSpot / resto)
+# Emite header `Server-Timing`. Apagable con QUERY_PROFILER_ENABLED=false.
+# ═══════════════════════════════════════════════════════════════════════════════
+from middleware.query_profiler import server_timing_middleware as _server_timing
+
+app.middleware("http")(_server_timing)
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RATE LIMITING — protección contra abuso y reducción de carga en hot paths
 # ═══════════════════════════════════════════════════════════════════════════════
 from slowapi import Limiter, _rate_limit_exceeded_handler

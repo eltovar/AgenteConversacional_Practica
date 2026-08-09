@@ -112,6 +112,15 @@ class MongoDBManager:
             return False
 
         try:
+            # Profiler de consultas (equivalente P6Spy). Debe registrarse ANTES
+            # de crear el cliente: PyMongo captura los listeners globales en el
+            # momento de la construcción. Idempotente y fail-open.
+            try:
+                from middleware.query_profiler import register_mongo_listener
+                register_mongo_listener()
+            except Exception as _qp_err:
+                logger.debug(f"[MongoDB] Profiler no disponible: {_qp_err}")
+
             self.client = AsyncIOMotorClient(
                 self.mongo_url,
                 serverSelectionTimeoutMS=5000,

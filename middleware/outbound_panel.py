@@ -4557,11 +4557,13 @@ async def search_contacts_by_keyword(
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     try:
-        from database.mongodb_client import MongoDBManager
-
         logger.info(f"[Panel] Búsqueda por palabra clave: '{q}'")
 
-        mongo_manager = MongoDBManager()
+        # ⚠️ Usar SIEMPRE el singleton. Instanciar MongoDBManager() aquí creaba un
+        # AsyncIOMotorClient nuevo (maxPoolSize=20) por cada request de búsqueda,
+        # que además re-ejecutaba _ensure_indexes() (24 createIndex) y nunca se
+        # cerraba → memory leak + latencia de handshake en cada tecleo.
+        mongo_manager = get_mongo_manager()
         matching_phones = await mongo_manager.search_messages_fulltext(q, limit=limit)
 
         logger.info(f"[Panel] Búsqueda '{q}': {len(matching_phones)} contactos encontrados")
@@ -4863,7 +4865,14 @@ async def get_active_contacts(
         state_manager = _get_state_manager()
 
         # === CACHE: Respuesta completa en Redis (TTL 5s) para colapsar concurrent requests ===
-        _cache_params = f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:{date_field}:{page}:{limit}"
+        # include_phone DEBE formar parte de la key: una request con deep link inyecta
+        # un contacto cross-advisor en la respuesta, y sin él en la key esa respuesta
+        # contaminada se servía durante 5s a cualquier otra petición con los mismos
+        # parámetros (fuga de la segregación por equipo).
+        _cache_params = (
+            f"{advisor or ''}:{filter_time}:{date_from or ''}:{date_to or ''}:"
+            f"{date_field}:{page}:{limit}:{include_phone or ''}"
+        )
         _contacts_cache_key = f"contacts_resp:{hashlib.md5(_cache_params.encode()).hexdigest()}"
         try:
             _cached = await state_manager.redis.get(_contacts_cache_key)

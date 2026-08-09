@@ -131,4 +131,61 @@ PGVECTOR_DATABASE_URL
 BUNNY_STORAGE_API_KEY
 ADMIN_API_KEY
 TWILIO_CONVERSATIONS_ENABLED   # feature flag migración
+
+# Profiler de consultas (middleware/query_profiler.py)
+QUERY_PROFILER_ENABLED         # default true — apaga toda la instrumentación
+QUERY_PROFILER_SLOW_MS         # default 50 — umbral de log de query lenta
+SERVER_TIMING_ENABLED          # default true — header Server-Timing
 ```
+
+---
+
+## Observabilidad — `middleware/query_profiler.py`
+
+Equivalente de P6Spy para este stack. Mide el desglose de latencia por request
+(MongoDB / HubSpot / resto) y emite el header `Server-Timing`, que Chrome
+DevTools grafica nativamente en la pestaña Network.
+
+- **Ver el desglose:** DevTools → Network → request → pestaña Timing.
+- **Queries lentas:** `railway logs | grep QueryProfiler`
+- **Apagar sin deploy:** `QUERY_PROFILER_ENABLED=false` en Railway.
+
+⚠️ **PII:** el profiler nunca loguea el filtro de las queries Mongo ni el query
+string de HubSpot, y enmascara los paths (`/contacts/{id}/detail`) porque el
+panel tiene 10+ rutas con el teléfono en la URL. Si añades logs aquí, respeta
+`_safe_path()`.
+
+---
+
+## Investigaciones Pendientes (Arquitectura Mayor)
+
+Dos temas de rediseño acordados en ago-2026. **No implementar sin análisis
+previo** — están priorizados para "un futuro no muy lejano".
+
+### 1. Rate limit 429 de HubSpot
+
+Estado actual: `_hubspot_post` / `_hubspot_get` hacen backoff **bloqueante
+dentro del request** (`await asyncio.sleep(12 * attempt)`), serializado detrás
+de `Semaphore(2)`. Un GET con `max_retries=2` puede costar **36 s**. El propio
+código lo documenta en `outbound_panel.py`: *"534 contactos × waits de 429
+(36s c/u) = timeout de Railway"*.
+
+A investigar:
+- Cuál es la mejor forma de optimizarlo (cola asíncrona, token bucket,
+  circuit breaker, caché más agresiva, webhooks de HubSpot en vez de polling).
+- Leer la documentación oficial de HubSpot sobre límites y generar hipótesis
+  **sin** sacar a HubSpot del sistema.
+- Evaluar explícitamente si eliminar HubSpot es viable y recomendable, con
+  argumentos a favor y en contra.
+
+### 2. Fuente única de verdad
+
+Hoy la lista de contactos del panel se arma desde **6 rutas de código** con
+destinos distintos (HubSpot search, MongoDB `appointments`, Redis ZSET,
+MongoDB `conversations`, MongoDB `messages` fulltext, y filtro en el navegador),
+cada una con su propio tope. La deduplicación funciona, pero la dispersión es
+el problema arquitectónico de fondo.
+
+A investigar: dos variantes de rediseño hacia una fuente única de verdad —
+una **conservando** HubSpot y otra **eliminándolo** — evaluadas contra el
+tiempo real de desarrollo y la capacidad de desplegar por partes.

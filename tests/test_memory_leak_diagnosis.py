@@ -25,6 +25,20 @@ def _read(relpath):
         return f.read()
 
 
+def _is_skipped(dirpath, skips):
+    """
+    True si dirpath debe excluirse del walk.
+
+    Compara contra la ruta RELATIVA a ROOT, no la absoluta. Con la ruta absoluta
+    el filtro '.claude' hacia match con TODO el repo cuando se corre desde un
+    git worktree (que vive en .claude/worktrees/<rama>/), dejando 0 archivos
+    escaneados y haciendo fallar los tests de conteo con un falso positivo.
+    """
+    rel = os.path.relpath(dirpath, ROOT)
+    parts = rel.split(os.sep)
+    return any(skip in parts for skip in skips)
+
+
 # ═══════════════════════════════════════════════════════════════
 # FASE 1: Tests de diagnostico (analisis estatico, sin imports)
 # ═══════════════════════════════════════════════════════════════
@@ -33,7 +47,7 @@ def test_01_count_redis_from_url_calls():
     """Cuenta cuantas veces se llama from_url() en todo el proyecto."""
     locations = []
     for dirpath, _, filenames in os.walk(ROOT):
-        if any(skip in dirpath for skip in ['.git', 'node_modules', '__pycache__', '.claude']):
+        if _is_skipped(dirpath, ['.git', 'node_modules', '__pycache__', '.claude']):
             continue
         for fname in filenames:
             if not fname.endswith('.py'):
@@ -166,7 +180,7 @@ def test_06_pools_without_max_connections():
     capped = []
 
     for dirpath, _, filenames in os.walk(ROOT):
-        if any(skip in dirpath for skip in ['.git', 'node_modules', '__pycache__', '.claude', 'tests']):
+        if _is_skipped(dirpath, ['.git', 'node_modules', '__pycache__', '.claude', 'tests']):
             continue
         for fname in filenames:
             if not fname.endswith('.py'):

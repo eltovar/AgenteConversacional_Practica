@@ -107,6 +107,12 @@ STAGES_TRANSFER_TO_LUISA = {
     "1326623539": "Local o Bodega",
     "subscriber": "Reubicados",
 }
+# Stages que cierran la conversación SIN transferir owner — cierre puro.
+# Se diferencian de STAGES_TRANSFER_TO_LUISA: allí el contacto cambia de dueño y
+# reaparece en el panel destino; aquí sale del panel y Sofía retoma.
+STAGES_AUTO_CLOSE = {
+    "evangelist": "Cerrado perdido",
+}
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {
     "salesqualifiedlead", "opportunity", "customer", "evangelist",
@@ -3304,6 +3310,19 @@ async def _close_conversation_internal(
     except Exception as e:
         logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
 
+    # Espejo en MongoDB: sin esto el contacto reaparece en el panel, porque el
+    # fallback GET /contacts (find_conversations_by_owner) y el rebuild nocturno
+    # (find_recent_conversations) releen `conversations` y ambos filtran por `archived`.
+    try:
+        from database.mongodb_client import get_mongo_manager
+        await get_mongo_manager().update_conversation_meta(
+            phone=phone_normalized,
+            canal=(canal or "whatsapp").lower(),
+            archived=True,
+        )
+    except Exception as e_arch:
+        logger.warning(f"[Panel] No se pudo archivar en MongoDB al cerrar {phone_normalized}: {e_arch}")
+
     try:
         _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
         if _close_meta and _close_meta.assigned_owner_id:
@@ -3434,20 +3453,31 @@ async def _transfer_to_luisa(
     try:
         r = await _get_redis_client()
         raw_meta = await r.get(meta_key)
-        if raw_meta:
-            transfer_result = await state_manager.transfer_ownership(
+        if not raw_meta:
+            # transfer_contact() aborta si no hay conv_meta. Sin este bootstrap la
+            # transferencia se saltaba en silencio y HubSpot conservaba al owner
+            # anterior, aunque el contacto sí llegara al panel destino vía ③.
+            # add_to_zset=False: el paso ① acaba de cerrarlo y ③ lo re-activa.
+            logger.info(f"{tag} Sin meta previa para {phone_normalized} — creando antes de transferir")
+            await state_manager.ensure_meta_with_channel(
                 phone=phone_normalized,
                 canal=canal_safe,
-                to_owner_id=LUISA_TRANSFER_TARGET,
+                canal_origen=canal_safe,
                 contact_id=contact_id,
-                reason=f"Embudo {stage_name} — transferencia automática",
-                mode="exclusive",
+                add_to_zset=False,
             )
-            if transfer_result.get("status") != "success":
-                logger.warning(f"{tag} Transfer falló: {transfer_result}")
-                result["transfer_error"] = transfer_result.get("message")
-        else:
-            logger.info(f"{tag} Sin meta previa para {phone_normalized} — creando directo")
+
+        transfer_result = await state_manager.transfer_ownership(
+            phone=phone_normalized,
+            canal=canal_safe,
+            to_owner_id=LUISA_TRANSFER_TARGET,
+            contact_id=contact_id,
+            reason=f"Embudo {stage_name} — transferencia automática",
+            mode="exclusive",
+        )
+        if transfer_result.get("status") != "success":
+            logger.warning(f"{tag} Transfer falló: {transfer_result}")
+            result["transfer_error"] = transfer_result.get("message")
     except Exception as e_transfer:
         logger.error(f"{tag} Transfer error: {e_transfer}")
         result["transfer_error"] = str(e_transfer)
@@ -3518,6 +3548,63 @@ async def _transfer_to_luisa(
         f"{tag} Transferencia completada — phone={phone_normalized} "
         f"contact={contact_id} closed={result['closed']} transferred={result['transferred']}"
     )
+    return result
+
+
+# ============================================================================
+# Helper: Cierre automático por embudo (sin transferencia de owner)
+# ============================================================================
+
+async def _auto_close_by_stage(
+    phone: str,
+    canal: Optional[str],
+    stage_id: str,
+) -> dict:
+    """
+    Cierra la conversación cuando la asesora mueve el contacto a un embudo
+    terminal (STAGES_AUTO_CLOSE, hoy "Cerrado perdido").
+
+    A diferencia de _transfer_to_luisa, aquí NO hay cambio de dueño: el contacto
+    sale del panel y Sofía retoma. Notifica por WebSocket para que la lista se
+    refresque sin que la asesora tenga que recargar.
+    """
+    stage_name = STAGES_AUTO_CLOSE.get(stage_id, stage_id)
+    tag = f"[AutoClose:{stage_name}]"
+    canal_safe = (canal or "whatsapp").lower()
+    result = {"closed": False, "close_error": None}
+
+    state_manager = _get_state_manager()
+
+    # Capturar el estado real ANTES de cerrar — _close_conversation_internal
+    # lo deja en BOT_ACTIVE y se perdería el valor de origen.
+    try:
+        _prev = await state_manager.get_status(phone, canal_safe)
+        old_status = _prev.value if _prev else ConversationStatus.BOT_ACTIVE.value
+    except Exception:
+        old_status = ConversationStatus.BOT_ACTIVE.value
+
+    try:
+        close_result = await _close_conversation_internal(phone, canal_safe)
+        phone_normalized = close_result["phone"]
+        result["closed"] = True
+    except Exception as e_close:
+        logger.error(f"{tag} Close falló para {phone}: {e_close}")
+        result["close_error"] = str(e_close)
+        return result
+
+    try:
+        meta = await state_manager.get_meta(phone_normalized, canal_safe)
+        await ws_manager.notify_status_change(
+            phone=phone_normalized,
+            canal=canal_safe,
+            old_status=old_status,
+            new_status=stage_name,
+            contact_name=(meta.display_name if meta else "") or "",
+        )
+    except Exception as e_ws:
+        logger.warning(f"{tag} WS notify falló (non-fatal): {e_ws}")
+
+    logger.info(f"{tag} Conversación cerrada por embudo — phone={phone_normalized}")
     return result
 
 
@@ -3593,6 +3680,22 @@ async def update_contact_stage(
                         f"[Panel] Transfer falló para contact={contact_id} stage={stage_id}: {e_seg}"
                     )
                     payload["transfer_error"] = str(e_seg)
+
+            elif stage_id in STAGES_AUTO_CLOSE and phone:
+                try:
+                    close_result = await _auto_close_by_stage(phone, canal, stage_id)
+                    payload["closed"] = close_result.get("closed", False)
+                    if close_result.get("close_error"):
+                        payload["close_error"] = close_result["close_error"]
+                    logger.info(
+                        f"[Panel] AutoClose {STAGES_AUTO_CLOSE[stage_id]} — "
+                        f"contact={contact_id} phone={phone} closed={payload['closed']}"
+                    )
+                except Exception as e_close:
+                    logger.error(
+                        f"[Panel] AutoClose falló para contact={contact_id} stage={stage_id}: {e_close}"
+                    )
+                    payload["close_error"] = str(e_close)
 
             return payload
         else:

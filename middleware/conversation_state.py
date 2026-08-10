@@ -788,6 +788,9 @@ class ConversationStateManager:
                         status=ConversationStatus.HUMAN_ACTIVE.value,
                         contact_id=contact_id or existing_meta.get("contact_id"),
                         canal_origen=canal_origen or existing_meta.get("canal_origen") or "whatsapp",
+                        # Espejo de in_panel=True: revierte el archivado de un cierre previo
+                        # para que el rebuild nocturno vuelva a considerar la conversación.
+                        archived=False,
                     )
                 )
             except Exception as _sync_err:
@@ -875,6 +878,9 @@ class ConversationStateManager:
                         status=ConversationStatus.PENDING_HANDOFF.value,
                         contact_id=contact_id,
                         canal_origen=canal,
+                        # Espejo de in_panel=True (línea ~834): un contacto que reescala
+                        # debe volver a ser visible para el rebuild nocturno.
+                        archived=False,
                     )
                 )
             except Exception as _sync_err:
@@ -1549,10 +1555,13 @@ class ConversationStateManager:
                 await self.redis.set(meta_key, json.dumps(meta))
 
                 # ✅ FIX: Actualizar score en ZSET para que contacto suba arriba
-                index_member = f"{phone}:{canal_safe}"
-                score = get_bogota_now().timestamp()
-                await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje asesor)")
+                # Simetría con update_client_message_timestamp: un contacto cerrado
+                # (in_panel=False) no debe volver al ZSET por un mensaje saliente.
+                if meta.get("in_panel", True):
+                    index_member = f"{phone}:{canal_safe}"
+                    score = get_bogota_now().timestamp()
+                    await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
+                    logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje asesor)")
                 
             return True
         except Exception as e:

@@ -1979,11 +1979,17 @@ class MongoDBManager:
         status: Optional[str] = None,
         contact_id: Optional[str] = None,
         canal_origen: Optional[str] = None,
+        archived: Optional[bool] = None,
     ) -> bool:
         """
         Sincroniza metadatos del contacto en la colección `conversations`.
         Llamar desde activate_human, request_handoff, transfer_contact, close-conversation.
         Solo actualiza campos no-None — preserva valores existentes.
+
+        `archived` es el espejo en MongoDB de `in_panel` en Redis: al cerrar una
+        conversación se marca True para que los dos lectores de MongoDB
+        (find_conversations_by_owner y find_recent_conversations) dejen de
+        devolverla y no reaparezca en el panel.
         """
         if not phone or not await self.connect():
             return False
@@ -2000,6 +2006,8 @@ class MongoDBManager:
                 set_fields["contact_id"] = contact_id
             if canal_origen is not None:
                 set_fields["canal_origen"] = canal_origen
+            if archived is not None:
+                set_fields["archived"] = archived
             if len(set_fields) == 1:  # solo updated_at — nada útil que actualizar
                 return False
             result = await self.db.conversations.update_one(

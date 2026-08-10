@@ -295,6 +295,157 @@ def test_13_no_sequential_name_cache_loop_in_hot_path():
 
 
 # ═══════════════════════════════════════════════════════════════
+# 2c. PIEZA 0b — ZSCAN por contacto en /contacts/search
+#
+# Medido en produccion: GET /contacts/search = 41.632ms, de los cuales
+# mongo=52ms y hubspot=2.109ms. Los otros 39.471ms eran _hydrate_contact
+# haciendo un ZSCAN con cursor sobre el ZSET COMPLETO por cada telefono,
+# con count=20 (o sea ~N/20 round-trips cada uno), 20 veces.
+# ═══════════════════════════════════════════════════════════════
+
+class _FakeRedisZ(_FakeRedis):
+    """Cuenta ZSCAN y ZRANGE por separado."""
+
+    def __init__(self, members=None, fail=False):
+        super().__init__({}, fail)
+        self.members = members or []
+        self.zscan_calls = 0
+        self.zrange_calls = 0
+
+    async def zrange(self, key, start, end, withscores=False):
+        if self.fail:
+            raise ConnectionError("Redis caido")
+        self.zrange_calls += 1
+        return list(self.members)
+
+    async def zscan(self, key, cursor, match=None, count=None):
+        self.zscan_calls += 1
+        return (0, [])
+
+    def pipeline(self, transaction=False):
+        return _FakePipeline()
+
+
+class _FakePipeline:
+    def __init__(self):
+        self.n = 0
+
+    def get(self, *a, **k):
+        self.n += 1
+
+    def exists(self, *a, **k):
+        self.n += 1
+
+    async def execute(self):
+        return [None] * self.n
+
+
+async def test_14_zset_index_built_in_one_round_trip(monkeypatch):
+    """El indice del ZSET se arma con UN solo ZRANGE, sin ZSCAN."""
+    fake = _FakeRedisZ([
+        ("+573138405930:whatsapp", 100.0),
+        ("+573138405930:instagram", 50.0),
+        ("+573001112233:whatsapp", 90.0),
+        ("basura-sin-canal", 10.0),
+    ])
+    op = _patch_redis(monkeypatch, fake)
+
+    index = await op._build_zset_phone_index()
+
+    assert index["+573138405930"] == {"whatsapp": 100.0, "instagram": 50.0}
+    assert index["+573001112233"] == {"whatsapp": 90.0}
+    assert "basura-sin-canal" not in index, "Miembros sin ':' deben ignorarse"
+    assert fake.zrange_calls == 1
+    assert fake.zscan_calls == 0
+
+
+async def test_15_zset_index_is_fail_open(monkeypatch):
+    """
+    Si Redis falla, {} = 'sin traza en el ZSET', que es exactamente lo que
+    hacia el ZSCAN al fallar. El pipeline posterior de _hydrate_contact
+    tambien fallara y ese SI marca redis_ok=False, asi que la decision de
+    saltar _search_contact se preserva.
+    """
+    op = _patch_redis(monkeypatch, _FakeRedisZ(fail=True))
+    assert await op._build_zset_phone_index() == {}
+
+
+async def test_16_hydrate_with_index_never_scans(monkeypatch):
+    """
+    LA propiedad de la Pieza 0b: pasando zset_index, _hydrate_contact NO
+    puede tocar ZSCAN. Es lo que convierte 20 scans completos en 1 lectura.
+    """
+    fake = _FakeRedisZ([("+573138405930:whatsapp", 100.0)])
+    op = _patch_redis(monkeypatch, fake)
+
+    # Cortar cualquier salida de red: aqui solo interesa el camino Redis.
+    class _CM:
+        async def _search_contact(self, phone):
+            return None
+    monkeypatch.setattr(op, "_get_contact_manager", lambda: _CM())
+    monkeypatch.setattr(op, "HUBSPOT_API_KEY", "")
+
+    index = {"+573138405930": {"whatsapp": 100.0}}
+    try:
+        await op._hydrate_contact(
+            "+573138405930", canal_hint=None, add_to_zset=False, zset_index=index
+        )
+    except Exception:
+        pass  # el resultado no importa; la propiedad es el numero de scans
+
+    assert fake.zscan_calls == 0, (
+        f"_hydrate_contact hizo {fake.zscan_calls} ZSCAN pese a recibir el "
+        "indice — volvio el N+1 de la busqueda"
+    )
+
+
+def test_17_search_endpoint_builds_index_once_outside_the_loop():
+    """
+    El indice debe construirse UNA vez antes del gather, no dentro de _h().
+    Si se cuela dentro, volvemos a N lecturas del ZSET.
+    """
+    src = _read(PANEL)
+    start = src.index("async def search_contacts_by_keyword")
+    end = src.index("async def _get_contacts_by_worker_filter")
+    body = src[start:end]
+
+    assert "_build_zset_phone_index()" in body, (
+        "La busqueda no indexa el ZSET — cada hydrate volveria a escanear"
+    )
+    assert "zset_index=_zset_index" in body, "El indice no se pasa a _hydrate_contact"
+
+    idx_build = body.index("_build_zset_phone_index()")
+    idx_inner = body.index("async def _h(")
+    assert idx_build < idx_inner, (
+        "El indice se construye DENTRO de la funcion por-contacto — "
+        "debe armarse una sola vez antes"
+    )
+
+
+def test_18_zscan_count_is_not_pathological():
+    """
+    count=20 obligaba a ~N/20 round-trips para recorrer el ZSET completo,
+    porque MATCH filtra DESPUES de escanear. Con miles de miembros eran
+    cientos de viajes por contacto.
+    """
+    # Descartar comentarios: el propio fix documenta el valor viejo ("count=20")
+    # en prosa, y eso no es el argumento real de la llamada.
+    src = "\n".join(
+        ln for ln in _read(PANEL).splitlines()
+        if not ln.strip().startswith("#")
+    )
+    m = re.search(r"zscan\((.*?)\)", src, re.DOTALL)
+    assert m, "No se encontro la llamada a zscan"
+    block = m.group(1)
+    count_m = re.search(r"count=(\d+)", block)
+    assert count_m, "zscan sin count explicito"
+    assert int(count_m.group(1)) >= 500, (
+        f"count={count_m.group(1)} es demasiado bajo — obliga a "
+        "N/count round-trips para recorrer el ZSET"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # 3. Conectores entre modulos — deteccion de acoplamiento
 # ═══════════════════════════════════════════════════════════════
 

@@ -622,10 +622,46 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 # Contact Hydration Service — pipeline unificada Redis → HubSpot → Mongo
 # ============================================================================
 
+async def _build_zset_phone_index() -> Dict[str, Dict[str, float]]:
+    """
+    Lee el ZSET del panel UNA vez y lo indexa por teléfono.
+
+    ⚠️ Existe para hidratar VARIOS contactos sin pagar un ZSCAN por cada uno.
+    El ZSCAN de _hydrate_contact usa count=20, así que recorre todo el ZSET en
+    trozos de 20 → ~N/20 round-trips POR CONTACTO. Medido en producción
+    (9-ago-2026): GET /contacts/search tardaba 41,6s, de los cuales 39,5s eran
+    justamente esto (mongo=52ms, hubspot=2,1s).
+
+    Returns:
+        {phone: {canal: score}}. Vacío si Redis falla — los llamadores deben
+        tratar el dict vacío como "sin traza en el ZSET", que es exactamente
+        lo que hacía el ZSCAN al fallar.
+    """
+    index: Dict[str, Dict[str, float]] = {}
+    try:
+        r = await _get_redis_client()
+        members = await r.zrange(
+            ConversationStateManager.ACTIVE_CONTACTS_ZSET, 0, -1, withscores=True
+        )
+        for raw_member, score in members:
+            m = raw_member if isinstance(raw_member, str) else raw_member.decode()
+            if ":" not in m:
+                continue
+            _p, canal_part = m.split(":", 1)
+            index.setdefault(_p, {})[canal_part.lower()] = (
+                float(score) if score is not None else 0.0
+            )
+    except Exception as e:
+        logger.warning(f"[Panel] No se pudo indexar el ZSET: {e}")
+        return {}
+    return index
+
+
 async def _hydrate_contact(
     phone: str,
     canal_hint: Optional[str] = None,
     add_to_zset: bool = False,
+    zset_index: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Materializa un contacto completo desde Redis + HubSpot + MongoDB.
@@ -653,30 +689,37 @@ async def _hydrate_contact(
     # Flag para saber si Redis quedó disponible — gobierna el fallback HubSpot
     redis_ok = True
 
-    # ── Paso B: ZSCAN para detectar canales en el panel ─────────────────────
+    # ── Paso B: detectar canales en el panel ────────────────────────────────
+    # Si el llamador ya indexó el ZSET (hidratación en lote), se usa ese índice
+    # y nos ahorramos el ZSCAN entero. Ver _build_zset_phone_index().
     score_by_canal: Dict[str, float] = {}
-    try:
-        cursor = 0
-        while True:
-            cursor, results = await redis_client.zscan(
-                ConversationStateManager.ACTIVE_CONTACTS_ZSET,
-                cursor,
-                match=f"{phone_norm}:*",
-                count=20,
-            )
-            for raw_member, score in results:
-                m = raw_member if isinstance(raw_member, str) else raw_member.decode()
-                if ":" not in m:
-                    continue
-                _p, canal_part = m.split(":", 1)
-                if _p != phone_norm:
-                    continue  # defensive: zscan match debería filtrar, pero por si acaso
-                score_by_canal[canal_part.lower()] = float(score) if score is not None else 0.0
-            if cursor == 0:
-                break
-    except Exception as e:
-        redis_ok = False
-        logger.warning(f"[Hydrate] Error zscan ZSET para {phone_norm}: {e}")
+    if zset_index is not None:
+        score_by_canal = dict(zset_index.get(phone_norm, {}))
+    else:
+        try:
+            cursor = 0
+            while True:
+                cursor, results = await redis_client.zscan(
+                    ConversationStateManager.ACTIVE_CONTACTS_ZSET,
+                    cursor,
+                    match=f"{phone_norm}:*",
+                    # count=20 obligaba a ~N/20 round-trips para recorrer el ZSET
+                    # completo (MATCH filtra DESPUES de escanear, no antes).
+                    count=1000,
+                )
+                for raw_member, score in results:
+                    m = raw_member if isinstance(raw_member, str) else raw_member.decode()
+                    if ":" not in m:
+                        continue
+                    _p, canal_part = m.split(":", 1)
+                    if _p != phone_norm:
+                        continue  # defensive: zscan match debería filtrar, pero por si acaso
+                    score_by_canal[canal_part.lower()] = float(score) if score is not None else 0.0
+                if cursor == 0:
+                    break
+        except Exception as e:
+            redis_ok = False
+            logger.warning(f"[Hydrate] Error zscan ZSET para {phone_norm}: {e}")
 
     # Canales candidatos: los del ZSET + canal_hint + whatsapp (siempre probamos)
     probe_canals: list = []
@@ -4732,10 +4775,20 @@ async def search_contacts_by_keyword(
         if matching_phones:
             _sem = asyncio.Semaphore(3)
 
+            # ⚠️ Índice del ZSET UNA vez para todos los teléfonos. Sin esto cada
+            # _hydrate_contact hacía su propio ZSCAN con cursor sobre el ZSET
+            # completo: medido en producción, 39,5s de los 41,6s del endpoint.
+            _zset_index = await _build_zset_phone_index()
+
             async def _h(_p: str):
                 async with _sem:
                     try:
-                        return await _hydrate_contact(_p, canal_hint=None, add_to_zset=False)
+                        return await _hydrate_contact(
+                            _p,
+                            canal_hint=None,
+                            add_to_zset=False,
+                            zset_index=_zset_index,
+                        )
                     except Exception as _he:
                         logger.debug(f"[Panel][Search] Hydrate {_p} falló: {_he}")
                         return None

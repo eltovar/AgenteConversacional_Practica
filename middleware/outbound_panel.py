@@ -382,6 +382,51 @@ async def _get_cached_contact_name(contact_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+async def _get_cached_contact_names_batch(
+    contact_ids: list,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Lee N nombres cacheados en UN solo round-trip a Redis (MGET).
+
+    ⚠️ Reemplaza el patrón `for cid in ids: await _get_cached_contact_name(cid)`,
+    que hacía un viaje a Redis POR CONTACTO. Medido en producción con el
+    profiler (9-ago-2026): con ~300 contactos eran ~5 s de los ~8 s totales de
+    GET /contacts — el 69% del tiempo del endpoint, más que HubSpot.
+
+    Fail-open: ante cualquier error devuelve {} (equivale a cache miss total),
+    y los nombres se resuelven vía _hubspot_batch_get_contacts como siempre.
+
+    Args:
+        contact_ids: IDs de HubSpot. Acepta duplicados.
+
+    Returns:
+        {contact_id: {"firstname": str, "lastname": str}} solo con los que
+        estaban cacheados. Los ausentes simplemente no aparecen.
+    """
+    if not contact_ids:
+        return {}
+
+    result: Dict[str, Dict[str, Any]] = {}
+    try:
+        r = await _get_redis_client()
+        keys = [f"{CONTACT_NAME_CACHE_PREFIX}{cid}" for cid in contact_ids]
+        raws = await r.mget(keys)
+        for cid, raw in zip(contact_ids, raws):
+            if not raw:
+                continue
+            try:
+                result[cid] = json.loads(raw)
+            except (ValueError, TypeError):
+                continue  # entrada corrupta → tratar como miss
+    except Exception as e:
+        logger.warning(
+            f"[Panel] MGET de nombres cacheados falló ({len(contact_ids)} ids), "
+            f"se resolverán vía HubSpot: {e}"
+        )
+        return {}
+    return result
+
+
 async def _get_redis_client() -> redis.Redis:
     """
     Obtiene cliente Redis con connection pool reutilizable.
@@ -5207,14 +5252,15 @@ async def get_active_contacts(
             if c.get("contact_id")
         ]
 
-        redis_name_cache: Dict[str, Dict[str, Any]] = {}
-        ids_needing_fetch: list = []
-        for cid in all_contact_ids:
-            cached = await _get_cached_contact_name(cid)
-            if cached:
-                redis_name_cache[cid] = cached
-            else:
-                ids_needing_fetch.append(cid)
+        # ⚠️ 1 round-trip (MGET) en vez de uno por contacto. El bucle secuencial
+        # anterior costaba ~5s con ~300 contactos — medido en produccion con el
+        # profiler, era el 69% del tiempo de este endpoint.
+        redis_name_cache: Dict[str, Dict[str, Any]] = await _get_cached_contact_names_batch(
+            all_contact_ids
+        )
+        ids_needing_fetch: list = [
+            cid for cid in all_contact_ids if cid not in redis_name_cache
+        ]
 
         batch_contact_data = {}
         if ids_needing_fetch:

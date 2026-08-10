@@ -191,6 +191,7 @@ def test_10_register_mongo_listener_is_idempotent(monkeypatch):
     Registrar dos veces duplicaria cada medicion (mongo_ms al doble).
     """
     calls = []
+    monkeypatch.setattr(qp, "PROFILER_ENABLED", True)  # explicito: no depender del env
     monkeypatch.setattr(qp, "_mongo_listener_registered", False)
     import pymongo.monitoring as m
     monkeypatch.setattr(m, "register", lambda listener: calls.append(listener))
@@ -441,7 +442,7 @@ def test_20_app_registers_middleware():
     assert idx_mw > idx_app
 
 
-def test_21_end_to_end_through_real_starlette():
+def test_21_end_to_end_through_real_starlette(monkeypatch):
     """
     Integracion real: mediciones hechas DENTRO del endpoint deben llegar al
     middleware que emite el header.
@@ -457,6 +458,9 @@ def test_21_end_to_end_through_real_starlette():
     """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(qp, "PROFILER_ENABLED", True)  # explicito: no depender del env
+    monkeypatch.setattr(qp, "SERVER_TIMING_ENABLED", True)
 
     mini = FastAPI()
     mini.middleware("http")(qp.server_timing_middleware)

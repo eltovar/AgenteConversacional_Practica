@@ -16,10 +16,13 @@ con el resto de la suite del repo.
 Ejecutar: pytest tests/test_panel_queries_qa.py -v
 """
 import ast
+import json
 import os
 import re
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 PANEL = os.path.join(ROOT, "middleware", "outbound_panel.py")
 MONGO = os.path.join(ROOT, "database", "mongodb_client.py")
@@ -158,6 +161,136 @@ def test_06_early_return_params_never_reach_cache():
     assert idx_worker_return < idx_cache, (
         "El branch de worker_id dejo de retornar antes del cache — "
         "worker_id debe añadirse a _cache_params"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2b. PIEZA 0 — N+1 sobre Redis en el cache de nombres
+#
+# Medido en produccion (9-ago-2026) con el profiler: GET /contacts tardaba
+# ~8.1s de los cuales ~5.6s eran `otro` (Redis+CPU) y solo 18ms MongoDB.
+# Causa: `for cid in ids: await _get_cached_contact_name(cid)` hacia un
+# round-trip por contacto. Con ~300 contactos y 15-20ms de RTT = ~5s.
+# ═══════════════════════════════════════════════════════════════
+
+class _FakeRedis:
+    """Redis mínimo que CUENTA round-trips — la propiedad que importa aquí."""
+
+    def __init__(self, data=None, fail=False):
+        self.data = data or {}
+        self.fail = fail
+        self.mget_calls = 0
+        self.get_calls = 0
+
+    async def mget(self, keys):
+        if self.fail:
+            raise ConnectionError("Redis caido")
+        self.mget_calls += 1
+        return [self.data.get(k) for k in keys]
+
+    async def get(self, key):
+        if self.fail:
+            raise ConnectionError("Redis caido")
+        self.get_calls += 1
+        return self.data.get(key)
+
+
+def _patch_redis(monkeypatch, fake):
+    import middleware.outbound_panel as op
+
+    async def _fake_client():
+        return fake
+    monkeypatch.setattr(op, "_get_redis_client", _fake_client)
+    return op
+
+
+async def test_08_name_cache_batch_uses_single_round_trip(monkeypatch):
+    """
+    LA propiedad de la Pieza 0: N contactos = 1 viaje a Redis, no N.
+
+    Si alguien revierte a un bucle secuencial, este test falla.
+    """
+    ids = [str(i) for i in range(300)]
+    data = {
+        f"contact_name:{i}": json.dumps({"firstname": f"N{i}", "lastname": "X"})
+        for i in range(300)
+    }
+    fake = _FakeRedis(data)
+    op = _patch_redis(monkeypatch, fake)
+
+    result = await op._get_cached_contact_names_batch(ids)
+
+    assert len(result) == 300
+    assert result["7"] == {"firstname": "N7", "lastname": "X"}
+    assert fake.mget_calls == 1, f"Se esperaba 1 MGET, hubo {fake.mget_calls}"
+    assert fake.get_calls == 0, (
+        f"Hubo {fake.get_calls} GETs individuales — volvio el N+1"
+    )
+
+
+async def test_09_name_cache_batch_partial_hits(monkeypatch):
+    """Los no cacheados simplemente no aparecen (van a HubSpot)."""
+    fake = _FakeRedis({
+        "contact_name:a": json.dumps({"firstname": "Ana", "lastname": "Gomez"}),
+    })
+    op = _patch_redis(monkeypatch, fake)
+
+    result = await op._get_cached_contact_names_batch(["a", "b", "c"])
+    assert set(result.keys()) == {"a"}
+
+
+async def test_10_name_cache_batch_survives_corrupt_entry(monkeypatch):
+    """Una entrada corrupta no puede tumbar toda la lista de contactos."""
+    fake = _FakeRedis({
+        "contact_name:a": "{no es json",
+        "contact_name:b": json.dumps({"firstname": "Ben", "lastname": ""}),
+    })
+    op = _patch_redis(monkeypatch, fake)
+
+    result = await op._get_cached_contact_names_batch(["a", "b"])
+    assert set(result.keys()) == {"b"}, "La entrada corrupta debe tratarse como miss"
+
+
+async def test_11_name_cache_batch_is_fail_open(monkeypatch):
+    """
+    Si Redis falla, devolver {} = cache miss total. El panel sigue
+    funcionando porque los nombres se resuelven via HubSpot batch.
+    """
+    op = _patch_redis(monkeypatch, _FakeRedis(fail=True))
+    assert await op._get_cached_contact_names_batch(["a", "b"]) == {}
+
+
+async def test_12_name_cache_batch_empty_input_touches_nothing(monkeypatch):
+    fake = _FakeRedis()
+    op = _patch_redis(monkeypatch, fake)
+    assert await op._get_cached_contact_names_batch([]) == {}
+    assert fake.mget_calls == 0, "Sin ids no deberia haber viaje a Redis"
+
+
+def test_13_no_sequential_name_cache_loop_in_hot_path():
+    """
+    Regresion estatica: `await _get_cached_contact_name(...)` NO puede volver
+    a aparecer dentro de un bucle en get_active_contacts.
+
+    Se analiza el AST en vez del texto para no depender del formato.
+    """
+    tree = ast.parse(_read(PANEL))
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "get_active_contacts":
+            continue
+        for loop in ast.walk(node):
+            if not isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            for inner in ast.walk(loop):
+                if isinstance(inner, ast.Await) and isinstance(inner.value, ast.Call):
+                    fn = ast.unparse(inner.value.func)
+                    if "_get_cached_contact_name" in fn:
+                        offenders.append(f"linea {inner.lineno}: {fn}")
+
+    assert not offenders, (
+        f"Volvio el N+1 sobre Redis en get_active_contacts: {offenders}. "
+        "Usar _get_cached_contact_names_batch() (1 MGET)."
     )
 
 

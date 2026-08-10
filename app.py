@@ -873,6 +873,88 @@ async def rebuild_zset_from_conversations():
         )
 
 
+# ── Lock de liderazgo del scheduler ─────────────────────────────────────────
+# Solo un worker corre los jobs. El lock vive en Redis con TTL para que la muerte
+# abrupta de un worker (SIGKILL por OOM) no deje el liderazgo bloqueado para siempre.
+SCHEDULER_LOCK_KEY = "scheduler_leader"
+SCHEDULER_LOCK_TTL = 300
+# Reintentos al arrancar: Railway levanta el worker nuevo antes de matar el viejo,
+# así que el lock puede seguir ocupado unos segundos durante el rollover.
+SCHEDULER_LOCK_RETRIES = 3
+SCHEDULER_LOCK_RETRY_DELAY = 2
+# El líder renueva su TTL mientras siga vivo. Sin esto el lock caduca a los 300s
+# aunque el worker esté sano, y otro worker podría levantar un SEGUNDO scheduler:
+# recordatorios y followups duplicados a los mismos clientes.
+SCHEDULER_HEARTBEAT_SECONDS = 120
+# Marca si ESTE worker es dueño del lock. Se consulta en el shutdown para no
+# borrar un lock que pertenece a otro worker.
+_scheduler_lock_held = False
+
+# Borrado condicional: solo libera si el valor sigue siendo nuestro PID. Un DEL
+# a secas podría borrar el lock que otro worker acaba de tomar tras nuestro TTL.
+_SCHEDULER_LOCK_RELEASE_LUA = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+
+async def _renew_scheduler_lock():
+    """
+    Renueva el TTL del lock mientras este worker siga siendo el líder.
+
+    Se re-escribe el valor con el PID propio: si el lock hubiera expirado en un
+    hueco de red, esto lo recupera en vez de dejar el puesto vacante.
+    """
+    if not _scheduler_lock_held:
+        return
+    try:
+        import redis.asyncio as _redis_hb
+        _hb = _redis_hb.from_url(
+            get_redis_url(), encoding="utf-8", decode_responses=True,
+            socket_timeout=2.0, socket_connect_timeout=2.0
+        )
+        try:
+            await _hb.set(SCHEDULER_LOCK_KEY, str(os.getpid()), ex=SCHEDULER_LOCK_TTL)
+        finally:
+            await _hb.aclose()
+    except Exception as e:
+        # No es fatal: quedan varios ciclos de heartbeat antes de que el TTL expire.
+        logger.warning("[Scheduler] Heartbeat del lock falló (non-fatal): %s", e)
+
+
+async def _release_scheduler_lock():
+    """
+    Libera el lock al apagar para que el worker siguiente arranque sus jobs ya.
+
+    Sin esto, un redeploy deja el lock huérfano hasta 5 minutos: el worker nuevo
+    lo encuentra ocupado, omite el scheduler y —al no reintentar nunca— el sistema
+    se queda sin ningún job de fondo. Ocurrió el 10-ago-2026 y costó dos redeploys.
+    """
+    if not _scheduler_lock_held:
+        return
+    try:
+        import redis.asyncio as _redis_rel
+        _rel = _redis_rel.from_url(
+            get_redis_url(), encoding="utf-8", decode_responses=True,
+            socket_timeout=2.0, socket_connect_timeout=2.0
+        )
+        try:
+            freed = await _rel.eval(
+                _SCHEDULER_LOCK_RELEASE_LUA, 1, SCHEDULER_LOCK_KEY, str(os.getpid())
+            )
+            if freed:
+                logger.info("[SHUTDOWN] Lock del scheduler liberado — el relevo es inmediato")
+            else:
+                logger.info("[SHUTDOWN] El lock ya no era nuestro; no se toca")
+        finally:
+            await _rel.aclose()
+    except Exception as e:
+        logger.warning("[SHUTDOWN] No se pudo liberar el lock del scheduler: %s", e)
+
+
 # Minutos que un lead con señal comercial puede seguir en BOT_ACTIVE antes de
 # que el job lo escale. Cubre al cliente que escribe una vez y se va: el rescate
 # in-request de webhook_handler necesita turnos nuevos, este no.
@@ -1660,6 +1742,7 @@ async def startup_event():
     #   - check_appointment_reminders efectivo cada 15 min → Rate Limit HubSpot + duplicados
     #   - check_appointment_followups efectivo cada 7.5 min → mensajes duplicados post-cita
     # Redis SET NX garantiza atomicamente que solo 1 worker adquiere el liderazgo.
+    global _scheduler_lock_held
     _is_scheduler_leader = False
     try:
         import redis.asyncio as _redis_sched
@@ -1667,23 +1750,50 @@ async def startup_event():
             get_redis_url(), encoding="utf-8", decode_responses=True,
             socket_timeout=2.0, socket_connect_timeout=2.0
         )
-        # TTL 300s: si el worker lider muere o se hace redeploy, otro toma el liderazgo
-        # en maximos 5min — sin necesidad de DEL manual antes de cada deploy
-        _sched_lock = await _sched_redis.set(
-            "scheduler_leader", str(pid), nx=True, ex=300
-        )
+        # Reintentos: en un redeploy Railway levanta el worker nuevo antes de matar el
+        # viejo, así que el lock puede seguir ocupado unos segundos. Sin reintentar, el
+        # worker se quedaba SIN scheduler de forma permanente — ninguno de los 13 jobs
+        # corría y el deploy igual reportaba SUCCESS. Ocurrió el 10-ago-2026.
+        _sched_lock = None
+        for _try in range(1, SCHEDULER_LOCK_RETRIES + 1):
+            _sched_lock = await _sched_redis.set(
+                SCHEDULER_LOCK_KEY, str(pid), nx=True, ex=SCHEDULER_LOCK_TTL
+            )
+            if _sched_lock:
+                if _try > 1:
+                    logger.info("[STARTUP] Lock del scheduler adquirido en el intento %s", _try)
+                break
+            if _try < SCHEDULER_LOCK_RETRIES:
+                await asyncio.sleep(SCHEDULER_LOCK_RETRY_DELAY)
+
         await _sched_redis.aclose()
         _is_scheduler_leader = bool(_sched_lock)
+        _scheduler_lock_held = _is_scheduler_leader
         if _is_scheduler_leader:
             logger.info("[STARTUP] Worker %s es el scheduler leader", pid)
         else:
-            logger.info("[STARTUP] Worker %s omite scheduler (otro worker es leader)", pid)
+            logger.warning(
+                "[STARTUP] Worker %s omite scheduler tras %s intentos — otro worker "
+                "sigue como leader. Si no hay otro vivo, el lock se libera solo en %ss",
+                pid, SCHEDULER_LOCK_RETRIES, SCHEDULER_LOCK_TTL
+            )
     except Exception as _sched_err:
         # Fallback: si Redis no disponible al startup, arrancar scheduler de todas formas
         _is_scheduler_leader = True
+        _scheduler_lock_held = False  # sin lock real: no hay nada que renovar ni liberar
         logger.warning("[STARTUP] Lock scheduler Redis fallo (%s) — scheduler sin coordinacion", _sched_err)
 
     if _is_scheduler_leader:
+        # Heartbeat primero: mantiene vivo el liderazgo mientras el worker lo esté.
+        # Solo tiene sentido si hay un lock real que renovar (no en el fallback sin Redis).
+        if _scheduler_lock_held:
+            scheduler.add_job(
+                _renew_scheduler_lock,
+                trigger=IntervalTrigger(seconds=SCHEDULER_HEARTBEAT_SECONDS),
+                id="scheduler_lock_heartbeat",
+                replace_existing=True,
+            )
+
         if APPOINTMENT_REMINDERS_ENABLED:
             scheduler.add_job(
                 check_appointment_reminders,
@@ -1967,6 +2077,10 @@ async def shutdown_event():
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("[SHUTDOWN] Schedulers detenidos")
+
+    # 1b. Ceder el liderazgo. Va después de parar el scheduler para que el heartbeat
+    # no vuelva a escribir el lock justo después de borrarlo.
+    await _release_scheduler_lock()
 
     # 2. Cerrar el singleton de ConversationStateManager
     try:

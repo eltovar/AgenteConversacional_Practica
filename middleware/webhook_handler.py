@@ -79,6 +79,12 @@ RESCUE_SIGNAL_TURNS = 3
 # producción de contactos con score alto que el análisis dejó en "none" toda la
 # conversación y nunca llegaron a una asesora.
 RESCUE_ENGAGEMENT_TURNS = 5
+# Turnos con el análisis caído antes de escalar. Cuando el LLM falla, el cliente ya
+# está recibiendo "Disculpa, tuve un pequeño inconveniente" y nadie lo atiende: hay
+# que llevarlo a una asesora. Se exige el segundo turno para no escalar de golpe a
+# todos los contactos activos ante un glitch transitorio; el primero solo deja la
+# marca, de la que se encarga el job de rescate si el cliente no vuelve a escribir.
+RESCUE_FAILURE_TURNS = 2
 
 
 
@@ -711,15 +717,25 @@ async def _process_message_deferred(
         # No se condiciona a tener el nombre: en producción se observaron contactos que
         # sí lo dieron y aun así quedaron atrapados.
         if analysis and analysis.handoff_priority not in ("immediate", "high"):
-            _has_signal = analysis.handoff_priority in RESCUE_SIGNAL_PRIORITIES
+            # Un análisis fallido no es "sin interés": es un lead que nadie evaluó.
+            # Cuenta como señal para que el job de rescate lo recoja aunque el
+            # cliente no vuelva a escribir.
+            _failed = analysis.analysis_failed
+            _has_signal = _failed or analysis.handoff_priority in RESCUE_SIGNAL_PRIORITIES
             _turns, _had_signal = await state_manager.track_bot_turn(
                 phone_normalized, final_channel, has_signal=_has_signal
             )
+            _rescue_by_failure = _failed and _turns >= RESCUE_FAILURE_TURNS
             _rescue_by_signal = _had_signal and _turns >= RESCUE_SIGNAL_TURNS
             _rescue_by_engagement = _turns >= RESCUE_ENGAGEMENT_TURNS
-            if _rescue_by_signal or _rescue_by_engagement:
+            if _rescue_by_failure or _rescue_by_signal or _rescue_by_engagement:
                 analysis.handoff_priority = "high"
-                _motivo = "señal comercial" if _rescue_by_signal else "insistencia sin señal"
+                if _rescue_by_failure:
+                    _motivo = "análisis caído"
+                elif _rescue_by_signal:
+                    _motivo = "señal comercial"
+                else:
+                    _motivo = "insistencia sin señal"
                 logger.info(
                     f"[Rescue] Escalamiento forzado tras {_turns} turnos "
                     f"({_motivo}, canal: {final_channel})"
@@ -844,6 +860,28 @@ async def _process_message_deferred(
                     canal=final_channel
                 )
                 logger.info(f"[DeferredProcess] ✅ Handoff solicitado: {handoff_reason}")
+
+                # El WS del mensaje entrante salió mucho antes de este punto, con el
+                # contacto todavía en BOT_ACTIVE. Sin esta segunda notificación el
+                # panel muestra el estado viejo —sin badge y fuera del índice 0—
+                # hasta que el polling de 10s lo corrija.
+                # Se publica por Pub/Sub (no notify_status_change, que solo hace
+                # broadcast local del worker) para que llegue en cualquier worker.
+                try:
+                    _hs_payload = {
+                        "type":       "status_change",
+                        "phone":      phone_normalized,
+                        "canal":      final_channel,
+                        "old_status": ConversationStatus.BOT_ACTIVE.value,
+                        "new_status": ConversationStatus.PENDING_HANDOFF.value,
+                    }
+                    _rc = state_manager.redis
+                    if _assigned_owner_def:
+                        await ws_manager.publish_to_advisor(_rc, _assigned_owner_def, _hs_payload)
+                    else:
+                        await ws_manager.publish_broadcast(_rc, _hs_payload)
+                except Exception as _ws_err:
+                    logger.warning(f"[DeferredProcess] WS handoff notify falló (non-fatal): {_ws_err}")
 
         # Guardar respuesta de Sofia en MongoDB
         _out_conv_sid = send_result.get("conversation_sid") or conversation_sid

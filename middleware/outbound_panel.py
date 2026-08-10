@@ -8,6 +8,7 @@ import os
 import json
 import re
 import html
+import time
 import asyncio
 import hashlib
 import httpx
@@ -169,6 +170,27 @@ def _get_contact_manager() -> ContactManager:
 # ============================================================================
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
 # ============================================================================
+# ── Cache de la respuesta de GET /contacts ──────────────────────────────────
+# El panel hace polling cada 10s (POLLING_INTERVAL_IDLE en index.js). Con el TTL
+# anterior de 5s el cache expiraba ANTES del siguiente poll, así que no acertaba
+# nunca entre peticiones sucesivas: cada poll reconstruía la lista entera.
+#
+# Cuando la reconstrucción se ralentiza —429 de HubSpot— eso se realimenta: la
+# petición tarda minutos, los polls siguen entrando cada 10s y se apilan decenas
+# de reconstrucciones simultáneas, cada una con cientos de llamadas a HubSpot.
+# Medido el 10-ago-2026: GET /contacts de hasta 508s.
+#
+# El TTL debe cubrir el intervalo de polling. El WebSocket sigue siendo el canal
+# de tiempo real (badges y banner no pasan por aquí), así que el desfase máximo
+# de la lista por polling es este TTL.
+CONTACTS_RESPONSE_CACHE_TTL = 20
+# Single-flight: mientras una petición reconstruye la lista, las demás esperan su
+# resultado en vez de duplicar el trabajo. TTL de seguridad por si el proceso muere
+# a mitad — sin él, un crash dejaría el flag puesto y nadie reconstruiría.
+CONTACTS_INFLIGHT_TTL = 30
+CONTACTS_INFLIGHT_WAIT_SECONDS = 3.0
+CONTACTS_INFLIGHT_POLL_INTERVAL = 0.25
+
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
 CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — invalidación explícita al editar nombre (ver PATCH /contacts/{id})
 CONTACT_NAME_CACHE_PREFIX = "contact_name:"
@@ -313,7 +335,11 @@ async def _get_contact_lifecyclestage(contact_id: str) -> str:
         redis_client = await _get_redis_client()
         cached = await redis_client.get(cache_key)
         if cached:
-            return cached.decode()
+            # El pool se crea con decode_responses=True, así que esto ya es str.
+            # Llamar .decode() a secas lanzaba AttributeError, el except lo tragaba
+            # y el cache NUNCA acertaba: cada contacto pedía su etapa a HubSpot en
+            # cada carga del panel. El isinstance cubre ambos clientes.
+            return cached if isinstance(cached, str) else cached.decode()
     except Exception:
         pass
 
@@ -342,6 +368,37 @@ async def _invalidate_contact_stage_cache(contact_id: str) -> None:
         logger.debug(f"[Panel] Caché de stage invalidado para {contact_id}")
     except Exception as e:
         logger.debug(f"[Panel] Error invalidando contact stage cache: {e}")
+
+
+async def _release_contacts_inflight(redis_client, inflight_key: Optional[str]) -> None:
+    """Suelta el turno de reconstrucción para que el siguiente poll no espere en balde."""
+    if not inflight_key:
+        return
+    try:
+        await redis_client.delete(inflight_key)
+    except Exception:
+        pass  # El TTL lo limpia igual; no vale romper la respuesta por esto.
+
+
+async def _await_contacts_inflight(redis_client, cache_key: str):
+    """
+    Espera a que la petición en curso publique su resultado.
+
+    Devuelve la respuesta cacheada si aparece dentro de la ventana, o None si se
+    agota el tiempo — en ese caso el llamador reconstruye por su cuenta
+    (fail-open: preferimos duplicar trabajo antes que devolver un error).
+    """
+    _waited = 0.0
+    while _waited < CONTACTS_INFLIGHT_WAIT_SECONDS:
+        await asyncio.sleep(CONTACTS_INFLIGHT_POLL_INTERVAL)
+        _waited += CONTACTS_INFLIGHT_POLL_INTERVAL
+        try:
+            _cached = await redis_client.get(cache_key)
+            if _cached:
+                return json.loads(_cached)
+        except Exception:
+            return None
+    return None
 
 
 async def _cache_contact_stage(contact_id: str, stage: str) -> None:
@@ -470,6 +527,54 @@ def _get_state_manager() -> ConversationStateManager:
     return _state_manager_singleton
 
 
+# ── Circuit breaker de HubSpot ──────────────────────────────────────────────
+# Dormir 12s dentro del request no descongestiona nada: HubSpot sigue saturado
+# porque el resto de peticiones sigue llegando. Y como las llamadas van detrás de
+# un Semaphore(2), esas esperas se SUMAN en vez de solaparse — de ahí los
+# GET /contacts de 300-500s medidos el 10-ago-2026.
+#
+# Al primer 429 se abre el breaker: durante los siguientes segundos las llamadas
+# fallan rápido en vez de dormir. El panel muestra el valor por defecto (o el de
+# cache) en lugar de quedarse colgado minutos.
+HUBSPOT_BREAKER_SECONDS = 10   # ventana de HubSpot: TEN_SECONDLY_ROLLING
+# Espera entre reintentos cuando el breaker aún no estaba abierto. Antes eran 12s,
+# calibrados para "cubrir la ventana de 10s de HubSpot" — pero con el breaker
+# delante los reintentos son raros, y 12s dentro del request era el multiplicador
+# que llevaba el panel a minutos.
+HUBSPOT_RETRY_BASE_SECONDS = 3
+_hubspot_breaker_until: float = 0.0
+_hubspot_breaker_trips: int = 0
+
+
+class HubSpotRateLimited(Exception):
+    """HubSpot está rechazando por rate limit; no reintentar dentro del request."""
+
+
+def _hubspot_breaker_open() -> bool:
+    """True si hay un 429 reciente y conviene no volver a llamar todavía."""
+    return time.monotonic() < _hubspot_breaker_until
+
+
+def _hubspot_breaker_trip() -> None:
+    """
+    Abre el breaker tras un 429.
+
+    Loguea solo la transición cerrado→abierto, no cada 429: durante un pico entran
+    decenas por segundo y el log dejaría de ser legible. El contador dice cuántas
+    veces se ha abierto desde que arrancó el proceso, que es la señal a vigilar.
+    """
+    global _hubspot_breaker_until, _hubspot_breaker_trips
+    _was_open = _hubspot_breaker_open()
+    _hubspot_breaker_until = time.monotonic() + HUBSPOT_BREAKER_SECONDS
+    if not _was_open:
+        _hubspot_breaker_trips += 1
+        logger.warning(
+            "[HubSpot] Circuit breaker ABIERTO %ss tras 429 — las lecturas "
+            "degradan a valor por defecto (apertura #%d)",
+            HUBSPOT_BREAKER_SECONDS, _hubspot_breaker_trips
+        )
+
+
 async def _hubspot_post(client, url: str, payload: dict, api_key: str, max_retries: int = 3):
     """
     POST a HubSpot con retry automático en 429 (rate limit).
@@ -482,7 +587,11 @@ async def _hubspot_post(client, url: str, payload: dict, api_key: str, max_retri
     for attempt in range(1, max_retries + 1):
         response = await client.post(url, json=payload, headers=headers)
         if response.status_code == 429:
-            wait = 12 * attempt
+            # Los POST no cortan por breaker (suelen ser escrituras que no
+            # conviene perder), pero sí lo abren para que las lecturas —que son
+            # el grueso del volumen— dejen de insistir.
+            _hubspot_breaker_trip()
+            wait = HUBSPOT_RETRY_BASE_SECONDS * attempt
             logger.warning(
                 f"[Panel] HubSpot 429 rate limit (intento {attempt}/{max_retries}), "
                 f"esperando {wait}s..."
@@ -505,12 +614,18 @@ async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_
     # Usar cliente global si no se provee uno
     if client is None:
         client = get_httpx_client()
-    
+
+    # Breaker abierto: no gastar el turno del Semaphore ni sumar otra llamada a
+    # una API que ya está rechazando. El llamador cae a su valor por defecto.
+    if _hubspot_breaker_open():
+        raise HubSpotRateLimited("circuit breaker abierto tras 429 reciente")
+
     headers = {"Authorization": f"Bearer {api_key}"}
     for attempt in range(1, max_retries + 1):
         response = await client.get(url, headers=headers, params=params)
         if response.status_code == 429:
-            wait = 12 * attempt
+            _hubspot_breaker_trip()
+            wait = HUBSPOT_RETRY_BASE_SECONDS * attempt
             logger.warning(
                 f"[Panel] HubSpot 429 rate limit GET (intento {attempt}/{max_retries}), "
                 f"esperando {wait}s..."
@@ -524,7 +639,10 @@ async def _hubspot_get(client, url: str, api_key: str, params: dict = None, max_
 async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int = 3):
     """
     PATCH a HubSpot con retry automático en 429 (rate limit).
-    Espera 12 segundos entre intentos — cubre la ventana de 10s de HubSpot.
+
+    Como en el POST, un 429 aquí abre el breaker para que las lecturas —el grueso
+    del volumen— dejen de insistir, pero la escritura sí se reintenta: perderla
+    dejaría el CRM desincronizado.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -534,7 +652,8 @@ async def _hubspot_patch(url: str, payload: dict, api_key: str, max_retries: int
     for attempt in range(1, max_retries + 1):
         response = await client.patch(url, headers=headers, json=payload)
         if response.status_code == 429:
-            wait = 12 * attempt
+            _hubspot_breaker_trip()
+            wait = HUBSPOT_RETRY_BASE_SECONDS * attempt
             logger.warning(
                 f"[Panel] HubSpot 429 rate limit PATCH (intento {attempt}/{max_retries}), "
                 f"esperando {wait}s..."
@@ -5014,6 +5133,10 @@ async def get_active_contacts(
             )
             # Cae al flujo normal abajo
 
+    # Fuera del try: el manejador de errores lo consulta para soltar el turno de
+    # single-flight, y si fallara antes de asignarlo daría NameError.
+    _inflight_key = None
+
     try:
         from zoneinfo import ZoneInfo
         TIMEZONE = ZoneInfo("America/Bogota")
@@ -5091,6 +5214,29 @@ async def get_active_contacts(
                 return json.loads(_cached)
         except Exception:
             pass  # Cache miss o error Redis → continuar con lógica normal
+
+        # Cache miss. Single-flight: solo una petición reconstruye; las demás
+        # esperan su resultado. Sin esto, con la lista lenta se apilan decenas de
+        # reconstrucciones simultáneas y cada una dispara cientos de llamadas a
+        # HubSpot, que responde 429 y ralentiza aún más — el bucle que llevó
+        # GET /contacts a 508s el 10-ago-2026.
+        try:
+            _candidate_key = f"contacts_inflight:{hashlib.md5(_cache_params.encode()).hexdigest()}"
+            _got_slot = await state_manager.redis.set(
+                _candidate_key, "1", nx=True, ex=CONTACTS_INFLIGHT_TTL
+            )
+            if _got_slot:
+                _inflight_key = _candidate_key
+            else:
+                _shared = await _await_contacts_inflight(
+                    state_manager.redis, _contacts_cache_key
+                )
+                if _shared is not None:
+                    logger.debug("[Panel] GET /contacts servido por single-flight")
+                    return _shared
+                # Se agotó la espera: reconstruir igual (fail-open).
+        except Exception:
+            pass  # Si Redis falla aquí, seguir sin single-flight.
 
         if advisor:
             # Cuando hay filtro de advisor: escanear todo el ZSET para no perder contactos
@@ -5693,13 +5839,22 @@ async def get_active_contacts(
         }
         try:
             await state_manager.redis.set(
-                _contacts_cache_key, json.dumps(_response_data, default=str), ex=5
+                _contacts_cache_key, json.dumps(_response_data, default=str),
+                ex=CONTACTS_RESPONSE_CACHE_TTL
             )
         except Exception:
             pass  # No bloquear la respuesta si el cache write falla
+        finally:
+            await _release_contacts_inflight(state_manager.redis, _inflight_key)
         return _response_data
 
     except Exception as e:
+        # Soltar el turno aunque la reconstrucción falle: si no, los polls
+        # siguientes esperarían hasta que expire el TTL sin que nadie reconstruya.
+        try:
+            await _release_contacts_inflight(_get_state_manager().redis, _inflight_key)
+        except Exception:
+            pass
         logger.error(f"[Panel] Error obteniendo contactos: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

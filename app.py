@@ -1902,7 +1902,15 @@ async def startup_event():
         # Python no devuelve arenas de memoria al OS (fragmentación).
         # --max-requests de gunicorn no recicla si hay WebSockets abiertos.
         # Este watchdog es la red de seguridad definitiva.
-        _MEM_LIMIT_MB = int(os.getenv("WORKER_MEM_LIMIT_MB", "4096"))  # 4 GB default
+        # 3300 MB ~= 80% del limite del contenedor (4096 MB en Railway). El default
+        # anterior era 4096: el watchdog necesitaba SUPERAR ese valor para actuar,
+        # pero Railway mata el proceso justo ahi, asi que NUNCA llegaba a dispararse.
+        # Medido el 10-ago-2026: pico de 4095.977 MB contra un limite de 4095.997 MB.
+        #
+        # La diferencia importa. Con SIGKILL no corre shutdown_event: el lock del
+        # scheduler queda huerfano y las conexiones sin cerrar. Con SIGTERM el worker
+        # cede el lock y el sucesor toma el relevo de inmediato.
+        _MEM_LIMIT_MB = int(os.getenv("WORKER_MEM_LIMIT_MB", "3300"))
 
         async def _memory_watchdog():
             try:

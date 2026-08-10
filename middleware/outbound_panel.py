@@ -187,6 +187,13 @@ CONTACTS_RESPONSE_CACHE_TTL = 20
 # Single-flight: mientras una petición reconstruye la lista, las demás esperan su
 # resultado en vez de duplicar el trabajo. TTL de seguridad por si el proceso muere
 # a mitad — sin él, un crash dejaría el flag puesto y nadie reconstruiría.
+# Cuando el inbox de no-leidos no responde, el corte normal de `limit` dejaria
+# fuera a los contactos nuevos (pierden el pase que les da estar sin leer). Se
+# amplia por este factor: el ZSET viene ordenado por actividad reciente, asi que
+# un contacto que acaba de escribir entra de sobra. No se muestran todos porque
+# serian ~1122 y volveria el coste que el resto de este modulo acaba de arreglar.
+CONTACTS_INBOX_FALLBACK_MULTIPLIER = 3
+
 CONTACTS_INFLIGHT_TTL = 30
 CONTACTS_INFLIGHT_WAIT_SECONDS = 3.0
 CONTACTS_INFLIGHT_POLL_INTERVAL = 0.25
@@ -5273,15 +5280,33 @@ async def get_active_contacts(
             # Límite dinámico: siempre incluir TODOS los contactos con unread + top `limit` del resto.
             # Garantiza que si hay 40 contactos con mensajes nuevos todos se muestran sin importar el límite.
             _unread_phones = await state_manager.get_all_inbox_phones(advisor)
-            _unread_set = [c for c in advisor_contacts if c.get("phone") in _unread_phones]
-            _other_set  = [c for c in advisor_contacts if c.get("phone") not in _unread_phones]
             _other_offset = (page - 1) * limit
-            active_contacts = _unread_set + _other_set[_other_offset:_other_offset + limit]
-            total_for_advisor = len(advisor_contacts)
-            logger.info(
-                f"[Panel] Límite dinámico: {len(_unread_set)} unread (sin límite) + "
-                f"{len(active_contacts) - len(_unread_set)} otros = {len(active_contacts)} total"
-            )
+
+            if _unread_phones is None:
+                # El inbox no respondió. Sin saber quién tiene mensajes sin leer no
+                # se puede aplicar el corte normal: dejaría fuera precisamente a los
+                # contactos nuevos, que es lo que paso el 10-ago-2026. Se amplía el
+                # corte — mostrar de más es recuperable, ocultar un lead no.
+                _fallback_limit = limit * CONTACTS_INBOX_FALLBACK_MULTIPLIER
+                # El offset se recalcula sobre el corte ampliado: usar el de `limit`
+                # haría que las páginas se solaparan (p1: 0-90, p2: 30-120).
+                _fallback_offset = (page - 1) * _fallback_limit
+                active_contacts = advisor_contacts[_fallback_offset:_fallback_offset + _fallback_limit]
+                total_for_advisor = len(advisor_contacts)
+                logger.warning(
+                    "[Panel] Inbox no disponible para advisor=%s — corte ampliado a %d "
+                    "(en vez de %d) para no ocultar contactos con mensajes nuevos",
+                    advisor, _fallback_limit, limit
+                )
+            else:
+                _unread_set = [c for c in advisor_contacts if c.get("phone") in _unread_phones]
+                _other_set  = [c for c in advisor_contacts if c.get("phone") not in _unread_phones]
+                active_contacts = _unread_set + _other_set[_other_offset:_other_offset + limit]
+                total_for_advisor = len(advisor_contacts)
+                logger.info(
+                    f"[Panel] Límite dinámico: {len(_unread_set)} unread (sin límite) + "
+                    f"{len(active_contacts) - len(_unread_set)} otros = {len(active_contacts)} total"
+                )
         else:
             zset_offset = (page - 1) * limit
             active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)

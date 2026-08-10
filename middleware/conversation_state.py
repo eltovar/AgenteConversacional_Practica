@@ -1713,8 +1713,19 @@ class ConversationStateManager:
             logger.error(f"[Inbox][Error][Batch] advisor={advisor_id}: {e}")
             return {}  # Fail-safe: sin badges antes que romper la UI
 
-    async def get_all_inbox_phones(self, advisor_id: str) -> set:
-        """Retorna set de phones con mensajes no leídos del asesor. O(N), 1 round-trip Redis."""
+    async def get_all_inbox_phones(self, advisor_id: str) -> Optional[set]:
+        """
+        Retorna set de phones con mensajes no leídos del asesor. O(N), 1 round-trip Redis.
+
+        Devuelve None si Redis falla — NO un set vacío. El panel usa este set para
+        decidir qué contactos entran sin límite, y un set vacío significa "nadie
+        tiene mensajes sin leer", que es justo la lectura más destructiva: los
+        contactos nuevos pierden su prioridad y quedan fuera del corte de 30.
+
+        Ocurrió el 10-ago-2026: con Redis saturado esta llamada fallaba en bucle
+        y las asesoras dejaban de ver contactos que sí habían escrito. None deja
+        que el llamador distinga "no hay nada" de "no pude averiguarlo".
+        """
         try:
             key = f"{self.ADVISOR_INBOX_PREFIX}{advisor_id}"
             all_members = await self.redis.zrange(key, 0, -1)
@@ -1726,7 +1737,7 @@ class ConversationStateManager:
             return phones
         except Exception as e:
             logger.error(f"[Inbox][Error][GetPhones] advisor={advisor_id}: {e}")
-            return set()
+            return None
 
     # ─── Notificaciones persistentes por asesor ───────────────────────────────
     # advisor_notifications:{advisor_id} → ZSET score=timestamp member=JSON

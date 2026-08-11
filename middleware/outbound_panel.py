@@ -5129,6 +5129,20 @@ async def _resolve_pending_reply_phones(contacts: list) -> set:
     }
 
 
+def _nunca_se_corta(contact: dict) -> bool:
+    """
+    Si un contacto entra en la respuesta pase lo que pase con el limite.
+
+    GET /contacts recorta la lista en TRES sitios encadenados: la seleccion
+    (_split_always_visible), el pre-limite previo al enriquecimiento con HubSpot
+    (_cuenta_como_prioridad) y el corte final que arma la respuesta. Arreglar uno
+    solo no cambia nada en pantalla — se comprobo dos veces en produccion el
+    11-ago-2026 —, asi que los tres comparten criterio: no leido, o el cliente
+    esperando respuesta.
+    """
+    return bool(contact.get("has_unread", False) or contact.get("pending_reply"))
+
+
 def _cuenta_como_prioridad(contact: dict) -> bool:
     """
     Si un contacto sobrevive al pre-limite previo al enriquecimiento con HubSpot.
@@ -5972,13 +5986,22 @@ async def get_active_contacts(
             if c.get("conversation_status") in waiting_statuses
         ])
 
-        _unread_in_final = [c for c in contacts_sorted if c.get("has_unread", False)]
-        _read_in_final = [c for c in contacts_sorted if not c.get("has_unread", False)]
-        _dynamic_result = _unread_in_final + _read_in_final[:limit]
+        # Corte final, el que arma la respuesta. Es el tercero de la cadena
+        # (selección → pre-límite de HubSpot → este) y los tres tienen que
+        # respetar lo mismo: ver _nunca_se_corta().
+        _always_in_final = [c for c in contacts_sorted if _nunca_se_corta(c)]
+        _rest_in_final = [c for c in contacts_sorted if not _nunca_se_corta(c)]
+        _dynamic_result = _always_in_final + _rest_in_final[:limit]
 
+        _pending_in_final = sum(
+            1 for c in _always_in_final
+            if c.get("pending_reply") and not c.get("has_unread", False)
+        )
         logger.info(
             f"[Panel] Retornando {len(_dynamic_result)} contactos "
-            f"({len(_unread_in_final)} unread + {len(_read_in_final[:limit])} leidos, "
+            f"({len(_always_in_final) - _pending_in_final} unread + "
+            f"{_pending_in_final} esperando respuesta + "
+            f"{len(_rest_in_final[:limit])} leidos, "
             f"activos: {active_count}, advisor: {advisor})"
         )
 

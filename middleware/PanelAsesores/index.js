@@ -476,10 +476,31 @@ async function updateDealStage(contactId, stageId) {
         '1326623539': 'Local o Bodega',
         'subscriber': 'Reubicados',
     };
+    // Stages que CIERRAN la conversación sin cambiar de dueño (STAGES_AUTO_CLOSE
+    // en outbound_panel.py). Van aparte de LUISA_TRANSFER_STAGES: aquí el
+    // contacto sale del panel y Sofía retoma, no se transfiere a nadie.
+    const AUTO_CLOSE_STAGES = {
+        'evangelist': 'Cerrado perdido',
+    };
     // Localizar el contacto: necesario para el body (auto-cierre) y para revertir
     // el dropdown si el usuario cancela la confirmación de "No responde".
     const contact = allContacts.find(c => String(c.contact_id) === String(contactId));
     const dropdownEl = document.querySelector(`select[data-contact-id="${contactId}"]`);
+
+    if (AUTO_CLOSE_STAGES[stageId]) {
+        const stageName = AUTO_CLOSE_STAGES[stageId];
+        const ok = confirm(
+            `Mover a '${stageName}'?\n\n` +
+            "- La conversacion se cerrara\n" +
+            "- El contacto desaparecera de tu panel\n" +
+            "- Sofia retomara si el cliente vuelve a escribir"
+        );
+        if (!ok) {
+            const previous = contactDealCache[contactId]?.current_stage || '';
+            if (dropdownEl && previous) dropdownEl.value = previous;
+            return;
+        }
+    }
 
     if (LUISA_TRANSFER_STAGES[stageId]) {
         const stageName = LUISA_TRANSFER_STAGES[stageId];
@@ -499,8 +520,11 @@ async function updateDealStage(contactId, stageId) {
     try {
         showLoader();
 
+        // El backend solo puede cerrar/transferir si recibe `phone`: sin él la
+        // rama de auto-cierre no corre y el contacto se queda en el panel.
+        // Todo stage de STAGES_AUTO_CLOSE o STAGES_TRANSFER_TO_LUISA debe pasar por aquí.
         const body = { stage_id: stageId };
-        if ((stageId === 'other' || LUISA_TRANSFER_STAGES[stageId]) && contact) {
+        if ((LUISA_TRANSFER_STAGES[stageId] || AUTO_CLOSE_STAGES[stageId]) && contact) {
             body.phone = contact.phone;
             body.canal = contact.canal || 'whatsapp';
         }

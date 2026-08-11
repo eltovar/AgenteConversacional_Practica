@@ -194,6 +194,15 @@ CONTACTS_RESPONSE_CACHE_TTL = 20
 # serian ~1122 y volveria el coste que el resto de este modulo acaba de arreglar.
 CONTACTS_INBOX_FALLBACK_MULTIPLIER = 3
 
+# Un contacto cuyo ultimo mensaje es del cliente entra SIEMPRE en la lista, tenga
+# badge o no. Sin esta regla, la asesora que abre un chat pierde el no-leido y el
+# contacto cae al monton ordenado por fecha; pasada la posicion `limit` desaparece
+# de la barra y la UI no pagina, asi que no hay forma de volver a el.
+# Medido el 11-ago-2026: 13 de 40 pendientes estaban en ese agujero.
+# El tope existe porque cada contacto extra cuesta enriquecimiento de HubSpot: si
+# `last_message_sender` viniera mal para cientos, volveria el coste de los 508s.
+CONTACTS_PENDING_MAX = 100
+
 CONTACTS_INFLIGHT_TTL = 30
 CONTACTS_INFLIGHT_WAIT_SECONDS = 3.0
 CONTACTS_INFLIGHT_POLL_INTERVAL = 0.25
@@ -5094,6 +5103,95 @@ async def _get_contacts_by_worker_filter(
     }
 
 
+async def _resolve_pending_reply_phones(contacts: list) -> set:
+    """
+    Telefonos cuyo ultimo mensaje es del CLIENTE, o sea que esperan respuesta.
+
+    Fuente: MongoDB `conversations`, que ya guarda `last_message_sender` en cada
+    upsert (mongodb_client.upsert_conversation_on_message). Una sola query con
+    $in sobre una coleccion indexada.
+
+    Ante cualquier fallo devuelve un set vacio: el panel se comporta exactamente
+    como antes de esta regla. Es preferible perder el rescate que romper la lista.
+    """
+    phones = sorted({c.get("phone") for c in contacts if c.get("phone")})
+    if not phones:
+        return set()
+    try:
+        previews = await get_mongo_manager().get_message_previews_batch(phones)
+    except Exception as e:
+        logger.warning(f"[Panel] No se pudo resolver pendientes (non-fatal): {e}")
+        return set()
+    return {
+        phone
+        for phone, data in (previews or {}).items()
+        if (data or {}).get("last_message_sender") == "client"
+    }
+
+
+def _split_always_visible(
+    advisor_contacts: list,
+    unread_phones: Optional[set],
+    pending_phones: set,
+    page: int,
+    limit: int,
+    pending_max: int = CONTACTS_PENDING_MAX,
+) -> tuple[list, dict]:
+    """
+    Decide que contactos entran en la respuesta.
+
+    Dos grupos: los que van SIEMPRE (sin leer, o con el cliente esperando) y el
+    resto, que se corta por `limit`. Funcion pura — sin IO — para poder probar el
+    corte sin levantar el endpoint.
+
+    `unread_phones=None` significa que el inbox no respondio; en ese caso el corte
+    del resto se amplia por CONTACTS_INBOX_FALLBACK_MULTIPLIER, como ya hacia
+    antes, pero los pendientes siguen entrando sin cortar.
+
+    Devuelve (contactos, stats) — stats alimenta el log.
+    """
+    inbox_down = unread_phones is None
+    unread = unread_phones or set()
+
+    always: list = []
+    rest: list = []
+    unread_count = 0
+    pending_count = 0
+    pending_truncated = 0
+
+    for contact in advisor_contacts:
+        phone = contact.get("phone") or ""
+        if phone and phone in unread:
+            always.append(contact)
+            unread_count += 1
+            continue
+        if phone and phone in pending_phones:
+            # El tope protege el coste del enriquecimiento aguas abajo. Los que
+            # sobran no se pierden: caen al resto y compiten por el corte normal.
+            if pending_count < pending_max:
+                always.append(contact)
+                pending_count += 1
+            else:
+                pending_truncated += 1
+                rest.append(contact)
+            continue
+        rest.append(contact)
+
+    cut = limit * CONTACTS_INBOX_FALLBACK_MULTIPLIER if inbox_down else limit
+    offset = (page - 1) * cut
+    active = always + rest[offset:offset + cut]
+
+    return active, {
+        "unread": unread_count,
+        "pending": pending_count,
+        "pending_truncated": pending_truncated,
+        "otros": len(active) - len(always),
+        "total": len(active),
+        "inbox_down": inbox_down,
+        "cut": cut,
+    }
+
+
 @router.get("/contacts")
 @limiter.limit("30/minute")
 async def get_active_contacts(
@@ -5277,35 +5375,46 @@ async def get_active_contacts(
             except Exception as _fb_err:
                 logger.warning(f"[Panel] Fallback MongoDB falló (non-fatal): {_fb_err}")
 
-            # Límite dinámico: siempre incluir TODOS los contactos con unread + top `limit` del resto.
-            # Garantiza que si hay 40 contactos con mensajes nuevos todos se muestran sin importar el límite.
+            # Límite dinámico: entran SIEMPRE los que tienen mensajes sin leer y los
+            # que esperan respuesta del cliente; del resto, solo los `limit` más
+            # recientes. El corte era lo que sepultaba conversaciones con el cliente
+            # esperando, porque abrir un chat quita el no-leído pero no la deuda.
+            # Nota: el PASO 1.5 vuelve a consultar `conversations` para el texto
+            # del preview. Se dejan separadas a proposito — fusionarlas ahorraria
+            # ~20ms sobre un endpoint de ~3000ms y a cambio acoplaria dos bloques
+            # distantes de este archivo.
             _unread_phones = await state_manager.get_all_inbox_phones(advisor)
-            _other_offset = (page - 1) * limit
+            _pending_phones = await _resolve_pending_reply_phones(advisor_contacts)
 
-            if _unread_phones is None:
+            active_contacts, _cut_stats = _split_always_visible(
+                advisor_contacts=advisor_contacts,
+                unread_phones=_unread_phones,
+                pending_phones=_pending_phones,
+                page=page,
+                limit=limit,
+            )
+            total_for_advisor = len(advisor_contacts)
+
+            if _cut_stats["inbox_down"]:
                 # El inbox no respondió. Sin saber quién tiene mensajes sin leer no
                 # se puede aplicar el corte normal: dejaría fuera precisamente a los
                 # contactos nuevos, que es lo que paso el 10-ago-2026. Se amplía el
                 # corte — mostrar de más es recuperable, ocultar un lead no.
-                _fallback_limit = limit * CONTACTS_INBOX_FALLBACK_MULTIPLIER
-                # El offset se recalcula sobre el corte ampliado: usar el de `limit`
-                # haría que las páginas se solaparan (p1: 0-90, p2: 30-120).
-                _fallback_offset = (page - 1) * _fallback_limit
-                active_contacts = advisor_contacts[_fallback_offset:_fallback_offset + _fallback_limit]
-                total_for_advisor = len(advisor_contacts)
                 logger.warning(
                     "[Panel] Inbox no disponible para advisor=%s — corte ampliado a %d "
                     "(en vez de %d) para no ocultar contactos con mensajes nuevos",
-                    advisor, _fallback_limit, limit
+                    advisor, _cut_stats["cut"], limit
                 )
-            else:
-                _unread_set = [c for c in advisor_contacts if c.get("phone") in _unread_phones]
-                _other_set  = [c for c in advisor_contacts if c.get("phone") not in _unread_phones]
-                active_contacts = _unread_set + _other_set[_other_offset:_other_offset + limit]
-                total_for_advisor = len(advisor_contacts)
-                logger.info(
-                    f"[Panel] Límite dinámico: {len(_unread_set)} unread (sin límite) + "
-                    f"{len(active_contacts) - len(_unread_set)} otros = {len(active_contacts)} total"
+            logger.info(
+                f"[Panel] Límite dinámico: {_cut_stats['unread']} unread + "
+                f"{_cut_stats['pending']} esperando respuesta (sin límite) + "
+                f"{_cut_stats['otros']} otros = {_cut_stats['total']} total"
+            )
+            if _cut_stats["pending_truncated"]:
+                logger.warning(
+                    "[Panel] Tope de pendientes alcanzado para advisor=%s: %d por "
+                    "encima de %d quedaron sujetos al corte normal",
+                    advisor, _cut_stats["pending_truncated"], CONTACTS_PENDING_MAX
                 )
         else:
             zset_offset = (page - 1) * limit

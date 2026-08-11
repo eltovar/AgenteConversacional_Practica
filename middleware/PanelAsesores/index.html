@@ -896,6 +896,8 @@
         // ADVISOR_NAMES es un objeto mutable para poder actualizarlo desde el panel
         let ADVISOR_NAMES = {{ advisor_names | tojson | safe }};
     </script>
+    <!-- Modales de decisión: debe cargar ANTES de index.js, que los invoca -->
+    <script src="/whatsapp/panel/static/ui-dialog.js"></script>
     <script src="/whatsapp/panel/static/index.js"></script>
     <!-- Contenedor de toasts de notificaciones (sistema nuevo) -->
     <div id="notifToastContainer"

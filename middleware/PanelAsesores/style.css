@@ -656,3 +656,171 @@
     white-space: nowrap;
     flex-shrink: 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Modal de decisión (ui-dialog.js)
+
+   Reemplaza confirm()/prompt() nativos. Los tonos viven aquí y NO como clases
+   dinámicas de Tailwind: el escáner de Tailwind solo detecta literales, así que
+   `dlg-accent-${tone}` se purgaría del build y el modal saldría sin color.
+   Mismo criterio que las clases .toast-* de arriba.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.dlg-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(17, 24, 39, 0.55);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    padding: 1rem;
+    animation: dlg-fade-in 0.15s ease-out;
+}
+
+.dlg-overlay[hidden] { display: none; }
+
+.dlg-panel {
+    background: #FFFFFF;
+    border-radius: 0.75rem;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.22);
+    width: 100%;
+    max-width: 26rem;
+    overflow: hidden;
+    animation: dlg-pop-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dlg-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dlg-pop-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dlg-overlay, .dlg-panel { animation: none; }
+}
+
+/* Franja de acento: la señal visual que distingue el tipo de acción */
+.dlg-accent { height: 4px; background: #6B7280; }
+.dlg-accent-danger  { background: #EF4444; }
+.dlg-accent-warning { background: #F5C400; }
+.dlg-accent-info    { background: #2563EB; }
+.dlg-accent-success { background: #10B981; }
+
+.dlg-body { padding: 1.25rem 1.5rem 1rem; }
+
+.dlg-head { display: flex; gap: 0.75rem; align-items: flex-start; }
+
+.dlg-icon {
+    flex-shrink: 0;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 9999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    line-height: 1;
+}
+.dlg-icon-danger  { background: #FEF2F2; color: #991B1B; }
+.dlg-icon-warning { background: #FEF9C3; color: #92400E; }
+.dlg-icon-info    { background: #EFF6FF; color: #1E40AF; }
+.dlg-icon-success { background: #ECFDF5; color: #065F46; }
+
+.dlg-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #111827;
+    margin: 0.15rem 0 0;
+    line-height: 1.35;
+}
+
+.dlg-message {
+    margin: 0.5rem 0 0;
+    font-size: 0.875rem;
+    color: #4B5563;
+    line-height: 1.5;
+    white-space: pre-line;
+}
+
+/* Lista de consecuencias: qué va a pasar exactamente */
+.dlg-bullets {
+    margin: 0.75rem 0 0;
+    padding: 0.625rem 0.75rem;
+    background: #F9FAFB;
+    border-radius: 0.5rem;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.dlg-bullets li {
+    font-size: 0.8125rem;
+    color: #4B5563;
+    padding-left: 1rem;
+    position: relative;
+    line-height: 1.45;
+}
+.dlg-bullets li::before {
+    content: "•";
+    position: absolute;
+    left: 0.25rem;
+    color: #9CA3AF;
+}
+
+.dlg-input {
+    width: 100%;
+    margin-top: 0.75rem;
+    border: 1px solid #D1D5DB;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    color: #111827;
+}
+.dlg-input:focus {
+    outline: none;
+    border-color: #2563EB;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.dlg-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    padding: 0.875rem 1.5rem 1.25rem;
+    flex-wrap: wrap;
+}
+
+.dlg-btn {
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s;
+}
+.dlg-btn:focus-visible {
+    outline: 2px solid #2563EB;
+    outline-offset: 2px;
+}
+
+.dlg-btn-cancel {
+    background: #FFFFFF;
+    border-color: #D1D5DB;
+    color: #374151;
+}
+.dlg-btn-cancel:hover { background: #F3F4F6; }
+
+.dlg-btn-danger  { background: #DC2626; color: #FFFFFF; }
+.dlg-btn-danger:hover  { background: #B91C1C; }
+
+.dlg-btn-warning { background: #F5C400; color: #3F2D00; }
+.dlg-btn-warning:hover { background: #DBAF00; }
+
+.dlg-btn-info    { background: #2563EB; color: #FFFFFF; }
+.dlg-btn-info:hover    { background: #1D4ED8; }
+
+.dlg-btn-success { background: #059669; color: #FFFFFF; }
+.dlg-btn-success:hover { background: #047857; }

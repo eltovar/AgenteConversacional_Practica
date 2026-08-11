@@ -487,34 +487,40 @@ async function updateDealStage(contactId, stageId) {
     const contact = allContacts.find(c => String(c.contact_id) === String(contactId));
     const dropdownEl = document.querySelector(`select[data-contact-id="${contactId}"]`);
 
+    // Revierte el dropdown al valor previo cuando la asesora cancela.
+    const revertDropdown = () => {
+        const previous = contactDealCache[contactId]?.current_stage || '';
+        if (dropdownEl && previous) dropdownEl.value = previous;
+    };
+
     if (AUTO_CLOSE_STAGES[stageId]) {
         const stageName = AUTO_CLOSE_STAGES[stageId];
-        const ok = confirm(
-            `Mover a '${stageName}'?\n\n` +
-            "- La conversacion se cerrara\n" +
-            "- El contacto desaparecera de tu panel\n" +
-            "- Sofia retomara si el cliente vuelve a escribir"
-        );
-        if (!ok) {
-            const previous = contactDealCache[contactId]?.current_stage || '';
-            if (dropdownEl && previous) dropdownEl.value = previous;
-            return;
-        }
+        const ok = await confirmDialog({
+            title: `¿Mover a "${stageName}"?`,
+            tone: 'warning',
+            bullets: [
+                'La conversación se cerrará',
+                'El contacto desaparecerá de tu panel',
+                'Sofía retomará si el cliente vuelve a escribir',
+            ],
+            confirmLabel: 'Cerrar conversación',
+        });
+        if (!ok) { revertDropdown(); return; }
     }
 
     if (LUISA_TRANSFER_STAGES[stageId]) {
         const stageName = LUISA_TRANSFER_STAGES[stageId];
-        const ok = confirm(
-            `Mover a '${stageName}'?\n\n` +
-            "- El contacto se transferira a Luisa automaticamente\n" +
-            "- Desaparecera de tu panel\n" +
-            `- Luisa lo atendera en el embudo ${stageName}`
-        );
-        if (!ok) {
-            const previous = contactDealCache[contactId]?.current_stage || '';
-            if (dropdownEl && previous) dropdownEl.value = previous;
-            return;
-        }
+        const ok = await confirmDialog({
+            title: `¿Mover a "${stageName}"?`,
+            tone: 'info',
+            bullets: [
+                'El contacto se transferirá a Luisa automáticamente',
+                'Desaparecerá de tu panel',
+                `Luisa lo atenderá en el embudo ${stageName}`,
+            ],
+            confirmLabel: 'Transferir',
+        });
+        if (!ok) { revertDropdown(); return; }
     }
 
     try {
@@ -1182,7 +1188,13 @@ async function updateTemplate(event, templateId) {
 }
 
 async function deleteTemplate(templateId) {
-    if (!confirm('Eliminar este template?')) return;
+    const ok = await confirmDialog({
+        title: '¿Eliminar este template?',
+        message: 'Esta acción no se puede deshacer.',
+        tone: 'danger',
+        confirmLabel: 'Eliminar',
+    });
+    if (!ok) return;
 
     try {
         const response = await fetch(`${BASE_URL}/templates/${templateId}?advisor_id=${encodeURIComponent(ADVISOR_ID)}`, {
@@ -3174,14 +3186,17 @@ async function closeConversation() {
         return;
     }
 
-    const confirmMsg = 'Cerrar esta conversacion?\n\n' +
-        '- El contacto desaparecera del panel\n' +
-        '- Sofia se reactivara para este contacto\n' +
-        '- El historial se mantiene en HubSpot';
-
-    if (!confirm(confirmMsg)) {
-        return;
-    }
+    const ok = await confirmDialog({
+        title: '¿Cerrar esta conversación?',
+        tone: 'warning',
+        bullets: [
+            'El contacto desaparecerá del panel',
+            'Sofía se reactivará para este contacto',
+            'El historial se mantiene en HubSpot',
+        ],
+        confirmLabel: 'Cerrar conversación',
+    });
+    if (!ok) return;
 
     const closeBtn = document.getElementById('closeConversationBtn');
     if (closeBtn) {
@@ -3485,7 +3500,16 @@ async function submitEditMessage(msgId, btn) {
 }
 
 async function confirmDeleteMessage(msgId) {
-    if (!confirm('¿Eliminar este mensaje? Se enviará una notificación al cliente.')) return;
+    const ok = await confirmDialog({
+        title: '¿Eliminar este mensaje?',
+        tone: 'danger',
+        bullets: [
+            'Se enviará una notificación al cliente',
+            'Esta acción no se puede deshacer',
+        ],
+        confirmLabel: 'Eliminar',
+    });
+    if (!ok) return;
     try {
         await _executeDeleteMessage(msgId, true);
     } catch (e) {
@@ -3945,7 +3969,7 @@ function stopRecording() {
  * Muestra confirmacion y envia el audio grabado.
  * @param {File} audioFile - Archivo de audio grabado
  */
-function confirmAndSendAudio(audioFile) {
+async function confirmAndSendAudio(audioFile) {
     // Mostrar preview del audio antes de enviar
     const preview = document.getElementById('mediaPreview');
     const previewName = document.getElementById('mediaPreviewName');
@@ -3963,14 +3987,23 @@ function confirmAndSendAudio(audioFile) {
         showToast('Tu cita aparecerá como mensaje de texto antes del audio.', 'info');
     }
 
-    // Preguntar si desea enviar inmediatamente o agregar texto
-    const sendNow = confirm('Audio grabado. ¿Deseas enviarlo ahora?\n\nPresiona "Cancelar" para agregar un mensaje de texto antes de enviar.');
+    // Dos acciones con nombre propio: con confirm() nativo el boton "Cancelar"
+    // no cancelaba nada, agregaba texto. Aqui cada opcion dice lo que hace.
+    const choice = await choiceDialog({
+        title: 'Audio grabado',
+        message: '¿Qué querés hacer con el audio?',
+        tone: 'info',
+        cancelLabel: null,
+        actions: [
+            { id: 'text', label: 'Agregar texto antes', tone: 'cancel' },
+            { id: 'send', label: 'Enviar ahora', tone: 'info' },
+        ],
+    });
 
-    if (sendNow) {
-        // Enviar inmediatamente
+    if (choice === 'send') {
         sendMessage(new Event('submit'));
     }
-    // Si cancela, el archivo queda en selectedMediaFile y puede agregar texto
+    // 'text' o ESC: el archivo queda en selectedMediaFile y puede agregar texto
 }
 
 /**
@@ -4798,7 +4831,14 @@ async function submitScheduleMessage(event) {
 }
 
 async function cancelScheduledMessage(messageId, contactId) {
-    if (!confirm('¿Cancelar este mensaje programado?')) return;
+    const ok = await confirmDialog({
+        title: '¿Cancelar este mensaje programado?',
+        message: 'El mensaje no se enviará.',
+        tone: 'danger',
+        confirmLabel: 'Cancelar envío',
+        cancelLabel: 'Volver',
+    });
+    if (!ok) return;
 
     try {
         const resp = await fetch(`${BASE_URL}/scheduled-messages/${messageId}`, {
@@ -4914,7 +4954,13 @@ async function confirmEditNote(noteId, contactId) {
  * @param {string} contactId
  */
 async function deleteNote(noteId, contactId) {
-    if (!confirm('¿Eliminar esta nota?')) return;
+    const ok = await confirmDialog({
+        title: '¿Eliminar esta nota?',
+        message: 'Esta acción no se puede deshacer.',
+        tone: 'danger',
+        confirmLabel: 'Eliminar',
+    });
+    if (!ok) return;
 
     try {
         const resp = await fetch(
@@ -5233,7 +5279,13 @@ async function sendTemplateMessage() {
             defaultValue = contactName.split(' ')[0];  // Primer nombre
         }
 
-        const value = prompt(`Valor para {${varName}}:`, defaultValue);
+        const value = await promptDialog({
+            title: `Valor para {${varName}}`,
+            label: `Valor para ${varName}`,
+            defaultValue: defaultValue,
+            placeholder: `Escribe el valor de ${varName}`,
+            tone: 'info',
+        });
         if (value === null) {
             // Usuario cancelo
             return;
@@ -5247,9 +5299,13 @@ async function sendTemplateMessage() {
         previewMsg = previewMsg.replace(new RegExp(`\\{${key}\\}`, 'g'), val || `{${key}}`);
     }
 
-    if (!confirm(`Enviar este mensaje?\n\n${previewMsg}`)) {
-        return;
-    }
+    const okSend = await confirmDialog({
+        title: '¿Enviar este mensaje?',
+        message: previewMsg,
+        tone: 'info',
+        confirmLabel: 'Enviar',
+    });
+    if (!okSend) return;
 
     // Deshabilitar boton mientras envia (si existe)
     const templateBtn = document.getElementById('sendTemplateBtn');
@@ -7365,7 +7421,16 @@ async function createWorker() {
 }
 
 async function deleteWorker(workerId, workerName) {
-    if (!confirm(`¿Eliminar a "${workerName}"? Sus citas históricas se conservan.`)) return;
+    const ok = await confirmDialog({
+        title: `¿Eliminar a "${workerName}"?`,
+        tone: 'danger',
+        bullets: [
+            'Sus citas históricas se conservan',
+            'Dejará de aparecer al agendar nuevas citas',
+        ],
+        confirmLabel: 'Eliminar',
+    });
+    if (!ok) return;
     try {
         const response = await fetch(`${BASE_URL}/workers/${workerId}`, {
             method: 'DELETE',
@@ -7613,7 +7678,13 @@ function editAppointment(apptId) {
 }
 
 async function deleteAppointment(apptId) {
-    if (!confirm('¿Eliminar esta cita permanentemente?')) return;
+    const ok = await confirmDialog({
+        title: '¿Eliminar esta cita?',
+        message: 'Se eliminará permanentemente y no se puede deshacer.',
+        tone: 'danger',
+        confirmLabel: 'Eliminar',
+    });
+    if (!ok) return;
 
     try {
         const response = await fetch(`${BASE_URL}/appointments/${apptId}`, {
@@ -8028,12 +8099,16 @@ async function submitBulkCampaign() {
         return;
     }
 
-    const ok = confirm(
-        `Vas a enviar a ${total} contactos TUYOS en "${stageName}".\n\n` +
-        `Plantilla: ${collected.template.label}\n` +
-        `Rango: ${dateFrom || 'cualquiera'} → ${dateTo || 'cualquiera'}\n\n` +
-        `Esta acción no se puede deshacer. ¿Continuar?`
-    );
+    const ok = await confirmDialog({
+        title: `¿Enviar a ${total} contactos?`,
+        message: `Se enviará a tus contactos en "${stageName}". Esta acción no se puede deshacer.`,
+        tone: 'danger',
+        bullets: [
+            `Plantilla: ${collected.template.label}`,
+            `Rango: ${dateFrom || 'cualquiera'} → ${dateTo || 'cualquiera'}`,
+        ],
+        confirmLabel: `Enviar a ${total}`,
+    });
     if (!ok) return;
 
     const btn = document.getElementById('bulkSendBtn');

@@ -17,6 +17,10 @@ module.exports = {
     "./metrics.html",
     "./index.js",
     "./metrics.js",
+    // ui-dialog.js hoy se estiliza solo con clases .dlg-* de style.css, no con
+    // Tailwind. Se lista igual para que, si alguien agrega una clase Tailwind
+    // ahi, no desaparezca del build sin aviso.
+    "./ui-dialog.js",
   ],
   theme: {
     extend: {},

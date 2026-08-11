@@ -5137,22 +5137,28 @@ def _nunca_se_corta(contact: dict) -> bool:
     (_split_always_visible), el pre-limite previo al enriquecimiento con HubSpot
     (_cuenta_como_prioridad) y el corte final que arma la respuesta. Arreglar uno
     solo no cambia nada en pantalla — se comprobo dos veces en produccion el
-    11-ago-2026 —, asi que los tres comparten criterio: no leido, o el cliente
-    esperando respuesta.
+    11-ago-2026 —, asi que los tres comparten criterio: no leido, o rescatado por
+    esperar respuesta.
+
+    Mira `pending_rescued` (el pase, acotado por el tope) y NO `pending_reply`
+    (la verdad, sin acotar): si mirara la verdad, el tope no serviria de nada y
+    entrarian todos los pendientes historicos.
     """
-    return bool(contact.get("has_unread", False) or contact.get("pending_reply"))
+    return bool(contact.get("has_unread", False) or contact.get("pending_rescued"))
 
 
 def _cuenta_como_prioridad(contact: dict) -> bool:
     """
     Si un contacto sobrevive al pre-limite previo al enriquecimiento con HubSpot.
 
-    Ademas de los del ZSET de prioridad, los que esperan respuesta del cliente.
+    Ademas de los del ZSET de prioridad, los rescatados por esperar respuesta.
     Sin ellos aqui, ese corte deshacia el rescate de _split_always_visible: el
     11-ago-2026 se seleccionaban 110 contactos y quedaban 62, con lo que el
     arreglo no cambiaba nada en pantalla.
+
+    Mira `pending_rescued`, no `pending_reply` — ver _nunca_se_corta().
     """
-    return bool(contact.get("in_priority_zset", True) or contact.get("pending_reply"))
+    return bool(contact.get("in_priority_zset", True) or contact.get("pending_rescued"))
 
 
 def _split_always_visible(
@@ -5193,21 +5199,34 @@ def _split_always_visible(
 
     for contact in advisor_contacts:
         phone = contact.get("phone") or ""
+        espera_respuesta = bool(phone and phone in pending_phones)
+
+        # `pending_reply` dice la verdad SIEMPRE — tambien si el contacto ademas
+        # tiene mensajes sin leer, y tambien si queda por encima del tope. Es la
+        # senal que el panel pinta: el cliente espera y nadie ha contestado.
+        if espera_respuesta:
+            contact["pending_reply"] = True
+
         if phone and phone in unread:
             always.append(contact)
             unread_count += 1
             continue
-        if phone and phone in pending_phones:
+
+        if espera_respuesta:
             # El tope protege el coste del enriquecimiento aguas abajo. Los que
             # sobran no se pierden: caen al resto y compiten por el corte normal.
+            # `pending_rescued` es la marca INTERNA del pase — la que miran los
+            # otros dos cortes. Separada de `pending_reply` a proposito: si los
+            # cortes leyeran la verdad en vez del pase, el tope no existiria.
             if pending_count < pending_max:
-                contact["pending_reply"] = True
+                contact["pending_rescued"] = True
                 always.append(contact)
                 pending_count += 1
             else:
                 pending_truncated += 1
                 rest.append(contact)
             continue
+
         rest.append(contact)
 
     cut = limit * CONTACTS_INBOX_FALLBACK_MULTIPLIER if inbox_down else limit

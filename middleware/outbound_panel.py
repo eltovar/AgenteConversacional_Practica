@@ -5129,6 +5129,18 @@ async def _resolve_pending_reply_phones(contacts: list) -> set:
     }
 
 
+def _cuenta_como_prioridad(contact: dict) -> bool:
+    """
+    Si un contacto sobrevive al pre-limite previo al enriquecimiento con HubSpot.
+
+    Ademas de los del ZSET de prioridad, los que esperan respuesta del cliente.
+    Sin ellos aqui, ese corte deshacia el rescate de _split_always_visible: el
+    11-ago-2026 se seleccionaban 110 contactos y quedaban 62, con lo que el
+    arreglo no cambiaba nada en pantalla.
+    """
+    return bool(contact.get("in_priority_zset", True) or contact.get("pending_reply"))
+
+
 def _split_always_visible(
     advisor_contacts: list,
     unread_phones: Optional[set],
@@ -5141,8 +5153,14 @@ def _split_always_visible(
     Decide que contactos entran en la respuesta.
 
     Dos grupos: los que van SIEMPRE (sin leer, o con el cliente esperando) y el
-    resto, que se corta por `limit`. Funcion pura — sin IO — para poder probar el
-    corte sin levantar el endpoint.
+    resto, que se corta por `limit`. Sin IO, para poder probar el corte sin
+    levantar el endpoint.
+
+    Marca `pending_reply=True` en los contactos rescatados. No es cosmetico: aguas
+    abajo hay un SEGUNDO corte antes del enriquecimiento con HubSpot que solo
+    respetaba `in_priority_zset`, y sin esta marca deshacia el trabajo de aqui
+    —medido en produccion: 110 contactos seleccionados, 62 tras el pre-limite—.
+    El campo viaja tambien en la respuesta, donde el panel puede usarlo.
 
     `unread_phones=None` significa que el inbox no respondio; en ese caso el corte
     del resto se amplia por CONTACTS_INBOX_FALLBACK_MULTIPLIER, como ya hacia
@@ -5169,6 +5187,7 @@ def _split_always_visible(
             # El tope protege el coste del enriquecimiento aguas abajo. Los que
             # sobran no se pierden: caen al resto y compiten por el corte normal.
             if pending_count < pending_max:
+                contact["pending_reply"] = True
                 always.append(contact)
                 pending_count += 1
             else:
@@ -5441,8 +5460,12 @@ async def get_active_contacts(
         # ── Pre-limitar ANTES del enriquecimiento con HubSpot.
         # Los contactos de prioridad (ZSET) siempre van; del resto solo los más recientes.
         # Sin esto, 534 contactos × waits de 429 (36s c/u) = timeout de Railway.
-        priority_contacts = [c for c in active_contacts if c.get("in_priority_zset", True)]
-        bot_contacts = [c for c in active_contacts if not c.get("in_priority_zset", True)]
+        # El criterio vive en _cuenta_como_prioridad() — ver ahí por qué los
+        # contactos con el cliente esperando tienen que pasar este corte.
+        # El coste de los contactos extra ya no es el de 2026-05: _hubspot_batch_get_contacts
+        # agrupa las consultas y el cache Redis de nombres absorbe la mayoría.
+        priority_contacts = [c for c in active_contacts if _cuenta_como_prioridad(c)]
+        bot_contacts = [c for c in active_contacts if not _cuenta_como_prioridad(c)]
 
         # Ordenar con 3 tiers (estilo WhatsApp):
         #   Tier 0: has_unread=True → prioridad máxima (necesitan atención)

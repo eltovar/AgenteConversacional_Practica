@@ -47,6 +47,54 @@ _MAX_SAVE_RETRIES = 3
 _SAVE_RETRY_DELAY = 0.5  # segundos (crece exponencialmente: 0.5s, 1s)
 
 
+def phones_awaiting_from_docs(docs: List[Dict[str, Any]]) -> set:
+    """
+    Telefonos cuyo cliente espera respuesta, dados documentos de `conversations`.
+
+    La coleccion guarda un documento por (phone, canal). Un mismo cliente escribe
+    por el portal y la asesora le contesta por WhatsApp, que es el canal real de
+    mensajeria — el portal solo es el origen. Asi que **decide el documento mas
+    reciente de entre todos los canales del telefono**.
+
+    Las dos formas de equivocarse en esto, ambas cometidas y medidas:
+
+      Colapsar por telefono quedandose con un documento cualquiera (el ultimo del
+      cursor). Si sale el contestado, un cliente que espera en otro canal
+      desaparece. Costo: 3 clientes invisibles llevando 11 horas, 4 y 6 dias.
+
+      Marcar el telefono si ALGUNO de sus canales tiene `client`. El documento
+      viejo de un portal deja el aviso encendido para siempre aunque la asesora
+      haya contestado un minuto despues por WhatsApp. Costo: 20 badges falsos de
+      160, detectados el 12-ago-2026 a las 11:05.
+
+    Un documento sin fecha se trata como el mas antiguo: nunca decide si hay otro
+    con fecha.
+    """
+    ultimo: Dict[str, Any] = {}
+    for d in docs:
+        phone = d.get("phone")
+        if not phone:
+            continue
+        ts = d.get("last_message_at")
+        previo = ultimo.get(phone)
+        if previo is None or _es_posterior(ts, previo[0]):
+            ultimo[phone] = (ts, d.get("last_message_sender"))
+    return {p for p, (_ts, sender) in ultimo.items() if sender == "client"}
+
+
+def _es_posterior(a: Optional[datetime], b: Optional[datetime]) -> bool:
+    """`a` es mas reciente que `b`. Sin fecha equivale a lo mas antiguo posible."""
+    if a is None:
+        return False
+    if b is None:
+        return True
+    if a.tzinfo is None and b.tzinfo is not None:
+        a = a.replace(tzinfo=b.tzinfo)
+    elif b.tzinfo is None and a.tzinfo is not None:
+        b = b.replace(tzinfo=a.tzinfo)
+    return a > b
+
+
 class MongoDBManager:
     """
     Gestor de MongoDB para mensajes en tiempo real.
@@ -2024,17 +2072,15 @@ class MongoDBManager:
         """
         De los telefonos dados, cuales tienen al CLIENTE esperando respuesta.
 
-        `conversations` guarda un documento por (phone, canal). Un mismo telefono
-        puede tener varios: el cliente escribio por pagina_web y nadie contesto,
-        mientras que por whatsapp si hubo respuesta. Basta con que UNO de sus
-        canales tenga al cliente esperando para que el contacto deba aparecer.
+        `conversations` guarda un documento por (phone, canal), asi que un mismo
+        telefono puede tener varios. La decision la toma el documento MAS RECIENTE
+        de entre todos sus canales — ver phones_awaiting_from_docs(), que es donde
+        vive la regla y donde se prueba.
 
-        Antes esto se resolvia reutilizando get_message_previews_batch(), que
-        indexa por telefono y por tanto COLAPSA los documentos: ganaba el ultimo
-        que iterara el cursor. Si ese era el de `advisor`, el telefono dejaba de
-        contar como pendiente. Medido el 12-ago-2026: 232 telefonos tienen mas de
-        un canal, y tres contactos con el cliente esperando desde hacia 11 horas,
-        4 dias y 6 dias quedaban sin marcar por esto.
+        Se trae la lectura a Python en vez de agregarla en MongoDB a proposito:
+        la regla es el corazon del aviso del panel y tiene que poder probarse
+        ejecutandola. El volumen lo permite — son 3 campos por documento sobre
+        una coleccion de ~2.600.
 
         Ante cualquier fallo devuelve un set vacio — el panel se comporta como
         antes de la regla de pendientes.
@@ -2043,10 +2089,11 @@ class MongoDBManager:
             return set()
         try:
             cursor = self.db.conversations.find(
-                {"phone": {"$in": list(phones)}, "last_message_sender": "client"},
-                {"phone": 1, "_id": 0},
+                {"phone": {"$in": list(phones)}},
+                {"phone": 1, "last_message_sender": 1, "last_message_at": 1, "_id": 0},
             )
-            return {d["phone"] async for d in cursor if d.get("phone")}
+            docs = [d async for d in cursor]
+            return phones_awaiting_from_docs(docs)
         except Exception as e:
             logger.warning(f"[MongoDB][conv] Error find_phones_awaiting_reply: {e}")
             return set()

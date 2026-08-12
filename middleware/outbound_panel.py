@@ -5191,6 +5191,21 @@ def _split_always_visible(
     inbox_down = unread_phones is None
     unread = unread_phones or set()
 
+    # Que 100 pendientes se rescatan: los MAS RECIENTES, no los primeros que
+    # aparezcan recorriendo la lista. `advisor_contacts` llega en dos tramos —
+    # primero el ZSET, despues el respaldo de MongoDB— y dentro de cada uno hay
+    # orden por actividad, pero entre ellos no. Aplicando el tope por posicion,
+    # un cliente que escribio hace 11 horas y viene del respaldo perdia su plaza
+    # frente a otro de hace 40 dias que estaba en el ZSET. Medido en produccion
+    # el 12-ago-2026: 3 de los pendientes mas recientes quedaban fuera.
+    _candidatos = [
+        c for c in advisor_contacts
+        if (c.get("phone") or "") in pending_phones
+        and (c.get("phone") or "") not in unread
+    ]
+    _candidatos.sort(key=lambda c: c.get("last_activity") or "", reverse=True)
+    _con_pase = {c.get("phone") for c in _candidatos[:pending_max]}
+
     always: list = []
     rest: list = []
     unread_count = 0
@@ -5218,7 +5233,7 @@ def _split_always_visible(
             # `pending_rescued` es la marca INTERNA del pase — la que miran los
             # otros dos cortes. Separada de `pending_reply` a proposito: si los
             # cortes leyeran la verdad en vez del pase, el tope no existiria.
-            if pending_count < pending_max:
+            if phone in _con_pase:
                 contact["pending_rescued"] = True
                 always.append(contact)
                 pending_count += 1

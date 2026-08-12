@@ -2020,6 +2020,37 @@ class MongoDBManager:
             logger.warning(f"[MongoDB][conv] Error update_conversation_meta {phone}: {e}")
             return False
 
+    async def find_phones_awaiting_reply(self, phones: List[str]) -> set:
+        """
+        De los telefonos dados, cuales tienen al CLIENTE esperando respuesta.
+
+        `conversations` guarda un documento por (phone, canal). Un mismo telefono
+        puede tener varios: el cliente escribio por pagina_web y nadie contesto,
+        mientras que por whatsapp si hubo respuesta. Basta con que UNO de sus
+        canales tenga al cliente esperando para que el contacto deba aparecer.
+
+        Antes esto se resolvia reutilizando get_message_previews_batch(), que
+        indexa por telefono y por tanto COLAPSA los documentos: ganaba el ultimo
+        que iterara el cursor. Si ese era el de `advisor`, el telefono dejaba de
+        contar como pendiente. Medido el 12-ago-2026: 232 telefonos tienen mas de
+        un canal, y tres contactos con el cliente esperando desde hacia 11 horas,
+        4 dias y 6 dias quedaban sin marcar por esto.
+
+        Ante cualquier fallo devuelve un set vacio — el panel se comporta como
+        antes de la regla de pendientes.
+        """
+        if not phones or not await self.connect():
+            return set()
+        try:
+            cursor = self.db.conversations.find(
+                {"phone": {"$in": list(phones)}, "last_message_sender": "client"},
+                {"phone": 1, "_id": 0},
+            )
+            return {d["phone"] async for d in cursor if d.get("phone")}
+        except Exception as e:
+            logger.warning(f"[MongoDB][conv] Error find_phones_awaiting_reply: {e}")
+            return set()
+
     async def find_conversations_by_owner(
         self,
         owner_id: str,

@@ -5111,6 +5111,10 @@ async def _resolve_pending_reply_phones(contacts: list) -> set:
     upsert (mongodb_client.upsert_conversation_on_message). Una sola query con
     $in sobre una coleccion indexada.
 
+    Basta con que UNO de los canales del telefono tenga al cliente esperando —
+    ver find_phones_awaiting_reply(), que explica por que no se puede resolver
+    esto colapsando los documentos por telefono.
+
     Ante cualquier fallo devuelve un set vacio: el panel se comporta exactamente
     como antes de esta regla. Es preferible perder el rescate que romper la lista.
     """
@@ -5118,15 +5122,10 @@ async def _resolve_pending_reply_phones(contacts: list) -> set:
     if not phones:
         return set()
     try:
-        previews = await get_mongo_manager().get_message_previews_batch(phones)
+        return await get_mongo_manager().find_phones_awaiting_reply(phones)
     except Exception as e:
         logger.warning(f"[Panel] No se pudo resolver pendientes (non-fatal): {e}")
         return set()
-    return {
-        phone
-        for phone, data in (previews or {}).items()
-        if (data or {}).get("last_message_sender") == "client"
-    }
 
 
 def _nunca_se_corta(contact: dict) -> bool:

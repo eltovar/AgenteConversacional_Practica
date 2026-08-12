@@ -1460,18 +1460,22 @@ async function loadContacts() {
         if (ADVISOR_ID) {
             for (const contact of newContacts) {
                 const phone = contact.phone || '';
-                // pending_reply = el cliente escribió lo último y nadie contestó.
-                // Lo calcula el backend desde MongoDB en cada carga, así que se
-                // apaga solo en cuanto la asesora responde.
-                const _debeRespuesta = !!contact.pending_reply;
-                // El guard de sesión (_seenPhones) silencia el "no leído" cuando
-                // la asesora abre el chat. La deuda con el cliente NO se silencia
-                // al abrir: solo al responder.
+                // El badge significa NO LEÍDO y se apaga al abrir el chat.
+                //
+                // Del 12-ago-2026 al 12-ago-2026 significó "sin responder" y no se
+                // apagaba hasta contestar. Se revirtió: el cliente suele responder
+                // a los pocos segundos —medido: 13s, 7s— así que el aviso volvía a
+                // encenderse constantemente y dejaba de leerse.
+                //
+                // No se pierde visibilidad al revertirlo. Que un contacto con el
+                // cliente esperando aparezca en la lista NO depende del badge: lo
+                // garantiza `pending_reply` en el corte del backend
+                // (outbound_panel._split_always_visible), que sigue en pie.
                 if (
-                    (contact.has_unread || _debeRespuesta) &&
+                    contact.has_unread &&
                     phone &&
                     phone !== currentPhone &&
-                    (_debeRespuesta || !_seenPhones.has(phone))
+                    !_seenPhones.has(phone)
                 ) {
                     // Solo inicializar si no hay conteo activo mayor (WS puede haber incrementado más)
                     if (!(phone in unreadCounts) || unreadCounts[phone] === 0) {
@@ -1485,11 +1489,9 @@ async function loadContacts() {
         // Reconciliación: si servidor dice has_unread=false pero tenemos badge local → limpiar.
         // El servidor es fuente de verdad para LIMPIAR (advisor marcó como leído en otra tab/sesión).
         // Solo aplica si el contacto no está abierto actualmente ni fue cerrado recientemente.
-        // Ahora son DOS señales: mientras el cliente siga esperando respuesta el
-        // aviso no se limpia, aunque el "no leído" ya se haya consumido.
         for (const contact of newContacts) {
             const _rp = contact.phone || '';
-            if (!contact.has_unread && !contact.pending_reply && _rp && _rp !== currentPhone &&
+            if (!contact.has_unread && _rp && _rp !== currentPhone &&
                 unreadCounts[_rp] > 0 && !recentlyClosedPhones.has(_rp)) {
                 console.log('[Panel][Inbox] Servidor limpia badge para', _rp, '(has_unread=false)');
                 unreadCounts[_rp] = 0;
@@ -4185,24 +4187,20 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     }
 
     // Al abrir el chat de un contacto, marcar sus mensajes como leídos.
-    // Salvo que el cliente siga esperando respuesta: leerlo no salda la deuda,
-    // solo contestarle. En ese caso el aviso se queda, pero deja de contar
-    // mensajes nuevos y pasa a significar "1 pendiente de responder".
-    const _contactoAbierto = allContacts.find(c => c.phone === phone);
-    const _sigueDebiendoRespuesta = !!(_contactoAbierto && _contactoAbierto.pending_reply);
+    //
+    // Conservar el badge aquí cuando había deuda con el cliente resultó peor de
+    // lo previsto: la reconciliación de arriba se salta el contacto abierto
+    // (`_rp !== currentPhone`), así que tras contestar el aviso seguía encendido
+    // hasta cambiar de chat. Desde la silla de la asesora eso es "contesté y no
+    // se fue".
     if (phone && unreadCounts[phone]) {
-        if (_sigueDebiendoRespuesta) {
-            unreadCounts[phone] = 1;
-            updateUnreadBadge(phone, 1);
-        } else {
-            delete unreadCounts[phone];
-            // Re-renderizar solo el ítem de la lista para quitar el badge
-            const phoneToReset = phone;
-            const contactItem = document.querySelector(`.contact-item[data-phone="${phoneToReset}"]`);
-            if (contactItem) {
-                const badge = contactItem.querySelector('.unread-badge');
-                if (badge) badge.remove();
-            }
+        delete unreadCounts[phone];
+        // Re-renderizar solo el ítem de la lista para quitar el badge
+        const phoneToReset = phone;
+        const contactItem = document.querySelector(`.contact-item[data-phone="${phoneToReset}"]`);
+        if (contactItem) {
+            const badge = contactItem.querySelector('.unread-badge');
+            if (badge) badge.remove();
         }
     }
 

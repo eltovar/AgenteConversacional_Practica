@@ -5420,9 +5420,13 @@ async def get_active_contacts(
                 )
                 if _mongo_extra:
                     advisor_contacts = advisor_contacts + _mongo_extra
+                    _huerfanas = sum(
+                        1 for c in _mongo_extra if c.get("_orphan_attributed")
+                    )
                     logger.info(
                         f"[Panel][MongoFallback] +{len(_mongo_extra)} conversaciones desde MongoDB "
-                        f"(owner={advisor}, total ahora {len(advisor_contacts)})"
+                        f"({_huerfanas} sin dueño atribuidas por canal, "
+                        f"owner={advisor}, total ahora {len(advisor_contacts)})"
                     )
             except Exception as _fb_err:
                 logger.warning(f"[Panel] Fallback MongoDB falló (non-fatal): {_fb_err}")

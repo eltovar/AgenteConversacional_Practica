@@ -2026,16 +2026,42 @@ class MongoDBManager:
         before_ts: Optional[datetime] = None,
         limit: int = 30,
         include_archived: bool = False,
+        orphan_channels: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Lista conversaciones de un owner, paginadas por last_message_at desc.
         Si before_ts se provee, retorna conversaciones con last_message_at < before_ts
         (cursor-based pagination para "cargar más antiguas").
+
+        `orphan_channels`: canales cuyo dueño es este asesor segun el registro de
+        canales. Con ellos se recogen ademas las conversaciones SIN dueño que
+        tienen al cliente esperando respuesta.
+
+        No tener dueño es el estado normal mientras Sofia atiende — la propiedad
+        se asigna al escalar. El problema son las que se quedan asi CON el cliente
+        esperando: no pertenecen a la bandeja de nadie y ninguna asesora las ve.
+        Medido el 11-ago-2026: 22 en 30 dias, 34 en 90.
+
+        Se atribuyen por canal al leer en vez de escribirles dueño: asignar en el
+        camino caliente marcaria casi todas (1.062 de las 1.176 sin dueño son de
+        los ultimos 30 dias). Atribuir por canal garantiza ademas que pasen la
+        segregacion por equipos del panel, que filtra por ese mismo canal.
         """
         if not owner_id or not await self.connect():
             return []
         try:
             query: Dict[str, Any] = {"owner_id": owner_id}
+            if orphan_channels:
+                query = {
+                    "$or": [
+                        {"owner_id": owner_id},
+                        {
+                            "owner_id": {"$in": [None, ""]},
+                            "canal": {"$in": list(orphan_channels)},
+                            "last_message_sender": "client",
+                        },
+                    ]
+                }
             if not include_archived:
                 query["archived"] = {"$ne": True}
             if before_ts:

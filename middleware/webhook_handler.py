@@ -482,7 +482,12 @@ async def _process_message_deferred(
         # Python lo marca como variable local en todo el scope — no puede referenciarse antes.
         # canal=final_channel: evita que contactos no-whatsapp generen ZSET member duplicado
         # (phone:whatsapp vs phone:instagram) cuando update_activity usa el default "whatsapp".
-        await get_state_manager().update_activity(phone_normalized, canal=final_channel or "whatsapp")
+        # reopen_if_closed: este es el unico punto donde la actividad viene de un
+        # mensaje ENTRANTE. Si la conversacion estaba cerrada, que el cliente
+        # vuelva a escribir la devuelve al panel — ver update_activity().
+        await get_state_manager().update_activity(
+            phone_normalized, canal=final_channel or "whatsapp", reopen_if_closed=True
+        )
 
         # Inbox de no-leídos: registrar actividad para el asesor asignado.
         # Se ejecuta ANTES del WS notify para que GET /contacts ya devuelva has_unread=True

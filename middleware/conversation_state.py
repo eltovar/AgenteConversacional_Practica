@@ -454,6 +454,12 @@ class ConversationStateManager:
 
                     meta = self._parse_meta_raw(meta_raw)
                     if not meta:
+                        # Sin meta no hay `assigned_owner_id`, y la lista del panel
+                        # filtra por dueño: rehidratar aquí lo metería en la salida
+                        # de esta función para que el filtro de asesora lo descarte
+                        # acto seguido. Se probó el 11-ago-2026 y no cambiaba nada
+                        # de lo que ve nadie. A estos los rescata el respaldo de
+                        # MongoDB, que los atribuye por canal.
                         bot_ghost_count += 1
                         continue
 
@@ -495,6 +501,29 @@ class ConversationStateManager:
         """Alias para obtener contactos activos."""
         return await self.get_active_contacts(limit=limit, offset=offset)
 
+    @staticmethod
+    def _channels_owned_by(owner_id: str) -> List[str]:
+        """
+        Canales cuyo dueño es este asesor, segun utils/channels_registry.
+
+        Cero hardcodeo: el mapeo canal→owner vive en el registro y es la misma
+        regla que ya reparte todos los demas contactos. Si el registro no esta
+        disponible se devuelve una lista vacia, con lo que la recogida de
+        huerfanas simplemente no ocurre y el panel se comporta como antes.
+        """
+        if not owner_id:
+            return []
+        try:
+            from utils.channels_registry import get_channel_to_owner
+
+            return [
+                canal for canal, dueno in get_channel_to_owner().items()
+                if str(dueno) == str(owner_id)
+            ]
+        except Exception as e:
+            logger.warning(f"[ConversationState] Registro de canales no disponible: {e}")
+            return []
+
     async def get_archived_conversations_from_mongo(
         self,
         owner_id: Optional[str] = None,
@@ -513,6 +542,9 @@ class ConversationStateManager:
         Usado por outbound_panel.GET /contacts cuando el ZSET tiene menos
         contactos que el `limit` solicitado o cuando el usuario pagina hacia
         conversaciones antiguas.
+
+        Recoge ademas las conversaciones SIN dueño de los canales de este asesor
+        que tienen al cliente esperando — ver find_conversations_by_owner().
         """
         try:
             from database.mongodb_client import get_mongo_manager
@@ -523,6 +555,7 @@ class ConversationStateManager:
                     before_ts=before_ts,
                     limit=limit * 2,  # over-fetch para compensar dedup contra ZSET
                     include_archived=False,
+                    orphan_channels=self._channels_owned_by(owner_id),
                 )
             else:
                 # Sin owner_id, usar query genérica reciente
@@ -544,13 +577,20 @@ class ConversationStateManager:
                 else:
                     last_activity_iso = str(last_msg_dt) if last_msg_dt else get_bogota_now_iso()
 
+                # Huerfana recogida por canal: no tiene dueño en MongoDB, pero el
+                # registro de canales dice que ese canal es de este asesor. Se le
+                # atribuye AQUI, en memoria — no se escribe propiedad. Sin esto el
+                # resto del pipeline la veria sin dueño y volveria a perderla.
+                _huerfana = bool(owner_id) and not d.get("owner_id")
+
                 result.append({
                     "phone": phone,
                     "canal": d.get("canal", "whatsapp"),
                     "status": d.get("status") or ConversationStatus.BOT_ACTIVE.value,
                     "display_name": d.get("display_name") or phone or "Cliente",
                     "last_activity": last_activity_iso,
-                    "owner_id": d.get("owner_id"),
+                    "owner_id": d.get("owner_id") or owner_id,
+                    "_orphan_attributed": _huerfana,
                     "assigned_owner_ids": [],
                     "handoff_reason": None,
                     "ttl_remaining": None,
@@ -936,7 +976,30 @@ class ConversationStateManager:
             logger.warning(f"[ConversationState] track_bot_turn falló: {e}")
             return (0, False)
 
-    async def update_activity(self, phone: str, canal: str = "whatsapp") -> bool:
+    async def _unarchive_in_mongo(self, phone: str, canal: str) -> None:
+        """
+        Espejo en MongoDB de in_panel=True: quita el `archived` de un cierre previo.
+
+        Sin esto el contacto volveria al ZSET pero seguiria filtrado en los dos
+        caminos que releen `conversations` — el respaldo del panel y el rebuild
+        nocturno—, que descartan lo archivado. No es critico: si falla, el
+        contacto sigue visible por Redis.
+        """
+        try:
+            from database.mongodb_client import get_mongo_manager
+
+            await get_mongo_manager().update_conversation_meta(
+                phone=phone, canal=canal, archived=False,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[ConversationState] No se pudo desarchivar {phone}:{canal} "
+                f"en MongoDB (non-fatal): {e}"
+            )
+
+    async def update_activity(
+        self, phone: str, canal: str = "whatsapp", reopen_if_closed: bool = False
+    ) -> bool:
         """
         Actualiza el timestamp de última actividad.
 
@@ -953,8 +1016,29 @@ class ConversationStateManager:
                 meta["last_activity"] = get_bogota_now_iso()
                 await self.redis.set(meta_key, json.dumps(meta))
 
-                # Actualizar score en ZSET para reordenamiento
-                # Solo si el contacto ya está en el panel (in_panel=True o flag no existe = compat)
+                # Un mensaje ENTRANTE reabre la conversación en el panel.
+                # Antes, `in_panel=False` (cierre previo) hacía que se saltara el
+                # zadd y el contacto no volvía NUNCA: el flag solo se reseteaba al
+                # escalar (activate_human / request_handoff), y una conversación
+                # que sigue en modo bot no pasa por ahí. Medido el 11-ago-2026:
+                # 6 conversaciones cerradas con el cliente esperando, invisibles.
+                # Cerrar es una decisión sobre el pasado; que el cliente vuelva a
+                # escribir es un hecho nuevo.
+                #
+                # `reopen_if_closed` lo pide el webhook y NADIE más: esta función
+                # tambien corre tras enviar recordatorios de cita (app.py:501, 1609,
+                # 1704), y un saliente automático no debe deshacer un cierre.
+                if reopen_if_closed and not meta.get("in_panel", True):
+                    meta["in_panel"] = True
+                    await self.redis.set(meta_key, json.dumps(meta))
+                    logger.info(
+                        f"[ConversationState] {phone}:{canal_safe} reabierto en el panel "
+                        f"— el cliente volvió a escribir tras un cierre"
+                    )
+                    await self._unarchive_in_mongo(phone, canal_safe)
+
+                # El flag ya quedó en True arriba si hubo reapertura, así que esta
+                # condición la cubre. El arreglo vive en el bloque de arriba.
                 _did_zadd = False
                 if meta.get("in_panel", True):
                     index_member = f"{phone}:{canal_safe}"

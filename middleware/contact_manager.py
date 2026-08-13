@@ -41,8 +41,11 @@ LEAD_CREATION_LOCK_TTL = 2
 # Máximo de reintentos para rate limits
 MAX_RATE_LIMIT_RETRIES = 3
 
-# ID de etapa "En Conversación" en HubSpot (stage unificado, entrada de todos los leads)
-STAGE_NUEVO_LEAD = "1326623075"
+# Etapa de entrada: TODO lead nuevo aterriza en "Nuevo Lead" y solo sale de ahí
+# cuando una asesora le escribe manualmente (ver _promote_nuevo_lead_to_en_conversacion
+# en outbound_panel.py). Si responde Sofía, el lead SIGUE en "Nuevo Lead": el embudo
+# mide justamente lo que todavía no ha tocado un humano.
+STAGE_NUEVO_LEAD = "1417459250"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -583,7 +586,7 @@ class ContactManager:
             "canal_origen": hs_canal,
             "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
 
-            # Lifecycle stage inicial (En Conversación — stage unificado)
+            # Lifecycle stage inicial: "Nuevo Lead" hasta que una asesora conteste
             "lifecyclestage": STAGE_NUEVO_LEAD,
         }
 

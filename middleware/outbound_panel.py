@@ -92,7 +92,8 @@ DEFAULT_TEMPLATE_PREFIX = "whatsapp_template:default:"
 
 # IDs del Pipeline Comercial de HubSpot (actualizado)
 HUBSPOT_PIPELINE_ID = "854756009"
-HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Stage unificado (entrada de todos los leads)
+HUBSPOT_STAGE_NUEVO_LEAD = "1417459250"       # Entrada de todo lead nuevo (sin contacto humano aún)
+HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Destino cuando la asesora contesta manualmente
 HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
 HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
 LUISA_TRANSFER_TARGET = "89096380"  # Luisa — destino fijo de transferencia
@@ -125,6 +126,7 @@ PROTECTED_STAGES_POST_VISITA = {
 # Bulk Campaigns (mensajes masivos) — constantes
 # ============================================================================
 BULK_EXCLUDED_STAGES = {
+    "1417459250",  # Nuevo Lead — merece atención directa, no un masivo
     "1326623075",  # En Conversación (stage unificado)
     "evangelist",  # Cerrado perdido
     "1326632628",  # Otros Municipios
@@ -250,6 +252,7 @@ _TEMPLATES_INITIALIZED: bool = False
 # Etapas del Pipeline de HubSpot
 # ============================================================================
 PIPELINE_STAGES = {
+    "1417459250": "Nuevo Lead",
     "1326623075": "En conversación",
     "marketingqualifiedlead": "Visita agendada",
     "salesqualifiedlead": "Visita realizada",
@@ -274,6 +277,7 @@ PIPELINE_STAGES = {
 
 # Lista ordenada de etapas para el frontend
 PIPELINE_STAGES_LIST = [
+    {"id": "1417459250", "name": "Nuevo Lead"},
     {"id": "1326623075", "name": "En conversación"},
     {"id": "marketingqualifiedlead", "name": "Visita agendada"},
     {"id": "salesqualifiedlead", "name": "Visita realizada"},
@@ -1229,6 +1233,53 @@ async def _promote_no_responde_to_en_conversacion(
         return False
     except Exception as e:
         logger.error(f"[BulkNoResponde] Error en promoción {contact_id}: {e}")
+        return False
+
+
+async def _promote_nuevo_lead_to_en_conversacion(
+    contact_id: str,
+    phone_normalized: str,
+) -> bool:
+    """
+    Promueve 'Nuevo Lead' (1417459250) → 'En conversación' (1326623075) cuando una
+    asesora responde manualmente.
+
+    Se llama desde _update_advisor_timestamp(), cuyo único origen es
+    POST /send-message. Los masivos (_send_bulk_template_message) y Sofía NO pasan
+    por ahí, así que un lead solo sale de "Nuevo Lead" por contacto humano real.
+
+    El guard es lo importante: solo promueve si la etapa actual es exactamente
+    "Nuevo Lead". Un contacto en Visita agendada, Seguimiento o Cerrado ganado no
+    se toca aunque la asesora le escriba.
+    """
+    if not HUBSPOT_API_KEY or not contact_id or not phone_normalized:
+        return False
+    try:
+        current_stage = await _get_contact_lifecyclestage(contact_id)
+        if current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
+            return False  # caso normal — el lead ya avanzó del embudo de entrada
+
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        headers = {"Authorization": f"Bearer {HUBSPOT_API_KEY}", "Content-Type": "application/json"}
+        client = get_httpx_client()
+        resp = await client.patch(
+            url, headers=headers,
+            json={"properties": {"lifecyclestage": HUBSPOT_STAGE_EN_CONVERSACION}},
+        )
+        if resp.status_code == 200:
+            logger.info(
+                f"[NuevoLead] Contacto {contact_id}: Nuevo Lead → En conversación "
+                f"(la asesora respondió)"
+            )
+            await _invalidate_contact_stage_cache(contact_id)
+            return True
+        logger.warning(
+            f"[NuevoLead] Error PATCH HubSpot {contact_id}: "
+            f"{resp.status_code} - {resp.text[:200]}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"[NuevoLead] Error promoviendo {contact_id}: {e}")
         return False
 
 
@@ -4959,7 +5010,11 @@ async def _get_contacts_by_worker_filter(
     STAGES_VISIBLES_WORKER = {
         "marketingqualifiedlead",  # Visita agendada
         "customer",                # Cerrado ganado
-        "1326623075",              # En Conversación (stage unificado)
+        "1326623075",              # En Conversación
+        # Sofía puede agendar una cita antes de que ninguna asesora escriba: ese
+        # contacto sigue en "Nuevo Lead" y sin esta entrada quedaría descartado
+        # del filtro por encargado pese a tener visita.
+        "1417459250",              # Nuevo Lead
     }
 
     mongo_mgr = get_mongo_manager()
@@ -6823,7 +6878,8 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     """
     Actualiza timestamp del mensaje del asesor en ConversationMeta.
     Usado para calcular TTL de 72h si asesor deja de responder.
-    También remueve del inbox y limpia notificaciones de inactividad del contacto.
+    También remueve del inbox, limpia notificaciones de inactividad y promueve
+    el lead fuera de "Nuevo Lead".
     """
     try:
         state_manager = _get_state_manager()
@@ -6839,6 +6895,16 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
             await state_manager.clear_inactivity_notifications_for_contact(
                 meta.assigned_owner_id, phone_normalized
             )
+        # Único punto donde un lead sale de "Nuevo Lead": lo dispara una respuesta
+        # manual de la asesora, nunca Sofía ni un envío masivo. No-fatal: si falla
+        # la promoción, el mensaje ya salió y el lead se promueve en el siguiente.
+        if meta and meta.contact_id:
+            try:
+                await _promote_nuevo_lead_to_en_conversacion(
+                    meta.contact_id, phone_normalized
+                )
+            except Exception as promo_err:
+                logger.warning(f"[NuevoLead] Promoción falló (non-fatal): {promo_err}")
     except Exception as e:
         logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
 

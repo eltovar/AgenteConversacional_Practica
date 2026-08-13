@@ -33,6 +33,7 @@ from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
 from utils.advisors_registry import (
     get_advisor_names,
+    get_lead_receiving_ids,
     get_panel_advisor_ids,
     get_transfer_target,
 )
@@ -6845,8 +6846,16 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     # contacto del panel de quien los elige. Solo tienen sentido para la asesora
     # que los recibe. Se calcula aqui, donde se conocen las dos constantes, en vez
     # de repetir la lista y comparar un ID a fuego en index.js.
+    # Se ocultan solo a quien RECIBE LEADS y no es el destino: para esa asesora,
+    # elegir uno de esos embudos manda el contacto fuera de su panel.
+    # Monica no recibe leads automaticos y si atiende transferencias manuales, asi
+    # que puede tener contactos en esas etapas y necesita poder filtrarlos —
+    # exactamente el comportamiento que habia antes de este refactor.
+    _destino = get_transfer_target()
     _hidden_by_advisor = {
-        aid: ([] if aid == get_transfer_target() else list(STAGES_TRANSFER_TO_LUISA))
+        aid: (list(STAGES_TRANSFER_TO_LUISA)
+              if aid in get_lead_receiving_ids() and aid != _destino
+              else [])
         for aid in advisor_names
     }
 

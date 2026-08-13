@@ -121,12 +121,6 @@ const ALL_PORTALS = [
     { value: "youtube",          label: "YouTube" },
 ];
 
-// Mapeo advisor ID → portales. Todos los IDs usan la lista completa.
-const ADVISOR_PORTALS = {
-    "89096378": ALL_PORTALS,
-    "89096380": ALL_PORTALS,
-};
-
 // Leer parametro advisor de la URL y persistir en sessionStorage para sobrevivir F5/reloads.
 // sessionStorage (no localStorage) para que cada pestaña/sesión sea independiente.
 const urlParams = new URLSearchParams(window.location.search);
@@ -1304,8 +1298,11 @@ function _initStageFilter() {
     const sel = document.getElementById('stageFilter');
     if (!sel) return;
     PIPELINE_STAGES.forEach(s => {
-        const JUBENY_HIDDEN_STAGES = ['1407668893', '1326623067', '1326631573', '1326632625', '1326631574', 'other', '1326623069', '1326632628', '1326623539', 'subscriber'];
-        if (JUBENY_HIDDEN_STAGES.includes(s.id) && ADVISOR_ID === '89096378') return;
+        // Los embudos ocultos los decide el backend por asesora (index.html).
+        // Antes era una lista repetida aqui mas una comparacion con un ID a fuego.
+        const ocultos = (typeof HIDDEN_STAGES_BY_ADVISOR !== 'undefined'
+            && HIDDEN_STAGES_BY_ADVISOR[ADVISOR_ID]) || [];
+        if (ocultos.includes(s.id)) return;
         const opt = document.createElement('option');
         opt.value = s.id;
         opt.textContent = s.name;
@@ -6718,7 +6715,7 @@ function openCreateContactModal() {
         // Poblar portales según el asesor activo
         const sel = document.getElementById('portalOrigenSelect');
         if (sel) {
-            const portals = ADVISOR_PORTALS[ADVISOR_ID] || ALL_PORTALS;
+            const portals = ALL_PORTALS;
             sel.innerHTML = '<option value="">-- Seleccionar --</option>'
                 + portals.map(p => `<option value="${p.value}">${p.label}</option>`).join('');
         }

@@ -19,37 +19,14 @@ class LeadAssigner:
     # CONFIGURACIÓN DE EQUIPOS Y CANALES
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # ✏️ EDITAR AQUÍ para cambiar los nombres de las asesoras en el panel.
-    # Este es el ÚNICO lugar donde se definen los nombres — mongodb_client.py y
-    # outbound_panel.py los leen automáticamente desde aquí.
-    OWNERS_CONFIG = {
-        # === TODOS LOS CANALES EXCEPTO FINCA RAÍZ Y METROCUADRADO (ID: 89096378) ===
-        "equipo_portales": [
-            {"name": "Jubeny", "id": "89096378", "active": True},
-        ],
-
-        # === SOLO FINCA RAÍZ + METROCUADRADO (ID: 89096380) ===
-        "equipo_directo": [
-            {"name": "Luisa", "id": "89096380", "active": True},
-        ],
-
-        # === EQUIPO DE MARKETING (Solo métricas - NO responde) ===
-        # NOTA: Este ID no se usa para asignación de leads, solo para filtrar métricas
-        "equipo_marketing": [
-            {"name": "Equipo de Marketing", "id": "82598814", "active": False},  # Inactivo para asignación
-        ],
-
-        # === RESPALDO (Solo transferencias manuales, ID: 89096379) ===
-        # No recibe asignación automática, solo contactos transferidos manualmente
-        "equipo_respaldo": [
-            {"name": "Monica", "id": "89096379", "active": False},  # Inactivo para asignación automática
-        ],
-
-        # Equipo default (fallback — Jubeny recibe todo lo no clasificado)
-        "default": [
-            {"name": "Jubeny", "id": "89096378", "active": True},
-        ],
-    }
+    # Los nombres y el reparto viven en utils/advisors_registry.py — ese es el
+    # unico sitio que hay que editar. Aqui solo se deriva la forma que espera el
+    # resto de esta clase: {equipo: [{name, id, active}]}.
+    #
+    # Antes la identidad vivia aqui, y para leer el nombre de una asesora habia
+    # que importar el asignador entero, que a su vez importa channels_registry.
+    from utils.advisors_registry import get_owners_config as _get_owners_config
+    OWNERS_CONFIG = _get_owners_config()
 
     # Mapeo canal → equipo (generado desde channels_registry.py)
     from utils.channels_registry import get_channel_to_team, get_channel_to_owner, get_social_media_channels

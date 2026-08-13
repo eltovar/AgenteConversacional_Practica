@@ -31,6 +31,11 @@ from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
+from utils.advisors_registry import (
+    get_advisor_names,
+    get_panel_advisor_ids,
+    get_transfer_target,
+)
 from integrations.hubspot import get_timeline_logger, hubspot_client as _hs_singleton
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -96,7 +101,10 @@ HUBSPOT_STAGE_NUEVO_LEAD = "1417459250"       # Entrada de todo lead nuevo (sin 
 HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Destino cuando la asesora contesta manualmente
 HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
 HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
-LUISA_TRANSFER_TARGET = "89096380"  # Luisa — destino fijo de transferencia
+# Destino de las transferencias por embudo. Sale del registro de asesoras, no de
+# aqui: cambiar quien recibe las transferencias es editar una entrada de
+# utils/advisors_registry.py, no buscar un ID por el codigo.
+LUISA_TRANSFER_TARGET = get_transfer_target()
 STAGES_TRANSFER_TO_LUISA = {
     "1407668893": "Seguimiento",
     "1326623067": "Hasta 1.5M",
@@ -3706,6 +3714,15 @@ async def _transfer_to_luisa(
     canal_safe = (canal or "whatsapp").lower()
     phone_normalized = phone
 
+    # Quien transfiere es el dueno ACTUAL del contacto, no un ID fijo. Antes era
+    # "89096378" a fuego, asi que si transferia cualquier otra asesora la
+    # notificacion decia que venia de Jubeny.
+    try:
+        _meta_previa = await state_manager.get_meta(phone_normalized, canal_safe)
+        from_advisor_id = _meta_previa.assigned_owner_id if _meta_previa else None
+    except Exception:
+        from_advisor_id = None
+
     try:
         normalizer = PhoneNormalizer()
         validation = normalizer.normalize(phone)
@@ -3808,7 +3825,7 @@ async def _transfer_to_luisa(
         contact_name = meta.display_name if meta else phone_normalized
         await ws_manager.notify_contact_transferred(
             phone=phone_normalized,
-            from_advisor="89096378",
+            from_advisor=from_advisor_id,
             to_advisor=LUISA_TRANSFER_TARGET,
             contact_name=contact_name,
             mode="exclusive",
@@ -6824,10 +6841,20 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     # Convertir lista a diccionario {id: name} para el template
     advisor_names = {a["id"]: a["name"] for a in advisors_list}
 
+    # Embudos que NO se ofrecen en el filtro: los de transferencia, que sacan el
+    # contacto del panel de quien los elige. Solo tienen sentido para la asesora
+    # que los recibe. Se calcula aqui, donde se conocen las dos constantes, en vez
+    # de repetir la lista y comparar un ID a fuego en index.js.
+    _hidden_by_advisor = {
+        aid: ([] if aid == get_transfer_target() else list(STAGES_TRANSFER_TO_LUISA))
+        for aid in advisor_names
+    }
+
     return templates.TemplateResponse(request, "index.html", {
         "api_key": x_api_key,
         "base_url": "/whatsapp/panel",
-        "advisor_names": advisor_names
+        "advisor_names": advisor_names,
+        "hidden_stages_by_advisor": _hidden_by_advisor,
     })
 
 # ============================================================================
@@ -8281,7 +8308,7 @@ async def cleanup_stale_inbox(
 
     from middleware.conversation_state import ConversationStatus
     state_mgr = _get_state_manager()
-    ACTIVE_ADVISORS = ["89096378", "89096380", "89096379"]
+    ACTIVE_ADVISORS = get_panel_advisor_ids()
     results = {}
     total_cleaned = 0
 
@@ -8348,7 +8375,7 @@ async def sync_owners_with_hubspot(
 
     state_mgr = _get_state_manager()
     http = get_httpx_client()
-    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+    OWNER_NAMES = get_advisor_names()
     hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
 
     total_zset = await state_mgr.redis.zcard(state_mgr.ACTIVE_CONTACTS_ZSET)
@@ -8502,7 +8529,7 @@ async def sync_owners_mongo(
     dry_run: bool = Query(True),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    advisor: str = Query(None, description="Solo corregir contactos de este advisor (ej: 89096379)"),
+    advisor: str = Query(None, description="Solo corregir contactos de este advisor"),
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
     """
@@ -8515,7 +8542,7 @@ async def sync_owners_mongo(
     import json as _json
     mongo_mgr = get_mongo_manager()
     http = get_httpx_client()
-    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+    OWNER_NAMES = get_advisor_names()
     hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
 
     query: dict = {"owner_id": {"$exists": True, "$ne": None}}
@@ -8663,7 +8690,7 @@ async def recover_lost_conversations(
     mongo_mgr = get_mongo_manager()
     state_mgr = _get_state_manager()
     http = get_httpx_client()
-    OWNER_NAMES = {"89096378": "Jubeny", "89096380": "Luisa", "89096379": "Monica"}
+    OWNER_NAMES = get_advisor_names()
     hs_token = os.getenv("HUBSPOT_ACCESS_TOKEN") or os.getenv("HUBSPOT_API_KEY")
 
     cutoff = get_bogota_now() - timedelta(hours=hours)

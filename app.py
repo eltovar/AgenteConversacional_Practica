@@ -685,7 +685,8 @@ async def rebuild_zset_from_conversations():
     try:
         from middleware.conversation_state import ConversationStatus
         state_mgr = get_state_manager()
-        ACTIVE_ADVISORS = ["89096378", "89096380", "89096379"]
+        from utils.advisors_registry import get_panel_advisor_ids
+        ACTIVE_ADVISORS = get_panel_advisor_ids()
         cleaned_total = 0
         for adv_id in ACTIVE_ADVISORS:
             inbox_key = f"{state_mgr.ADVISOR_INBOX_PREFIX}{adv_id}"

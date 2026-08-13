@@ -895,6 +895,9 @@
         const BASE_URL = '{{ base_url }}';
         // ADVISOR_NAMES es un objeto mutable para poder actualizarlo desde el panel
         let ADVISOR_NAMES = {{ advisor_names | tojson | safe }};
+        // Embudos que no se ofrecen en el filtro, por asesora. Los calcula el
+        // backend, que es donde vive la lista de embudos de transferencia.
+        const HIDDEN_STAGES_BY_ADVISOR = {{ hidden_stages_by_advisor | tojson | safe }};
     </script>
     <!-- Modales de decisión: debe cargar ANTES de index.js, que los invoca -->
     <script src="/whatsapp/panel/static/ui-dialog.js"></script>

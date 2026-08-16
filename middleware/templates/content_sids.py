@@ -58,10 +58,10 @@ MENSAJE_PERSONALIZADO = _sid(
 # llegaron a existir en Railway, así que renombrarlos no rompe nada.
 # ─────────────────────────────────────────────────────────────────────────────
 FOLLOWUP_1 = _sid(
-    "TWILIO_TPL_CITA_SEGUIMIENTO", "HX4096bcf5cf64e54e55190322954f0e72"
+    "TWILIO_TPL_CITA_SEGUIMIENTO", "HX855385d3bb9ea48b68e3ba36facaa4be"
 )
 FOLLOWUP_2 = _sid(
-    "TWILIO_TPL_CITA_EXPERIENCIA", "HX5a9ecb7b4e894097df336aa43c738f4b"
+    "TWILIO_TPL_CITA_EXPERIENCIA", "HX28a75df846f2944dbd22dd7e939f058a"
 )
 RECORDATORIO_CITA: Optional[str] = _sid(
     "TWILIO_REMINDER_TEMPLATE_SID", "HXdd7160cc287929ec3ae4d18160e7c51b"

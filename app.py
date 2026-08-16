@@ -374,6 +374,37 @@ async def process_aggregated_messages(session_id: str, to_number: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE RECORDATORIOS DE CITAS
 # ═══════════════════════════════════════════════════════════════════════════════
+SALUDO_GENERICO = "cliente"
+
+
+def _es_nombre_real(valor: Optional[str]) -> bool:
+    """True si el valor parece un nombre y no un telefono.
+
+    Why: display_name sale del perfil de WhatsApp y, cuando Meta no lo expone,
+    trae el propio numero. Validar solo "existe" hacia que las plantillas de
+    cita salieran como "Hola +573156129967".
+    """
+    if not valor:
+        return False
+    v = valor.strip()
+    letras = sum(1 for c in v if c.isalpha())
+    digitos = sum(1 for c in v if c.isdigit())
+    return letras >= 2 and digitos <= letras
+
+
+async def _resolver_nombre_cita(apt, state_manager) -> tuple:
+    """Nombre para las plantillas de cita: cita -> meta Redis -> generico."""
+    if _es_nombre_real(apt.contact_name):
+        return apt.contact_name.strip().split()[0], "appointment_redis"
+    try:
+        meta = await state_manager.get_meta(apt.phone_normalized, apt.canal)
+        if meta and _es_nombre_real(meta.display_name):
+            return meta.display_name.strip().split()[0], "redis_meta"
+    except Exception:
+        pass
+    return SALUDO_GENERICO, "fallback"
+
+
 async def check_appointment_reminders():
     """
     Verifica citas próximas y envía recordatorios 5 horas antes.
@@ -428,20 +459,7 @@ async def check_appointment_reminders():
             )
 
             # Construir mensaje de recordatorio — resolver nombre con fallback de 3 niveles
-            contact_name = apt.contact_name
-            _name_source = "appointment_redis"
-            if not contact_name:
-                # Nivel 2: Redis conversation meta (display_name se popula desde webhook)
-                try:
-                    _meta = await state_manager.get_meta(apt.phone_normalized, apt.canal)
-                    if _meta and _meta.display_name:
-                        contact_name = _meta.display_name.split()[0]
-                        _name_source = "redis_meta"
-                except Exception:
-                    pass
-            if not contact_name:
-                contact_name = "cliente"
-                _name_source = "fallback"
+            contact_name, _name_source = await _resolver_nombre_cita(apt, state_manager)
             logger.info(
                 "[Scheduler][Naming] %s → nombre='%s' (source=%s)",
                 apt.phone_normalized, contact_name, _name_source
@@ -1522,19 +1540,7 @@ async def check_appointment_followups():
                     continue
 
                 # Resolver nombre con fallback de 3 niveles
-                contact_name = apt.contact_name
-                _name_source = "appointment_redis"
-                if not contact_name:
-                    try:
-                        _meta = await state_manager.get_meta(apt.phone_normalized, apt.canal)
-                        if _meta and _meta.display_name:
-                            contact_name = _meta.display_name.split()[0]
-                            _name_source = "redis_meta"
-                    except Exception:
-                        pass
-                if not contact_name:
-                    contact_name = "cliente"
-                    _name_source = "fallback"
+                contact_name, _name_source = await _resolver_nombre_cita(apt, state_manager)
 
                 apt_dt = apt.scheduled_dt
                 minutes_since = (now - apt_dt).total_seconds() / 60
@@ -1546,8 +1552,8 @@ async def check_appointment_followups():
                 )
 
                 followup1_preview = (
-                    f"¡Hola {contact_name}! 😊 Esperamos que la visita haya sido de tu agrado. "
-                    f"Cuéntanos, ¿Te ha gustado el inmueble?"
+                    f"Hola {contact_name} 😁 ¿Qué te pareció el inmueble? "
+                    f"Cuéntanos para continuar con tu proceso!!"
                 )
 
                 if twilio_client.is_available:
@@ -1674,13 +1680,18 @@ async def check_appointment_followup2():
                     continue
 
                 _followup2_sid = tpl_sids.FOLLOWUP_2
+                contact_name, _name_source = await _resolver_nombre_cita(apt, state_manager)
+                logger.info(
+                    "[Scheduler][Followup2] %s -> nombre='%s' (source=%s)",
+                    apt.phone_normalized, contact_name, _name_source
+                )
 
                 if twilio_client.is_available:
                     result = await twilio_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body="",
                         content_sid=_followup2_sid,
-                        content_variables={}
+                        content_variables={"1": contact_name}
                     )
 
                     if result.get("status") == "success":
@@ -1692,7 +1703,11 @@ async def check_appointment_followup2():
                         try:
                             canal_apt = apt.canal or "whatsapp"
                             mongo_mgr = get_mongo_manager()
-                            survey_preview = "Para nosotros es importante conocer tu experiencia y seguir mejorando la calidad de nuestro servicio. 📈"
+                            survey_preview = (
+                                f"Hola {contact_name},  Para nosotros es importante conocer tu "
+                                f"experiencia y seguir mejorando la calidad de nuestro servicio: "
+                                f"https://forms.gle/W3bQbDVFkR4ybVbW6"
+                            )
                             await mongo_mgr.save_message(
                                 phone=apt.phone_normalized,
                                 content=survey_preview,

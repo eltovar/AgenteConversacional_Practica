@@ -88,8 +88,8 @@ DEFAULT_TEMPLATES = {
         "name": "Seguimiento Post-Cita (1/2)",
         "category": "seguimiento",
         "body": (
-            "¡Hola {nombre}! 😊 Esperamos que la visita haya sido de tu agrado. "
-            "Cuéntanos, ¿Te ha gustado el inmueble?"
+            "Hola {nombre} 😁 ¿Qué te pareció el inmueble? "
+            "Cuéntanos para continuar con tu proceso!!"
         ),
         "variables": ["nombre"],
         # {{1}}=nombre — Twilio: seguimiento_de_cita
@@ -102,17 +102,16 @@ DEFAULT_TEMPLATES = {
         "name": "Encuesta de Experiencia (2/2)",
         "category": "seguimiento",
         "body": (
-            "Para nosotros es importante conocer tu experiencia y seguir "
-            "mejorando la calidad de nuestro servicio. 📈\n"
-            "¿Nos podrías regalar tu opinión? https://forms.gle/W3bQbDVFkR4ybVbW6\n"
-            "Tus respuestas tomarán solo un minuto, serán anónimas y se usarán "
-            "para optimizar nuestros procesos de atención. 💪\n"
-            "¡Gracias por confiar en Inmobiliaria Proteger! 💛"
+            "Hola {nombre},  Para nosotros es importante conocer tu experiencia "
+            "y seguir mejorando la calidad de nuestro servicio: "
+            "https://forms.gle/W3bQbDVFkR4ybVbW6 \n"
+            "Toma un minuto y es anónima. ¡Gracias por confiar en "
+            "Inmobiliaria Proteger! 💛"
         ),
-        "variables": [],
-        # Sin variables — Twilio: experiencia_cita
+        "variables": ["nombre"],
+        # {{1}}=nombre — Twilio: experiencia_cita
         "content_sid": _sids.FOLLOWUP_2,
-        "content_variables_map": [],
+        "content_variables_map": ["nombre"],
         "is_default": True,
     },
     "seguimiento_personalizado": {

@@ -106,6 +106,8 @@ HUBSPOT_STAGE_NUEVO_LEAD = "1417459250"       # Entrada de todo lead nuevo (sin 
 HUBSPOT_STAGE_EN_CONVERSACION = "1326623075"  # Destino cuando la asesora contesta manualmente
 HUBSPOT_STAGE_VISITA_AGENDADA = "marketingqualifiedlead"
 HUBSPOT_STAGE_VISITA_REALIZADA = "salesqualifiedlead"
+HUBSPOT_STAGE_NO_RESPONDE = "other"          # Embudo de reactivacion por masivos
+HUBSPOT_STAGE_CERRADO_PERDIDO = "evangelist" # Terminal: sale del panel, Sofia retoma
 # Destino de las transferencias por embudo. Sale del registro de asesoras, no de
 # aqui: cambiar quien recibe las transferencias es editar una entrada de
 # utils/advisors_registry.py, no buscar un ID por el codigo.
@@ -116,7 +118,7 @@ STAGES_TRANSFER_TO_LUISA = {
     "1326631573": "Hasta 2M",
     "1326632625": "Hasta 2.5M",
     "1326631574": "De 3M en adelante",
-    "other": "No responde",
+    HUBSPOT_STAGE_NO_RESPONDE: "No responde",
     "1326623069": "Propietarios",
     "1326632628": "Otros Municipios",
     "1326623539": "Local o Bodega",
@@ -126,7 +128,7 @@ STAGES_TRANSFER_TO_LUISA = {
 # Se diferencian de STAGES_TRANSFER_TO_LUISA: allí el contacto cambia de dueño y
 # reaparece en el panel destino; aquí sale del panel y Sofía retoma.
 STAGES_AUTO_CLOSE = {
-    "evangelist": "Cerrado perdido",
+    HUBSPOT_STAGE_CERRADO_PERDIDO: "Cerrado perdido",
 }
 # Stages comerciales que NO se deben sobreescribir (progreso manual de asesora)
 PROTECTED_STAGES_POST_VISITA = {

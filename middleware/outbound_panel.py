@@ -37,7 +37,11 @@ from utils.advisors_registry import (
     get_panel_advisor_ids,
     get_transfer_target,
 )
-from integrations.hubspot import get_timeline_logger, hubspot_client as _hs_singleton
+from integrations.hubspot import (
+    get_timeline_logger,
+    hubspot_client as _hs_singleton,
+    register_contact_update_hook as _register_contact_update_hook,
+)
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
@@ -219,8 +223,15 @@ CONTACTS_INFLIGHT_WAIT_SECONDS = 3.0
 CONTACTS_INFLIGHT_POLL_INTERVAL = 0.25
 
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
+CONTACT_STAGE_CACHE_PREFIX = "contact_stage:"
 CONTACT_NAME_CACHE_TTL = 14400   # 4 horas — invalidación explícita al editar nombre (ver PATCH /contacts/{id})
 CONTACT_NAME_CACHE_PREFIX = "contact_name:"
+
+# Propiedades de HubSpot que componen el nombre mostrado en el panel. Fuente
+# única: cualquier escritura que las toque debe refrescar el caché de nombres.
+# Los tres escritores (CRMAgent, ContactManager y el renombrado del panel) se
+# apoyan en esta tupla en vez de repetir los literales.
+CONTACT_NAME_PROPERTIES = ("firstname", "lastname")
 
 def get_httpx_client() -> httpx.AsyncClient:
     """
@@ -370,7 +381,7 @@ async def _get_contact_lifecyclestage(contact_id: str, strict: bool = False) -> 
     if not contact_id or not HUBSPOT_API_KEY:
         return _fallback
 
-    cache_key = f"contact_stage:{contact_id}"
+    cache_key = _contact_stage_cache_key(contact_id)
     try:
         redis_client = await _get_redis_client()
         cached = await redis_client.get(cache_key)
@@ -426,7 +437,7 @@ async def _invalidate_contact_stage_cache(
     """
     try:
         redis_client = await _get_redis_client()
-        cache_key = f"contact_stage:{contact_id}"
+        cache_key = _contact_stage_cache_key(contact_id)
         if new_stage:
             await redis_client.set(cache_key, new_stage, ex=CONTACT_STAGE_CACHE_TTL)
             logger.debug(f"[Panel] Caché de stage fijado a '{new_stage}' para {contact_id}")
@@ -480,25 +491,114 @@ async def _cache_contact_stage(contact_id: str, stage: str) -> None:
     try:
         redis_client = await _get_redis_client()
         await redis_client.set(
-            f"contact_stage:{contact_id}", stage, ex=CONTACT_STAGE_CACHE_TTL, nx=True
+            _contact_stage_cache_key(contact_id), stage,
+            ex=CONTACT_STAGE_CACHE_TTL, nx=True,
         )
     except Exception:
         pass
 
 
+def _contact_stage_cache_key(contact_id: str) -> str:
+    """Única forma de construir la key del caché de etapas."""
+    return f"{CONTACT_STAGE_CACHE_PREFIX}{contact_id}"
+
+
+def _contact_name_cache_key(contact_id: str) -> str:
+    """Única forma de construir la key del caché de nombres."""
+    return f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}"
+
+
+def _contact_name_payload(firstname: str, lastname: str) -> str:
+    """Único formato serializado del caché de nombres."""
+    return json.dumps({"firstname": firstname or "", "lastname": lastname or ""})
+
+
 async def _cache_contact_name(contact_id: str, firstname: str, lastname: str) -> None:
-    """Guarda nombre del contacto en Redis cache (4h TTL). No bloquea el request."""
+    """
+    Guarda nombre del contacto en Redis cache (4h TTL). No bloquea el request.
+
+    nx: escritor best-effort. La tarea nace del enriquecimiento de GET /contacts
+    —que tarda segundos— con el nombre leído al empezar el request. Si mientras
+    tanto Sofía capturó el nombre real o una asesora lo editó, la key ya tiene
+    el valor bueno y esta escritura debe declinarse. Sin el nx, el nombre viejo
+    (normalmente el propio teléfono) revivía durante 4 horas.
+    """
     if not contact_id:
         return
     try:
         r = await _get_redis_client()
-        await r.setex(
-            f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}",
-            CONTACT_NAME_CACHE_TTL,
-            json.dumps({"firstname": firstname or "", "lastname": lastname or ""})
+        await r.set(
+            _contact_name_cache_key(contact_id),
+            _contact_name_payload(firstname, lastname),
+            ex=CONTACT_NAME_CACHE_TTL,
+            nx=True,
         )
     except Exception:
         pass
+
+
+async def _invalidate_contact_name_cache(
+    contact_id: str,
+    firstname: Optional[str] = None,
+    lastname: Optional[str] = None,
+) -> None:
+    """
+    Escritor AUTORITATIVO del caché de nombres. Se llama tras un cambio que
+    HubSpot ya confirmó.
+
+    Con firstname/lastname deja el valor nuevo, lo que además ahorra la ida a
+    HubSpot que el DELETE forzaba en el siguiente poll. Sin ellos, borra.
+    """
+    try:
+        r = await _get_redis_client()
+        key = _contact_name_cache_key(contact_id)
+        if firstname is not None or lastname is not None:
+            await r.set(
+                key,
+                _contact_name_payload(firstname or "", lastname or ""),
+                ex=CONTACT_NAME_CACHE_TTL,
+            )
+            logger.debug(f"[Panel] Caché de nombre fijado para {contact_id}")
+        else:
+            await r.delete(key)
+            logger.debug(f"[Panel] Caché de nombre invalidado para {contact_id}")
+    except Exception as e:
+        logger.debug(f"[Panel] Error sincronizando contact name cache: {e}")
+
+
+async def _on_hubspot_contact_updated(
+    contact_id: str, properties: Dict[str, Any]
+) -> None:
+    """
+    Hook registrado en hubspot_client: refresca el caché de nombres cuando
+    cualquiera de los tres escritores toca el nombre en HubSpot.
+
+    El más frecuente es ContactManager.update_contact_info(), que dispara cuando
+    Sofía captura el nombre real a mitad de conversación. Sin esto, el panel
+    seguía mostrando el valor viejo —casi siempre el teléfono, que es como se
+    crean los leads— hasta 4 horas.
+    """
+    if not contact_id or not properties:
+        return
+    presentes = [p for p in CONTACT_NAME_PROPERTIES if p in properties]
+    if not presentes:
+        return  # el cambio no toca el nombre: nada que refrescar
+
+    if len(presentes) == len(CONTACT_NAME_PROPERTIES):
+        # Update completo: sabemos el nombre entero, lo dejamos escrito y el
+        # panel se ahorra la ida a HubSpot.
+        await _invalidate_contact_name_cache(
+            contact_id,
+            firstname=properties.get("firstname"),
+            lastname=properties.get("lastname"),
+        )
+    else:
+        # Update parcial (p.ej. solo firstname): escribir el payload completo
+        # borraría la otra mitad del nombre. Se invalida y que HubSpot mande.
+        await _invalidate_contact_name_cache(contact_id)
+
+
+_register_contact_update_hook(_on_hubspot_contact_updated)
 
 
 async def _get_cached_contact_name(contact_id: str) -> Optional[Dict[str, Any]]:
@@ -507,7 +607,7 @@ async def _get_cached_contact_name(contact_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         r = await _get_redis_client()
-        raw = await r.get(f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}")
+        raw = await r.get(_contact_name_cache_key(contact_id))
         if raw:
             return json.loads(raw)
     except Exception:
@@ -542,7 +642,7 @@ async def _get_cached_contact_names_batch(
     result: Dict[str, Dict[str, Any]] = {}
     try:
         r = await _get_redis_client()
-        keys = [f"{CONTACT_NAME_CACHE_PREFIX}{cid}" for cid in contact_ids]
+        keys = [_contact_name_cache_key(cid) for cid in contact_ids]
         raws = await r.mget(keys)
         for cid, raw in zip(contact_ids, raws):
             if not raw:
@@ -3561,12 +3661,13 @@ async def update_contact_name(
                     logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
             except Exception as redis_err:
                 logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
-            # Invalidar cache de nombre para que el próximo poll traiga el dato fresco de HubSpot
-            try:
-                _rc_inv = await _get_redis_client()
-                await _rc_inv.delete(f"{CONTACT_NAME_CACHE_PREFIX}{contact_id}")
-            except Exception:
-                pass
+            # El renombrado va por _hubspot_patch, no por hubspot_client.update_contact,
+            # así que no lo cubre el hook: se refresca el caché aquí con el mismo
+            # escritor autoritativo. Deja el nombre nuevo en vez de borrar, de modo
+            # que el siguiente poll no tenga que preguntárselo a HubSpot.
+            await _invalidate_contact_name_cache(
+                contact_id, firstname=firstname.strip(), lastname=lastname.strip()
+            )
             # Notificar a todos los paneles para que actualicen el nombre sin esperar poll
             try:
                 _rc_ws = await _get_redis_client()
@@ -6264,8 +6365,8 @@ async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
         }
 
         # ── Caché HubSpot en Redis ─────────────────────────────────
-        stage_keys = len([k async for k in redis_client.scan_iter("contact_stage:*")])
-        name_keys  = len([k async for k in redis_client.scan_iter("contact_name:*")])
+        stage_keys = len([k async for k in redis_client.scan_iter(f"{CONTACT_STAGE_CACHE_PREFIX}*")])
+        name_keys  = len([k async for k in redis_client.scan_iter(f"{CONTACT_NAME_CACHE_PREFIX}*")])
         assoc_keys = len([k async for k in redis_client.scan_iter("hs_assoc:*")])
         idem_keys  = len([k async for k in redis_client.scan_iter("hs_note_processed:*")])
 

@@ -6,9 +6,56 @@ Maneja autenticación, retry logic y deduplicación de contactos.
 
 import os
 import httpx
-from typing import Optional, Dict, Any, List
+from typing import Awaitable, Callable, Optional, Dict, Any, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from logging_config import logger
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HOOKS POST-ACTUALIZACIÓN - Notificar a quien cachee datos de contacto
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# update_contact() es el unico punto por el que pasan los tres escritores de
+# propiedades de contacto (CRMAgent, ContactManager y sus 5 llamantes en
+# webhook_handler). Quien mantenga un cache de esos datos se registra aqui y se
+# entera de todo cambio sin que este modulo sepa que existe un cache.
+#
+# Esta capa NO conoce Redis, ni claves, ni TTLs: solo avisa. Asi se evita el
+# import circular (outbound_panel ya importa integrations.hubspot) y no hace
+# falta crear otro pool de Redis — CLAUDE.md prohibe instanciarlos fuera de los
+# singletons existentes.
+
+ContactUpdateHook = Callable[[str, Dict[str, Any]], Awaitable[None]]
+
+_contact_update_hooks: List[ContactUpdateHook] = []
+
+
+def register_contact_update_hook(hook: ContactUpdateHook) -> None:
+    """
+    Registra un callback que se ejecuta tras cada actualizacion confirmada de
+    contacto, con (contact_id, propiedades_enviadas).
+
+    Idempotente: registrar dos veces el mismo callable no lo duplica, para que
+    una reimportacion del modulo no dispare el hook por partida doble.
+    """
+    if hook not in _contact_update_hooks:
+        _contact_update_hooks.append(hook)
+
+
+async def _run_contact_update_hooks(contact_id: str, properties: Dict[str, Any]) -> None:
+    """
+    Ejecuta los hooks en serie y se traga sus errores.
+
+    Se hace `await`, no create_task: una escritura en background llegaria con
+    datos leidos antes del PATCH y podria pisar un valor mas nuevo. Es
+    exactamente la carrera que estos hooks vienen a cerrar.
+    """
+    for hook in _contact_update_hooks:
+        try:
+            await hook(contact_id, properties)
+        except Exception as e:
+            # Un cache caido nunca puede tumbar la sincronizacion con HubSpot.
+            logger.warning(f"[HubSpotClient] Hook post-update fallo (no critico): {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -361,6 +408,10 @@ class HubSpotClient:
         
         await self._request("PATCH", endpoint, {"properties": validated_props})
         logger.info(f"[HubSpotClient] Contacto actualizado: {contact_id}")
+
+        # HubSpot ya confirmo el cambio: avisar a quien cachee estos datos.
+        # Se pasan las propiedades validadas, que son las que HubSpot recibio.
+        await _run_contact_update_hooks(contact_id, validated_props)
 
 
     async def create_deal(

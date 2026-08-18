@@ -10,7 +10,7 @@ Componentes:
 - outbound_handler.py: Webhook para mensajes HubSpot -> WhatsApp
 """
 
-from .hubspot_client import HubSpotClient
+from .hubspot_client import HubSpotClient, register_contact_update_hook
 from .hubspot_utils import normalize_phone_e164, calculate_lead_score
 
 # Instancia global del cliente HubSpot
@@ -49,6 +49,7 @@ __all__ = [
     # Cliente principal
     "HubSpotClient",
     "hubspot_client",
+    "register_contact_update_hook",
     # Utilidades
     "normalize_phone_e164",
     "calculate_lead_score",

@@ -351,13 +351,24 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
     return False
 
 
-async def _get_contact_lifecyclestage(contact_id: str) -> str:
+async def _get_contact_lifecyclestage(contact_id: str, strict: bool = False) -> Optional[str]:
     """
     Lee la propiedad lifecyclestage del Contact en HubSpot.
     Usa caché en Redis (1h) para reducir llamadas a la API.
+
+    strict=False (por defecto): si no se puede leer, devuelve "En conversación".
+    Es un fail-open deliberado — STAGES_VISIBLES_WORKER lo contiene, así que un
+    429 de HubSpot deja la cita visible en el reporte por asesor en vez de
+    borrarla. NO cambiar sin revisar los 5 llamantes que dependen de ello.
+
+    strict=True: devuelve None cuando la lectura falla, para que el llamante
+    distinga "la etapa es otra" de "no pude averiguar la etapa". Lo usa la
+    promoción de Nuevo Lead, donde tragarse el error significa perder el lead.
     """
+    _fallback = None if strict else HUBSPOT_STAGE_EN_CONVERSACION
+
     if not contact_id or not HUBSPOT_API_KEY:
-        return HUBSPOT_STAGE_EN_CONVERSACION
+        return _fallback
 
     cache_key = f"contact_stage:{contact_id}"
     try:
@@ -379,24 +390,51 @@ async def _get_contact_lifecyclestage(contact_id: str) -> str:
             stage = response.json().get("properties", {}).get("lifecyclestage") or HUBSPOT_STAGE_EN_CONVERSACION
             try:
                 redis_client = await _get_redis_client()
-                await redis_client.setex(cache_key, CONTACT_STAGE_CACHE_TTL, stage)
+                # nx: escritor best-effort. Si la key ya existe es porque alguien
+                # acaba de cambiar la etapa y dejó ahí el valor bueno; este stage
+                # se leyó de HubSpot antes de ese cambio y lo pisaría.
+                await redis_client.set(
+                    cache_key, stage, ex=CONTACT_STAGE_CACHE_TTL, nx=True
+                )
             except Exception:
                 pass
             return stage
     except Exception as e:
         logger.debug(f"[Panel] Error leyendo lifecyclestage de contacto {contact_id}: {e}")
 
-    return HUBSPOT_STAGE_EN_CONVERSACION
+    return _fallback
 
 
-async def _invalidate_contact_stage_cache(contact_id: str) -> None:
-    """Invalida el caché de lifecyclestage en Redis para un contacto específico."""
+async def _invalidate_contact_stage_cache(
+    contact_id: str, new_stage: Optional[str] = None
+) -> None:
+    """
+    Sincroniza el caché de lifecyclestage tras un cambio de etapa confirmado.
+
+    Con new_stage escribe el valor nuevo en vez de borrar la key. Dos motivos:
+
+    1. Ahorra la llamada a HubSpot que el DELETE forzaba en la siguiente lectura.
+    2. Cierra la carrera que dejaba el chip del panel pegado hasta 1 hora:
+       GET /contacts tarda 7-9s y al terminar dispara _cache_contact_stage() con
+       la etapa que leyó AL EMPEZAR. Si la asesora responde en medio, esa tarea
+       de fondo resucitaba "Nuevo Lead" con TTL de 1h sobre la key recién
+       borrada. Dejando aquí el valor bueno, el `nx` de los escritores
+       best-effort hace que la escritura tardía se decline sola.
+
+    Los cuatro llamantes invocan esto dentro de un `if status_code == 200`, así
+    que new_stage es siempre la etapa que HubSpot acaba de aceptar.
+    """
     try:
         redis_client = await _get_redis_client()
-        await redis_client.delete(f"contact_stage:{contact_id}")
-        logger.debug(f"[Panel] Caché de stage invalidado para {contact_id}")
+        cache_key = f"contact_stage:{contact_id}"
+        if new_stage:
+            await redis_client.set(cache_key, new_stage, ex=CONTACT_STAGE_CACHE_TTL)
+            logger.debug(f"[Panel] Caché de stage fijado a '{new_stage}' para {contact_id}")
+        else:
+            await redis_client.delete(cache_key)
+            logger.debug(f"[Panel] Caché de stage invalidado para {contact_id}")
     except Exception as e:
-        logger.debug(f"[Panel] Error invalidando contact stage cache: {e}")
+        logger.debug(f"[Panel] Error sincronizando contact stage cache: {e}")
 
 
 async def _release_contacts_inflight(redis_client, inflight_key: Optional[str]) -> None:
@@ -431,10 +469,19 @@ async def _await_contacts_inflight(redis_client, cache_key: str):
 
 
 async def _cache_contact_stage(contact_id: str, stage: str) -> None:
-    """Guarda lifecyclestage en Redis cache en background (sin bloquear el request)."""
+    """
+    Guarda lifecyclestage en Redis cache en background (sin bloquear el request).
+
+    nx: escritor best-effort. Esta tarea nace del enriquecimiento de
+    GET /contacts, que tarda 7-9s, y llega con una etapa leída al inicio del
+    request. Si mientras tanto alguien la cambió, la key ya tiene el valor bueno
+    y esta escritura debe declinarse — ver _invalidate_contact_stage_cache().
+    """
     try:
         redis_client = await _get_redis_client()
-        await redis_client.setex(f"contact_stage:{contact_id}", CONTACT_STAGE_CACHE_TTL, stage)
+        await redis_client.set(
+            f"contact_stage:{contact_id}", stage, ex=CONTACT_STAGE_CACHE_TTL, nx=True
+        )
     except Exception:
         pass
 
@@ -1185,7 +1232,9 @@ async def _update_contact_to_visita_realizada(contact_id: str) -> None:
             logger.info(
                 f"[Lifecycle] Contacto {contact_id}: marketingqualifiedlead → salesqualifiedlead"
             )
-            await _invalidate_contact_stage_cache(contact_id)
+            await _invalidate_contact_stage_cache(
+                contact_id, HUBSPOT_STAGE_VISITA_REALIZADA
+            )
         else:
             logger.warning(
                 f"[Lifecycle] Error actualizando lifecyclestage: {r.status_code} - {r.text}"
@@ -1232,7 +1281,9 @@ async def _promote_no_responde_to_en_conversacion(
                 f"[BulkNoResponde] Contacto {contact_id}: other → 1326623075 (En conversación) "
                 f"por respuesta a mensaje masivo"
             )
-            await _invalidate_contact_stage_cache(contact_id)
+            await _invalidate_contact_stage_cache(
+                contact_id, HUBSPOT_STAGE_EN_CONVERSACION
+            )
             await r.delete(flag_key)
             return True
         logger.warning(
@@ -1264,8 +1315,22 @@ async def _promote_nuevo_lead_to_en_conversacion(
     if not HUBSPOT_API_KEY or not contact_id or not phone_normalized:
         return False
     try:
-        current_stage = await _get_contact_lifecyclestage(contact_id)
+        # strict: sin esto, un 429 o un timeout de HubSpot devolvía
+        # "En conversación" y el guard de abajo daba el lead por promovido. El
+        # lead se quedaba en "Nuevo Lead" para siempre y no quedaba ni un log.
+        current_stage = await _get_contact_lifecyclestage(contact_id, strict=True)
+        if current_stage is None:
+            logger.warning(
+                f"[NuevoLead] No se pudo leer la etapa de {contact_id} — "
+                f"promoción pospuesta al siguiente mensaje de la asesora"
+            )
+            return False
         if current_stage != HUBSPOT_STAGE_NUEVO_LEAD:
+            # Caso normal y mayoritario: el lead ya avanzó del embudo de entrada.
+            logger.debug(
+                f"[NuevoLead] Contacto {contact_id} en '{current_stage}' — "
+                f"no es 'Nuevo Lead', skip"
+            )
             return False  # caso normal — el lead ya avanzó del embudo de entrada
 
         url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
@@ -1280,7 +1345,9 @@ async def _promote_nuevo_lead_to_en_conversacion(
                 f"[NuevoLead] Contacto {contact_id}: Nuevo Lead → En conversación "
                 f"(la asesora respondió)"
             )
-            await _invalidate_contact_stage_cache(contact_id)
+            await _invalidate_contact_stage_cache(
+                contact_id, HUBSPOT_STAGE_EN_CONVERSACION
+            )
             return True
         logger.warning(
             f"[NuevoLead] Error PATCH HubSpot {contact_id}: "
@@ -3943,7 +4010,7 @@ async def update_contact_stage(
         if response.status_code == 200:
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
             logger.info(f"[Panel] Contacto {contact_id} actualizado a etapa '{stage_name}'")
-            await _invalidate_contact_stage_cache(contact_id)
+            await _invalidate_contact_stage_cache(contact_id, stage_id)
 
             payload = {
                 "status": "success",
@@ -6941,6 +7008,16 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
                 )
             except Exception as promo_err:
                 logger.warning(f"[NuevoLead] Promoción falló (non-fatal): {promo_err}")
+        elif meta:
+            # GET /contacts sí resuelve el contact_id por teléfono cuando falta en
+            # el meta, pero solo en memoria: nunca lo devuelve a Redis. Un contacto
+            # así se ve perfecto en el panel y jamás se promueve, sin dejar rastro.
+            # Teléfono enmascarado: CLAUDE.md prohíbe loggearlo entero, y los 4
+            # últimos dígitos bastan para localizarlo en el panel.
+            logger.warning(
+                f"[NuevoLead] conv_meta sin contact_id para "
+                f"···{phone_normalized[-4:]}:{canal or 'default'} — no se puede promover"
+            )
     except Exception as e:
         logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
 

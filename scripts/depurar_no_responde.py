@@ -86,6 +86,7 @@ BASE_HUBSPOT = "https://api.hubapi.com/crm/v3/objects/contacts"
 LOTE_LECTURA = 100          # máximo que admite el batch read de HubSpot
 PETICIONES_POR_SEGUNDO = 3  # conservador: el panel comparte el presupuesto
 ERRORES_SEGUIDOS_PARA_ABORTAR = 5
+REINTENTOS_ESCRITURA = 3    # los mismos que ya tenía la lectura
 
 CARPETA_SALIDA = os.path.join(RAIZ, "scripts", "salida")
 
@@ -200,15 +201,16 @@ def leer_etapas(contact_ids: List[str], ritmo: Ritmo) -> Dict[str, Dict[str, str
 
 # ── Escritura ───────────────────────────────────────────────────────────────
 
-def mover_etapa(contact_id: str, etapa_destino: str, ritmo: Ritmo) -> Optional[str]:
+def _fijar_etapa(contact_id: str, valor: str, ritmo: Ritmo) -> Optional[str]:
     """
-    Cambia lifecyclestage en dos pasos: limpiar y fijar.
+    Un PATCH de lifecyclestage, con reintentos. Devuelve None si fue bien.
 
-    HubSpot solo deja avanzar el lifecyclestage; sin el paso de limpieza un
-    movimiento "hacia atrás" devuelve 200 y no cambia nada. Es el mismo
-    procedimiento que usa el panel en PATCH /contacts/{id}/stage.
+    La lectura ya reintentaba 3 veces y la escritura ninguna. Esa asimetria
+    costo un contacto el 19-ago-2026: un corte de red pasajero (WinError 10054)
+    dejo el cambio a medias.
     """
-    for valor in ("", etapa_destino):
+    ultimo = None
+    for intento in range(REINTENTOS_ESCRITURA):
         cuerpo = json.dumps({"properties": {"lifecyclestage": valor}}).encode()
         peticion = urllib.request.Request(
             f"{BASE_HUBSPOT}/{contact_id}", data=cuerpo,
@@ -217,13 +219,67 @@ def mover_etapa(contact_id: str, etapa_destino: str, ritmo: Ritmo) -> Optional[s
         ritmo.esperar()
         try:
             with urllib.request.urlopen(peticion, timeout=60) as resp:
-                if resp.status != 200:
-                    return f"HTTP {resp.status}"
+                if resp.status == 200:
+                    return None
+                ultimo = f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            return f"HTTP {e.code}"
+            ultimo = f"HTTP {e.code}"
+            # Un 4xx que no sea 429 no se arregla insistiendo.
+            if 400 <= e.code < 500 and e.code != 429:
+                break
         except Exception as e:
-            return str(e)
-    return None
+            ultimo = str(e)
+        if intento < REINTENTOS_ESCRITURA - 1:
+            time.sleep(2 * (intento + 1))
+    return ultimo
+
+
+def mover_etapa(
+    contact_id: str, etapa_origen: str, etapa_destino: str, ritmo: Ritmo
+) -> Optional[str]:
+    """
+    Cambia lifecyclestage en dos pasos: limpiar y fijar.
+
+    HubSpot solo deja avanzar el lifecyclestage; sin el paso de limpieza un
+    movimiento "hacia atrás" devuelve 200 y no cambia nada. Es el mismo
+    procedimiento que usa el panel en PATCH /contacts/{id}/stage.
+
+    Entre los dos pasos el contacto no está en ningún embudo. Si el segundo
+    falla hay que DESHACER, o queda invisible para todo el mundo: no sale en el
+    panel y tampoco vuelve a entrar en la regla, que exige estar en el embudo de
+    origen para tocarlo. Devolverlo a su sitio lo deja donde estaba y la
+    siguiente pasada lo reintenta sola.
+    """
+    error = _fijar_etapa(contact_id, "", ritmo)
+    if error:
+        return error  # no se llego a tocar: sigue en su embudo
+
+    error = _fijar_etapa(contact_id, etapa_destino, ritmo)
+    if not error:
+        return None
+
+    vuelta = _fijar_etapa(contact_id, etapa_origen, ritmo)
+    if vuelta:
+        return f"{error}; ADEMAS quedo SIN ETAPA (no se pudo deshacer: {vuelta})"
+    return f"{error} (deshecho: sigue en {etapa_origen})"
+
+
+def rescatar_sin_etapa(contact_ids: List[str], etapa_origen: str, ritmo: Ritmo) -> int:
+    """
+    Devuelve al embudo de origen a quien se quedó sin etapa ninguna.
+
+    Un contacto sin lifecyclestage no es una decisión de nadie: es una escritura
+    que se rompió por la mitad. Se le devuelve a su embudo, no se le empuja al
+    destino, para que pase por el mismo camino auditado que los demás.
+    """
+    rescatados = 0
+    for cid in contact_ids:
+        error = _fijar_etapa(cid, etapa_origen, ritmo)
+        if error:
+            print(f"    aviso: {cid} sigue sin etapa ({error})")
+        else:
+            rescatados += 1
+    return rescatados
 
 
 async def cerrar_conversaciones(telefonos_visibles: Dict[str, List[str]]) -> int:
@@ -345,10 +401,17 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
 
     print("\n[3/5] Aplicando la regla completa...")
     a_depurar, descartados = [], defaultdict(int)
+    sin_etapa = []
     for telefono, cid, envios in preseleccion:
         props = propiedades.get(cid)
         if props is None:
             descartados["no_legible_en_hubspot"] += 1
+            continue
+        # Sin etapa ninguna = escritura rota, no decisión de una asesora. No
+        # entra en la regla (que exige el embudo de origen), así que si no se
+        # rescata aquí se queda invisible para siempre.
+        if not props.get("lifecyclestage"):
+            sin_etapa.append(cid)
             continue
         decision = evaluar(
             Historial(cid, envios, respuestas.get(telefono), props.get("lifecyclestage")),
@@ -382,6 +445,10 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
         print("      descartados por:")
         for motivo, n in sorted(descartados.items(), key=lambda x: -x[1]):
             print(f"        {motivo:36s} {n}")
+    if sin_etapa:
+        print(f"      SIN ETAPA (escritura rota): {len(sin_etapa)}")
+        print(f"        {', '.join(sin_etapa)}")
+        print(f"        se devolveran a '{regla.etapa_origen}' si se aplica")
 
     os.makedirs(CARPETA_SALIDA, exist_ok=True)
     with open(informe, "w", encoding="utf-8-sig", newline="") as f:
@@ -396,15 +463,22 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
         print("      Revisa el CSV y, si estas conforme, relanza con --aplicar\n")
         return 0
 
-    if not a_depurar:
+    if not a_depurar and not sin_etapa:
         print("\n[5/5] Nada que aplicar.\n")
         return 0
 
     print(f"\n[5/5] Se van a mover {len(a_depurar)} contactos a '{regla.etapa_destino}'.")
+    if sin_etapa:
+        print(f"      Y devolver {len(sin_etapa)} sin etapa a '{regla.etapa_origen}'.")
     print("      Esta accion escribe en HubSpot.")
     if input("      Escribe DEPURAR para continuar: ").strip() != "DEPURAR":
         print("      Cancelado. No se ha tocado nada.\n")
         return 1
+
+    if sin_etapa:
+        rescatados = rescatar_sin_etapa(sin_etapa, regla.etapa_origen, ritmo)
+        print(f"      rescatados sin etapa: {rescatados}/{len(sin_etapa)}"
+              f" (los movera la proxima pasada)")
 
     hechos = leer_checkpoint()
     if hechos:
@@ -416,7 +490,7 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
         cid = fila["contact_id"]
         if cid in hechos:
             continue
-        error = mover_etapa(cid, regla.etapa_destino, ritmo)
+        error = mover_etapa(cid, regla.etapa_origen, regla.etapa_destino, ritmo)
         if not error:
             anotar_checkpoint(cid)
         if error:

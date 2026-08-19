@@ -351,8 +351,11 @@ def test_el_cambio_de_etapa_es_en_dos_pasos():
     atras devuelve 200 y no cambia nada. Es lo que hace el panel.
     """
     src = _fuente_script()
-    assert 'for valor in ("", etapa_destino):' in src, (
-        "se perdio el clear+set; el movimiento puede fallar en silencio"
+    assert '_fijar_etapa(contact_id, "", ritmo)' in src, (
+        "se perdio el paso de limpieza; mover hacia atras devuelve 200 sin cambiar nada"
+    )
+    assert "_fijar_etapa(contact_id, etapa_destino, ritmo)" in src, (
+        "se perdio el paso de fijado"
     )
 
 
@@ -568,3 +571,202 @@ def test_el_checkpoint_es_uno_solo_para_todos_los_modos():
     """
     src = _fuente_script()
     assert 'CHECKPOINT = os.path.join(CARPETA_SALIDA, "depuracion_no_responde_checkpoint.jsonl")' in src
+
+
+# ══════════════════════════════════════════════════════════════════════
+# El camino de ESCRITURA — lo que costo un contacto el 19-ago-2026
+# ══════════════════════════════════════════════════════════════════════
+#
+# Mover de embudo son DOS llamadas: limpiar y fijar. Entre una y otra el
+# contacto no esta en ningun embudo. Aquel dia un corte de red pasajero
+# (WinError 10054) entro entre las dos y dejo a un contacto sin etapa: ni en el
+# panel, ni en la regla —que exige el embudo de origen para tocarlo—. Invisible
+# para todo el mundo y sin forma de recuperarlo solo.
+#
+# La causa de fondo era una asimetria: la lectura reintentaba 3 veces, la
+# escritura ninguna.
+
+import importlib.util  # noqa: E402
+import urllib.error  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+
+def _cargar_script():
+    spec = importlib.util.spec_from_file_location("_depurar_script", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SCRIPT_MOD = _cargar_script()
+
+
+class _RitmoFalso:
+    def esperar(self):
+        pass
+
+
+def _respuesta(status=200):
+    r = MagicMock()
+    r.status = status
+    r.__enter__ = lambda s: s
+    r.__exit__ = lambda s, *a: False
+    return r
+
+
+def _http_error(codigo):
+    return urllib.error.HTTPError("u", codigo, "no", {}, None)
+
+
+def _con_urlopen(efectos):
+    """Sustituye urlopen y el sleep de los reintentos (los tests no esperan)."""
+    return (
+        patch.object(SCRIPT_MOD.urllib.request, "urlopen", side_effect=efectos),
+        patch.object(SCRIPT_MOD, "time", MagicMock(sleep=lambda s: None,
+                                                   monotonic=lambda: 0.0)),
+        patch.object(SCRIPT_MOD, "_cabeceras", lambda: {}),
+    )
+
+
+def _valores_enviados(mock_urlopen):
+    """Los lifecyclestage que se llegaron a mandar, en orden."""
+    import json as _json
+    return [
+        _json.loads(c.args[0].data)["properties"]["lifecyclestage"]
+        for c in mock_urlopen.call_args_list
+    ]
+
+
+def _ejecutar(efectos, fn):
+    p1, p2, p3 = _con_urlopen(efectos)
+    with p1 as mock_urlopen, p2, p3:
+        return fn(), mock_urlopen
+
+
+# ── Reintentos ──────────────────────────────────────────────────────────────
+
+def test_un_corte_de_red_pasajero_ya_no_pierde_la_escritura():
+    """El fallo real: WinError 10054 a la primera, bien a la segunda."""
+    efectos = [OSError("[WinError 10054] connection forcibly closed"), _respuesta(200)]
+    error, mock = _ejecutar(
+        efectos, lambda: SCRIPT_MOD._fijar_etapa("1", "evangelist", _RitmoFalso())
+    )
+    assert error is None, "se rindio al primer corte de red"
+    assert mock.call_count == 2
+
+
+def test_se_rinde_tras_agotar_los_reintentos():
+    efectos = [OSError("red caida")] * SCRIPT_MOD.REINTENTOS_ESCRITURA
+    error, mock = _ejecutar(
+        efectos, lambda: SCRIPT_MOD._fijar_etapa("1", "evangelist", _RitmoFalso())
+    )
+    assert error is not None
+    assert mock.call_count == SCRIPT_MOD.REINTENTOS_ESCRITURA
+
+
+def test_un_400_no_se_reintenta():
+    """Insistir ante un rechazo del propio HubSpot solo gasta presupuesto."""
+    efectos = [_http_error(400)] * 5
+    error, mock = _ejecutar(
+        efectos, lambda: SCRIPT_MOD._fijar_etapa("1", "evangelist", _RitmoFalso())
+    )
+    assert "400" in error
+    assert mock.call_count == 1, "reintento un error que no se arregla reintentando"
+
+
+def test_un_429_si_se_reintenta():
+    """El rate limit es justo lo contrario: pasajero por definicion."""
+    efectos = [_http_error(429), _respuesta(200)]
+    error, mock = _ejecutar(
+        efectos, lambda: SCRIPT_MOD._fijar_etapa("1", "evangelist", _RitmoFalso())
+    )
+    assert error is None
+    assert mock.call_count == 2
+
+
+# ── El movimiento completo, y el deshacer ───────────────────────────────────
+
+def test_el_movimiento_limpia_y_luego_fija():
+    efectos = [_respuesta(200), _respuesta(200)]
+    error, mock = _ejecutar(
+        efectos,
+        lambda: SCRIPT_MOD.mover_etapa("1", "other", "evangelist", _RitmoFalso()),
+    )
+    assert error is None
+    assert _valores_enviados(mock) == ["", "evangelist"]
+
+
+def test_si_falla_la_limpieza_no_se_toca_nada():
+    """El contacto sigue en su embudo: no hay nada que deshacer."""
+    efectos = [_http_error(400)]
+    error, mock = _ejecutar(
+        efectos,
+        lambda: SCRIPT_MOD.mover_etapa("1", "other", "evangelist", _RitmoFalso()),
+    )
+    assert error is not None
+    assert _valores_enviados(mock) == [""], "escribio despues de fallar la limpieza"
+
+
+def test_si_falla_el_fijado_el_contacto_vuelve_a_su_embudo():
+    """
+    LA REGRESION. Sin esto el contacto queda sin etapa: fuera del panel y fuera
+    del alcance de la regla, que exige el embudo de origen. Devolverlo lo deja
+    donde estaba y la siguiente pasada lo reintenta sola.
+    """
+    efectos = [
+        _respuesta(200),   # limpiar: bien
+        _http_error(400),  # fijar: no (un 4xx no se reintenta)
+        _respuesta(200),   # deshacer: bien
+    ]
+    error, mock = _ejecutar(
+        efectos,
+        lambda: SCRIPT_MOD.mover_etapa("1", "other", "evangelist", _RitmoFalso()),
+    )
+    enviados = _valores_enviados(mock)
+    assert enviados[-1] == "other", (
+        f"no se devolvio al embudo de origen; quedo sin etapa. Enviado: {enviados}"
+    )
+    assert error is not None and "deshecho" in error
+
+
+def test_si_tampoco_se_puede_deshacer_el_error_lo_dice_a_gritos():
+    """
+    Queda un contacto sin etapa de verdad. Tiene que verse en el informe, porque
+    es el unico estado del que no se sale solo.
+    """
+    efectos = [_respuesta(200)] + [_http_error(400)] * 2
+    error, _ = _ejecutar(
+        efectos,
+        lambda: SCRIPT_MOD.mover_etapa("1", "other", "evangelist", _RitmoFalso()),
+    )
+    assert "SIN ETAPA" in error
+
+
+# ── El rescate ──────────────────────────────────────────────────────────────
+
+def test_el_rescate_devuelve_al_origen_no_empuja_al_destino():
+    """
+    De un contacto sin etapa no se sabe que decidio nadie. Se le devuelve a su
+    embudo y pasa por el mismo camino auditado que los demas.
+    """
+    efectos = [_respuesta(200), _respuesta(200)]
+    n, mock = _ejecutar(
+        efectos,
+        lambda: SCRIPT_MOD.rescatar_sin_etapa(["1", "2"], "other", _RitmoFalso()),
+    )
+    assert n == 2
+    assert _valores_enviados(mock) == ["other", "other"]
+    assert "evangelist" not in _valores_enviados(mock)
+
+
+def test_el_runner_recoge_a_los_que_quedaron_sin_etapa():
+    """Si no se apartan aparte, la regla los descarta y no vuelven nunca."""
+    src = _fuente_script()
+    assert 'if not props.get("lifecyclestage"):' in src
+    assert "sin_etapa.append(cid)" in src
+    assert "rescatar_sin_etapa(sin_etapa, regla.etapa_origen, ritmo)" in src
+
+
+def test_la_escritura_reintenta_igual_que_la_lectura():
+    """La asimetria entre leer y escribir es lo que causo el incidente."""
+    assert SCRIPT_MOD.REINTENTOS_ESCRITURA >= 3

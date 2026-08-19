@@ -95,6 +95,52 @@ def _es_posterior(a: Optional[datetime], b: Optional[datetime]) -> bool:
     return a > b
 
 
+# ---------------------------------------------------------------------------
+# Helpers puros del rescate de reclamaciones huerfanas.
+# A nivel de modulo a proposito: no tocan la base de datos, asi que se pueden
+# probar sin red y se reusan desde donde haga falta.
+# ---------------------------------------------------------------------------
+def _a_utc(momento: Optional[datetime]) -> Optional[datetime]:
+    """
+    Normaliza a UTC consciente de zona.
+
+    El cliente de Mongo NO se crea con tz_aware, asi que todo datetime que
+    vuelve de la base es NAIVE y esta en UTC. Restarle un datetime.now(TIMEZONE)
+    —que si es consciente y esta en Bogota— lanza TypeError, y si alguien lo
+    envuelve en un try/except el fallo desaparece sin dejar rastro. Ademas hay
+    5 horas de diferencia entre ambas zonas, asi que ni siquiera comparar dos
+    naive seria correcto.
+    """
+    if momento is None:
+        return None
+    return momento if momento.tzinfo else momento.replace(tzinfo=timezone.utc)
+
+
+def claim_caducado(
+    claimed_at: Optional[datetime], ahora_utc: datetime, lease_seconds: int
+) -> bool:
+    """
+    ¿Esta reclamacion la dejo huerfana un proceso muerto?
+
+    Sin claimed_at se da por caducada: son contactos anteriores a que existiera
+    la marca, asi que llevan reclamados desde antes de eso.
+    """
+    reclamado = _a_utc(claimed_at)
+    if reclamado is None:
+        return True
+    return (ahora_utc - reclamado).total_seconds() > lease_seconds
+
+
+def campana_demasiado_vieja(
+    created_at: Optional[datetime], ahora_utc: datetime, max_age_hours: int
+) -> bool:
+    """Pasado este plazo, lo huerfano se cancela en vez de reintentarse."""
+    creada = _a_utc(created_at)
+    if creada is None:
+        return True
+    return (ahora_utc - creada).total_seconds() > max_age_hours * 3600
+
+
 class MongoDBManager:
     """
     Gestor de MongoDB para mensajes en tiempo real.
@@ -1813,9 +1859,16 @@ class MongoDBManager:
             claimed = []
             for _ in range(batch_size):
                 # findOneAndUpdate atómico: marca el primer contacto pending como in_progress
+                # claimed_at es lo que permite distinguir despues "lo estoy
+                # procesando ahora" de "lo reclamo un proceso que ya murio".
+                # Sin esta marca no hay forma de detectar la reclamacion huerfana
+                # que congelo la cola entera durante 33 dias.
                 result = await self.db.bulk_campaigns.find_one_and_update(
                     {"_id": ObjectId(campaign_id), "contacts.status": "pending"},
-                    {"$set": {"contacts.$.status": "in_progress"}},
+                    {"$set": {
+                        "contacts.$.status": "in_progress",
+                        "contacts.$.claimed_at": datetime.now(TIMEZONE),
+                    }},
                     projection={"contacts.$": 1, "creator_advisor_id": 1, "creator_advisor_name": 1,
                                 "stage_id": 1, "template_content_sid": 1, "template_id": 1,
                                 "template_variables": 1, "auto_fill_keys": 1},
@@ -1905,6 +1958,133 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"[MongoDB][BulkCampaign] Error last_by_stage_advisor: {e}")
             return None
+
+    async def recuperar_contactos_caducados(
+        self,
+        campaign_id: str,
+        lease_seconds: int,
+        campaign_max_age_hours: int,
+    ) -> Dict[str, int]:
+        """
+        Rescata contactos reclamados que nadie resolvió nunca.
+
+        claim_next_pending_contacts() los pasa a "in_progress" ANTES de enviar.
+        Si el proceso muere en ese hueco —un SIGKILL por memoria, un reinicio de
+        despliegue a mitad de lote— el contacto queda reclamado para siempre:
+        no hay nada "pending" que reclamar, pero finalize tampoco cierra la
+        campaña porque sigue habiendo un "in_progress". La campaña queda activa
+        eternamente y, al ser la más antigua, bloquea a todas las demás. Pasó de
+        verdad: tres campañas y 217 envíos congelados 33 días.
+
+        Dos desenlaces según la edad de la CAMPAÑA, no la del contacto:
+          · joven  -> vuelven a "pending" y se reintentan. Cubre el caso normal.
+          · vieja  -> se cancelan. Un masivo comercial que sale semanas tarde
+                      llega fuera de contexto; es peor que no enviarlo.
+
+        Los contactos sin `claimed_at` se tratan como caducados: son anteriores
+        a que existiera la marca, así que llevan ahí, como poco, desde antes.
+        """
+        resultado = {"devueltos": 0, "cancelados": 0}
+        if not await self.connect():
+            return resultado
+        try:
+            doc = await self.db.bulk_campaigns.find_one(
+                {"_id": ObjectId(campaign_id)},
+                projection={"contacts.status": 1, "contacts.claimed_at": 1, "created_at": 1},
+            )
+            if not doc:
+                return resultado
+
+            ahora = datetime.now(timezone.utc)
+            caducados = sum(
+                1 for c in doc.get("contacts", [])
+                if c.get("status") == "in_progress"
+                and claim_caducado(c.get("claimed_at"), ahora, lease_seconds)
+            )
+            if not caducados:
+                return resultado
+
+            demasiado_vieja = campana_demasiado_vieja(
+                doc.get("created_at"), ahora, campaign_max_age_hours
+            )
+            nuevo_estado = "cancelled" if demasiado_vieja else "pending"
+
+            limite = ahora - timedelta(seconds=lease_seconds)
+            await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id)},
+                {"$set": {
+                    "contacts.$[caducado].status": nuevo_estado,
+                    "contacts.$[caducado].claimed_at": None,
+                }},
+                array_filters=[{
+                    "caducado.status": "in_progress",
+                    "$or": [
+                        {"caducado.claimed_at": None},
+                        {"caducado.claimed_at": {"$lt": limite}},
+                    ],
+                }],
+            )
+            if demasiado_vieja:
+                resultado["cancelados"] = caducados
+            else:
+                resultado["devueltos"] = caducados
+            logger.warning(
+                f"[MongoDB][BulkCampaign] {campaign_id}: {caducados} contactos "
+                f"reclamados y nunca resueltos -> {nuevo_estado}"
+            )
+            return resultado
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error recuperando caducados: {e}")
+            return resultado
+
+    async def cancel_bulk_campaign(self, campaign_id: str, motivo: str) -> Dict[str, Any]:
+        """
+        Cancela una campaña sin enviar lo que quede pendiente.
+
+        Los contactos sin enviar pasan a "cancelled" — no a "failed", que
+        significa "se intentó y no se pudo". La distinción importa para saber
+        después si a alguien se le intentó escribir o no.
+
+        Idempotente: cancelar una campaña ya completada no la altera.
+        """
+        vacio = {"cancelados": 0, "ya_estaba_cerrada": False}
+        if not await self.connect():
+            return vacio
+        try:
+            doc = await self.db.bulk_campaigns.find_one(
+                {"_id": ObjectId(campaign_id)},
+                projection={"contacts.status": 1, "status": 1},
+            )
+            if not doc:
+                return vacio
+            if doc.get("status") == "completed":
+                return {"cancelados": 0, "ya_estaba_cerrada": True}
+
+            sin_enviar = sum(
+                1 for c in doc.get("contacts", [])
+                if c.get("status") in ("pending", "in_progress")
+            )
+            await self.db.bulk_campaigns.update_one(
+                {"_id": ObjectId(campaign_id)},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "completed_at": datetime.now(TIMEZONE),
+                        "cancelled": True,
+                        "cancel_reason": (motivo or "")[:300],
+                        "contacts.$[sinEnviar].status": "cancelled",
+                    }
+                },
+                array_filters=[{"sinEnviar.status": {"$in": ["pending", "in_progress"]}}],
+            )
+            logger.info(
+                f"[MongoDB][BulkCampaign] Campaña {campaign_id} cancelada: "
+                f"{sin_enviar} contactos sin enviar. Motivo: {motivo}"
+            )
+            return {"cancelados": sin_enviar, "ya_estaba_cerrada": False}
+        except Exception as e:
+            logger.error(f"[MongoDB][BulkCampaign] Error cancelando {campaign_id}: {e}")
+            return vacio
 
     async def finalize_bulk_campaign_if_done(self, campaign_id: str) -> bool:
         """Si no quedan contactos pending/in_progress, marca status=completed."""

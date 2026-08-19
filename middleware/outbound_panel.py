@@ -153,6 +153,15 @@ BULK_BATCH_SIZE = 5
 BULK_SEND_SPACING_SEC = 0.5
 BULK_MAX_CONCURRENT = 2
 BULK_MESSAGE_DEDUP_TTL = 86400 * 7
+# Un contacto reclamado y no resuelto en este plazo se da por huerfano: el
+# proceso que lo tomo murio. Holgado frente al lote real (5 envios, ~3s).
+BULK_CLAIM_LEASE_SECONDS = 900
+# Pasada esta edad, una campana ya no reintenta lo huerfano: lo cancela. Un
+# masivo comercial que sale dias tarde llega fuera de contexto.
+BULK_CAMPAIGN_MAX_AGE_HOURS = 24
+# Campanas que mira el tick antes de rendirse. >1 para que una atascada no
+# pueda volver a matar de hambre a las que van detras.
+BULK_CAMPAIGNS_PER_TICK = 5
 HUBSPOT_BULK_SEARCH_CACHE_TTL = 1800
 BULK_NO_RESPONDE_FLAG_PREFIX = "bulk_no_responde_pending:"
 BULK_NO_RESPONDE_FLAG_TTL = 86400 * 30
@@ -9645,16 +9654,35 @@ async def _process_bulk_campaign_tick():
 
     try:
         mongo_mgr = get_mongo_manager()
-        active = await mongo_mgr.get_active_bulk_campaigns(limit=1)
-        if not active:
+        activas = await mongo_mgr.get_active_bulk_campaigns(limit=BULK_CAMPAIGNS_PER_TICK)
+        if not activas:
             return
 
-        campaign = active[0]
-        campaign_id = campaign["_id"]
-        contacts = await mongo_mgr.claim_next_pending_contacts(campaign_id, BULK_BATCH_SIZE)
-        if not contacts:
-            await mongo_mgr.finalize_bulk_campaign_if_done(campaign_id)
+        # Se recorre hasta encontrar una campana con trabajo real. Antes se
+        # tomaba siempre la primera: si esa no tenia nada reclamable pero
+        # tampoco podia cerrarse, el tick se iba de vacio y las siguientes no
+        # se procesaban nunca. Asi es como 217 envios quedaron congelados 33
+        # dias sin un solo error en los logs.
+        campaign = None
+        contacts = []
+        for candidata in activas:
+            cid_campana = candidata["_id"]
+            # Rescatar lo reclamado por un proceso muerto ANTES de reclamar mas:
+            # es lo que devuelve trabajo a la cola y permite cerrar la campana.
+            await mongo_mgr.recuperar_contactos_caducados(
+                cid_campana, BULK_CLAIM_LEASE_SECONDS, BULK_CAMPAIGN_MAX_AGE_HOURS
+            )
+            contacts = await mongo_mgr.claim_next_pending_contacts(
+                cid_campana, BULK_BATCH_SIZE
+            )
+            if contacts:
+                campaign = candidata
+                break
+            await mongo_mgr.finalize_bulk_campaign_if_done(cid_campana)
+
+        if not campaign:
             return
+        campaign_id = campaign["_id"]
 
         sem = asyncio.Semaphore(BULK_MAX_CONCURRENT)
 

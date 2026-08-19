@@ -6,17 +6,23 @@ está perdido de hecho. Hoy las asesoras lo detectan a ojo y lo mueven a mano a
 "Cerrado perdido" — 58 de ellos ya movidos así a 18-ago-2026. Este módulo
 decide lo mismo, con la misma regla, de forma reproducible.
 
-DOS FORMAS DE CONTAR (ver MODO_*)
-    La primera corrida (18-ago-2026) contó solo los masivos SEGUIDOS, es decir
+TRES FORMAS DE CONTAR (ver MODO_*), de la más conservadora a la más agresiva
+    `MODO_RACHA_SEGUIDA` (18-ago-2026) contó solo los masivos SEGUIDOS, es decir
     los posteriores a la última respuesta del cliente. Eso dejaba fuera un caso
     real y frecuente: quien contestó al primer masivo con un "no gracias",
     recibió otro meses después y ya no volvió a hablar. Son 2 masivos y 0
     interés, pero la racha valía 1.
 
-    De ahí `MODO_HISTORIAL_COMPLETO`, que cuenta todos los masivos del historial
-    estén seguidos o no. Medido el 19-ago-2026: 378 contactos con la primera
-    forma, 458 con la segunda, y NINGUNO que saliera antes deja de salir — la
-    segunda amplía a la primera, no la contradice.
+    `MODO_HISTORIAL_COMPLETO` cuenta todos los masivos del historial estén
+    seguidos o no, pero mantiene un candado: si el cliente habló DESPUÉS del
+    último masivo, no se le toca. Medido el 19-ago-2026: 378 contactos con la
+    primera forma, 458 con la segunda, y NINGUNO que saliera antes deja de
+    salir — la segunda amplía a la primera, no la contradice.
+
+    `MODO_HISTORIAL_SIN_EXCEPCION` quita ese candado. Cierra también a quien
+    contestó. Es una decisión de negocio explícita del usuario, tomada con las
+    37 conversaciones afectadas delante; no es la evolución natural de las otras
+    dos y no debe convertirse en el defecto de nada.
 
 DELIBERADAMENTE PURO: ni Redis, ni Mongo, ni HubSpot, ni reloj propio. Solo
 datos de entrada y una decisión de salida. Eso permite dos cosas:
@@ -52,6 +58,7 @@ ESPERA_MINIMA_HORAS = 48
 # exclusión por fecha, embudo de origen) es idéntico en los dos.
 MODO_RACHA_SEGUIDA = "racha_seguida"
 MODO_HISTORIAL_COMPLETO = "historial_completo"
+MODO_HISTORIAL_SIN_EXCEPCION = "historial_sin_excepcion"
 
 
 # ── Motivos ─────────────────────────────────────────────────────────────────
@@ -148,11 +155,31 @@ def masivos_del_historial(
     return envios
 
 
+def masivos_del_historial_sin_excepcion(
+    envios_masivos: Sequence[datetime],
+    ultima_respuesta: Optional[datetime],
+) -> Tuple[datetime, ...]:
+    """
+    Todos los masivos. Haber contestado NO salva a nadie.
+
+    Ignora `ultima_respuesta` a propósito: es la decisión que tomó el usuario el
+    19-ago-2026, con el detalle de las 37 conversaciones afectadas delante y
+    tras señalarle que 26 de ellas habían contestado "sí, sigo buscando" y 3
+    seguían escribiendo esa misma semana. La regla que pidió es literal: más de
+    un masivo en el historial, al embudo terminal.
+
+    ⚠️  Este modo cierra conversaciones vivas. No debe ser el del job periódico
+    sin que alguien vuelva a decidirlo expresamente.
+    """
+    return tuple(sorted(envios_masivos))
+
+
 BaseDeConteo = Callable[[Sequence[datetime], Optional[datetime]], Tuple[datetime, ...]]
 
 BASES_DE_CONTEO: Dict[str, BaseDeConteo] = {
     MODO_RACHA_SEGUIDA: racha_sin_respuesta,
     MODO_HISTORIAL_COMPLETO: masivos_del_historial,
+    MODO_HISTORIAL_SIN_EXCEPCION: masivos_del_historial_sin_excepcion,
 }
 
 

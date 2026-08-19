@@ -8,12 +8,15 @@ REGLA QUE SE VALIDA (fijada con el usuario el 18-ago-2026):
     · han pasado >= 48h desde el último de esos masivos
     · el primer masivo contado no cae en el periodo excluido
 
-DOS FORMAS DE CONTAR
+TRES FORMAS DE CONTAR, de la más conservadora a la más agresiva
   racha_seguida (18-ago)  solo los masivos posteriores a la última respuesta:
                           contestar reinicia la cuenta.
   historial_completo      todos los masivos, estén seguidos o no. Una respuesta
     (19-ago)              intercalada ya no salva al contacto; solo lo salva
                           haber hablado DESPUÉS del último masivo.
+  historial_sin_excepcion todos los masivos y punto. Haber contestado no salva.
+    (19-ago)              Decisión de negocio explícita: cierra conversaciones
+                          vivas, y por eso no es el defecto de nada.
 
 Datos reales sobre los que se dimensionó:
   18-ago: 1387 telefonos con masivos al embudo · 373 respondieron · 378 con
@@ -538,7 +541,6 @@ def test_un_modo_inventado_falla_ruidosamente():
 def test_cada_modo_apunta_a_su_funcion():
     assert base_de_conteo(MODO_RACHA_SEGUIDA) is racha_sin_respuesta
     assert base_de_conteo(MODO_HISTORIAL_COMPLETO) is masivos_del_historial
-    assert set(BASES_DE_CONTEO) == {MODO_RACHA_SEGUIDA, MODO_HISTORIAL_COMPLETO}
 
 
 # ── El script expone el modo sin forzarlo ───────────────────────────────────
@@ -770,3 +772,96 @@ def test_el_runner_recoge_a_los_que_quedaron_sin_etapa():
 def test_la_escritura_reintenta_igual_que_la_lectura():
     """La asimetria entre leer y escribir es lo que causo el incidente."""
     assert SCRIPT_MOD.REINTENTOS_ESCRITURA >= 3
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Modo sin excepcion — la decision de negocio del 19-ago-2026
+# ══════════════════════════════════════════════════════════════════════
+#
+# El usuario decidio, con las 37 conversaciones delante y tras avisarle de que
+# 26 habian contestado "si, sigo buscando" y 3 seguian escribiendo esa semana,
+# que la regla fuera literal: mas de un masivo en el historial -> cerrado
+# perdido, haya contestado o no.
+
+from middleware.depuracion_no_responde import (  # noqa: E402
+    MODO_HISTORIAL_SIN_EXCEPCION,
+    masivos_del_historial_sin_excepcion,
+)
+
+REGLA_SIN_EXCEPCION = Regla(
+    etapa_origen=NO_RESPONDE,
+    etapa_destino=CERRADO_PERDIDO,
+    excluir_racha_desde=CORTE_JULIO,
+    modo=MODO_HISTORIAL_SIN_EXCEPCION,
+)
+
+
+def test_contestar_al_ultimo_masivo_ya_no_salva():
+    """
+    El caso de Karla (+57...3010): masivo el 15-jul, contesto "si por favor" un
+    minuto despues, una asesora le mando un apartamento, y nadie volvio a
+    escribirle. Con los otros dos modos se queda; con este se cierra.
+    """
+    hist = _hist([MAYO, JULIO], respuesta=JULIO + timedelta(minutes=2))
+
+    assert evaluar(hist, REGLA, AHORA).depurar is False
+    assert evaluar(hist, REGLA_HISTORIAL, AHORA).depurar is False
+
+    d = evaluar(hist, REGLA_SIN_EXCEPCION, AHORA)
+    assert d.depurar is True
+    assert d.masivos_contados == 2
+
+
+def test_sin_excepcion_no_mira_la_respuesta_para_nada():
+    assert masivos_del_historial_sin_excepcion([JULIO, MAYO], None) == (MAYO, JULIO)
+    assert masivos_del_historial_sin_excepcion(
+        [JULIO, MAYO], JULIO + timedelta(days=30)
+    ) == (MAYO, JULIO)
+
+
+def test_sin_excepcion_conserva_el_resto_de_la_regla():
+    """Lo unico que se quita es el candado de la respuesta. Nada mas."""
+    reciente = AHORA - timedelta(hours=1)
+    assert evaluar(_hist([MAYO, reciente]), REGLA_SIN_EXCEPCION, AHORA).motivo == (
+        MOTIVO_ESPERA_NO_CUMPLIDA
+    )
+    assert evaluar(_hist([MAYO]), REGLA_SIN_EXCEPCION, AHORA).motivo == MOTIVO_RACHA_CORTA
+    assert evaluar(_hist([JULIO, JULIO_2]), REGLA_SIN_EXCEPCION, AHORA).motivo == (
+        MOTIVO_RACHA_EXCLUIDA
+    )
+    assert evaluar(_hist([MAYO, JULIO], etapa="customer"), REGLA_SIN_EXCEPCION, AHORA).motivo == (
+        MOTIVO_FUERA_DEL_EMBUDO
+    )
+
+
+@pytest.mark.parametrize("envios,respuesta", [
+    ([MAYO, JULIO], None),
+    ([MAYO, JULIO], MAYO + timedelta(days=3)),
+    ([MAYO, JULIO], JULIO + timedelta(days=1)),
+    ([MAYO, MAYO_2, JULIO], None),
+])
+def test_sin_excepcion_amplia_a_los_otros_dos_modos(envios, respuesta):
+    """Cada modo contiene al anterior; ninguno contradice a los previos."""
+    hist = _hist(envios, respuesta=respuesta)
+    if evaluar(hist, REGLA, AHORA).depurar:
+        assert evaluar(hist, REGLA_HISTORIAL, AHORA).depurar is True
+    if evaluar(hist, REGLA_HISTORIAL, AHORA).depurar:
+        assert evaluar(hist, REGLA_SIN_EXCEPCION, AHORA).depurar is True
+
+
+def test_el_modo_agresivo_no_es_el_defecto_de_nada():
+    """
+    REGRESION IMPORTANTE. Este modo cierra conversaciones vivas. Que acabe siendo
+    el defecto del script o del job periodico seria un fallo grave y silencioso.
+    """
+    assert Regla(etapa_origen="a", etapa_destino="b").modo == MODO_RACHA_SEGUIDA
+    src = _fuente_script()
+    assert "default=MODO_RACHA_SEGUIDA" in src
+    assert f'default="{MODO_HISTORIAL_SIN_EXCEPCION}"' not in src
+
+
+def test_los_tres_modos_estan_registrados():
+    assert set(BASES_DE_CONTEO) == {
+        MODO_RACHA_SEGUIDA, MODO_HISTORIAL_COMPLETO, MODO_HISTORIAL_SIN_EXCEPCION,
+    }
+    assert base_de_conteo(MODO_HISTORIAL_SIN_EXCEPCION) is masivos_del_historial_sin_excepcion

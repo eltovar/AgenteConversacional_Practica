@@ -4,16 +4,23 @@ QA Fase 6 — Motor de depuración del embudo "No responde".
 REGLA QUE SE VALIDA (fijada con el usuario el 18-ago-2026):
   Un contacto pasa a "Cerrado perdido" si, y solo si:
     · sigue en el embudo "No responde"
-    · acumula 2 o más masivos SEGUIDOS sin responder
+    · acumula 2 o más masivos sin responder
     · han pasado >= 48h desde el último de esos masivos
-    · su racha no arranca en el periodo excluido (julio en la corrida histórica)
+    · el primer masivo contado no cae en el periodo excluido
 
-  La racha se cuenta DESDE la última respuesta del cliente: contestar reinicia
-  la cuenta; una respuesta de hace seis meses no la rompe.
+DOS FORMAS DE CONTAR
+  racha_seguida (18-ago)  solo los masivos posteriores a la última respuesta:
+                          contestar reinicia la cuenta.
+  historial_completo      todos los masivos, estén seguidos o no. Una respuesta
+    (19-ago)              intercalada ya no salva al contacto; solo lo salva
+                          haber hablado DESPUÉS del último masivo.
 
-Datos reales sobre los que se dimensionó (produccion, 18-ago-2026):
-  1387 telefonos con masivos al embudo · 373 respondieron · 378 con racha 2
-  · 636 con racha 1 · 1763 contactos en el embudo
+Datos reales sobre los que se dimensionó:
+  18-ago: 1387 telefonos con masivos al embudo · 373 respondieron · 378 con
+          racha 2 · 636 con racha 1 · 1763 contactos en el embudo
+  19-ago: 458 cumplen contando el historial completo (+80, y 0 perdidos frente
+          a la racha) · 106 con 2+ masivos que SÍ contestaron al último, 39 de
+          ellos aún en el embudo — son los que protege el candado
 
 Ejecutar:
     python -m pytest tests/panel/test_depuracion_no_responde.py -v
@@ -29,7 +36,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from middleware.depuracion_no_responde import (  # noqa: E402
+    BASES_DE_CONTEO,
     ESPERA_MINIMA_HORAS,
+    MODO_HISTORIAL_COMPLETO,
+    MODO_RACHA_SEGUIDA,
     MOTIVO_DEPURAR,
     MOTIVO_ESPERA_NO_CUMPLIDA,
     MOTIVO_FUERA_DEL_EMBUDO,
@@ -41,7 +51,9 @@ from middleware.depuracion_no_responde import (  # noqa: E402
     Decision,
     Historial,
     Regla,
+    base_de_conteo,
     evaluar,
+    masivos_del_historial,
     racha_sin_respuesta,
 )
 
@@ -81,8 +93,8 @@ def test_dos_masivos_sin_responder_se_depura():
     d = evaluar(_hist([MAYO, JULIO]), REGLA, AHORA)
     assert d.depurar is True
     assert d.motivo == MOTIVO_DEPURAR
-    assert d.racha == 2
-    assert d.primer_masivo_racha == MAYO
+    assert d.masivos_contados == 2
+    assert d.primer_masivo == MAYO
     assert d.ultimo_masivo == JULIO
 
 
@@ -91,7 +103,7 @@ def test_un_solo_masivo_no_basta():
     d = evaluar(_hist([MAYO]), REGLA, AHORA)
     assert d.depurar is False
     assert d.motivo == MOTIVO_RACHA_CORTA
-    assert d.racha == 1
+    assert d.masivos_contados == 1
 
 
 def test_sin_masivos_no_se_toca():
@@ -109,7 +121,7 @@ def test_responder_despues_del_ultimo_masivo_salva_al_contacto():
     d = evaluar(_hist([MAYO, JULIO], respuesta=JULIO + timedelta(days=1)), REGLA, AHORA)
     assert d.depurar is False
     assert d.motivo == MOTIVO_RESPONDIO
-    assert d.racha == 0
+    assert d.masivos_contados == 0
 
 
 def test_responder_entre_los_dos_masivos_reinicia_la_cuenta():
@@ -121,8 +133,8 @@ def test_responder_entre_los_dos_masivos_reinicia_la_cuenta():
     d = evaluar(_hist([MAYO, JULIO], respuesta=entre), REGLA, AHORA)
     assert d.depurar is False
     assert d.motivo == MOTIVO_RACHA_CORTA
-    assert d.racha == 1
-    assert d.primer_masivo_racha == JULIO
+    assert d.masivos_contados == 1
+    assert d.primer_masivo == JULIO
 
 
 def test_una_respuesta_muy_vieja_no_rompe_la_racha():
@@ -133,7 +145,7 @@ def test_una_respuesta_muy_vieja_no_rompe_la_racha():
     hace_seis_meses = MAYO - timedelta(days=180)
     d = evaluar(_hist([MAYO, JULIO], respuesta=hace_seis_meses), REGLA, AHORA)
     assert d.depurar is True
-    assert d.racha == 2
+    assert d.masivos_contados == 2
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -184,7 +196,7 @@ def test_racha_que_arranca_en_julio_queda_fuera():
     d = evaluar(_hist([JULIO, JULIO_2]), REGLA, AHORA)
     assert d.depurar is False
     assert d.motivo == MOTIVO_RACHA_EXCLUIDA
-    assert d.racha == 2
+    assert d.masivos_contados == 2
 
 
 def test_racha_que_arranca_en_mayo_si_entra():
@@ -208,7 +220,7 @@ def test_la_racha_no_depende_del_orden_de_entrada():
     desordenado = evaluar(_hist([JULIO, MAYO]), REGLA, AHORA)
     ordenado = evaluar(_hist([MAYO, JULIO]), REGLA, AHORA)
     assert desordenado == ordenado
-    assert desordenado.primer_masivo_racha == MAYO
+    assert desordenado.primer_masivo == MAYO
 
 
 def test_racha_sin_respuesta_devuelve_todo_si_nunca_contesto():
@@ -223,7 +235,7 @@ def test_tres_masivos_sin_responder_tambien_se_depura():
     """El umbral es "2 o más", no "exactamente 2"."""
     d = evaluar(_hist([MAYO, MAYO_2, JULIO]), REGLA, AHORA)
     assert d.depurar is True
-    assert d.racha == 3
+    assert d.masivos_contados == 3
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -376,4 +388,183 @@ def test_un_masivo_en_el_mismo_instante_que_la_respuesta_no_cuenta():
     assert racha_sin_respuesta([MAYO], MAYO) == ()
     d = evaluar(_hist([MAYO, JULIO], respuesta=JULIO), REGLA, AHORA)
     assert d.depurar is False
-    assert d.racha == 0
+    assert d.masivos_contados == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Modo historial completo — la ampliacion del 19-ago-2026
+# ══════════════════════════════════════════════════════════════════════
+
+REGLA_HISTORIAL = Regla(
+    etapa_origen=NO_RESPONDE,
+    etapa_destino=CERRADO_PERDIDO,
+    excluir_racha_desde=CORTE_JULIO,
+    modo=MODO_HISTORIAL_COMPLETO,
+)
+
+
+def test_el_caso_que_motiva_el_modo_nuevo():
+    """
+    El ejemplo real que dio el usuario: masivo en mayo, contesto "No gracias",
+    masivo en julio, silencio. Dos masivos y cero interes, pero la racha valia
+    1 y la primera corrida lo dejo dentro del embudo. Son 57 contactos.
+    """
+    contesto_al_primero = MAYO + timedelta(minutes=1)
+    hist = _hist([MAYO, JULIO], respuesta=contesto_al_primero)
+
+    viejo = evaluar(hist, REGLA, AHORA)
+    assert viejo.depurar is False, "la regla vieja ya lo depuraba; el modo sobra"
+    assert viejo.motivo == MOTIVO_RACHA_CORTA
+
+    nuevo = evaluar(hist, REGLA_HISTORIAL, AHORA)
+    assert nuevo.depurar is True
+    assert nuevo.motivo == MOTIVO_DEPURAR
+    assert nuevo.masivos_contados == 2
+    assert nuevo.primer_masivo == MAYO
+    assert nuevo.ultimo_masivo == JULIO
+
+
+def test_hablar_tras_el_ultimo_masivo_sigue_salvando_al_contacto():
+    """
+    EL CANDADO. En modo racha salia gratis; aqui hay que ponerlo a mano. Sin el,
+    la corrida cerraria a 39 personas que si contestaron al ultimo masivo.
+    """
+    d = evaluar(
+        _hist([MAYO, JULIO], respuesta=JULIO + timedelta(days=1)),
+        REGLA_HISTORIAL, AHORA,
+    )
+    assert d.depurar is False
+    assert d.motivo == MOTIVO_RESPONDIO
+    assert d.masivos_contados == 0
+
+
+def test_un_solo_masivo_tampoco_basta_contando_el_historial():
+    """823 telefonos reales. El umbral no cambia con el modo."""
+    d = evaluar(_hist([MAYO]), REGLA_HISTORIAL, AHORA)
+    assert d.depurar is False
+    assert d.motivo == MOTIVO_RACHA_CORTA
+
+
+def test_la_espera_de_48h_tambien_rige_en_el_modo_nuevo():
+    recien = AHORA - timedelta(hours=1)
+    d = evaluar(_hist([MAYO, recien]), REGLA_HISTORIAL, AHORA)
+    assert d.depurar is False
+    assert d.motivo == MOTIVO_ESPERA_NO_CUMPLIDA
+
+
+def test_la_exclusion_mira_el_primer_masivo_de_todo_el_historial():
+    """
+    Contando el historial, "el primero" ya no es el primero de la racha sino el
+    primero a secas. Quien empezo a recibir masivos en julio sigue fuera.
+    """
+    d = evaluar(_hist([JULIO, JULIO_2], respuesta=JULIO + timedelta(minutes=1)),
+                REGLA_HISTORIAL, AHORA)
+    assert d.depurar is False
+    assert d.motivo == MOTIVO_RACHA_EXCLUIDA
+    assert d.primer_masivo == JULIO
+
+
+@pytest.mark.parametrize("envios,respuesta", [
+    ([MAYO, JULIO], None),                          # nunca contesto
+    ([MAYO, JULIO], MAYO - timedelta(days=180)),    # contesto hace medio ano
+    ([MAYO, MAYO_2, JULIO], None),                  # tres masivos
+    ([MAYO, MAYO_2], None),                         # los dos en mayo
+])
+def test_el_modo_nuevo_no_pierde_a_nadie_del_viejo(envios, respuesta):
+    """
+    Medido en produccion: 378 con la regla vieja, 458 con la nueva, 0 perdidos.
+    Si esto se rompe, la ampliacion habria pasado a contradecir a la corrida
+    anterior en vez de ampliarla, y habria contactos mal cerrados.
+    """
+    hist = _hist(envios, respuesta=respuesta)
+    if evaluar(hist, REGLA, AHORA).depurar:
+        assert evaluar(hist, REGLA_HISTORIAL, AHORA).depurar is True, (
+            "la regla nueva deja fuera a alguien que la vieja si depuraba"
+        )
+
+
+# ── La funcion de conteo, aislada ───────────────────────────────────────────
+
+def test_masivos_del_historial_devuelve_todos_y_ordenados():
+    assert masivos_del_historial([JULIO, MAYO], None) == (MAYO, JULIO)
+
+
+def test_masivos_del_historial_ignora_una_respuesta_intercalada():
+    entre = MAYO + timedelta(days=3)
+    assert masivos_del_historial([MAYO, JULIO], entre) == (MAYO, JULIO)
+
+
+def test_masivos_del_historial_se_vacia_si_hablo_despues_del_ultimo():
+    assert masivos_del_historial([MAYO, JULIO], JULIO + timedelta(seconds=1)) == ()
+
+
+def test_masivos_del_historial_sin_envios():
+    assert masivos_del_historial([], None) == ()
+
+
+def test_una_respuesta_en_el_mismo_instante_del_ultimo_masivo_no_salva():
+    """
+    Borde simetrico al del modo racha. Alli la respuesta empataba y ganaba; aqui
+    solo salva si es ESTRICTAMENTE posterior, porque el masivo se envio primero.
+    """
+    assert masivos_del_historial([MAYO, JULIO], JULIO) == (MAYO, JULIO)
+
+
+# ── Contrato de los modos ───────────────────────────────────────────────────
+
+def test_el_modo_por_defecto_sigue_siendo_la_racha():
+    """
+    REGRESION. Cambiar el defecto alteraria en silencio a todo llamador que ya
+    exista, incluido el job periodico pendiente. Ampliar debe ser explicito.
+    """
+    assert Regla(etapa_origen="a", etapa_destino="b").modo == MODO_RACHA_SEGUIDA
+
+
+def test_un_modo_inventado_falla_ruidosamente():
+    """
+    Caer en un defecto ante un nombre mal escrito depuraria contactos con una
+    regla distinta de la pedida, y sin avisar.
+    """
+    with pytest.raises(ValueError, match="modo de conteo desconocido"):
+        evaluar(_hist([MAYO, JULIO]),
+                Regla(etapa_origen=NO_RESPONDE, etapa_destino=CERRADO_PERDIDO,
+                      modo="racha_segida"),
+                AHORA)
+
+
+def test_cada_modo_apunta_a_su_funcion():
+    assert base_de_conteo(MODO_RACHA_SEGUIDA) is racha_sin_respuesta
+    assert base_de_conteo(MODO_HISTORIAL_COMPLETO) is masivos_del_historial
+    assert set(BASES_DE_CONTEO) == {MODO_RACHA_SEGUIDA, MODO_HISTORIAL_COMPLETO}
+
+
+# ── El script expone el modo sin forzarlo ───────────────────────────────────
+
+def test_el_script_deja_elegir_el_modo_y_no_lo_impone():
+    src = _fuente_script()
+    assert '"--modo"' in src, "no se puede pedir la regla ampliada desde la linea de comandos"
+    assert "default=MODO_RACHA_SEGUIDA" in src, (
+        "el script cambio de regla por defecto: una corrida rutinaria depuraria "
+        "de mas sin que nadie lo pidiera"
+    )
+    assert "choices=sorted(BASES_DE_CONTEO)" in src, (
+        "las opciones no salen del motor; pueden desincronizarse"
+    )
+
+
+def test_el_informe_no_pisa_el_de_la_corrida_anterior():
+    """
+    El CSV es la evidencia de que se movio. Si cada corrida sobrescribe a la
+    anterior, se pierde el registro de la depuracion del 18-ago.
+    """
+    src = _fuente_script()
+    assert "depuracion_no_responde_informe_{modo}.csv" in src
+
+
+def test_el_checkpoint_es_uno_solo_para_todos_los_modos():
+    """
+    "A este ya se le movio" no depende de con que regla se decidio. Partirlo por
+    modo haria que la corrida ampliada reintentara los 368 ya movidos.
+    """
+    src = _fuente_script()
+    assert 'CHECKPOINT = os.path.join(CARPETA_SALIDA, "depuracion_no_responde_checkpoint.jsonl")' in src

@@ -56,7 +56,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -133,41 +133,31 @@ class Ritmo:
 
 async def leer_historial(etapa_origen: str):
     """
-    Devuelve, por teléfono: masivos al embudo, última respuesta y contact_id.
-    Dos consultas a Mongo, sin traer el contenido de los mensajes.
+    Devuelve, por telefono: masivos al embudo, ultima respuesta y contact_id.
+
+    La consulta NO vive aqui: la comparte con el job periodico
+    (middleware/job_depuracion_masivos.py). Tenerla duplicada garantizaba que un
+    dia el script y el job vieran cosas distintas y nadie supiera cual manda.
+
+    Lo que si es propio de este fichero es la conexion: el script corre fuera del
+    servidor y abre su propio cliente, mientras que el job usa el singleton de
+    Mongo. Por eso la funcion compartida recibe la base de datos ya abierta.
     """
     from motor.motor_asyncio import AsyncIOMotorClient
+
+    from middleware.job_depuracion_masivos import leer_historial_masivos
 
     uri = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL")
     if not uri:
         sys.exit("Falta MONGO_URL / MONGO_PUBLIC_URL. Revisa el .env.")
 
     cliente = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=30000)
-    db = cliente.get_database("inmobiliaria_chat")
-
-    masivos: Dict[str, List[datetime]] = defaultdict(list)
-    contact_ids: Dict[str, str] = {}
-    async for m in db.messages.find(
-        {"metadata.is_bulk_send": True, "metadata.stage_id": etapa_origen},
-        {"phone": 1, "timestamp": 1, "hubspot_contact_id": 1, "_id": 0},
-    ):
-        tel = m.get("phone")
-        if not tel:
-            continue
-        masivos[tel].append(m["timestamp"])
-        if m.get("hubspot_contact_id"):
-            contact_ids.setdefault(tel, str(m["hubspot_contact_id"]))
-
-    ultima_respuesta: Dict[str, datetime] = {}
-    async for m in db.messages.find({"sender": "client"}, {"phone": 1, "timestamp": 1, "_id": 0}):
-        tel, ts = m.get("phone"), m.get("timestamp")
-        if not tel or not ts:
-            continue
-        if tel not in ultima_respuesta or ts > ultima_respuesta[tel]:
-            ultima_respuesta[tel] = ts
-
-    cliente.close()
-    return masivos, ultima_respuesta, contact_ids
+    try:
+        return await leer_historial_masivos(
+            cliente.get_database("inmobiliaria_chat"), etapa_origen
+        )
+    finally:
+        cliente.close()
 
 
 def leer_etapas(contact_ids: List[str], ritmo: Ritmo) -> Dict[str, Dict[str, str]]:
@@ -368,7 +358,11 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
         excluir_racha_desde=EXCLUIR_RACHA_DESDE,
         modo=modo,
     )
-    ahora = datetime.now()
+    # UTC, que es como MongoDB devuelve los timestamps de `messages` (los
+    # guarda con zona y PyMongo los convierte). Con `datetime.now()` la
+    # espera de 48h se corria tantas horas como la zona de quien lanzara
+    # el script: desde un portatil en Bogota eran 53.
+    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
     ritmo = Ritmo(PETICIONES_POR_SEGUNDO)
     informe = _ruta_informe(regla.modo)
 

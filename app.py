@@ -2081,6 +2081,33 @@ async def startup_event():
         except Exception as _erz:
             logger.error("[STARTUP] ❌ FALLO registrando rebuild_zset_nightly: %s", _erz, exc_info=True)
 
+        # Depuracion del embudo "No responde": lo que hasta ahora se corria a
+        # mano tras cada masivo. A las 5:00 a.m. porque compite con el panel por
+        # el limite de HubSpot (que es por portal, no por proceso) y las asesoras
+        # entran a las 8:30. No choca con el rebuild del ZSET de las 3:00.
+        # Viene EN SECO: con DEPURACION_AUTO_ENABLED=false calcula y deja el
+        # informe en el log sin mover a nadie.
+        try:
+            from middleware.job_depuracion_masivos import (
+                ID_JOB as _ID_DEPURACION,
+                check_depuracion_masivos,
+            )
+            scheduler.add_job(
+                check_depuracion_masivos,
+                trigger=CronTrigger(hour=5, minute=0, timezone="America/Bogota"),
+                id=_ID_DEPURACION,
+                replace_existing=True,
+            )
+            logger.info(
+                "[STARTUP] Depuracion 'No responde' HABILITADA (5:00 AM Bogota, "
+                "aplicando=%s)",
+                os.getenv("DEPURACION_AUTO_ENABLED", "false"),
+            )
+        except Exception as _erd:
+            logger.error(
+                "[STARTUP] FALLO registrando depuracion_no_responde: %s", _erd, exc_info=True
+            )
+
         try:
             scheduler.add_job(
                 reconcile_owner_ids,

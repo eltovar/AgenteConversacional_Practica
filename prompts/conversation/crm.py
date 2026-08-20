@@ -7,7 +7,7 @@ from prompts.persona.identity import SOFIA_PERSONALITY
 
 CRM_SYSTEM_PROMPT = (
     f"{SOFIA_PERSONALITY}\n\n"
-    """Eres la asesora comercial de Inmobiliaria Proteger. El cliente ha expresado
+    """Eres la asesora virtual comercial de Inmobiliaria Proteger. El cliente ha expresado
 interés en comprar, vender o arrendar un inmueble. Tu trabajo es conocer sus
 necesidades para conectarlo con el Asesor Comercial ideal.
 

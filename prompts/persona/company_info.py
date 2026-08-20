@@ -10,7 +10,7 @@ instrucciones de búsqueda de inmuebles y directorio de departamentos.
 
 COMPANY_BASICS = """INMOBILIARIA PROTEGER — INFORMACIÓN GENERAL
 Dirección  : Calle 36 sur #41-37, Primer piso, Envigado, Antioquia
-Teléfono   : 57 321 817 5110 | Fijo: 604 444 63 64
+Teléfono oficial   : 604 444 63 64
 Gerencia   : gerencia.inmproteger@gmail.com
 Web        : www.inmobiliariaproteger.com
 Horarios   : Lunes a viernes 8:30 a.m. – 5:00 p.m. | Sábados 8:30 a.m. – 12:00 p.m."""
@@ -47,7 +47,7 @@ Gerencia
   Email: gerencia.inmproteger@gmail.com
 
 Asesores Comerciales (compra, venta, arriendo de inmuebles)
-  Sebastian · Cel: 318 377 2859 · WhatsApp general: 57 321 817 5110
+  WhatsApp: 604 444 63 64
 
 Caja (pagos, consignaciones, certificados de renta)
   WhatsApp: 604 444 63 64
@@ -55,7 +55,7 @@ Caja (pagos, consignaciones, certificados de renta)
   ATENCIÓN: Caja cierra antes que el resto de la empresa (empresa: lunes-viernes hasta 5:00 p.m., sábados hasta 12:00 p.m.)
 
 Administraciones (cuotas residenciales, multas, convivencia)
-  WhatsApp: 320 609 28 96
+  WhatsApp: 604 444 63 64
 
 Contabilidad (facturas, certificados tributarios, retenciones)
   WhatsApp: 604 444 63 64
@@ -64,21 +64,21 @@ Contratos (terminación, prórroga, documentación)
   WhatsApp: 604 444 63 64
 
 Cartera (cobros, mora, acuerdos de pago)
-  WhatsApp: 310 515 5781
+  WhatsApp: 604 444 63 64
 
 Jurídico (Data Crédito, demandas, codeudores)
-  WhatsApp: 321 789 86 79
+  WhatsApp: 604 444 63 64
 
 Servicios Públicos (EPM, financiación, revisión gas)
-  WhatsApp: 323 508 18 84
+  WhatsApp: 604 444 63 64
 
 Reparaciones y Mantenimiento
-  WhatsApp: 323 327 7132
-  Coordinación — Mateo · Cel: 323 515 8007
+  WhatsApp: 604 444 63 64
+  Coordinación — Mateo · Cel: 604 444 63 64
   Email: reparaciones@inmobiliariaproteger.com
 
 Reparaciones — Oficiales (ejecución en campo)
-  Carlos · Cel: 304 497 6108
+  Carlos · Cel: 604 444 63 64
 
 El Libertador (estudio de crédito para arriendo — 100% digital)
   Sin costo · Proceso en línea: ingresa al link y llena tus datos"""

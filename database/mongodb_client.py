@@ -1181,20 +1181,51 @@ class MongoDBManager:
             ).sort("name", ASCENDING)
             workers = await cursor.to_list(length=200)
             return [
-                {"id": str(w["_id"]), "name": w["name"]}
+                # `phone` puede no existir: los encargados creados antes de que
+                # el campo existiera siguen siendo validos, solo no confirman.
+                {"id": str(w["_id"]), "name": w["name"], "phone": w.get("phone", "")}
                 for w in workers
             ]
         except Exception as e:
             logger.error(f"[MongoDB] Error listando workers: {e}")
             return []
 
-    async def create_worker(self, name: str) -> Optional[str]:
-        """Crea un nuevo worker. Retorna el ID o None si ya existe."""
+    async def get_worker(self, worker_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Un encargado por su id, activo o no.
+
+        Se lee tambien el inactivo a proposito: una cita puede referirse a alguien
+        dado de baja despues, y para reenviar su confirmacion hace falta su ficha.
+        """
+        if not await self.connect():
+            return None
+        try:
+            w = await self.db.appointment_workers.find_one({"_id": ObjectId(worker_id)})
+            if not w:
+                return None
+            return {
+                "id": str(w["_id"]),
+                "name": w.get("name", ""),
+                "phone": w.get("phone", ""),
+                "active": bool(w.get("active")),
+            }
+        except Exception as e:
+            logger.error(f"[MongoDB] Error leyendo worker {worker_id}: {e}")
+            return None
+
+    async def create_worker(self, name: str, phone: str = "") -> Optional[str]:
+        """
+        Crea un nuevo worker. Retorna el ID o None si ya existe.
+
+        `phone` es el numero que se le da al cliente en la confirmacion de cita.
+        Se guarda ya normalizado por el llamador (E.164).
+        """
         if not await self.connect():
             return None
         try:
             result = await self.db.appointment_workers.insert_one({
                 "name": name.strip(),
+                "phone": (phone or "").strip(),
                 "active": True,
                 "created_at": datetime.now(TIMEZONE)
             })
@@ -1204,14 +1235,25 @@ class MongoDBManager:
             logger.warning(f"[MongoDB] Worker duplicado o error: {e}")
             return None
 
-    async def update_worker(self, worker_id: str, name: str) -> bool:
-        """Actualiza el nombre de un worker."""
+    async def update_worker(
+        self, worker_id: str, name: str, phone: Optional[str] = None
+    ) -> bool:
+        """
+        Actualiza un worker.
+
+        `phone=None` deja el telefono como esta; cadena vacia lo borra. Esa
+        distincion importa: renombrar a alguien no puede dejarlo sin telefono y
+        apagarle las confirmaciones sin que nadie se entere.
+        """
         if not await self.connect():
             return False
         try:
+            campos = {"name": name.strip(), "updated_at": datetime.now(TIMEZONE)}
+            if phone is not None:
+                campos["phone"] = phone.strip()
             result = await self.db.appointment_workers.update_one(
                 {"_id": ObjectId(worker_id)},
-                {"$set": {"name": name.strip(), "updated_at": datetime.now(TIMEZONE)}}
+                {"$set": campos}
             )
             return result.modified_count > 0
         except Exception as e:
@@ -1248,8 +1290,17 @@ class MongoDBManager:
         hubspot_note_id: Optional[str] = None,
         contact_name: Optional[str] = None,
         canal: Optional[str] = None,
+        direccion: str = "",
+        worker_phone: str = "",
     ) -> Optional[str]:
-        """Crea una cita y la persiste en MongoDB."""
+        """
+        Crea una cita y la persiste en MongoDB.
+
+        `worker_phone` se copia de la ficha del encargado igual que `worker_name`:
+        si manana cambia su telefono, la cita conserva el que de verdad recibio
+        el cliente. Sin esa copia, reenviar una confirmacion vieja mandaria un
+        numero distinto del que se le dijo.
+        """
         if not await self.connect():
             return None
         try:
@@ -1259,11 +1310,17 @@ class MongoDBManager:
                 "advisor_id": advisor_id,
                 "worker_id": worker_id,
                 "worker_name": worker_name,
+                "worker_phone": worker_phone or "",
                 "appointment_dt": appointment_dt,
+                "direccion": direccion or "",
                 "notes": notes,
                 "hubspot_note_id": hubspot_note_id,
                 "contact_name": contact_name,
                 "canal": canal or "whatsapp",
+                # Valores con los que se compuso el ultimo mensaje que recibio el
+                # cliente. Vacio = todavia no se le ha confirmado nada. Es lo que
+                # permite saber, al editar, si hay algo nuevo que contarle.
+                "confirmacion_variables": {},
                 "status": "scheduled",
                 "created_at": datetime.now(TIMEZONE),
             })
@@ -1367,8 +1424,14 @@ class MongoDBManager:
             return [
                 {
                     "id": str(a["_id"]),
+                    # `worker_id` faltaba: el formulario de edicion del panel lo
+                    # usa para preseleccionar al encargado y nunca lo recibia,
+                    # asi que al editar una cita el desplegable salia en blanco.
+                    "worker_id": a.get("worker_id", ""),
                     "worker_name": a.get("worker_name", ""),
+                    "worker_phone": a.get("worker_phone", ""),
                     "appointment_dt": _iso_bogota(a.get("appointment_dt")),
+                    "direccion": a.get("direccion", ""),
                     "notes": a.get("notes", ""),
                     "status": a.get("status", "scheduled"),
                     "created_at": _iso_bogota(a.get("created_at")),
@@ -1473,9 +1536,11 @@ class MongoDBManager:
         worker_id: str = None,
         worker_name: str = None,
         appointment_dt: datetime = None,
-        notes: str = None
+        notes: str = None,
+        direccion: str = None,
+        worker_phone: str = None,
     ) -> bool:
-        """Actualiza una cita existente."""
+        """Actualiza una cita existente. Los None se dejan como estan."""
         if not await self.connect():
             return False
         try:
@@ -1488,6 +1553,10 @@ class MongoDBManager:
                 update_fields["appointment_dt"] = appointment_dt
             if notes is not None:
                 update_fields["notes"] = notes
+            if direccion is not None:
+                update_fields["direccion"] = direccion
+            if worker_phone is not None:
+                update_fields["worker_phone"] = worker_phone
 
             result = await self.db.appointments.update_one(
                 {"_id": ObjectId(appointment_id)},
@@ -1509,6 +1578,71 @@ class MongoDBManager:
             return result.deleted_count > 0
         except Exception as e:
             logger.error(f"[MongoDB] Error eliminando cita {appointment_id}: {e}")
+            return False
+
+    async def marcar_confirmacion_enviada(
+        self, appointment_id: str, variables: Dict[str, str]
+    ) -> bool:
+        """
+        Deja constancia de con que datos se le escribio al cliente.
+
+        Se guarda DESPUES de que Twilio confirme el envio: si se guardara antes,
+        un fallo de red dejaria la cita creyendo que el cliente esta avisado y
+        una edicion posterior no le reenviaria nada.
+        """
+        if not await self.connect():
+            return False
+        try:
+            r = await self.db.appointments.update_one(
+                {"_id": ObjectId(appointment_id)},
+                {"$set": {"confirmacion_variables": dict(variables or {})}},
+            )
+            return r.matched_count > 0
+        except Exception as e:
+            logger.error(f"[MongoDB] Error marcando confirmacion de {appointment_id}: {e}")
+            return False
+
+    async def update_appointment_note_message(
+        self,
+        appointment_id: str,
+        contenido: str,
+        worker_name: str,
+        fecha_display: str,
+    ) -> bool:
+        """
+        Reescribe la nota de la cita que vive en el hilo del panel.
+
+        Al editar una cita, la nota que se escribio al crearla queda mintiendo:
+        sigue mostrando la fecha, el encargado y la direccion viejos. La asesora
+        abre la conversacion, lee la nota y actua sobre datos caducados.
+
+        Se actualiza en el sitio en vez de anadir una nota nueva: es un apunte de
+        estado ("esta cita es asi"), no un mensaje del historial.
+        """
+        if not await self.connect():
+            return False
+        try:
+            result = await self.db.messages.update_one(
+                {
+                    "metadata.appointment_id": appointment_id,
+                    "metadata.type": "appointment_created",
+                },
+                {"$set": {
+                    "content": contenido,
+                    "metadata.worker_name": worker_name,
+                    "metadata.fecha_display": fecha_display,
+                    "metadata.updated_at": datetime.now(TIMEZONE),
+                }},
+            )
+            if result.matched_count == 0:
+                logger.info(
+                    f"[MongoDB] Sin nota en el hilo para la cita {appointment_id} "
+                    f"(cita anterior a que se guardara la nota)"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"[MongoDB] Error actualizando nota de cita {appointment_id}: {e}")
             return False
 
     async def get_appointment_by_id(self, appointment_id: str) -> Optional[Dict[str, Any]]:

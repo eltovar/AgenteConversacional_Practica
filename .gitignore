@@ -33,7 +33,8 @@ cleanup_report_*.csv
 
 # Carpetas bases
 /scripts/
-/docs/
+/docs/*
+!/docs/rediseno/
 /backup_pre_migration_20260423/
 /tests/
 /test/
@@ -56,3 +57,9 @@ INFORME_*
 mongosh*
 
 
+
+# Listas operativas con datos personales
+_PRIVADO_*
+
+# Volcado de Redis local (Memurai). No pertenece al repo.
+dump.rdb

@@ -31,6 +31,20 @@ from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
 from utils.twilio_client import twilio_client
+from utils.date_parser import (
+    DIAS_SEMANA_ABREV,
+    DIAS_SEMANA_CAP,
+    MESES_ABREV,
+    MESES_ABREV_CAP,
+    hora_12h,
+)
+from .confirmacion_cita import (
+    DatosCita,
+    IDENTIFICADOR_PLANTILLA as PLANTILLA_CONFIRMACION_CITA,
+    MOTIVO_SIN_TELEFONO_CLIENTE,
+    componer as componer_confirmacion,
+    hace_falta_reenviar,
+)
 from utils.advisors_registry import (
     get_advisor_names,
     get_lead_receiving_ids,
@@ -1303,6 +1317,106 @@ async def _hydrate_contact_and_ensure_panel(
 ) -> Optional[Dict[str, Any]]:
     """Thin wrapper: hidrata el contacto y lo persiste al panel (add_to_zset=True)."""
     return await _hydrate_contact(phone, canal_hint=canal_hint, add_to_zset=True)
+
+
+async def _update_contact_to_visita_agendada(contact_id: str) -> Tuple[bool, str]:
+    """
+    Pone el contacto en 'Visita agendada' al crear una cita en el panel.
+
+    POR QUÉ EXISTE
+        Medido el 19-ago-2026 sobre los 310 contactos con cita de los últimos 90
+        días: 300 (96.8%) ya pasaban por 'Visita agendada', y la marca cae a una
+        mediana de 12 segundos ANTES de crearse la cita. Es decir, la asesora ya
+        hacía este paso a mano, justo antes de agendar. Esto no inventa una regla
+        nueva: automatiza un ritual de dos clics.
+        Los 10 restantes (3.2%) hicieron la visita y el embudo nunca se enteró:
+        `_update_contact_to_visita_realizada` sólo avanza desde 'Visita agendada',
+        así que sin esta marca nunca llegaron a 'Visita realizada'.
+
+    SIN GUARD DE ETAPAS PROTEGIDAS, a propósito
+        Al contrario que `_update_contact_to_visita_realizada`, aquí no se respeta
+        `PROTECTED_STAGES_POST_VISITA`. De esos 310 contactos, 10 (3.2%) venían de
+        una etapa avanzada y la asesora la pisó igual, a mano. Agendar una visita
+        es un acto explícito y más reciente que la etapa vieja; bloquearlo
+        obligaría a la asesora a ir a moverla a mano, que es justo lo que esto
+        quita. Decisión del usuario, 19-ago-2026.
+
+    Devuelve (ok, detalle). Nunca lanza: el llamador ya guardó la cita y un fallo
+    de etapa no puede tumbar el agendamiento.
+    """
+    if not HUBSPOT_API_KEY or not contact_id:
+        return False, "sin_credenciales"
+
+    etapa_previa = None
+    try:
+        etapa_previa = await _get_contact_lifecyclestage(contact_id)
+        if etapa_previa == HUBSPOT_STAGE_VISITA_AGENDADA:
+            return True, "ya_estaba"
+
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+
+        # Dos pasos obligatorios: lifecyclestage en HubSpot es unidireccional y
+        # sólo deja avanzar. Limpiar primero permite moverlo en cualquier
+        # dirección. Mismo patrón que `update_contact_stage`.
+        limpiado = await _hubspot_patch(url, {"properties": {"lifecyclestage": ""}}, HUBSPOT_API_KEY)
+        if limpiado.status_code != 200:
+            # No se llegó a tocar nada: el contacto sigue en su etapa.
+            return False, f"limpiar_HTTP_{limpiado.status_code}"
+
+        fijado = await _hubspot_patch(
+            url, {"properties": {"lifecyclestage": HUBSPOT_STAGE_VISITA_AGENDADA}}, HUBSPOT_API_KEY
+        )
+        if fijado.status_code == 200:
+            await _invalidate_contact_stage_cache(contact_id, HUBSPOT_STAGE_VISITA_AGENDADA)
+            logger.info(
+                f"[Lifecycle] Contacto {contact_id}: {etapa_previa} → "
+                f"{HUBSPOT_STAGE_VISITA_AGENDADA} (cita agendada)"
+            )
+            return True, "movido"
+
+        # ── Entre limpiar y fijar el contacto NO tiene etapa ──────────────────
+        # Ahí es invisible en el panel y fuera del alcance de cualquier regla que
+        # filtre por embudo. Pasó de verdad el 18-ago-2026 con la depuración de
+        # "No responde" y dejó un contacto atrapado. Se deshace.
+        return False, await _deshacer_etapa(
+            contact_id, etapa_previa, f"fijar_HTTP_{fijado.status_code}"
+        )
+    except Exception as e:
+        # Un corte de red entre los dos pasos deja el mismo hueco que un HTTP malo.
+        logger.warning(f"[Lifecycle] Error moviendo {contact_id} a Visita agendada: {e}")
+        if etapa_previa:
+            return False, await _deshacer_etapa(contact_id, etapa_previa, "error_de_red")
+        return False, "error_de_red"
+
+
+async def _deshacer_etapa(contact_id: str, etapa_previa: Optional[str], causa: str) -> str:
+    """
+    Devuelve el contacto a su etapa original tras un cambio a medias.
+
+    Un contacto sin etapa no lo ve nadie: ni el panel, ni las reglas de embudo, ni
+    la asesora. Es peor que no haber intentado el cambio, así que si el segundo
+    paso falla se restaura lo que había.
+    """
+    if not etapa_previa:
+        return f"{causa}; quedó SIN ETAPA (no se conocía la anterior)"
+    try:
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        vuelta = await _hubspot_patch(
+            url, {"properties": {"lifecyclestage": etapa_previa}}, HUBSPOT_API_KEY
+        )
+        if vuelta.status_code == 200:
+            await _invalidate_contact_stage_cache(contact_id, etapa_previa)
+            logger.warning(
+                f"[Lifecycle] {contact_id}: {causa} — deshecho, sigue en {etapa_previa}"
+            )
+            return f"{causa} (deshecho: sigue en {etapa_previa})"
+    except Exception as e:
+        logger.error(f"[Lifecycle] {contact_id}: fallo al deshacer tras {causa}: {e}")
+    logger.error(
+        f"[Lifecycle] CONTACTO SIN ETAPA: {contact_id} tras {causa} — "
+        f"no se pudo devolver a {etapa_previa}"
+    )
+    return f"{causa}; ADEMÁS quedó SIN ETAPA (no se pudo deshacer)"
 
 
 async def _update_contact_to_visita_realizada(contact_id: str) -> None:
@@ -5315,11 +5429,9 @@ async def _get_contacts_by_worker_filter(
                 elif secs < 172800:
                     time_ago_str = f"ayer {t}"
                 elif delta.days < 7:
-                    _dias = ['lun','mar','mié','jue','vie','sáb','dom']
-                    time_ago_str = f"{_dias[local.weekday()]} {t}"
+                    time_ago_str = f"{DIAS_SEMANA_ABREV[local.weekday()]} {t}"
                 else:
-                    _meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
-                    time_ago_str = f"{local.day} {_meses[local.month - 1]}"
+                    time_ago_str = f"{local.day} {MESES_ABREV[local.month - 1]}"
             except (ValueError, TypeError):
                 time_ago_str = "en espera"
 
@@ -6519,10 +6631,39 @@ async def list_workers(x_api_key: str = Header(None, alias="X-API-Key")):
 
 class WorkerCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
+    # Opcional a propósito: los 6 encargados que ya existían se crearon sin él y
+    # se puede dar de alta a alguien antes de saber su número. Sin teléfono la
+    # cita se agenda igual, sólo no sale la confirmación al cliente.
+    phone: str = Field("", max_length=25, description="Teléfono que verá el cliente")
 
 
 class WorkerUpdateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
+    # None = no tocar el teléfono. Cadena vacía = borrarlo. Renombrar a alguien no
+    # puede apagarle las confirmaciones sin querer.
+    phone: Optional[str] = Field(None, max_length=25)
+
+
+def _normalizar_telefono_encargado(crudo: Optional[str]) -> Optional[str]:
+    """
+    Valida y normaliza a E.164 el teléfono de un encargado.
+
+    None entra y None sale (= no tocar). Cadena vacía sale vacía (= borrar). Un
+    número inválido corta con 422: guardar basura aquí significa mandársela al
+    cliente en la confirmación de su cita.
+    """
+    if crudo is None:
+        return None
+    crudo = crudo.strip()
+    if not crudo:
+        return ""
+    resultado = PhoneNormalizer().normalize(crudo)
+    if not resultado.is_valid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Teléfono del encargado inválido: {resultado.error_message}",
+        )
+    return resultado.normalized
 
 
 @router.post("/workers", status_code=201)
@@ -6533,12 +6674,13 @@ async def create_worker(
     """Crea un nuevo worker (encargado de mostrar inmuebles)."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
+    telefono = _normalizar_telefono_encargado(body.phone) or ""
     mongo_mgr = get_mongo_manager()
-    worker_id = await mongo_mgr.create_worker(body.name)
+    worker_id = await mongo_mgr.create_worker(body.name, telefono)
     if not worker_id:
         raise HTTPException(status_code=409, detail="Ya existe un worker con ese nombre")
     logger.info(f"[Panel] Worker creado: {body.name} ({worker_id})")
-    return {"worker_id": worker_id, "name": body.name}
+    return {"worker_id": worker_id, "name": body.name, "phone": telefono}
 
 
 @router.patch("/workers/{worker_id}")
@@ -6550,11 +6692,12 @@ async def update_worker(
     """Actualiza el nombre de un worker."""
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
+    telefono = _normalizar_telefono_encargado(body.phone)
     mongo_mgr = get_mongo_manager()
-    ok = await mongo_mgr.update_worker(worker_id, body.name)
+    ok = await mongo_mgr.update_worker(worker_id, body.name, telefono)
     if not ok:
         raise HTTPException(status_code=404, detail="Worker no encontrado")
-    return {"ok": True, "name": body.name}
+    return {"ok": True, "name": body.name, "phone": telefono}
 
 
 @router.delete("/workers/{worker_id}")
@@ -6576,10 +6719,149 @@ async def delete_worker(
 # APPOINTMENTS (Citas agendadas)
 # ============================================================================
 
+MOTIVO_SIN_CAMBIOS_PARA_EL_CLIENTE = "sin_cambios_para_el_cliente"
+
+
+async def _enviar_confirmacion_cita(
+    appointment_id: str,
+    contact_id: str,
+    phone_normalized: str,
+    canal: str,
+    advisor_id: Optional[str],
+    plantilla_id: str,
+    datos: DatosCita,
+    comunicadas: Optional[Dict[str, str]],
+) -> Tuple[bool, str]:
+    """
+    Escribe al cliente los datos de su cita, si hay algo que contarle.
+
+    Lo usan los DOS caminos: crear la cita (con `comunicadas` vacío, así que
+    siempre hay algo nuevo) y editarla (con lo que ya se le dijo, para no
+    molestarle si no ha cambiado nada que él vea). Una sola función porque el
+    trabajo es idéntico —componer, enviar, dejar rastro— y duplicarlo garantizaba
+    que un arreglo en uno de los dos caminos no llegara al otro.
+
+    Devuelve (enviada, motivo). Nunca lanza: la cita ya está guardada y un fallo
+    aquí se reporta, no tumba la operación.
+    """
+    if not phone_normalized:
+        return False, MOTIVO_SIN_TELEFONO_CLIENTE
+
+    try:
+        # La plantilla se lee de Redis, igual que en el envío manual: si una
+        # asesora edita el texto desde el panel, el mensaje lo sigue. Aquí no
+        # vive ni una frase.
+        await _init_default_templates()
+        plantilla = await _get_template_by_advisor(advisor_id or "default", plantilla_id)
+        decision = componer_confirmacion(plantilla, datos)
+
+        if not decision.enviar:
+            motivo = decision.motivo
+            if decision.faltantes:
+                # Sin esto la asesora lee "datos incompletos" y no sabe cuál de
+                # los cinco campos tiene que arreglar.
+                motivo += ":" + ",".join(decision.faltantes)
+            return False, motivo
+
+        if not hace_falta_reenviar(comunicadas, decision):
+            return False, MOTIVO_SIN_CAMBIOS_PARA_EL_CLIENTE
+
+        if not twilio_client.is_available:
+            return False, "twilio_no_disponible"
+
+        envio = await twilio_client.send_whatsapp_message(
+            to=phone_normalized,
+            body=decision.cuerpo,
+            content_sid=decision.content_sid,
+            content_variables=decision.content_variables,
+        )
+        if envio.get("status") != "success":
+            return False, f"twilio: {envio.get('message', 'error')}"
+
+        mongo_mgr = get_mongo_manager()
+
+        # Sólo tras el OK de Twilio. Guardarlo antes dejaría la cita creyendo que
+        # el cliente está avisado, y una edición posterior no le reenviaría nada.
+        await mongo_mgr.marcar_confirmacion_enviada(appointment_id, decision.variables)
+
+        # El mensaje tiene que verse en el hilo del panel, o la asesora no sabe
+        # qué recibió su cliente y se lo repite a mano.
+        try:
+            await mongo_mgr.save_message(
+                phone=phone_normalized,
+                content=decision.cuerpo,
+                sender="bot",
+                channel=canal,
+                hubspot_contact_id=contact_id,
+                message_sid=envio.get("message_sid"),
+                metadata={
+                    "source": "Confirmación automática de cita",
+                    "template_id": plantilla_id,
+                    "appointment_id": appointment_id,
+                },
+            )
+            await _get_state_manager().update_activity(phone_normalized, canal=canal)
+            rc = await _get_redis_client()
+            await ws_manager.publish_broadcast(rc, {
+                "type": "contact_updated",
+                "action": "new_message",
+                "phone": phone_normalized,
+                "canal": canal,
+                "sender": "bot",
+                "preview": decision.cuerpo[:100],
+            })
+        except Exception as e_hist:
+            logger.warning(
+                f"[Panel] Mensaje de cita enviado pero no se reflejó en el panel: {e_hist}"
+            )
+
+        return True, "enviado"
+    except Exception as e:
+        logger.error(f"[Panel] Error enviando mensaje de cita {appointment_id}: {e}")
+        return False, f"error: {e}"
+
+
+def _fecha_larga_nota(momento) -> str:
+    """
+    "Miercoles, 19 Ago 2026 | 04:00 PM (Hora Colombia)".
+
+    Los nombres de dias y meses salen de utils.date_parser, su fuente unica.
+    """
+    return (
+        f"{DIAS_SEMANA_CAP[momento.weekday()]}, "
+        f"{momento.day} {MESES_ABREV_CAP[momento.month - 1]} "
+        f"{momento.year} | "
+        f"{hora_12h(momento, con_cero=True)} (Hora Colombia)"
+    )
+
+
+def _texto_nota_cita(worker_name: str, momento, direccion: str, notas: str) -> str:
+    """
+    La nota interna de la cita: la que va al timeline de HubSpot y al hilo del panel.
+
+    Vive en una funcion y no incrustada en el endpoint porque se arma DOS veces:
+    al crear la cita y al editarla. Duplicar el texto garantizaba que la nota de
+    una cita editada acabara diciendo algo distinto de la de una cita nueva.
+    """
+    extra = f"\nNotas: {notas}" if (notas or "").strip() else ""
+    return (
+        f"📅 CITA PROGRAMADA\n"
+        f"Encargado: {worker_name}\n"
+        f"Fecha: {_fecha_larga_nota(momento)}\n"
+        f"Lugar: {direccion}"
+        f"{extra}"
+    )
+
+
 class AppointmentCreateRequest(BaseModel):
     worker_id: str = Field(..., description="ID del worker en MongoDB")
     worker_name: str = Field(..., description="Nombre del worker (desnormalizado para rapidez)")
     appointment_dt: str = Field(..., description="Fecha y hora en ISO 8601 (ej. 2026-03-10T10:00:00)")
+    # Obligatoria: es el {lugar} de la confirmación que recibe el cliente. Se pide
+    # como campo propio y no dentro de las observaciones porque en 90 días y 326
+    # citas NINGUNA tenía observaciones escritas — un campo opcional aquí saldría
+    # vacío y el cliente recibiría su cita sin dirección.
+    direccion: str = Field(..., max_length=200, description="Dirección del inmueble a visitar")
     notes: str = Field("", description="Observaciones de la cita")
     advisor_id: Optional[str] = Field(None, description="HubSpot owner ID de la asesora")
     canal: str = Field("whatsapp", description="Canal de origen del contacto (whatsapp, instagram, etc.)")
@@ -6610,6 +6892,18 @@ async def create_appointment(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
+    # Se valida ANTES de tocar HubSpot o MongoDB: una cita a medio crear es peor
+    # que una cita rechazada, porque nadie se entera de que le falta algo.
+    direccion = (body.direccion or "").strip()
+    if not direccion:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "La direccion del inmueble es obligatoria: "
+                "es el lugar que se le envia al cliente."
+            ),
+        )
+
     from datetime import datetime as dt
     from zoneinfo import ZoneInfo
     BOGOTA_TZ = ZoneInfo("America/Bogota")
@@ -6623,23 +6917,22 @@ async def create_appointment(
     except ValueError:
         raise HTTPException(status_code=422, detail="Formato de fecha inválido. Use ISO 8601.")
 
-    # Formatear fecha legible para la nota
-    DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-    fecha_str = (
-        f"{DIAS[appt_dt_bogota.weekday()]}, "
-        f"{appt_dt_bogota.day} {MESES[appt_dt_bogota.month - 1]} {appt_dt_bogota.year} | "
-        f"{appt_dt_bogota.strftime('%I:%M %p')} (Hora Colombia)"
-    )
+    fecha_str = _fecha_larga_nota(appt_dt_bogota)
 
-    # Construir nota HubSpot
-    notas_extra = f"\nNotas: {body.notes}" if body.notes.strip() else ""
-    note_body = (
-        f"📅 CITA PROGRAMADA\n"
-        f"Encargado: {body.worker_name}\n"
-        f"Fecha: {fecha_str}"
-        f"{notas_extra}"
-    )
+    # Resolver el encargado para saber que telefono se le da al cliente. Si no
+    # tiene ficha o no tiene telefono, la cita sigue adelante: se agenda igual y
+    # la confirmacion se omite con motivo. Agendar no puede depender de un campo
+    # de configuracion sin llenar.
+    mongo_mgr = get_mongo_manager()
+    telefono_encargado = ""
+    try:
+        ficha = await mongo_mgr.get_worker(body.worker_id)
+        if ficha:
+            telefono_encargado = (ficha.get("phone") or "").strip()
+    except Exception as e_worker:
+        logger.warning(f"[Panel] No se pudo leer la ficha del encargado: {e_worker}")
+
+    note_body = _texto_nota_cita(body.worker_name, appt_dt_bogota, direccion, body.notes)
 
     # Crear nota en HubSpot (en background para no bloquear)
     hubspot_note_id = None
@@ -6671,7 +6964,6 @@ async def create_appointment(
         logger.info(f"[Naming] Sin firstname en HubSpot para contact_id={contact_id} — se usará fallback en scheduler")
 
     # Persistir en MongoDB
-    mongo_mgr = get_mongo_manager()
     appointment_id = await mongo_mgr.create_appointment(
         contact_id=contact_id,
         phone=phone,
@@ -6683,6 +6975,8 @@ async def create_appointment(
         hubspot_note_id=hubspot_note_id,
         contact_name=contact_firstname or None,
         canal=body.canal,
+        direccion=direccion,
+        worker_phone=telefono_encargado,
     )
 
     if not appointment_id:
@@ -6708,14 +7002,17 @@ async def create_appointment(
         except Exception as msg_err:
             logger.warning(f"[Panel] No se pudo guardar nota de cita en historial: {msg_err}")
 
-    # Sincronizar cita a Redis para que el scheduler de recordatorios la detecte
+    # Se normaliza una sola vez: lo usan el sync a Redis y la confirmacion.
+    phone_normalized = ""
     if phone:
+        _norm = PhoneNormalizer().normalize(phone)
+        phone_normalized = _norm.normalized if _norm.is_valid else phone
+
+    # Sincronizar cita a Redis para que el scheduler de recordatorios la detecte
+    if phone_normalized:
         try:
             from middleware.appointment_manager import AppointmentManager
             redis_url = os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
-            normalizer = PhoneNormalizer()
-            phone_norm_result = normalizer.normalize(phone)
-            phone_normalized = phone_norm_result.normalized if phone_norm_result.is_valid else phone
 
             apt_manager = AppointmentManager(redis_url)
             try:
@@ -6738,9 +7035,44 @@ async def create_appointment(
             # No falla el endpoint — MongoDB ya tiene la cita
             logger.warning(f"[Panel] No se pudo sincronizar cita a Redis (recordatorios pueden no funcionar): {redis_err}")
 
+    # ────────────────────────────────────────────────────────────────────────
+    # Embudo y confirmación al cliente
+    # ────────────────────────────────────────────────────────────────────────
+    # Van DESPUÉS del guardado y ninguno puede tumbar el endpoint: la cita ya
+    # está en firme y es el dato valioso. Un fallo aquí se reporta en la
+    # respuesta, no se traga en un log que nadie mira.
+
+    # 1) Embudo → 'Visita agendada'. Automatiza lo que la asesora ya hacía a mano
+    #    justo antes de agendar (medido: mediana 12 s antes, 300 de 310 casos).
+    etapa_ok, etapa_detalle = await _update_contact_to_visita_agendada(contact_id)
+    if not etapa_ok:
+        logger.warning(
+            f"[Panel] Cita {appointment_id}: no se movió a 'Visita agendada' — {etapa_detalle}"
+        )
+
+    # 2) Confirmación por WhatsApp al cliente. `comunicadas={}` porque a esta cita
+    #    todavía no se le ha dicho nada: siempre hay algo nuevo que contar.
+    confirmacion_enviada, confirmacion_motivo = await _enviar_confirmacion_cita(
+        appointment_id=appointment_id,
+        contact_id=contact_id,
+        phone_normalized=phone_normalized,
+        canal=body.canal or "whatsapp",
+        advisor_id=body.advisor_id,
+        plantilla_id=PLANTILLA_CONFIRMACION_CITA,
+        datos=DatosCita(
+            fecha_hora=appt_dt_bogota,
+            lugar=direccion,
+            encargado=body.worker_name,
+            telefono_encargado=telefono_encargado,
+            telefono_cliente=phone_normalized,
+        ),
+        comunicadas={},
+    )
+
     logger.info(
         f"[Panel] Cita agendada: contact={contact_id}, worker={body.worker_name}, "
-        f"fecha={fecha_str}, appt_id={appointment_id}"
+        f"fecha={fecha_str}, appt_id={appointment_id}, "
+        f"etapa={etapa_ok}, confirmacion={confirmacion_enviada} ({confirmacion_motivo})"
     )
     return {
         "appointment_id": appointment_id,
@@ -6748,7 +7080,13 @@ async def create_appointment(
         "worker_name": body.worker_name,
         "appointment_dt": appt_dt_bogota.isoformat(),
         "fecha_display": fecha_str,
-        "note_body": note_body
+        "direccion": direccion,
+        "note_body": note_body,
+        # El panel usa estos tres para avisar en vez de dar un OK que miente.
+        "stage_updated": etapa_ok,
+        "stage_detail": etapa_detalle,
+        "confirmation_sent": confirmacion_enviada,
+        "confirmation_reason": confirmacion_motivo,
     }
 
 
@@ -6803,6 +7141,7 @@ class AppointmentUpdateBody(BaseModel):
     worker_id: str = None
     worker_name: str = None
     appointment_dt: str = None
+    direccion: str = None
     notes: str = None
 
 
@@ -6830,15 +7169,120 @@ async def update_appointment(
             raise HTTPException(status_code=422, detail="Formato de fecha inválido")
 
     mongo_mgr = get_mongo_manager()
+
+    # Si cambia el encargado, su telefono cambia con el: la copia de la cita
+    # tiene que seguirlo o un reenvio daria el numero de otra persona.
+    telefono_encargado = None
+    if body.worker_id:
+        try:
+            ficha = await mongo_mgr.get_worker(body.worker_id)
+            telefono_encargado = (ficha or {}).get("phone", "")
+        except Exception as e_worker:
+            logger.warning(f"[Panel] No se pudo releer el encargado al editar cita: {e_worker}")
+
     ok = await mongo_mgr.update_appointment(
         appointment_id=appointment_id,
         worker_id=body.worker_id,
         worker_name=body.worker_name,
         appointment_dt=appt_dt,
-        notes=body.notes
+        notes=body.notes,
+        direccion=(body.direccion.strip() if body.direccion is not None else None),
+        worker_phone=telefono_encargado,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    # El panel necesita saber si al cliente se le aviso, para no dar un OK que
+    # deje a la asesora creyendo que el cliente ya conoce la nueva fecha.
+    respuesta = {"ok": True, "client_notified": False, "client_notify_reason": "no_evaluado"}
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Refrescar la nota interna
+    # ────────────────────────────────────────────────────────────────────────
+    # La nota que se escribió al crear la cita queda mintiendo tras una edición:
+    # sigue diciendo la fecha, el encargado y la dirección viejos. La asesora abre
+    # la conversación, lee la nota y actúa sobre datos caducados.
+    #
+    # Se rearma desde el documento YA GUARDADO, no desde `body`: un PATCH puede
+    # traer solo un campo, y componer la nota con lo que llegó dejaría el resto
+    # vacío. Leer lo persistido es la única fuente completa.
+    try:
+        cita = await mongo_mgr.get_appointment_by_id(appointment_id)
+        if cita:
+            momento = cita.get("appointment_dt")
+            if momento is not None:
+                # Mongo devuelve los datetime en UTC y sin tzinfo. Restarle nada y
+                # formatearlo directo desplazaría la nota 5 horas.
+                if momento.tzinfo is None:
+                    momento = momento.replace(tzinfo=timezone.utc)
+                momento = momento.astimezone(BOGOTA_TZ)
+
+                nota = _texto_nota_cita(
+                    cita.get("worker_name", ""),
+                    momento,
+                    cita.get("direccion", ""),
+                    cita.get("notes", ""),
+                )
+                fecha_str = _fecha_larga_nota(momento)
+
+                await mongo_mgr.update_appointment_note_message(
+                    appointment_id=appointment_id,
+                    contenido=nota,
+                    worker_name=cita.get("worker_name", ""),
+                    fecha_display=fecha_str,
+                )
+
+                # El timeline de HubSpot lo consulta quien no entra al panel, así
+                # que no puede quedarse con la versión vieja mientras el panel
+                # muestra la nueva.
+                nota_hs = cita.get("hubspot_note_id")
+                if nota_hs:
+                    try:
+                        await _hs_singleton.update_note(nota_hs, nota)
+                    except Exception as e_hs:
+                        logger.warning(
+                            f"[Panel] Nota de HubSpot {nota_hs} no se pudo refrescar: {e_hs}"
+                        )
+
+                # Avisar al cliente si cambió algo que él ve. `_enviar_confirmacion_cita`
+                # compara los datos con los del último mensaje que recibió, así que
+                # editar una observación interna no le cuesta un WhatsApp.
+                reenviada, reenvio_motivo = await _enviar_confirmacion_cita(
+                    appointment_id=appointment_id,
+                    contact_id=cita.get("contact_id", ""),
+                    phone_normalized=cita.get("phone", ""),
+                    canal=cita.get("canal", "whatsapp"),
+                    advisor_id=cita.get("advisor_id"),
+                    plantilla_id=PLANTILLA_CONFIRMACION_CITA,
+                    datos=DatosCita(
+                        fecha_hora=momento,
+                        lugar=cita.get("direccion", ""),
+                        encargado=cita.get("worker_name", ""),
+                        telefono_encargado=cita.get("worker_phone", ""),
+                        telefono_cliente=cita.get("phone", ""),
+                    ),
+                    comunicadas=cita.get("confirmacion_variables") or {},
+                )
+                respuesta["client_notified"] = reenviada
+                respuesta["client_notify_reason"] = reenvio_motivo
+
+                # El panel tiene la nota vieja en memoria hasta que recargue.
+                if cita.get("phone"):
+                    try:
+                        rc = await _get_redis_client()
+                        await ws_manager.publish_broadcast(rc, {
+                            "type": "contact_updated",
+                            "action": "appointment_updated",
+                            "phone": cita["phone"],
+                            "canal": cita.get("canal", "whatsapp"),
+                            "appointment_id": appointment_id,
+                        })
+                    except Exception as e_ws:
+                        logger.warning(f"[Panel] WS de cita editada falló: {e_ws}")
+    except Exception as e_nota:
+        # La cita ya está actualizada; que la nota no se refresque no puede
+        # convertir una edición correcta en un error para la asesora.
+        logger.error(f"[Panel] No se pudo refrescar la nota de la cita {appointment_id}: {e_nota}")
 
     # Sync Redis si cambió appointment_dt — actualiza ZSET score y resetea flags
     # para que el scheduler use la nueva ventana de recordatorio/seguimiento
@@ -6864,7 +7308,7 @@ async def update_appointment(
         except Exception as redis_err:
             logger.warning("[Panel] Error sync Redis en reprogramación (non-fatal): %s", redis_err)
 
-    return {"ok": True}
+    return respuesta
 
 
 @router.delete("/appointments/{appointment_id}")

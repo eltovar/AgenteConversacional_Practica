@@ -297,16 +297,21 @@ def _llamadas_a(nombre):
     return encontradas
 
 
-def test_conector_los_cuatro_invalidadores_pasan_la_etapa_nueva():
+def test_conector_los_invalidadores_pasan_la_etapa_nueva():
     """
-    _invalidate_contact_stage_cache() <- 4 productores de cambio de etapa:
-      visita realizada, bulk no-responde, promocion Nuevo Lead, PATCH /stage.
-    Los cuatro estan dentro de un `if status_code == 200`, asi que los cuatro
-    conocen la etapa nueva. Si alguno vuelve a llamar con un solo argumento,
-    reabre la carrera para ese flujo.
+    _invalidate_contact_stage_cache() <- 6 productores de cambio de etapa:
+      visita realizada, bulk no-responde, promocion Nuevo Lead, PATCH /stage,
+      y los dos del agendamiento de cita (19-ago-2026): el paso a "Visita
+      agendada" y su deshacer cuando el segundo PATCH falla.
+    Todos estan dentro de un `if status_code == 200`, asi que todos conocen la
+    etapa nueva. Si alguno vuelve a llamar con un solo argumento, reabre la
+    carrera para ese flujo.
+
+    El deshacer cuenta igual que los demas: restaura una etapa concreta, asi que
+    tiene que dejar el cache apuntando a ella y no borrarlo sin mas.
     """
     llamadas = _llamadas_a("_invalidate_contact_stage_cache")
-    assert len(llamadas) == 4, f"cambio el numero de invalidadores: {len(llamadas)}"
+    assert len(llamadas) == 6, f"cambio el numero de invalidadores: {len(llamadas)}"
 
     sin_etapa = [c.lineno for c in llamadas if len(c.args) < 2]
     assert not sin_etapa, (
@@ -317,11 +322,16 @@ def test_conector_los_cuatro_invalidadores_pasan_la_etapa_nueva():
 
 def test_conector_solo_la_promocion_usa_strict():
     """
-    _get_contact_lifecyclestage() <- 6 consumidores. Solo la promocion puede
-    pedir strict; los otros 5 dependen del fail-open.
+    _get_contact_lifecyclestage() <- 7 consumidores (el septimo, desde el
+    19-ago-2026, es el paso a "Visita agendada" al crear una cita). Solo la
+    promocion puede pedir strict; los otros 6 dependen del fail-open.
+
+    Que el agendamiento use fail-open es deliberado: si HubSpot no contesta, se
+    asume "En conversacion" y el cambio de etapa se intenta igual. Lo contrario
+    dejaria citas sin registrar en el embudo por un 429 pasajero.
     """
     llamadas = _llamadas_a("_get_contact_lifecyclestage")
-    assert len(llamadas) == 6, f"cambio el numero de consumidores: {len(llamadas)}"
+    assert len(llamadas) == 7, f"cambio el numero de consumidores: {len(llamadas)}"
 
     con_strict = [
         c for c in llamadas

@@ -747,9 +747,17 @@
                     <input type="datetime-local" id="apptDatetime" required
                         class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400">
                 </div>
+                <!-- Direccion del inmueble -->
+                <div class="mb-3">
+                    <label class="block text-sm font-medium mb-1">Direcci&oacute;n del inmueble <span class="text-red-500">*</span></label>
+                    <input type="text" id="apptDireccion" required maxlength="200"
+                        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        placeholder="Ej: Calle 10 #43-25, Apto 502, Envigado">
+                    <p class="text-xs text-gray-500 mt-1">Es el lugar que recibe el cliente en la confirmaci&oacute;n.</p>
+                </div>
                 <!-- Observaciones -->
                 <div class="mb-4">
-                    <label class="block text-sm font-medium mb-1">Observaciones</label>
+                    <label class="block text-sm font-medium mb-1">Observaciones <span class="text-gray-400 font-normal">(internas, no se env&iacute;an)</span></label>
                     <textarea id="apptNotes" rows="2"
                         class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
                         placeholder="Ej: Ver apartamento en Chapinero, zona norte..."></textarea>
@@ -865,8 +873,11 @@
                 <!-- Sección: Equipo de Campo -->
                 <div>
                     <h3 class="text-sm font-semibold text-gray-700 mb-2">&#128736; Equipo de Campo</h3>                    <!-- Agregar nuevo worker -->
-                    <div class="flex gap-2 mb-4">
+                    <p class="text-xs text-gray-500 mb-2">El tel&eacute;fono se le env&iacute;a al cliente en la confirmaci&oacute;n de su cita. Sin &eacute;l la cita se agenda igual, pero no sale la confirmaci&oacute;n.</p>
+                    <div class="flex gap-2 mb-2">
                         <input type="text" id="newWorkerName" placeholder="Nombre del encargado (ej. Mauricio)"
+                            class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F5C400]">
+                        <input type="tel" id="newWorkerPhone" placeholder="Tel&eacute;fono (ej. 3001234567)"
                             class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#F5C400]">
                         <button onclick="createWorker()"
                             class="bg-[#F5C400] text-[#1A1A1A] font-semibold px-3 py-2 rounded text-sm hover:bg-[#D4A800] transition-colors">

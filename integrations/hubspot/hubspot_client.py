@@ -510,6 +510,28 @@ class HubSpotClient:
             logger.error(f"[HubSpotClient] Error creando nota para contacto {contact_id}: {e}")
             raise
 
+    async def update_note(self, note_id: str, body: str) -> bool:
+        """
+        Reescribe el cuerpo de una nota ya creada.
+
+        Hace falta al editar una cita: la nota del timeline conserva la fecha y el
+        encargado originales, y el timeline de HubSpot es lo que consulta quien no
+        entra al panel.
+        """
+        if not note_id:
+            return False
+        try:
+            await self._request(
+                "PATCH",
+                f"/crm/v3/objects/notes/{note_id}",
+                {"properties": {"hs_note_body": body}},
+            )
+            logger.info(f"[HubSpotClient] Nota {note_id} actualizada")
+            return True
+        except Exception as e:
+            logger.error(f"[HubSpotClient] Error actualizando nota {note_id}: {e}")
+            return False
+
     async def get_contact(self, contact_id: str, properties: Optional[list] = None) -> Dict[str, Any]:
         """
         Obtiene los datos de un contacto por su ID.

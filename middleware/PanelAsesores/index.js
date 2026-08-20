@@ -7366,6 +7366,10 @@ function renderWorkersList(workers) {
             <span class="flex-1 text-sm font-medium text-gray-700 worker-name-display">${w.name}</span>
             <input type="text" value="${w.name}"
                 class="hidden flex-1 text-sm border rounded px-2 py-1 focus:ring-1 focus:ring-yellow-400 worker-name-input">
+            <span class="flex-1 text-xs worker-phone-display ${w.phone ? 'text-gray-500' : 'text-red-500'}"
+                title="${w.phone ? 'Se envia al cliente en la confirmacion de su cita' : 'Sin telefono no sale la confirmacion de cita'}">${w.phone || 'sin telefono'}</span>
+            <input type="tel" value="${w.phone || ''}" placeholder="Telefono"
+                class="hidden flex-1 text-sm border rounded px-2 py-1 focus:ring-1 focus:ring-yellow-400 worker-phone-input">
             <button onclick="startEditWorker('${w.id}')"
                 class="text-blue-500 hover:text-blue-700 text-xs px-2 py-1 worker-edit-btn"
                 title="Editar nombre">&#9998;</button>
@@ -7384,6 +7388,8 @@ function startEditWorker(workerId) {
     if (!row) return;
     row.querySelector('.worker-name-display').classList.add('hidden');
     row.querySelector('.worker-name-input').classList.remove('hidden');
+    row.querySelector('.worker-phone-display').classList.add('hidden');
+    row.querySelector('.worker-phone-input').classList.remove('hidden');
     row.querySelector('.worker-edit-btn').classList.add('hidden');
     row.querySelector('.worker-save-btn').classList.remove('hidden');
     row.querySelector('.worker-name-input').focus();
@@ -7394,12 +7400,16 @@ async function saveEditWorker(workerId) {
     if (!row) return;
     const newName = row.querySelector('.worker-name-input').value.trim();
     if (!newName) return;
+    // Se manda siempre: el backend distingue null (no tocar) de '' (borrar), y
+    // aqui el campo llega precargado con el valor actual, asi que '' es un
+    // borrado deliberado, no un descuido.
+    const newPhone = row.querySelector('.worker-phone-input').value.trim();
 
     try {
         const response = await fetch(`${BASE_URL}/workers/${workerId}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
-            body: JSON.stringify({ name: newName })
+            body: JSON.stringify({ name: newName, phone: newPhone })
         });
         if (response.ok) {
             await loadWorkers(true); // forceRefresh: invalidar caché tras editar
@@ -7414,17 +7424,20 @@ async function saveEditWorker(workerId) {
 
 async function createWorker() {
     const input = document.getElementById('newWorkerName');
+    const phoneInput = document.getElementById('newWorkerPhone');
     const name = input.value.trim();
+    const phone = phoneInput ? phoneInput.value.trim() : '';
     if (!name) { input.focus(); return; }
 
     try {
         const response = await fetch(`${BASE_URL}/workers`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, phone })
         });
         if (response.ok) {
             input.value = '';
+            if (phoneInput) phoneInput.value = '';
             await loadWorkers(true); // forceRefresh: invalidar caché tras crear
         } else {
             const err = await response.json();
@@ -7635,6 +7648,7 @@ function showAppointmentForm(isEdit = false) {
         // Nueva cita - resetear form
         document.getElementById('editingApptId').value = '';
         document.getElementById('apptWorkerSelect').value = '';
+        document.getElementById('apptDireccion').value = '';
         document.getElementById('apptNotes').value = '';
         submitBtn.textContent = 'Agendar Cita';
         modalTitle.textContent = '📅 Nueva Cita';
@@ -7687,6 +7701,7 @@ function editAppointment(apptId) {
             `T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
     }
 
+    document.getElementById('apptDireccion').value = appt.direccion || '';
     document.getElementById('apptNotes').value = appt.notes || '';
 
     showAppointmentForm(true);
@@ -7719,6 +7734,31 @@ async function deleteAppointment(apptId) {
     }
 }
 
+// Traduce el motivo tecnico del backend a algo que la asesora pueda accionar.
+// Los identificadores salen de middleware/confirmacion_cita.py.
+function describirFalloConfirmacion(motivo) {
+    if (motivo && motivo.startsWith('twilio:')) {
+        return 'WhatsApp rechazo la confirmacion (' + motivo.slice(7).trim() + '). Reenviala a mano.';
+    }
+    // El backend manda 'datos_incompletos:contacto,asesor' — clave y faltantes.
+    const [clave, faltantes] = String(motivo || '').split(':');
+    if (clave === 'datos_incompletos') {
+        const falta = (faltantes || '').split(',').filter(Boolean);
+        if (falta.length === 1 && falta[0] === 'contacto') {
+            return 'No se envio la confirmacion: al encargado le falta el telefono. Agregalo en Configuracion.';
+        }
+        return 'No se envio la confirmacion: faltan datos de la cita (' + (falta.join(', ') || 'sin detalle') + ').';
+    }
+    const mapa = {
+        'sin_telefono_del_cliente': 'No se envio la confirmacion: el contacto no tiene telefono.',
+        'plantilla_no_encontrada': 'No se envio la confirmacion: falta la plantilla cita_confirmacion.',
+        'plantilla_sin_cuerpo': 'No se envio la confirmacion: la plantilla esta vacia.',
+        'twilio_no_disponible': 'No se envio la confirmacion: WhatsApp no esta disponible en este momento.',
+    };
+    if (mapa[clave]) return mapa[clave];
+    return 'No se envio la confirmacion al cliente (' + (motivo || 'motivo desconocido') + ').';
+}
+
 async function submitAppointment(event) {
     event.preventDefault();
     if (!currentContactId) return;
@@ -7728,9 +7768,14 @@ async function submitAppointment(event) {
     const workerId = select.value;
     const workerName = select.options[select.selectedIndex]?.dataset?.name || '';
     const datetimeVal = document.getElementById('apptDatetime').value;
+    const direccionEl = document.getElementById('apptDireccion');
+    const direccion = direccionEl.value.trim();
     const notes = document.getElementById('apptNotes').value.trim();
 
     if (!workerId || !datetimeVal) return;
+    // La direccion es el {lugar} de la confirmacion que recibe el cliente: sin
+    // ella el mensaje saldria con un hueco donde va el sitio de la visita.
+    if (!direccion) { direccionEl.focus(); return; }
 
     const submitBtn = document.getElementById('apptSubmitBtn');
     submitBtn.disabled = true;
@@ -7747,6 +7792,7 @@ async function submitAppointment(event) {
                     worker_id: workerId,
                     worker_name: workerName,
                     appointment_dt: datetimeVal,
+                    direccion: direccion,
                     notes: notes
                 })
             });
@@ -7759,6 +7805,7 @@ async function submitAppointment(event) {
                     worker_id: workerId,
                     worker_name: workerName,
                     appointment_dt: datetimeVal,
+                    direccion: direccion,
                     notes: notes,
                     advisor_id: ADVISOR_ID || null,
                     canal: currentCanal || 'whatsapp'
@@ -7771,10 +7818,37 @@ async function submitAppointment(event) {
         const content = resultDiv.querySelector('div');
 
         if (response.ok) {
-            content.className = 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
-            content.innerHTML = editingId
+            // Un OK verde cuando la confirmacion no salio seria mentir: la asesora
+            // se iria creyendo que el cliente ya sabe donde es su cita.
+            const avisos = [];
+            if (!editingId) {
+                if (data.confirmation_sent === false) {
+                    avisos.push(describirFalloConfirmacion(data.confirmation_reason));
+                }
+                if (data.stage_updated === false) {
+                    avisos.push('La etapa no paso a "Visita agendada" — muevela a mano.');
+                }
+            } else if (data.client_notified === false
+                       && data.client_notify_reason !== 'sin_cambios_para_el_cliente') {
+                // Al reprogramar, lo que importa es si el cliente conoce la nueva
+                // fecha. Un OK verde sin avisarle deja a la asesora creyendo que si.
+                avisos.push(describirFalloConfirmacion(data.client_notify_reason));
+            }
+            const hayAvisos = avisos.length > 0;
+            content.className = hayAvisos
+                ? 'p-3 rounded text-sm bg-amber-100 text-amber-900 border border-amber-300'
+                : 'p-3 rounded text-sm bg-green-100 text-green-800 border border-green-200';
+            const base = editingId
                 ? `✅ Cita actualizada correctamente`
-                : `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`;
+                  + (data.client_notified
+                        ? `<br><span class="text-xs">📲 Se le aviso al cliente del cambio</span>`
+                        : (data.client_notify_reason === 'sin_cambios_para_el_cliente'
+                            ? `<br><span class="text-xs">Sin cambios que afecten al cliente</span>` : ''))
+                : `✅ Cita agendada con <strong>${workerName}</strong><br><span class="text-xs">${data.fecha_display || ''}</span>`
+                  + (data.confirmation_sent ? `<br><span class="text-xs">📲 Confirmacion enviada al cliente</span>` : '');
+            content.innerHTML = hayAvisos
+                ? base + `<div class="mt-2 text-xs">⚠️ ` + avisos.join(`<br>⚠️ `) + `</div>`
+                : base;
             resultDiv.classList.remove('hidden');
 
             // [Badge] Update optimista: mostrar badge 📅 inmediatamente sin esperar GET /contacts
@@ -7788,11 +7862,20 @@ async function submitAppointment(event) {
                 }
             }
 
+            // La nota de la cita vive en el hilo del chat. Al editar, el backend
+            // la reescribe en Mongo, pero lo que hay en pantalla es lo que se
+            // cargo al abrir la conversacion: sin recargar el historial, la
+            // asesora sigue leyendo la fecha vieja.
+            if (editingId && currentContactId) {
+                loadChatHistory(currentContactId);
+            }
+
             // Recargar y volver a lista (confirma estado real desde servidor)
             setTimeout(async () => {
                 await _loadAppointmentsAndRender();
                 loadContacts(); // Sincroniza badge con estado real del backend
-                resultDiv.classList.add('hidden');
+                // Un aviso no puede evaporarse en segundo y medio.
+                if (!hayAvisos) resultDiv.classList.add('hidden');
             }, 1500);
         } else {
             content.className = 'p-3 rounded text-sm bg-red-100 text-red-800 border border-red-200';

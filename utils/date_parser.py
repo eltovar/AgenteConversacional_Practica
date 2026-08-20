@@ -22,6 +22,52 @@ logger = logging.getLogger(__name__)
 # Timezone de Colombia
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Nombres de fecha en español — fuente única
+# ─────────────────────────────────────────────────────────────────────────────
+# Estaban copiados en cuatro sitios (dos aquí mismo y dos en outbound_panel),
+# cada uno con su propia capitalización. Las variantes se DERIVAN de estas dos
+# tablas en vez de reescribirse, así no pueden desincronizarse.
+DIAS_SEMANA = (
+    "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo",
+)
+MESES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+DIAS_SEMANA_CAP = tuple(d.capitalize() for d in DIAS_SEMANA)
+MESES_CAP = tuple(m.capitalize() for m in MESES)
+DIAS_SEMANA_ABREV = tuple(d[:3] for d in DIAS_SEMANA)          # lun, mar, mié...
+MESES_ABREV = tuple(m[:3] for m in MESES)                       # ene, feb, mar...
+MESES_ABREV_CAP = tuple(m.capitalize() for m in MESES_ABREV)    # Ene, Feb, Mar...
+
+
+def hora_12h(momento: datetime, con_cero: bool = False) -> str:
+    """
+    Hora en formato de 12 horas: "3:00 PM".
+
+    `con_cero=True` la deja como "03:00 PM", que es la forma que ya usaban las
+    notas de cita en HubSpot; se mantiene para no cambiar notas existentes.
+    """
+    hora = momento.hour
+    sufijo = "AM" if hora < 12 else "PM"
+    if hora > 12:
+        hora -= 12
+    elif hora == 0:
+        hora = 12
+    return f"{hora:02d}:{momento.minute:02d} {sufijo}" if con_cero else (
+        f"{hora}:{momento.minute:02d} {sufijo}"
+    )
+
+
+def fecha_larga(momento: datetime) -> str:
+    """Fecha hablada para un mensaje al cliente: "lunes 10 de marzo de 2026"."""
+    return (
+        f"{DIAS_SEMANA[momento.weekday()]} {momento.day} "
+        f"de {MESES[momento.month - 1]} de {momento.year}"
+    )
+
 
 class AppointmentDateParser:
     """Parser de fechas para citas en español colombiano."""
@@ -237,27 +283,10 @@ class AppointmentDateParser:
         Returns:
             String formateado como "lunes 15 de marzo a las 3:00 PM"
         """
-        # Nombres de días en español
-        dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
-        meses = [
-            "enero", "febrero", "marzo", "abril", "mayo", "junio",
-            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
-        ]
-
-        dia_semana = dias[appointment_dt.weekday()]
+        dia_semana = DIAS_SEMANA[appointment_dt.weekday()]
         dia = appointment_dt.day
-        mes = meses[appointment_dt.month - 1]
-
-        # Formatear hora
-        hour = appointment_dt.hour
-        minute = appointment_dt.minute
-        am_pm = "AM" if hour < 12 else "PM"
-        if hour > 12:
-            hour -= 12
-        elif hour == 0:
-            hour = 12
-
-        hora_str = f"{hour}:{minute:02d} {am_pm}"
+        mes = MESES[appointment_dt.month - 1]
+        hora_str = hora_12h(appointment_dt)
 
         if include_day_name:
             return f"{dia_semana} {dia} de {mes} a las {hora_str}"

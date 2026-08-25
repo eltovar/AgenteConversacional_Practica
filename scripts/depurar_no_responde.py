@@ -70,6 +70,8 @@ load_dotenv(os.path.join(RAIZ, ".env"))
 from middleware.depuracion_no_responde import (  # noqa: E402
     BASES_DE_CONTEO,
     MODO_RACHA_SEGUIDA,
+    UMBRAL_MASIVOS_SIN_RESPUESTA,
+    Decision,
     Historial,
     Regla,
     evaluar,
@@ -188,6 +190,75 @@ def leer_etapas(contact_ids: List[str], ritmo: Ritmo) -> Dict[str, Dict[str, str
     print()
     return salida
 
+
+def leer_excluidos(ruta: Optional[str]) -> Dict[str, str]:
+    """
+    Contactos que NO se tocan pase lo que pase, con el motivo de cada uno.
+
+    Es una anulación humana por encima de cualquier regla: los que contestaron
+    algo al masivo y siguen vivos. El fichero se genera desde la clasificación
+    de sus respuestas, no se escribe a mano, y el motivo viaja dentro para que
+    dentro de tres meses se sepa por qué se salvó cada uno.
+    """
+    if not ruta:
+        return {}
+    if not os.path.exists(ruta):
+        sys.exit(f"No existe el fichero de exclusion: {ruta}")
+    excluidos: Dict[str, str] = {}
+    with open(ruta, "r", encoding="utf-8-sig", newline="") as f:
+        for fila in csv.DictReader(f):
+            cid = (fila.get("contact_id") or "").strip()
+            if cid:
+                excluidos[cid] = (fila.get("motivo") or "sin_motivo").strip()
+    if not excluidos:
+        sys.exit(f"El fichero de exclusion no tiene ningun contact_id: {ruta}")
+    return excluidos
+
+
+def leer_por_owner(owner_id: str, etapa_origen: str, ritmo: Ritmo) -> Dict[str, str]:
+    """
+    Contactos del embudo de origen que pertenecen a un propietario. {id: telefono}
+
+    Es un criterio ADMINISTRATIVO, no de negocio: "estos se gestionan por otro
+    lado". Por eso vive aquí y no en el motor, que decide una sola cosa —si un
+    lead está perdido por no responder— y tiene 73 tests defendiendo esa
+    respuesta. Meter aquí dentro el propietario ensuciaría esa regla.
+
+    Se filtra por etapa Y por owner en la misma consulta: pedir todos los del
+    propietario y filtrar después traería contactos de todo el CRM.
+    """
+    encontrados: Dict[str, str] = {}
+    despues = None
+    while True:
+        cuerpo = {
+            "filterGroups": [{"filters": [
+                {"propertyName": "hubspot_owner_id", "operator": "EQ", "value": owner_id},
+                {"propertyName": "lifecyclestage", "operator": "EQ", "value": etapa_origen},
+            ]}],
+            "properties": ["phone"],
+            "limit": 100,
+        }
+        if despues:
+            cuerpo["after"] = despues
+        peticion = urllib.request.Request(
+            f"{BASE_HUBSPOT}/search", data=json.dumps(cuerpo).encode(),
+            headers=_cabeceras(),
+        )
+        ritmo.esperar()
+        try:
+            with urllib.request.urlopen(peticion, timeout=60) as resp:
+                datos = json.load(resp)
+        except Exception as e:
+            print(f"    aviso: busqueda por owner interrumpida ({e})")
+            break
+        for r in datos.get("results", []):
+            encontrados[r["id"]] = (r.get("properties") or {}).get("phone") or ""
+        despues = (datos.get("paging", {}).get("next") or {}).get("after")
+        print(f"    encontrados {len(encontrados)}", end="\r")
+        if not despues:
+            break
+    print()
+    return encontrados
 
 # ── Escritura ───────────────────────────────────────────────────────────────
 
@@ -346,7 +417,15 @@ def anotar_checkpoint(contact_id: str) -> None:
 
 # ── Principal ───────────────────────────────────────────────────────────────
 
-async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
+async def principal(
+    aplicar: bool,
+    limite: Optional[int],
+    modo: str,
+    umbral: int,
+    owner: Optional[str],
+    ruta_exclusion: Optional[str],
+    corte_fecha: Optional[datetime],
+) -> int:
     from middleware.outbound_panel import (
         HUBSPOT_STAGE_CERRADO_PERDIDO,
         HUBSPOT_STAGE_NO_RESPONDE,
@@ -355,9 +434,11 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
     regla = Regla(
         etapa_origen=HUBSPOT_STAGE_NO_RESPONDE,
         etapa_destino=HUBSPOT_STAGE_CERRADO_PERDIDO,
-        excluir_racha_desde=EXCLUIR_RACHA_DESDE,
+        umbral=umbral,
+        excluir_racha_desde=corte_fecha,
         modo=modo,
     )
+    excluidos = leer_excluidos(ruta_exclusion)
     # UTC, que es como MongoDB devuelve los timestamps de `messages` (los
     # guarda con zona y PyMongo los convierte). Con `datetime.now()` la
     # espera de 48h se corria tantas horas como la zona de quien lanzara
@@ -368,7 +449,12 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
 
     print("\n" + "=" * 70)
     print(f"  DEPURACION  {regla.etapa_origen}  ->  {regla.etapa_destino}")
-    print(f"  conteo: {regla.modo}")
+    print(f"  conteo: {regla.modo} (umbral {regla.umbral})")
+    print(f"  corte por fecha: {corte_fecha.strftime('%Y-%m-%d') if corte_fecha else 'ninguno'}")
+    if owner:
+        print(f"  ademas: todos los del propietario {owner}")
+    if excluidos:
+        print(f"  intocables: {len(excluidos)} contactos de la lista de exclusion")
     print(f"  modo: {'APLICAR (escribe en HubSpot)' if aplicar else 'INFORME (no escribe nada)'}")
     print("=" * 70)
 
@@ -390,6 +476,21 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
             preseleccion.append((telefono, cid, envios))
     print(f"      {len(preseleccion)} cumplen la regla antes de mirar su etapa actual")
 
+    # Los del propietario entran aunque no cumplan la regla de masivos: el
+    # criterio es otro ("se gestionan por otro lado"). Se marcan con envios=None
+    # para que mas abajo se les pida solo estar en el embudo.
+    por_owner: Dict[str, str] = {}
+    if owner:
+        print(f"\n[1b/5] Buscando contactos del propietario {owner} en el embudo...")
+        por_owner = leer_por_owner(owner, regla.etapa_origen, ritmo)
+        ya = {c for _, c, _ in preseleccion}
+        nuevos = 0
+        for cid, telefono in por_owner.items():
+            if cid not in ya:
+                preseleccion.append((telefono, cid, None))
+                nuevos += 1
+        print(f"      {len(por_owner)} del propietario, {nuevos} que la regla no cogia")
+
     print("\n[2/5] Consultando la etapa actual de cada uno en HubSpot...")
     propiedades = leer_etapas([c for _, c, _ in preseleccion], ritmo)
 
@@ -397,6 +498,11 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
     a_depurar, descartados = [], defaultdict(int)
     sin_etapa = []
     for telefono, cid, envios in preseleccion:
+        if cid in excluidos:
+            # Contesto algo al masivo y sigue vivo. Manda por encima de todo,
+            # incluido el criterio del propietario.
+            descartados["excluido_" + excluidos[cid]] += 1
+            continue
         props = propiedades.get(cid)
         if props is None:
             descartados["no_legible_en_hubspot"] += 1
@@ -407,19 +513,31 @@ async def principal(aplicar: bool, limite: Optional[int], modo: str) -> int:
         if not props.get("lifecyclestage"):
             sin_etapa.append(cid)
             continue
-        decision = evaluar(
-            Historial(cid, envios, respuestas.get(telefono), props.get("lifecyclestage")),
-            regla, ahora,
-        )
+        if envios is None:
+            # Vino por el propietario: basta con que siga en el embudo, cosa
+            # que la lectura de arriba ya confirmo.
+            decision = Decision(True, "propietario", 0, None, None)
+        else:
+            decision = evaluar(
+                Historial(cid, envios, respuestas.get(telefono), props.get("lifecyclestage")),
+                regla, ahora,
+            )
         if decision.depurar:
             nombre = f"{props.get('firstname') or ''} {props.get('lastname') or ''}".strip()
+
+            # Los que entran por propietario no tienen masivos, asi que no tienen
+            # fechas. Se marcan con un guion en vez de reventar el informe.
+            def _fecha(marca):
+                return marca.strftime("%Y-%m-%d") if marca else "-"
+
             a_depurar.append({
                 "contact_id": cid,
                 "telefono": telefono,
                 "nombre": nombre or "(sin nombre)",
+                "motivo": decision.motivo,
                 "masivos_sin_responder": decision.masivos_contados,
-                "primer_masivo": decision.primer_masivo.strftime("%Y-%m-%d"),
-                "ultimo_masivo": decision.ultimo_masivo.strftime("%Y-%m-%d"),
+                "primer_masivo": _fecha(decision.primer_masivo),
+                "ultimo_masivo": _fecha(decision.ultimo_masivo),
                 "ultima_respuesta": (
                     respuestas[telefono].strftime("%Y-%m-%d")
                     if telefono in respuestas else "nunca"
@@ -518,7 +636,32 @@ if __name__ == "__main__":
                         help="escribe en HubSpot; sin este flag solo genera el informe")
     parser.add_argument("--limite", type=int, default=None,
                         help="procesa como mucho N contactos (para probar)")
+    parser.add_argument("--umbral", type=int, default=UMBRAL_MASIVOS_SIN_RESPUESTA,
+                        help="cuantos masivos hacen falta (por defecto: %(default)s)")
+    parser.add_argument("--owner", default=None,
+                        help="anade TODOS los del propietario que esten en el embudo")
+    parser.add_argument("--excluir", default=None, metavar="CSV",
+                        help="fichero con contact_id que no se tocan nunca")
+    # El corte por fecha nacio con umbral 2: no cerrar a quien empezaba su racha
+    # en la campana de julio porque solo llevaba un intento. Con --umbral 1 ese
+    # razonamiento se cae solo, asi que hay que poder quitarlo, pero a mano.
+    parser.add_argument("--corte-fecha", default=EXCLUIR_RACHA_DESDE.strftime("%Y-%m-%d"),
+                        metavar="AAAA-MM-DD",
+                        help="no depurar si el primer masivo contado es de esta "
+                             "fecha en adelante. 'ninguno' lo desactiva. "
+                             "(por defecto: %(default)s)")
     parser.add_argument("--modo", choices=sorted(BASES_DE_CONTEO), default=MODO_RACHA_SEGUIDA,
                         help="que masivos se cuentan (por defecto: %(default)s)")
     args = parser.parse_args()
-    sys.exit(asyncio.run(principal(args.aplicar, args.limite, args.modo)))
+    if str(args.corte_fecha).strip().lower() in ("ninguno", "ninguna", "no", ""):
+        corte = None
+    else:
+        try:
+            corte = datetime.strptime(args.corte_fecha, "%Y-%m-%d")
+        except ValueError:
+            sys.exit(f"--corte-fecha no es una fecha AAAA-MM-DD: {args.corte_fecha}")
+
+    sys.exit(asyncio.run(principal(
+        args.aplicar, args.limite, args.modo, args.umbral, args.owner, args.excluir,
+        corte,
+    )))

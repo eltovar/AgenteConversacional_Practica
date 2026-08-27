@@ -66,7 +66,7 @@ Desarrollo completo en [D-02 §1](02-actores-y-roles.md).
 
 | Para cambiar… | ANTES ✅ | DESPUÉS 🔵 |
 |---|---|---|
-| Una asesora | Editar `OWNERS_CONFIG` en `lead_assigner.py` + desplegar | Pantalla de administración |
+| Una asesora | Editar `utils/advisors_registry.py` + desplegar | Pantalla de administración |
 | Un canal | Editar `channels_registry.py` + desplegar | Pantalla de administración |
 | Una etapa del embudo | Editar código en varios sitios + desplegar | Pantalla de administración |
 | Regla de asignación | Editar código + desplegar | Configuración |

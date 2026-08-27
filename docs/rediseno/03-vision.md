@@ -302,3 +302,49 @@ Consulta directa a la API. **Son los numeros reales de la operacion**, no estima
 > **Falta el numero 3.** El tiempo de primera respuesta esta en la coleccion `messages` de MongoDB. Necesita acceso a la base de produccion, no a HubSpot.
 > **Faltan las metas.** Los valores de "hoy" ya estan; las metas las pone el negocio.
 
+---
+
+## 12. Tiempo de respuesta — medido en MongoDB el 2026-08-20
+
+Muestra: **56.278 mensajes**, **2.647 conversaciones**, ventana de **90 dias**. Coleccion `messages`, campo `sender` (`client` / `bot` / `advisor` / `system`).
+
+### 12.1 El contraste
+
+| Quien responde | Mediana | p75 | p90 | < 5 min | < 1 h |
+|---|---|---|---|---|---|
+| **SofIA** | **0,7 min** *(42 s)* | 0,7 min | 0,8 min | **95 %** | 95 % |
+| **Asesora** *(por turno)* | **30 min** | 6,7 h | 24,1 h | 23 % | 61 % |
+
+*n = 1.597 conversaciones para SofIA · 6.394 turnos para asesoras.*
+
+### 12.2 Lectura
+
+**SofIA cumple.** Responde en 42 segundos de mediana y el 95 % de las veces en menos de 5 minutos. El primer contacto con el cliente **no es el problema**.
+
+**El problema esta en la cola de la distribucion, no en la mediana.** La asesora responde en 30 minutos la mitad de las veces — razonable. Pero:
+
+- **1 de cada 4 turnos tarda mas de 6,7 horas**
+- **1 de cada 10 tarda mas de 24 horas**
+- Solo el 23 % se responde en menos de 5 minutos
+
+> **Este es el numero que respalda las razones 1 y 5 del "por que ahora"** (media hora al dia buscando contactos, friccion de cambiar de pestana). Un contacto que espera 24 horas no es un fallo de voluntad: es un contacto que **no se vio a tiempo**.
+
+### 12.3 Los tres numeros de referencia — completos
+
+| # | Metrica | **Hoy** | Meta | Origen |
+|---|---|---|---|---|
+| 1 | Leads al mes | **578** *(~19/dia)* | pendiente | HubSpot |
+| 2 | % que llega a visita | **6,1 %** *(suelo)* | pendiente | HubSpot |
+| 3 | **Tiempo de respuesta de la asesora** | **30 min mediana · p90 24,1 h** | pendiente | MongoDB |
+| — | *Tiempo de respuesta de SofIA* | *0,7 min · 95 % bajo 5 min* | mantener | MongoDB |
+
+> **Propuesta de meta para el numero 3:** en vez de perseguir la mediana (ya es aceptable), atacar la cola. Por ejemplo: **p90 por debajo de 4 horas** y **ningun contacto sin respuesta pasadas 24 h**. Es lo que de verdad cambia la experiencia del cliente.
+
+### 12.4 Limitacion de la medicion
+
+Estas cifras miden **cliente escribe → asesora responde**, sin distinguir si SofIA estaba atendiendo legitimamente en ese intervalo.
+
+> **La metrica exacta seria handoff → primera respuesta humana, y hoy no se puede calcular: el sistema no registra el evento de handoff.**
+> Es el mismo hueco que impide medir la conversion del embudo (11.4). Ambos se cierran con el `Historial de Contacto` como registro de eventos (D-09).
+> **Hoy SofIA CRM no puede medir ni su embudo ni su tiempo de reaccion.** Es, por si solo, un argumento de peso para D-09.
+

@@ -81,7 +81,7 @@ Ambos existen como canales y ambos apuntan a Jubeny. ¿`default` es un canal rea
 ### Equipo
 
 
-Agrupación de asesoras en `lead_assigner.py::OWNERS_CONFIG`: `equipo_portales`, `equipo_directo`, `equipo_marketing`, `equipo_respaldo`, `default`.
+Agrupación de asesoras. ⚠️ Corregido 2026-08-26: se declara en `utils/advisors_registry.py`, de donde `lead_assigner.py::OWNERS_CONFIG` la deriva: `equipo_portales`, `equipo_directo`, `equipo_marketing`, `equipo_respaldo`, `default`.
 > ⚠️ Los equipos hoy no agrupan a nadie: cada uno tiene exactamente una persona.
 `equipo_portales` = Jubeny. `equipo_directo` = Luisa. `equipo_respaldo` = Mónica. `equipo_marketing` = Marketing.
 El concepto "Equipo" es una capa de indirección que no hace nada — hereda de cuando había round-robin, que ya se eliminó.

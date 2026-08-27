@@ -44,49 +44,53 @@ HubSpot no filtra pipelines por rol — esa capacidad exige HubSpot Enterprise (
 
 | ID | Documento | Archivo | Estado |
 |---|---|---|---|
-| D-01 | Glosario / lenguaje ubicuo | `01-glosario.md` | ⚠️ Borrador v0 — requiere revisión |
-| D-02 | Actores y roles | `02-actores-y-roles.md` | ⚠️ Borrador v0 — roles ✅ confirmados por wireframe |
-| D-03 | Visión, objetivos y no-objetivos | `03-vision.md` | ⚠️ Borrador v0 — reconstruido, 7 preguntas abiertas |
-| — | Wireframes recuperados (catálogo) | `wireframes/README.md` | ✅ Fuente primaria |
+> ⚠️ **Estado actualizado el 2026-08-27.** El detalle archivo por archivo, con lo que está escrito pero desactualizado, vive en [AUDITORIA.md](AUDITORIA.md).
+
+| ID | Documento | Archivo | Estado |
+|---|---|---|---|
+| D-01 | Glosario / lenguaje ubicuo | `01-glosario.md` | ✅ Escrito — 371 líneas |
+| D-02 | Actores y roles | `02-actores-y-roles.md` | ✅ Escrito — 1.523 líneas, roles confirmados por wireframe |
+| D-03 | Visión, objetivos y no-objetivos | `03-vision.md` | ✅ Escrito — métricas medidas en producción |
+| — | Wireframes recuperados (catálogo) | `wireframes/README.md` | 🟠 29 imágenes · falta `wf32.png` |
 
 
-### Fase 1 — Comportamiento (el qué)
-
-
-| ID | Documento | Estado |
-|---|---|---|
-| D-04 | Inventario de capacidades actuales (as-is) | ⬜ No iniciado |
-| D-05 | Casos de uso + criterios de aceptación | ⬜ Existe borrador parcial en `DOCUMENTACION.docx` (solo imágenes) |
-| D-06 | Matriz de permisos (rol × recurso × acción) | ⬜ Existe título en `DOCUMENTACION.docx`, sin contenido |
-| D-07 | Journey maps (cliente / asesora) | ⬜ No iniciado |
-| D-08 | Máquinas de estado | ⬜ No iniciado |
-| D-09 | Catálogo de eventos de dominio | ⬜ No iniciado |
-
-
-### Fase 2 — Estructura (el cómo)
+### Fase 1 — Comportamiento (el qué) · **100 %**
 
 
 | ID | Documento | Estado |
 |---|---|---|
-| D-10 | Modelo de dominio + ERD + diccionario de datos | ⬜ No iniciado |
-| D-11 | Política de fuente de verdad por entidad | ⬜ No iniciado — máxima prioridad técnica |
-| D-12 | Arquitectura objetivo (C4) | ⬜ No iniciado |
-| D-13 | Contratos de API y eventos | ⬜ No iniciado |
-| D-14 | ADRs (decisiones arquitectónicas) | ⬜ No iniciado — mínimo 5 |
-| D-15 | Requisitos no funcionales (PII, memoria, costo, disponibilidad) | ⬜ No iniciado |
+| D-04 | Inventario de capacidades actuales (as-is) | ✅ Escrito — **corregido el 26-ago** (fuentes de identidad de asesoras) |
+| D-05 | Casos de uso + criterios de aceptación | ✅ Escrito — 32 casos con criterios Gherkin · *falta revisión contigo* |
+| D-06 | Matriz de permisos (rol × recurso × acción) | ✅ Escrito · *falta revisión contigo* |
+| D-07 | Journey maps (cliente / asesora) | ✅ Escrito — 5 recorridos · *falta revisión contigo* |
+| D-08 | Máquinas de estado | ✅ Escrito — modelo de asignatario |
+| D-09 | Catálogo de eventos de dominio | ✅ Escrito — 22 tipos, E-01…E-22 |
 
 
-### Fase 3 — Transición
+### Fase 2 — Estructura (el cómo) · **92 %**
 
 
 | ID | Documento | Estado |
 |---|---|---|
-| D-16 | Antes vs Después → `16-antes-despues.md` | ⚠️ Borrador v0 — "Antes" ✅ verificado, "Después" 🔵 hipótesis |
-| D-17 | Benchmark de CRMs → `17-benchmark-crms.md` | ⚠️ Borrador v0 — reconstruido, 10 patrones propuestos |
-| D-18 | Estrategia de migración, coexistencia y rollback | ⬜ No iniciado |
-| D-19 | Matriz de riesgos | ⬜ No iniciado |
-| D-20 | Roadmap + matriz de trazabilidad | ⬜ No iniciado |
-| D-21 | Definition of Ready (contrato con desarrollo) | ⬜ No iniciado |
+| D-10 | Modelo de dominio + ERD + diccionario de datos | ✅ Escrito — **corregido el 26-ago** |
+| D-11 | Política de fuente de verdad por entidad | 🟠 §5 pendiente — **depende de ADR-006** |
+| D-12 | Arquitectura objetivo (C4) | 🟠 C4 completo · §7-§8 pendientes de D-18 y ADR-006 |
+| D-13 | Contratos de API y eventos | ✅ Escrito |
+| D-14 | ADRs (decisiones arquitectónicas) | 🟠 **ADR-001…005 cerrados · ADR-006 es un esqueleto** |
+| D-15 | Requisitos no funcionales (PII, memoria, costo, disponibilidad) | 🟠 67 líneas — faltan PII, memoria y disponibilidad |
+
+
+### Fase 3 — Transición · **50 %**
+
+
+| ID | Documento | Estado |
+|---|---|---|
+| D-16 | Antes vs Después → `16-antes-despues.md` | ✅ Escrito — "Antes" verificado, "Después" 🔵 hipótesis |
+| D-17 | Benchmark de CRMs → `17-benchmark-crms.md` | ✅ Escrito — 10 patrones propuestos |
+| D-18 | Estrategia de migración, coexistencia y rollback → `18-migracion.md` | ✅ **Escrito el 26-ago** — análisis de módulos, 8 cargas, coexistencia, reversión |
+| D-19 | Matriz de riesgos | 🔴 No iniciado |
+| D-20 | Roadmap + matriz de trazabilidad | 🔴 No iniciado |
+| D-21 | Definition of Ready (contrato con desarrollo) | 🔴 No iniciado |
 
 
 ---
@@ -102,10 +106,14 @@ HubSpot no filtra pipelines por rol — esa capacidad exige HubSpot Enterprise (
 | Roles "Interna" / "Seguimiento" |  | ✅ Confirmados por wireframe `img08` |
 
 
-### 🔴 Bloqueo activo — la pregunta V-4
+### ✅ RESUELTO — la pregunta V-4
 
 
-El código organiza el trabajo por CANAL. Los wireframes lo organizan por FUNCIÓN. Son incompatibles. Hasta resolverlo no se puede avanzar en D-06 (permisos), D-10 (modelo de datos) ni D-11 (fuentes de verdad). Detalle en D-03 §8 y [D-16 §2](16-antes-despues.md).
+> **Estuvo bloqueando D-06, D-10 y D-11. Ya no.**
+
+El código organiza el trabajo por CANAL. Los wireframes lo organizan por FUNCIÓN. **No son incompatibles: son dos dimensiones ortogonales.** El canal decide **de quién es el lead al entrar**; el rol decide **qué puede hacer** esa persona con él. Finca Raíz sigue entrando a Luisa, y Luisa además tiene el rol A. Seguimiento.
+
+Detalle en D-03 §8 y [D-16 §2](16-antes-despues.md). Los tres documentos que bloqueaba están escritos.
 
 ---
 

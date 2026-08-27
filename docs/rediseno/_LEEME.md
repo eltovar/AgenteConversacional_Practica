@@ -19,8 +19,8 @@ Documentación de planeación — Rediseño SofIA, Inmobiliaria Proteger
 |---|---|
 | *(raíz)* | El índice maestro y este documento |
 | Fase 0 - Fundamentos | Glosario, actores y roles, visión. Lo que hay que cerrar antes que nada |
-| Fase 1 - Comportamiento | Casos de uso, permisos, journeys, máquinas de estado *(por crear)* |
-| Fase 2 - Estructura | Modelo de datos, arquitectura, contratos, decisiones técnicas *(por crear)* |
+| Fase 1 - Comportamiento | Inventario, casos de uso, permisos, journeys, máquinas de estado, eventos ✅ |
+| Fase 2 - Estructura | Modelo de datos, fuentes de verdad, arquitectura, contratos, ADRs, NFR |
 | Fase 3 - Transición | Antes/después, benchmark, migración, riesgos, roadmap |
 | Wireframes | Catálogo comentado + las 9 imágenes originales en `Imagenes/` |
 
@@ -63,13 +63,27 @@ Cada documento indica su archivo de origen debajo del título.
 ---
 
 
-## El bloqueo activo
+## El bloqueo que hubo — y cómo se resolvió
 
 
 El código organiza el trabajo por CANAL. Los wireframes lo organizan por FUNCIÓN.
 - Código: Jubeny atiende 14 canales, Luisa atiende Finca Raíz y MetroCuadrado.
 - Wireframes: *A. Interna* atiende lo nuevo, *A. Seguimiento* hace seguimiento.
 
-Un lead de Finca Raíz que ya fue contactado, ¿es de Luisa o de Seguimiento? Hasta resolverlo no se puede escribir el modelo de datos ni la matriz de permisos.
+Un lead de Finca Raíz que ya fue contactado, ¿es de Luisa o de Seguimiento?
+
+> ✅ **Resuelto: son las dos cosas.** Canal y rol son **dimensiones distintas**. El canal decide de quién es el lead al entrar; el rol decide qué puede hacer esa persona. Finca Raíz sigue entrando a Luisa, y Luisa tiene el rol de Seguimiento.
 
 Está desarrollado en `03 - Visión` (§8) y `16 - Antes y Después` (§2).
+
+---
+
+
+## Dónde está el estado real
+
+
+| Documento | Para qué |
+|---|---|
+| `00 - Auditoria de la Documentacion` | **Estado archivo por archivo**, qué falta y en qué orden se cierra |
+| `00 - ESTADO de la Planeacion` | La instantánea corta: decisiones, métricas medidas y avance |
+| `00 - Indice Maestro` | El mapa de los 21 documentos y el registro de preguntas abiertas |

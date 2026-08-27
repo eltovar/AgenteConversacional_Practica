@@ -156,19 +156,89 @@ flowchart TD
 
 ## ADR-002 · Monolito modular frente a microservicios
 
-**Estado:** pendiente de redactar. Análisis preliminar en [D-02 §16](02-actores-y-roles.md).
+**Estado:** ✅ decidido · 2026-08-20
+
+**Decisión: monolito modular.** Un solo despliegue con límites internos estrictos.
+
+| A favor | En contra de microservicios aquí |
+|---|---|
+| ~7 usuarios, ~19 leads/día | Multiplican los puntos de fallo |
+| El sistema ya sufrió fugas de memoria y `SIGKILL` con **un** worker | Operar 5 servicios con ese historial es peor, no mejor |
+| Un despliegue, un registro de errores | Trazas distribuidas que nadie leerá |
+| Los módulos se pueden extraer después | Extraer es fácil; volver a juntar no |
+
+**Único candidato futuro a extraer:** el motor de IA — perfil de carga distinto y dependencias propias.
+**Consecuencia:** `outbound_panel.py` (10.222 líneas) se parte en ~10 módulos con fronteras explícitas. Ver [D-12 §6](12-arquitectura.md).
 
 ## ADR-003 · Etapas frente a propiedades del contacto
 
-**Estado:** pendiente de redactar. Decisión ya tomada (Opción B) en [D-02 §25.1](02-actores-y-roles.md); falta formalizarla como ADR.
+**Estado:** ✅ decidido · 2026-08-15
+
+**Contexto:** las 21 etapas de `lifecyclestage` son excluyentes, pero solo **7 forman una secuencia**. Las otras 14 son clasificaciones metidas en el mismo campo porque HubSpot ofrece uno solo de ese tipo.
+
+**El coste actual, medido:** un contacto marcado `Hasta 2M` **deja de decir en qué punto del embudo está**. Se pierde información a diario. Y `No Responde` concentra **1.220 contactos** — el 38 % de la base.
+
+**Decisión: separar en cuatro campos.**
+
+| Campo | Valores |
+|---|---|
+| `etapa` | 7 — el embudo real |
+| `presupuesto` | 4 — propiedad |
+| `segmento` | 5 — propiedad |
+| `motivo_cierre` | 5 — propiedad |
+
+**Consecuencias:** el Kanban baja de 21 a **7 columnas** y se vuelve usable · un contacto puede estar en `Visita Realizada` **y** ser `Hasta 2M` **y** `Propietario` · **migración compleja**: hay que inferir la etapa de los 3.209 contactos que hoy están en una clasificación → [D-18](18-migracion.md).
 
 ## ADR-004 · Modelo de gestión del agente de IA
 
-**Estado:** pendiente de redactar. Plan de 6 pilares en [D-02 §18](02-actores-y-roles.md).
+**Estado:** ✅ decidido · 2026-08-15
+
+**Evaluación separada:** modelo de interacción **85/100 — se mantiene**. Implementación técnica **60/100 — se rehace**.
+
+**Decisión: SofIA es un asignatario, no un estado.** Los 4 estados conversacionales se sustituyen por `assigned_to` + historial de eventos.
+
+**Plan de 6 pilares:**
+
+| # | Pilar | Prioridad |
+|---|---|---|
+| 1 | Un solo motor de respuesta — quedarse con `SofiaBrain`, retirar el orquestador | 🔴 |
+| 2 | SofIA como asignatario | 🔴 |
+| 3 | Contrato de autonomía explícito | 🔴 |
+| 4 | Handoff auditable — hoy el motivo se calcula y se descarta | 🟠 |
+| 5 | **Banco de evaluación** — 30-50 conversaciones etiquetadas | 🟠 |
+| 6 | Degradación segura — si el LLM falla, escalar en vez de callar | 🟠 |
+
+**Lo que NO se toca:** Single-Stream (una llamada al LLM en vez de dos), el flujo completo, el RAG, el historial en Redis, los prompts modularizados y APScheduler.
+
+**Riesgo principal:** hoy conviven **dos arquitecturas de agente y dos máquinas de estado**. Nadie puede responder *"¿por qué SofIA contestó esto?"* sin saber por qué ruta entró el mensaje.
 
 ## ADR-005 · Persistencia del KPI semanal
 
-**Estado:** pendiente de redactar. Análisis en [D-02 §21](02-actores-y-roles.md).
+**Estado:** ✅ decidido · 2026-08-15
+
+**Pregunta:** ¿guardar el KPI semanal en Drive?
+
+**Drive no es una base de datos.** Es almacenamiento de archivos: cada actualización exigiría leer, modificar y reescribir el archivo entero, sin control de concurrencia ni consultas.
+
+| Opción | Veredicto |
+|---|---|
+| Archivo CSV/JSON en Drive | ❌ Se corrompe con dos escrituras a la vez |
+| Google Sheets vía API | 🟡 Sirve para añadir una fila semanal; **no como fuente operativa** |
+| **MongoDB — colección `kpi_semanal`** | ✅ **Recomendada** |
+
+**Decisión: las dos cosas, cada una en su sitio.** MongoDB es la fuente operativa que lee el Dashboard; un trabajo semanal añade una fila a un Sheet en Drive para consulta humana de Marketing y dirección.
+
+**Ventana:** lunes a sábado, la misma para todos los roles.
+
+---
+
+## ADR-006 · Cola de propagación hacia HubSpot
+
+**Estado:** 🔴 pendiente de redactar — **es el ADR que falta y sostiene D-11**.
+
+**Contexto:** la política de fuentes de verdad exige que la escritura local sea síncrona y la propagación a HubSpot diferida con reintentos. Esa pieza **no existe hoy**: la reconciliación de 6 h hace de sustituto.
+
+**A decidir:** tecnología de la cola · política de reintentos · qué pasa si un elemento falla de forma permanente · cómo se observa su salud.
 
 ---
 
@@ -220,3 +290,71 @@ Al iniciar la aplicacion:
 
 **Sin bloqueos.** Quedan tres preguntas menores: duracion de la sesion (A-3), perdida de acceso a Gmail (A-4), migracion a Workspace (A-5).
 
+---
+
+### A-3 · Duracion y almacenamiento de la sesion
+
+**Pregunta:** ¿`sessionStorage` con JWT, o cookie `HttpOnly` enviada por el servidor?
+
+#### Comparacion
+
+| | `sessionStorage` + JWT | **Cookie `HttpOnly`** |
+|---|---|---|
+| ¿JavaScript puede leer el token? | **Si** | **No** — el navegador lo bloquea |
+| Riesgo de XSS | **Alto.** Un script inyectado hace `sessionStorage.getItem('jwt')` y se lleva la sesion | **Nulo para robo de token** |
+| Riesgo de CSRF | Bajo | Existe — se cubre con `SameSite=Lax` + token anti-CSRF |
+| Alcance | **Por pestana.** Una pestana nueva **no tiene token** | Todo el navegador |
+| Se envia solo en cada peticion | No — hay que anadirlo a mano | **Si**, incluido streaming y WebSocket |
+| Coste | Gratis | Gratis |
+
+#### El problema practico de `sessionStorage`
+
+> `sessionStorage` es **por pestana, no por sesion de usuario**. Si una asesora abre el CRM en una segunda pestana, esa pestana **no tiene token y le pide iniciar sesion otra vez**.
+>
+> Para alguien que trabaja todo el dia y abre pestanas constantemente, eso es exactamente la friccion que el rediseno quiere eliminar (razon n.o 5 del "por que ahora"). Y en dos dispositivos el problema se duplica.
+
+#### Sobre el comportamiento que buscas
+
+El efecto *"la sesion muere al cerrar"* tambien lo da una **cookie de sesion** — sin `Max-Age` ni `Expires`, el navegador la borra al cerrarse. Matiz: `sessionStorage` muere al cerrar **la pestana**; la cookie de sesion muere al cerrar **el navegador**. La segunda encaja mejor con la jornada de una asesora.
+
+#### Decision
+
+> ✅ **Cookie `HttpOnly` + `Secure` + `SameSite=Lax`**, con vida de **12 horas** y renovacion deslizante mientras haya actividad.
+
+| Requisito | Estado |
+|---|---|
+| HTTPS obligatorio | ✅ Railway lo da |
+| Token anti-CSRF en operaciones que escriben | Hay que implementarlo |
+| `SameSite=Lax` | Suficiente si frontend y backend comparten dominio |
+| Renovacion deslizante | Cada peticion valida extiende la sesion |
+| Revocacion inmediata | La sesion se invalida en servidor al desactivar al usuario |
+
+**Ninguna de las dos opciones cuesta dinero.** Ambas son capacidades nativas del navegador.
+
+> **Sobre las peticiones largas de IA:** las cookies se envian automaticamente en **todas** las peticiones, incluidas SSE y el handshake de WebSocket. Con `sessionStorage` habria que anadir la cabecera a mano en cada llamada. Para este sistema, la cookie es tambien mas comoda.
+
+### A-4 · Cambiar el correo de un usuario sin perder sus contactos
+
+> ✅ **Si es posible, y es la forma correcta de disenarlo.**
+
+La clave esta en el modelo de datos: **el correo es una credencial, no un identificador.**
+
+| Concepto | Papel |
+|---|---|
+| `user_id` interno | **Identidad permanente.** Nunca cambia |
+| `hubspot_owner_id` | Vinculo con HubSpot. Nunca cambia |
+| `email` | **Solo credencial de acceso.** Editable por el Administrador |
+
+Los contactos y los portales se enlazan al `user_id` / `owner_id`, **nunca al correo**. Por eso el Administrador puede cambiar el correo desde *Team Members* y la persona conserva intactos sus contactos, sus portales y su historial.
+
+> ⚠️ **Requisito de auditoria:** todo cambio de correo debe quedar registrado (quien lo cambio, cuando, valor anterior). Cambiar el correo de acceso de otra persona es una operacion sensible.
+
+### A-5 · Google Workspace
+
+> ✅ **Por ahora no.** Se mantiene la lista blanca por correo. Si algun dia migran, se anade `hd` como segunda barrera sin rehacer nada.
+
+### A-6 · Correos compartidos
+
+> ✅ **No se permiten.** Un correo = una persona.
+
+**Consecuencia inmediata:** `82598814` "Publicidad Proteger" es hoy **un owner que no es una persona**. Al aplicar esta regla hay que convertirlo en la cuenta de una persona real con rol Marketing, o retirarlo. → entra en D-18.

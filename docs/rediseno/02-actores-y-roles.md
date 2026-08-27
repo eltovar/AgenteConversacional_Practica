@@ -1491,3 +1491,33 @@ Todos los contadores de periodo usan la **misma ventana: lunes a sábado, seis d
 > 🔑 **Un solo concepto de "semana" en todo el sistema.** El Administrador cuadra con lo que ve cada asesora, y el KPI semanal de §21 usa exactamente el mismo corte.
 > ⚠️ El domingo queda **fuera** de la ventana. Si entra una cita en domingo, no se cuenta en ninguna semana. ❓ ¿Es intencional o el domingo debe sumarse al lunes siguiente?
 
+---
+
+## 27. Cierre de la ronda 6 — 2026-08-20
+
+| # | Punto | Resolucion |
+|---|---|---|
+| **A-3** | Sesion | ✅ **Cookie `HttpOnly` + `Secure` + `SameSite=Lax`**, 12 h con renovacion deslizante. `sessionStorage` descartado: es por pestana, una pestana nueva obligaria a iniciar sesion otra vez. Ver [ADR-001](14-adrs.md) |
+| **A-4** | Cambiar el correo de un usuario | ✅ **Si.** El correo es credencial, no identificador. Los contactos y portales se enlazan al `user_id` interno |
+| **A-5** | Google Workspace | ✅ Por ahora no |
+| **A-6** | Correos compartidos | ✅ **No se permiten.** Consecuencia: "Publicidad Proteger" debe pasar a ser la cuenta de una persona real |
+| **D11-1** | Retardo de sincronizacion | ✅ Definido por entidad en [D-11](11-fuentes-de-verdad.md) |
+| **D15-1** | Automatizaciones | ✅ **Se quedan en codigo**, pero se externalizan los parametros de tiempo. Ver [D-15](15-nfr.md) |
+| **D08-1** | ¿Hace falta posponer una conversacion? | ✅ **No.** No habra funcion de posponer |
+
+### 27.1 ⚠️ Correccion sobre D08-1 (2026-08-20)
+
+La conclusion anterior eliminaba de mas. **Habia tres mecanismos mezclados en uno:**
+
+| # | Mecanismo | ¿Hace falta? |
+|---|---|---|
+| 1 | Ventana de 24 h de WhatsApp — que se puede enviar | ✅ **Si**, es restriccion externa |
+| 2 | Limpieza de bandeja (`bot_controlled_conversations`, 48 h) | 🟡 Probablemente no |
+| 3 | Posponer manual (snooze) | ❌ No — era lo que respondia D08-1 |
+
+**El requisito real es el 1:** fuera de la ventana de 24 h solo se pueden enviar plantillas, y SofIA es quien las envia.
+
+> ✅ **RESUELTO — Opcion A (2026-08-20).** Al cerrarse la ventana de 24 h cambia **el modo de envio** (solo plantillas, las manda SofIA), **no el asignatario**. El contacto sigue siendo de su asesora y sigue en su cola.
+> Se conservan la ventana de 24 h (eventos `E-21` / `E-22`) y desaparecen `bot_controlled_conversations`, el umbral de 48 h y las claves `conv_was_panel`.
+> Desarrollo completo en [D-08 §1-bis](08-maquinas-de-estado.md).
+

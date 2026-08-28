@@ -20,6 +20,7 @@ from datetime import datetime
 from fastapi import APIRouter, Form, Request, BackgroundTasks
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.request_validator import RequestValidator
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
@@ -948,6 +949,65 @@ def get_link_detector() -> LinkDetector:
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Middleware"])
 
 
+# ════════════════════════════════════════════════════════════════════
+# Validación de firma Twilio (X-Twilio-Signature)
+# ════════════════════════════════════════════════════════════════════
+# Modos: "off" (no evalúa) | "log_only" (evalúa y loguea, nunca bloquea)
+# | "enforce" (rechaza con 403 si la firma no valida).
+# Se despliega en log_only y se observa contra tráfico real de Twilio antes
+# de pasar a enforce — un error de reconstrucción de URL en enforce directo
+# rechazaría el 100% del tráfico legítimo.
+TWILIO_SIGNATURE_MODE = os.getenv("TWILIO_SIGNATURE_MODE", "log_only").strip().lower()
+
+# URL pública que Twilio firmó (la que está configurada en la consola de Twilio
+# como webhook). Necesaria porque detrás del proxy de Railway request.url puede
+# reportar http:// y un host interno — sin esto, la firma nunca calzaría.
+# Mismo patrón que PANEL_BASE_URL (outbound_panel.py).
+TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", "").rstrip("/")
+
+
+def _twilio_signed_url(request: Request) -> str:
+    """Reconstruye la URL pública exacta que Twilio usó para firmar la petición.
+
+    El query string se conserva: en los webhooks JSON de Conversations API,
+    Twilio pone ahí bodySHA256, y sin él RequestValidator no puede validar
+    el cuerpo.
+    """
+    path_q = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    if TWILIO_WEBHOOK_BASE_URL:
+        return f"{TWILIO_WEBHOOK_BASE_URL}{path_q}"
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    host = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or request.url.netloc
+    ).split(",")[0].strip()
+    return f"{proto}://{host}{path_q}"
+
+
+async def _twilio_signature_is_valid(request: Request, raw_body: bytes, is_json: bool) -> bool:
+    """Valida X-Twilio-Signature. Falla cerrado ante cualquier error o dato ausente.
+
+    La firma se calcula distinto según el formato del payload:
+    - JSON (Conversations API): sobre el cuerpo crudo como string.
+    - form-encoded (Programmable Messaging): sobre los parámetros del form,
+      pasados como FormData para que se respeten claves repetidas.
+    """
+    token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    signature = request.headers.get("x-twilio-signature", "")
+    if not token or not signature:
+        return False
+    try:
+        validator = RequestValidator(token)
+        url = _twilio_signed_url(request)
+        if is_json:
+            return validator.validate(url, raw_body.decode("utf-8"), signature)
+        return validator.validate(url, await request.form(), signature)
+    except Exception as e:
+        logger.error(f"[Webhook][Sig] Error validando firma: {type(e).__name__}: {e}")
+        return False
+
+
 class MiddlewareConfig:
     """Configuración del middleware."""
 
@@ -1168,19 +1228,51 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     content_type = request.headers.get("content-type", "").lower()
     is_json_request = "application/json" in content_type
 
+    _raw_peek = b""
     try:
         _raw_peek = await request.body()
-        _peek_str = _raw_peek[:1500].decode("utf-8", errors="replace")
-        _twilio_sig = request.headers.get("x-twilio-signature", "")[:16]
-        logger.info(
-            f"[Webhook][RAW] ct='{content_type}' sig='{_twilio_sig}...' "
-            f"len={len(_raw_peek)} body[:1500]={_peek_str!r}"
-        )
+
         async def _replay_body():
             return {"type": "http.request", "body": _raw_peek, "more_body": False}
         request._receive = _replay_body
+
+        # Diagnóstico sin PII: forma del payload, nunca su contenido.
+        # Mismo criterio que query_profiler._safe_path — se registran
+        # etiquetas, no valores. Los nombres de campo son del esquema fijo
+        # de Twilio (From, Body, MessageSid...), no datos del cliente, y
+        # alcanzan para detectar un cambio de esquema (422).
+        _sig_present = bool(request.headers.get("x-twilio-signature"))
+        try:
+            if is_json_request:
+                _fields = sorted(json.loads(_raw_peek or b"{}").keys())
+            else:
+                from urllib.parse import parse_qsl
+                _fields = sorted({k for k, _ in parse_qsl(_raw_peek.decode("utf-8", "replace"))})
+        except Exception:
+            _fields = ["<no parseable>"]
+        logger.info(
+            f"[Webhook][RAW] ct='{content_type}' sig_present={_sig_present} "
+            f"len={len(_raw_peek)} fields={_fields}"
+        )
     except Exception as _diag_e:
         logger.warning(f"[Webhook][RAW] No se pudo leer body para diagnóstico: {_diag_e}")
+
+    # ── Validación de firma Twilio ─────────────────────────────────
+    if TWILIO_SIGNATURE_MODE != "off":
+        _sig_ok = await _twilio_signature_is_valid(request, _raw_peek, is_json_request)
+        if not _sig_ok:
+            if TWILIO_SIGNATURE_MODE == "enforce":
+                logger.warning(
+                    f"[Webhook][Sig] RECHAZADO: firma inválida o ausente "
+                    f"(ct='{content_type}', len={len(_raw_peek)})"
+                )
+                return Response(content="", status_code=403)
+            logger.warning(
+                f"[Webhook][Sig] log_only: firma NO válida — en enforce se "
+                f"habría rechazado (ct='{content_type}', len={len(_raw_peek)})"
+            )
+        else:
+            logger.info("[Webhook][Sig] Firma válida")
 
     From: str = ""
     Body: str = ""

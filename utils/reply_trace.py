@@ -6,10 +6,13 @@ guarda nada en Mongo, no se emite ningún error, y el mensaje queda idéntico a
 uno que nunca citó nada. Ese silencio es el problema de fondo: impide medir el
 tamaño del fallo y, por tanto, decidir qué arreglar.
 
-WhatsApp sí nos da la verdad de terreno. `ChannelMetadata.data.context` sólo
-viene poblado cuando el mensaje ES una respuesta a otro. Comparando esa señal
-contra lo que el pipeline logró resolver, cada entrante cae en exactamente una
-categoría contable.
+La primera versión daba por verdad de terreno la presencia de
+`ChannelMetadata.data.context`. Es falsa, y medirlo en producción lo demostró
+en una hora: Twilio manda ese campo con la identidad del remitente
+(`ProfileName`, `WaId`) en prácticamente todos los entrantes, así que el
+clasificador marcaba como pérdida 24 de 27 mensajes. Lo que marca una
+respuesta no es que exista el contexto, sino que dentro aparezca una clave de
+referencia al mensaje citado.
 
 Estas funciones son puras: no tocan red, disco ni base de datos, y no alteran
 ningún flujo. Quien llama decide si registra el resultado y con qué nivel.
@@ -36,6 +39,14 @@ PERDIDA_NO_EN_MONGO = "perdida:no_esta_en_mongo"
 # otras se han visto en payloads antiguos y en la documentación.
 _CLAVES_REFERENCIA = ("MessageId", "message_id", "quoted_message_id", "id")
 
+# La presencia de `data.context` NO significa que el mensaje sea una respuesta.
+# Medido en producción el 29-ago-2026: Twilio manda
+# `context=[ProfileName,WaId]` —la identidad de quien escribe— en
+# prácticamente todos los entrantes. Darlo por marca de cita clasificó como
+# pérdida 24 de 27 mensajes en una hora, contra una tasa histórica del 2-3%.
+# Sólo estas claves marcan una respuesta de verdad.
+_CLAVES_DE_RESPUESTA = frozenset(_CLAVES_REFERENCIA)
+
 
 def _a_dict(bruto: Any) -> Optional[dict]:
     """Normaliza un campo que puede llegar como dict, como JSON o como basura."""
@@ -52,12 +63,12 @@ def _a_dict(bruto: Any) -> Optional[dict]:
     return None
 
 
-def contexto_de_cita(channel_metadata_bruto: Any) -> Optional[dict]:
-    """Devuelve `data.context` si el entrante es una respuesta; si no, None.
+def contexto_del_mensaje(channel_metadata_bruto: Any) -> Optional[dict]:
+    """Devuelve `data.context` del ChannelMetadata, o None si no viene.
 
-    Ésta es la verdad de terreno: WhatsApp puebla `context` únicamente cuando
-    el usuario respondió citando. Que devuelva un dict —aunque sea sin
-    identificador dentro— significa que hubo cita.
+    Ojo: que exista NO significa que haya cita. Twilio lo manda en casi todos
+    los entrantes con la identidad del remitente dentro. Para saber si es una
+    respuesta hay que pasar por `es_contexto_de_respuesta`.
     """
     meta = _a_dict(channel_metadata_bruto)
     if meta is None:
@@ -67,6 +78,18 @@ def contexto_de_cita(channel_metadata_bruto: Any) -> Optional[dict]:
         return None
     contexto = datos.get("context")
     return contexto if isinstance(contexto, dict) else None
+
+
+def es_contexto_de_respuesta(contexto: Optional[dict]) -> bool:
+    """True sólo si el contexto describe una cita, no al remitente.
+
+    Distinguir esto es lo único que separa una medición útil de un contador de
+    mensajes: `data.context` viene poblado siempre, y lo que cambia cuando hay
+    cita es que aparece una clave de referencia dentro.
+    """
+    if not isinstance(contexto, dict) or not contexto:
+        return False
+    return any(clave in contexto for clave in _CLAVES_DE_RESPUESTA)
 
 
 def referencia_de_contexto(contexto: Optional[dict]) -> Optional[str]:
@@ -194,8 +217,8 @@ def traza(
     Devuelve `(linea, diagnostico)`. Quien llama elige el nivel de log según
     `es_perdida(diagnostico)`.
     """
-    contexto = contexto_de_cita(channel_metadata_bruto)
-    hubo_contexto = contexto is not None
+    contexto = contexto_del_mensaje(channel_metadata_bruto)
+    hubo_contexto = es_contexto_de_respuesta(contexto)
     if referencia is None:
         referencia = referencia_de_contexto(contexto)
 

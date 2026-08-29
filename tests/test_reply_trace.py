@@ -27,36 +27,63 @@ CM_CON_CITA = json.dumps({
     },
 })
 
+# Forma REAL de un mensaje normal, capturada en produccion el 29-ago-2026:
+#   [CitaTrace][forma] meta=[data,type] data=[context] context=[ProfileName,WaId]
+# El `context` existe SIEMPRE y describe al remitente. El fixture original de
+# este fichero lo omitia porque lo escribi con la misma suposicion que el
+# codigo, asi que la prueba confirmaba la hipotesis en vez de atacarla.
 CM_SIN_CITA = json.dumps({
+    "type": "whatsapp",
+    "data": {"context": {"ProfileName": "Cliente", "WaId": "573001234567"}},
+})
+
+# Metadata sin bloque `context` en absoluto (no toda variante lo trae).
+CM_SIN_CONTEXTO = json.dumps({
     "type": "whatsapp",
     "data": {"author": {"Name": "Cliente"}},
 })
 
-# Cliente que citó pero cuyo contexto llegó sin identificador utilizable.
+# Cliente que cito pero cuyo contexto llego sin identificador utilizable.
 CM_CITA_SIN_ID = json.dumps({
     "type": "whatsapp",
-    "data": {"context": {}},
+    "data": {"context": {"ProfileName": "Cliente", "WaId": "573001234567",
+                         "MessageId": ""}},
 })
 
 
-# ── contexto_de_cita ────────────────────────────────────────────────────────
+# ── contexto_del_mensaje ────────────────────────────────────────────────────────
 
 def test_detecta_el_contexto_cuando_el_cliente_cito():
-    assert rt.contexto_de_cita(CM_CON_CITA) == {"MessageId": WAMID}
+    assert rt.contexto_del_mensaje(CM_CON_CITA) == {"MessageId": WAMID}
 
 
-def test_sin_contexto_devuelve_none():
-    assert rt.contexto_de_cita(CM_SIN_CITA) is None
+def test_sin_bloque_context_devuelve_none():
+    assert rt.contexto_del_mensaje(CM_SIN_CONTEXTO) is None
 
 
-def test_el_contexto_vacio_sigue_probando_que_hubo_cita():
-    """Un `context` sin identificador NO es lo mismo que no haber citado."""
-    assert rt.contexto_de_cita(CM_CITA_SIN_ID) == {}
-    assert rt.contexto_de_cita(CM_CITA_SIN_ID) is not None
+def test_el_contexto_de_un_mensaje_normal_no_es_una_cita():
+    """REGRESION del falso positivo del 89%: `context` viene en todos los
+    entrantes con la identidad de quien escribe. Que exista no prueba nada."""
+    ctx = rt.contexto_del_mensaje(CM_SIN_CITA)
+    assert ctx is not None, "el contexto existe..."
+    assert rt.es_contexto_de_respuesta(ctx) is False, "...pero no es una cita"
+
+
+def test_una_clave_de_referencia_si_marca_una_cita():
+    ctx = rt.contexto_del_mensaje(CM_CON_CITA)
+    assert rt.es_contexto_de_respuesta(ctx) is True
+
+
+def test_un_contexto_con_referencia_vacia_sigue_siendo_una_cita():
+    """La clave esta pero el valor no sirve: el cliente cito y nos quedamos
+    sin con que buscar."""
+    ctx = rt.contexto_del_mensaje(CM_CITA_SIN_ID)
+    assert rt.es_contexto_de_respuesta(ctx) is True
+    assert rt.referencia_de_contexto(ctx) is None
 
 
 def test_acepta_dict_ya_parseado_igual_que_json():
-    assert rt.contexto_de_cita(json.loads(CM_CON_CITA)) == {"MessageId": WAMID}
+    assert rt.contexto_del_mensaje(json.loads(CM_CON_CITA)) == {"MessageId": WAMID}
 
 
 @pytest.mark.parametrize("basura", [
@@ -66,7 +93,7 @@ def test_acepta_dict_ya_parseado_igual_que_json():
 ])
 def test_nunca_revienta_con_payloads_malformados(basura):
     """La traza corre en el camino del webhook: no puede lanzar nunca."""
-    assert rt.contexto_de_cita(basura) is None
+    assert rt.contexto_del_mensaje(basura) is None
 
 
 # ── referencia_de_contexto ──────────────────────────────────────────────────

@@ -1662,6 +1662,15 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 logger.warning(_linea_cita)
             elif _diag_cita != reply_trace.SIN_CITA:
                 logger.info(_linea_cita)
+
+            # DIAGNÓSTICO TEMPORAL: qué claves trae el ChannelMetadata. Sin
+            # esto no se puede distinguir una respuesta real de un mensaje
+            # normal, y el clasificador marca el 89% como pérdida. Se registra
+            # una vez por estructura distinta, así que una respuesta real
+            # —con claves nuevas— aparece sola. Retirar tras calibrar.
+            _forma = reply_trace.forma_del_payload(channel_metadata_raw)
+            if reply_trace.forma_es_nueva(_forma):
+                logger.warning(f"[CitaTrace][forma] sid={MessageSid or 'N/A'} {_forma}")
         except Exception as _e_cita:
             logger.debug(f"[CitaTrace] traza de entrada fallida: {_e_cita}")
 

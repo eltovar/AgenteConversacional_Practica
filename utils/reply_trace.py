@@ -128,6 +128,59 @@ def es_perdida(diagnostico: str) -> bool:
     return diagnostico.startswith("perdida:")
 
 
+# ── DIAGNÓSTICO TEMPORAL — retirar cuando el clasificador esté calibrado ─────
+#
+# Why: la primera hora en producción marcó el 89% de los entrantes como cita
+# perdida. La suposición de que `data.context` sólo aparece en respuestas era
+# falsa: Twilio lo manda en casi todos los mensajes. Para endurecer el
+# clasificador hace falta saber QUÉ trae ese contexto, y eso no se puede
+# deducir desde aquí — hay que mirarlo en el payload real.
+#
+# Registra nombres de clave, nunca valores, igual que el log [Webhook][RAW].
+# Los nombres son del esquema fijo de Twilio, no datos del cliente.
+
+_FORMAS_VISTAS: set = set()
+_MAX_FORMAS = 200  # cota dura: el watchdog de memoria no perdona sets sin techo
+
+
+def forma_del_payload(channel_metadata_bruto: Any) -> Optional[str]:
+    """Firma estructural del ChannelMetadata: qué claves trae, en qué nivel.
+
+    Devuelve None si no hay metadata que describir.
+    """
+    meta = _a_dict(channel_metadata_bruto)
+    if meta is None:
+        return None
+
+    datos = meta.get("data")
+    datos = datos if isinstance(datos, dict) else {}
+    contexto = datos.get("context")
+
+    partes = [
+        "meta=[" + ",".join(sorted(meta.keys())) + "]",
+        "data=[" + ",".join(sorted(datos.keys())) + "]",
+    ]
+    if isinstance(contexto, dict):
+        partes.append("context=[" + ",".join(sorted(contexto.keys())) + "]")
+    elif contexto is not None:
+        partes.append(f"context=<{type(contexto).__name__}>")
+    return " ".join(partes)
+
+
+def forma_es_nueva(firma: Optional[str]) -> bool:
+    """True la primera vez que se ve esta estructura en este proceso.
+
+    Acota el volumen: la forma habitual se registra una vez, y una respuesta
+    real —que traerá claves distintas— salta a la vista de inmediato.
+    """
+    if not firma or firma in _FORMAS_VISTAS:
+        return False
+    if len(_FORMAS_VISTAS) >= _MAX_FORMAS:
+        return False
+    _FORMAS_VISTAS.add(firma)
+    return True
+
+
 def traza(
     message_sid: Optional[str],
     canal: Optional[str],

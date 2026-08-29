@@ -62,11 +62,29 @@ def _channel_metadata(con_cita: bool) -> str:
     return json.dumps({"type": "whatsapp", "data": datos})
 
 
+@pytest.fixture(autouse=True)
+def _limpiar_memoria_de_formas():
+    """El diagnóstico de forma deduplica en un set de módulo: sin limpiarlo,
+    el orden de los tests decidiría si emite o no."""
+    rt._FORMAS_VISTAS.clear()
+    yield
+    rt._FORMAS_VISTAS.clear()
+
+
 async def _lineas_de_traza(caplog, campos: dict) -> list[str]:
+    """Sólo las líneas de clasificación.
+
+    `[CitaTrace][forma]` queda fuera a propósito: es el diagnóstico temporal,
+    se emite una vez por estructura distinta —también en mensajes normales—
+    y su volumen se comprueba en su propio test.
+    """
     caplog.set_level(logging.INFO)
     respuesta = await wh.whatsapp_webhook(_peticion_legacy(campos), BackgroundTasks())
     assert respuesta.status_code == 200, "la traza no puede alterar la respuesta al webhook"
-    return [r.getMessage() for r in caplog.records if "[CitaTrace]" in r.getMessage()]
+    return [
+        r.getMessage() for r in caplog.records
+        if "[CitaTrace][entrada]" in r.getMessage() or "[CitaTrace][salida]" in r.getMessage()
+    ]
 
 
 # ── El caso que motiva toda la instrumentación ──────────────────────────────
@@ -134,6 +152,32 @@ async def test_un_channel_metadata_corrupto_no_tumba_el_webhook(caplog):
 
 
 # ── PII ─────────────────────────────────────────────────────────────────────
+
+async def test_el_diagnostico_de_forma_se_emite_una_sola_vez(caplog):
+    """Se registra una vez por estructura, no una vez por mensaje: cinco
+    entrantes idénticos dejan una sola línea."""
+    caplog.set_level(logging.INFO)
+    for _ in range(5):
+        await wh.whatsapp_webhook(
+            _peticion_legacy(_campos_base(ChannelMetadata=_channel_metadata(False))),
+            BackgroundTasks(),
+        )
+    formas = [r.getMessage() for r in caplog.records if "[CitaTrace][forma]" in r.getMessage()]
+    assert len(formas) == 1, f"el diagnostico se repitio {len(formas)} veces"
+    assert "meta=[" in formas[0] and "data=[" in formas[0]
+
+
+async def test_el_diagnostico_de_forma_no_lleva_valores(caplog):
+    caplog.set_level(logging.INFO)
+    await wh.whatsapp_webhook(
+        _peticion_legacy(_campos_base(ChannelMetadata=_channel_metadata(True))),
+        BackgroundTasks(),
+    )
+    formas = [r.getMessage() for r in caplog.records if "[CitaTrace][forma]" in r.getMessage()]
+    assert formas, "no se emitio el diagnostico"
+    assert "MessageId" in formas[0], "deberia listar la clave"
+    assert WAMID not in formas[0], "pero nunca su valor"
+
 
 async def test_la_traza_no_registra_el_telefono_ni_el_cuerpo(caplog):
     lineas = await _lineas_de_traza(caplog, _campos_base(

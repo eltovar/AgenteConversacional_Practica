@@ -90,16 +90,19 @@ async def _lineas_de_traza(caplog, campos: dict) -> list[str]:
 # ── El caso que motiva toda la instrumentación ──────────────────────────────
 
 async def test_una_cita_del_cliente_deja_de_ser_invisible(caplog):
-    """Legacy no manda OriginalRepliedMessageSid, pero ChannelMetadata trae el
-    contexto. Antes de esto el mensaje era indistinguible de uno sin cita."""
+    """Legacy no manda OriginalRepliedMessageSid, pero si ChannelMetadata
+    trajera el contexto, el mensaje dejaria de ser indistinguible de uno sin
+    cita. La entrada solo constata que hay referencia: quien decide el
+    desenlace es la linea de salida, tras buscar en Mongo."""
     lineas = await _lineas_de_traza(caplog, _campos_base(
         ChannelMetadata=_channel_metadata(con_cita=True),
     ))
     assert lineas, "el webhook no emitió ninguna traza para una cita entrante"
     entrada = [l for l in lineas if "[entrada]" in l]
     assert entrada, f"falta la traza de entrada; se emitió: {lineas}"
-    assert rt.PERDIDA_SOLO_WAMID in entrada[0]
+    assert rt.PENDIENTE in entrada[0]
     assert "contexto_whatsapp=si" in entrada[0]
+    assert "forma_ref=wamid" in entrada[0]
 
 
 async def test_el_channel_metadata_llega_de_verdad_a_la_traza(caplog):
@@ -151,7 +154,24 @@ async def test_un_channel_metadata_corrupto_no_tumba_el_webhook(caplog):
     assert "_process_message_deferred" in [t.func.__name__ for t in tareas.tasks]
 
 
-# ── PII ─────────────────────────────────────────────────────────────────────
+async def test_una_cita_legitima_no_dispara_un_warning_en_la_entrada(caplog):
+    """REGRESION del WARNING falso. Twilio manda la referencia cuando el
+    original tiene menos de 7 dias; esa cita se resuelve bien, y marcarla como
+    perdida al entrar ensucia el grep con el que se leen los datos."""
+    caplog.set_level(logging.INFO)
+    await wh.whatsapp_webhook(
+        _peticion_legacy(_campos_base(
+            OriginalRepliedMessageSid="SM" + "a" * 32,
+            ChannelMetadata=_channel_metadata(con_cita=False),
+        )),
+        BackgroundTasks(),
+    )
+    entrada = [r for r in caplog.records if "[CitaTrace][entrada]" in r.getMessage()]
+    assert entrada, "deberia registrarse la cita entrante"
+    assert rt.PENDIENTE in entrada[0].getMessage()
+    assert "perdida" not in entrada[0].getMessage()
+    assert entrada[0].levelno == logging.INFO, "no puede ser WARNING: no hay fallo"
+
 
 async def test_el_diagnostico_de_forma_se_emite_una_sola_vez(caplog):
     """Se registra una vez por estructura, no una vez por mensaje: cinco
@@ -178,6 +198,8 @@ async def test_el_diagnostico_de_forma_no_lleva_valores(caplog):
     assert "MessageId" in formas[0], "deberia listar la clave"
     assert WAMID not in formas[0], "pero nunca su valor"
 
+
+# ── PII ─────────────────────────────────────────────────────────────────────
 
 async def test_la_traza_no_registra_el_telefono_ni_el_cuerpo(caplog):
     lineas = await _lineas_de_traza(caplog, _campos_base(

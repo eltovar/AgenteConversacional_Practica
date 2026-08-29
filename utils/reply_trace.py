@@ -30,6 +30,9 @@ from typing import Any, Optional, Tuple
 # que hoy no dejan ninguna huella en el sistema.
 SIN_CITA = "sin_cita"
 RESUELTA = "resuelta"
+# Hay referencia pero todavía no se ha buscado. No es un desenlace: es la foto
+# de la entrada al webhook, y se cierra en la línea de salida con el mismo sid.
+PENDIENTE = "pendiente_de_resolver"
 PERDIDA_SIN_REFERENCIA = "perdida:sin_referencia"
 PERDIDA_SOLO_WAMID = "perdida:solo_wamid"
 PERDIDA_NO_EN_MONGO = "perdida:no_esta_en_mongo"
@@ -125,6 +128,7 @@ def diagnosticar(
     referencia: Optional[str],
     hubo_contexto: bool,
     resuelto: bool,
+    resolucion_intentada: bool = True,
 ) -> str:
     """Clasifica el destino de una posible cita entrante.
 
@@ -132,13 +136,19 @@ def diagnosticar(
         referencia: identificador del mensaje citado que el pipeline extrajo.
         hubo_contexto: WhatsApp marcó el entrante como respuesta.
         resuelto: la búsqueda en Mongo encontró el mensaje citado.
+        resolucion_intentada: si ya se buscó en Mongo. En la entrada al webhook
+            todavía no, y dar por perdida una referencia que nadie ha buscado
+            convierte cada cita legítima en un WARNING falso.
     """
     if resuelto:
         return RESUELTA
     if not referencia:
         # Sin referencia y sin contexto no hubo cita ninguna. Con contexto, el
-        # cliente sí citó y nos quedamos sin identificador con el que buscar.
+        # cliente sí citó y nos quedamos sin identificador con el que buscar:
+        # eso ya es definitivo aquí, porque no queda nada que consultar.
         return PERDIDA_SIN_REFERENCIA if hubo_contexto else SIN_CITA
+    if not resolucion_intentada:
+        return PENDIENTE
     if forma_de_referencia(referencia) == "wamid":
         # El WAMid sólo casa contra el campo `wamid`, que se puebla en una rama
         # del webhook que hoy no recibe eventos. Buscar por él no puede acertar.
@@ -211,6 +221,7 @@ def traza(
     channel_metadata_bruto: Any = None,
     resuelto: bool = False,
     etapa: str = "entrada",
+    resolucion_intentada: bool = True,
 ) -> Tuple[str, str]:
     """Arma la línea de traza y su diagnóstico.
 
@@ -222,7 +233,7 @@ def traza(
     if referencia is None:
         referencia = referencia_de_contexto(contexto)
 
-    diagnostico = diagnosticar(referencia, hubo_contexto, resuelto)
+    diagnostico = diagnosticar(referencia, hubo_contexto, resuelto, resolucion_intentada)
     linea = (
         f"[CitaTrace][{etapa}] sid={message_sid or 'N/A'} "
         f"canal={canal or 'N/A'} contexto_whatsapp={'si' if hubo_contexto else 'no'} "

@@ -150,6 +150,34 @@ def test_wamid_sin_resolver_se_marca_aparte():
     assert rt.diagnosticar(WAMID, hubo_contexto=True, resuelto=False) == rt.PERDIDA_SOLO_WAMID
 
 
+def test_en_la_entrada_una_referencia_todavia_no_es_una_perdida():
+    """REGRESION del WARNING falso: en la entrada al webhook nadie ha buscado
+    en Mongo, asi que toda cita legitima salia marcada como perdida y un
+    segundo despues la linea de salida decia 'resuelta'."""
+    assert rt.diagnosticar(
+        "SM" + "a" * 32, hubo_contexto=False, resuelto=False,
+        resolucion_intentada=False,
+    ) == rt.PENDIENTE
+
+
+def test_un_wamid_en_la_entrada_tampoco_se_da_por_perdido():
+    """La busqueda incluye el campo `wamid`: hay que dejarla ocurrir."""
+    assert rt.diagnosticar(
+        WAMID, hubo_contexto=True, resuelto=False, resolucion_intentada=False,
+    ) == rt.PENDIENTE
+
+
+def test_la_falta_de_referencia_si_es_definitiva_ya_en_la_entrada():
+    """Aqui no hay nada que buscar, asi que esperar no cambiaria el desenlace."""
+    assert rt.diagnosticar(
+        None, hubo_contexto=True, resuelto=False, resolucion_intentada=False,
+    ) == rt.PERDIDA_SIN_REFERENCIA
+
+
+def test_pendiente_no_cuenta_como_perdida():
+    assert rt.es_perdida(rt.PENDIENTE) is False
+
+
 def test_sid_resoluble_que_no_casa_es_otra_perdida():
     assert rt.diagnosticar("IM" + "a" * 32, hubo_contexto=True, resuelto=False) == rt.PERDIDA_NO_EN_MONGO
 

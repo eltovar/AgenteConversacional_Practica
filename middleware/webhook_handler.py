@@ -1657,6 +1657,10 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 channel_metadata_bruto=channel_metadata_raw,
                 resuelto=False,
                 etapa="entrada",
+                # Aquí todavía no se ha buscado en Mongo. Sin esto, cada cita
+                # legítima salía como WARNING de pérdida y un segundo después
+                # la línea de salida decía "resuelta".
+                resolucion_intentada=False,
             )
             if reply_trace.es_perdida(_diag_cita):
                 logger.warning(_linea_cita)

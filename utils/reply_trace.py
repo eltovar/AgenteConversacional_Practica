@@ -1,0 +1,155 @@
+"""Traza de las citaciones entrantes: separa "no citó" de "citó y lo perdimos".
+
+Why: cuando un cliente responde citando un mensaje en WhatsApp y Twilio no nos
+manda una referencia utilizable, la cita desaparece sin dejar rastro — no se
+guarda nada en Mongo, no se emite ningún error, y el mensaje queda idéntico a
+uno que nunca citó nada. Ese silencio es el problema de fondo: impide medir el
+tamaño del fallo y, por tanto, decidir qué arreglar.
+
+WhatsApp sí nos da la verdad de terreno. `ChannelMetadata.data.context` sólo
+viene poblado cuando el mensaje ES una respuesta a otro. Comparando esa señal
+contra lo que el pipeline logró resolver, cada entrante cae en exactamente una
+categoría contable.
+
+Estas funciones son puras: no tocan red, disco ni base de datos, y no alteran
+ningún flujo. Quien llama decide si registra el resultado y con qué nivel.
+
+PII: la traza nunca incluye teléfonos, nombres ni contenido de mensajes. Sólo
+lleva el SID de Twilio, el canal y el diagnóstico — conforme a la regla de
+CLAUDE.md de no loguear datos de clientes en producción.
+"""
+
+import json
+from typing import Any, Optional, Tuple
+
+# ── Diagnósticos ────────────────────────────────────────────────────────────
+# Un entrante cae en exactamente uno. Los que empiezan por "perdida:" son los
+# que hoy no dejan ninguna huella en el sistema.
+SIN_CITA = "sin_cita"
+RESUELTA = "resuelta"
+PERDIDA_SIN_REFERENCIA = "perdida:sin_referencia"
+PERDIDA_SOLO_WAMID = "perdida:solo_wamid"
+PERDIDA_NO_EN_MONGO = "perdida:no_esta_en_mongo"
+
+# Claves donde WhatsApp deja el identificador del mensaje citado, dentro de
+# ChannelMetadata.data.context. PascalCase es la que usa Twilio de verdad; las
+# otras se han visto en payloads antiguos y en la documentación.
+_CLAVES_REFERENCIA = ("MessageId", "message_id", "quoted_message_id", "id")
+
+
+def _a_dict(bruto: Any) -> Optional[dict]:
+    """Normaliza un campo que puede llegar como dict, como JSON o como basura."""
+    if not bruto:
+        return None
+    if isinstance(bruto, dict):
+        return bruto
+    if isinstance(bruto, (str, bytes, bytearray)):
+        try:
+            valor = json.loads(bruto)
+        except (ValueError, TypeError):
+            return None
+        return valor if isinstance(valor, dict) else None
+    return None
+
+
+def contexto_de_cita(channel_metadata_bruto: Any) -> Optional[dict]:
+    """Devuelve `data.context` si el entrante es una respuesta; si no, None.
+
+    Ésta es la verdad de terreno: WhatsApp puebla `context` únicamente cuando
+    el usuario respondió citando. Que devuelva un dict —aunque sea sin
+    identificador dentro— significa que hubo cita.
+    """
+    meta = _a_dict(channel_metadata_bruto)
+    if meta is None:
+        return None
+    datos = meta.get("data")
+    if not isinstance(datos, dict):
+        return None
+    contexto = datos.get("context")
+    return contexto if isinstance(contexto, dict) else None
+
+
+def referencia_de_contexto(contexto: Optional[dict]) -> Optional[str]:
+    """Identificador del mensaje citado que viene dentro del contexto."""
+    if not isinstance(contexto, dict):
+        return None
+    for clave in _CLAVES_REFERENCIA:
+        valor = contexto.get(clave)
+        if valor:
+            return str(valor)
+    return None
+
+
+def forma_de_referencia(referencia: Optional[str]) -> str:
+    """Clasifica la referencia por su forma, que determina si es resoluble.
+
+    Importa porque cada forma se busca en un campo distinto de Mongo, y hoy no
+    todos esos campos están poblados.
+    """
+    if not referencia:
+        return "ausente"
+    ref = str(referencia)
+    if ref.startswith("wamid."):
+        return "wamid"
+    if ref.startswith("IM"):
+        return "im_sid"
+    if ref.startswith(("SM", "MM")):
+        return "sm_sid"
+    return "otra"
+
+
+def diagnosticar(
+    referencia: Optional[str],
+    hubo_contexto: bool,
+    resuelto: bool,
+) -> str:
+    """Clasifica el destino de una posible cita entrante.
+
+    Args:
+        referencia: identificador del mensaje citado que el pipeline extrajo.
+        hubo_contexto: WhatsApp marcó el entrante como respuesta.
+        resuelto: la búsqueda en Mongo encontró el mensaje citado.
+    """
+    if resuelto:
+        return RESUELTA
+    if not referencia:
+        # Sin referencia y sin contexto no hubo cita ninguna. Con contexto, el
+        # cliente sí citó y nos quedamos sin identificador con el que buscar.
+        return PERDIDA_SIN_REFERENCIA if hubo_contexto else SIN_CITA
+    if forma_de_referencia(referencia) == "wamid":
+        # El WAMid sólo casa contra el campo `wamid`, que se puebla en una rama
+        # del webhook que hoy no recibe eventos. Buscar por él no puede acertar.
+        return PERDIDA_SOLO_WAMID
+    return PERDIDA_NO_EN_MONGO
+
+
+def es_perdida(diagnostico: str) -> bool:
+    """True si el diagnóstico representa una cita que el cliente hizo y se perdió."""
+    return diagnostico.startswith("perdida:")
+
+
+def traza(
+    message_sid: Optional[str],
+    canal: Optional[str],
+    referencia: Optional[str],
+    channel_metadata_bruto: Any = None,
+    resuelto: bool = False,
+    etapa: str = "entrada",
+) -> Tuple[str, str]:
+    """Arma la línea de traza y su diagnóstico.
+
+    Devuelve `(linea, diagnostico)`. Quien llama elige el nivel de log según
+    `es_perdida(diagnostico)`.
+    """
+    contexto = contexto_de_cita(channel_metadata_bruto)
+    hubo_contexto = contexto is not None
+    if referencia is None:
+        referencia = referencia_de_contexto(contexto)
+
+    diagnostico = diagnosticar(referencia, hubo_contexto, resuelto)
+    linea = (
+        f"[CitaTrace][{etapa}] sid={message_sid or 'N/A'} "
+        f"canal={canal or 'N/A'} contexto_whatsapp={'si' if hubo_contexto else 'no'} "
+        f"forma_ref={forma_de_referencia(referencia)} diagnostico={diagnostico}"
+    )
+    return linea, diagnostico

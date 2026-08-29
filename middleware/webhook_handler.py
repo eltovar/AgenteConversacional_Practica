@@ -59,6 +59,7 @@ from utils.twilio_client import twilio_client
 
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
+from utils import reply_trace
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESCATE DE LEADS ESTANCADOS
@@ -414,6 +415,25 @@ async def _process_message_deferred(
                     logger.warning(f"[DeferredProcess] Reply SID no encontrado en MongoDB: {original_replied_message_sid} (mensaje expirado o pre-sistema)")
             except Exception as e:
                 logger.warning(f"[DeferredProcess] Error resolviendo reply context: {e}")
+
+        # Cierre de la traza: si el parser sí trajo referencia, aquí se sabe si
+        # llegó a casar contra Mongo. La señal de contexto ya quedó en la línea
+        # de entrada, correlacionable por sid.
+        try:
+            _linea_cita, _diag_cita = reply_trace.traza(
+                message_sid=message_sid,
+                canal=final_channel,
+                referencia=original_replied_message_sid,
+                channel_metadata_bruto=None,
+                resuelto=bool(reply_to_id),
+                etapa="salida",
+            )
+            if reply_trace.es_perdida(_diag_cita):
+                logger.warning(_linea_cita)
+            elif _diag_cita != reply_trace.SIN_CITA:
+                logger.info(_linea_cita)
+        except Exception as _e_cita:
+            logger.debug(f"[CitaTrace] traza de salida fallida: {_e_cita}")
 
         client_mongo_id = await mongo_manager.save_message(
             phone=phone_normalized,
@@ -1284,6 +1304,9 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     OriginalRepliedMessageSid: Optional[str] = None
     OriginalRepliedMessageSender: Optional[str] = None
     conversation_sid: Optional[str] = None
+    # Sólo lo consume la traza de citaciones. Se declara aquí porque las tres
+    # ramas del parser lo pueblan (o no) por separado.
+    channel_metadata_raw: Any = None
 
     def _extract_reply_sid_from_attrs(attrs_raw: Any) -> Optional[str]:
         """Extrae el SID del mensaje citado desde el campo Attributes (JSON).
@@ -1363,6 +1386,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         NumMedia         = int(data.get("NumMedia", 0))
         MediaUrl0        = data.get("MediaUrl0")
         MediaContentType0 = data.get("MediaContentType0")
+        channel_metadata_raw = data.get("ChannelMetadata")  # sólo para la traza
         OriginalRepliedMessageSid    = data.get("OriginalRepliedMessageSid")
         OriginalRepliedMessageSender = data.get("OriginalRepliedMessageSender")
         if not OriginalRepliedMessageSid:
@@ -1570,6 +1594,10 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             OriginalRepliedMessageSender = form_data.get("OriginalRepliedMessageSender")
             conversation_sid  = None  # No existe en Programmable Messaging
             chat_service_sid_inbound = None
+            # Programmable Messaging SÍ trae ChannelMetadata, y ahí viene el
+            # `data.context` que marca si el cliente citó. Esta rama nunca lo
+            # miraba; se lee sólo para la traza, no altera la resolución.
+            channel_metadata_raw = form_data.get("ChannelMetadata")
 
             # Diagnóstico: log campos de reply para debugging
             all_keys   = list(form_data.keys())
@@ -1617,6 +1645,26 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             f"sid={MessageSid or 'N/A'} | channel={incoming_channel or early_channel} | "
             f"conv={conversation_sid or 'N/A'} | body={Body[:80]!r}"
         )
+        # Traza de citaciones: contrasta la señal real de WhatsApp
+        # (ChannelMetadata.data.context) contra la referencia que el parser
+        # logró extraer. Sin esto una cita perdida es indistinguible de un
+        # mensaje que nunca citó. Sólo registra; no altera el procesamiento.
+        try:
+            _linea_cita, _diag_cita = reply_trace.traza(
+                message_sid=MessageSid,
+                canal=incoming_channel or early_channel,
+                referencia=OriginalRepliedMessageSid,
+                channel_metadata_bruto=channel_metadata_raw,
+                resuelto=False,
+                etapa="entrada",
+            )
+            if reply_trace.es_perdida(_diag_cita):
+                logger.warning(_linea_cita)
+            elif _diag_cita != reply_trace.SIN_CITA:
+                logger.info(_linea_cita)
+        except Exception as _e_cita:
+            logger.debug(f"[CitaTrace] traza de entrada fallida: {_e_cita}")
+
         background_tasks.add_task(
             _process_message_deferred,
             phone_normalized,

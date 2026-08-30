@@ -1,17 +1,19 @@
 """Renderizado y anclas de las citaciones en el panel.
 
-Why: la investigación de agosto de 2026 encontró tres implementaciones
-distintas de la misma burbuja de cita en `index.js`, y un ancla que falla en
-silencio. Ninguna de las dos cosas causa el síntoma que reportó la asesora —la
-cita que no aparece—, pero una de ellas es un sumidero de XSS latente y la otra
-deja el 16% de los clics sin hacer nada.
+Why: había tres copias del HTML de la burbuja de cita —historial, eco
+optimista y actualización por WebSocket— y habían divergido. La del WebSocket
+inyectaba `rp.content` sin escapar mediante insertAdjacentHTML, y ese texto es
+un mensaje de WhatsApp del cliente: entrada controlada por un tercero. Estaba
+inalcanzable en producción (`conversation_sid` al 0%), que es justo lo que la
+hacía peligrosa — código muerto que una migración reviviría con el fallo
+dentro, igual que pasó con los Content SID.
 
-Los tests marcados `xfail` describen el estado deseado y hoy fallan a
-propósito: pasan a verde cuando se corrija cada defecto, sin tocarlos. Es el
-mismo patrón que `test_content_sids_coherencia.py`.
+Ahora hay una sola función. Estos tests fijan que siga habiendo una sola y que
+cumpla las cuatro propiedades que las copias habían perdido.
 
 Se analiza el fuente porque el panel no tiene arnés de JS en este repo, mismo
-criterio que `test_memory_leak_diagnosis.py`.
+criterio que `test_memory_leak_diagnosis.py`. La sintaxis se valida aparte con
+`node --check`.
 """
 
 import re
@@ -23,105 +25,89 @@ RAIZ = Path(__file__).resolve().parents[1]
 INDEX_JS = (RAIZ / "middleware/PanelAsesores/index.js").read_text(encoding="utf-8")
 WEBHOOK_PY = (RAIZ / "middleware/webhook_handler.py").read_text(encoding="utf-8")
 
-# Cada bloque que construye el HTML de una burbuja de cita, con su contexto.
-# La ventana toma texto ANTES y DESPUES del `<div>`: las variables (color,
-# texto citado) se asignan arriba y `sender_name` se usa dentro del template.
-# Con una ventana solo hacia atras, el bloque optimista quedaba sin
-# `sender_name` y su test no habria podido pasar nunca.
-_BLOQUES = re.compile(
-    r'.{900}<div class="reply-quote.{600}', re.DOTALL
-)
+
+def _funcion_renderizadora() -> str:
+    """El cuerpo de `construirCitaHtml`, única fuente del HTML de una cita."""
+    m = re.search(
+        r"function construirCitaHtml\(.*?\n\}", INDEX_JS, re.DOTALL
+    )
+    assert m, "no se encontro construirCitaHtml"
+    return m.group(0)
 
 
-def _bloques_de_cita() -> list:
-    """Los fragmentos de `index.js` que arman una burbuja de cita."""
-    return _BLOQUES.findall(INDEX_JS)
+# ── Fuente única ────────────────────────────────────────────────────────────
 
-
-# ── Lo que ya es cierto: guardas de regresión ───────────────────────────────
-
-def test_hay_exactamente_tres_renderizadores_de_cita():
-    """Documenta el estado de partida. Si aparece un cuarto, o si la
-    unificación reduce el número, este test obliga a revisar los de abajo."""
-    assert len(_bloques_de_cita()) == 3, (
-        f"se esperaban 3 bloques `reply-quote`, hay {len(_bloques_de_cita())}"
+def test_hay_un_unico_renderizador_de_cita():
+    """Si vuelve a aparecer HTML de cita fuera de la función, la divergencia
+    —y con ella el fallo de escapado— puede reaparecer sin que nadie lo note."""
+    bloques = INDEX_JS.count('class="reply-quote')
+    assert bloques == 1, (
+        f"hay {bloques} sitios construyendo la burbuja de cita; debe haber 1"
     )
 
 
+def test_los_tres_sitios_consumen_la_funcion_compartida():
+    """Historial, eco optimista y WebSocket."""
+    llamadas = len(re.findall(r"construirCitaHtml\(", INDEX_JS))
+    assert llamadas == 4, f"se esperaban 3 llamadas + 1 definicion, hay {llamadas}"
+
+
+# ── Las cuatro propiedades que las copias habían perdido ────────────────────
+
+def test_escapa_el_contenido_citado():
+    """El texto citado viene de WhatsApp. Es el fallo que motivó la
+    unificación: la copia del WebSocket lo inyectaba en crudo."""
+    fn = _funcion_renderizadora()
+    assert "escapeHtml((rp.content" in fn, "el contenido citado no se escapa"
+    assert "escapeHtml(remitente)" in fn, "el nombre del remitente no se escapa"
+
+
+def test_distingue_los_tres_remitentes():
+    """Cliente gris, bot ámbar, asesora azul. La copia del WebSocket sólo
+    contemplaba dos y pintaba al bot como si fuera el cliente."""
+    fn = _funcion_renderizadora()
+    for color, quien in (("#6B7280", "cliente"), ("#D97706", "bot"), ("#2563EB", "asesora")):
+        assert color in fn, f"falta el color de {quien}"
+
+
+def test_usa_el_nombre_real_del_remitente():
+    """La copia rotulaba 'Tú'/'Asesor' fijo."""
+    assert "rp.sender_name" in _funcion_renderizadora()
+
+
+def test_usa_los_iconos_de_media():
+    """La copia pintaba `[image]` en vez del icono."""
+    fn = _funcion_renderizadora()
+    assert "CITA_ICONOS" in fn
+    assert "📷 Imagen" in INDEX_JS
+
+
+def test_el_id_del_salto_se_valida_antes_de_entrar_en_el_onclick():
+    """El id se interpola dentro de un atributo onclick. escapeHtml no escapa
+    la comilla simple, así que se valida con lista blanca en su lugar."""
+    fn = _funcion_renderizadora()
+    assert "/^[A-Za-z0-9_-]+$/.test" in fn, (
+        "el id entra crudo en el onclick: un id con comilla rompe el atributo"
+    )
+
+
+# ── Guardas sobre la ruta que hacía peligrosa la copia ──────────────────────
+
 def test_solo_hay_un_publicador_de_message_updated():
-    """El renderizador divergente (index.js:~6003) sólo se alcanza por este
-    evento, y su único emisor está detrás de `conversation_sid`, que en
-    producción está al 0%. Si alguien añade otro emisor, ese renderizador se
-    vuelve alcanzable — y con él su fallo de escapado."""
+    """La actualización en vivo tiene un único emisor, el fetch diferido, tras
+    un guard de `conversation_sid` que en producción está al 0%. Si aparece
+    otro emisor esa ruta se vuelve caliente y conviene revisarla entera."""
     assert WEBHOOK_PY.count('"type":       "message_updated"') + \
            WEBHOOK_PY.count('"type": "message_updated"') == 1
 
 
-def test_la_edicion_del_cliente_no_usa_el_renderizador_divergente():
-    """`onMessageUpdated` publica `message_edited`, un tipo distinto. Confundir
-    ambos haría alcanzable el renderizador inseguro."""
+def test_la_edicion_del_cliente_publica_un_tipo_distinto():
+    """`onMessageUpdated` publica `message_edited`. Confundir ambos cambiaría
+    qué código se ejecuta en vivo."""
     assert '"type": "message_edited"' in WEBHOOK_PY
 
 
-def test_el_renderizador_canonico_distingue_los_tres_remitentes():
-    """Cliente gris, bot ámbar, asesora azul. Es el comportamiento correcto que
-    los otros dos deben respetar."""
-    canonico = _bloques_de_cita()[0]
-    assert "'#6B7280'" in canonico or "#6B7280" in canonico
-    assert "#D97706" in canonico, "falta el caso del bot"
-    assert "#2563EB" in canonico
-
-
-def test_la_burbuja_optimista_escapa_el_contenido():
-    """El eco local de un envío propio ya escapa. Guarda de regresión."""
-    optimista = _bloques_de_cita()[1]
-    assert "escapeHtml" in optimista
-
-
-# ── Lo que aún no es cierto: se ponen en verde al corregir ─────────────────
-
-@pytest.mark.xfail(
-    reason="index.js:~6003 inyecta rp.content sin escapar via insertAdjacentHTML",
-    strict=False,
-)
-def test_todos_los_renderizadores_escapan_el_contenido_citado():
-    """El texto citado viene de un mensaje de WhatsApp del cliente: es entrada
-    controlada por terceros. Los otros dos bloques lo pasan por `escapeHtml`;
-    el del WebSocket no, y lo inyecta con `insertAdjacentHTML`."""
-    sin_escapar = [i for i, b in enumerate(_bloques_de_cita()) if "escapeHtml" not in b]
-    assert not sin_escapar, (
-        f"bloques que no escapan el contenido citado: {sin_escapar}"
-    )
-
-
-@pytest.mark.xfail(
-    reason="index.js:~6003 usa #3b82f6/#6b7280 en vez de la paleta canonica",
-    strict=False,
-)
-def test_todos_los_renderizadores_usan_la_misma_paleta():
-    """La misma cita no puede cambiar de color según por dónde llegó."""
-    for i, bloque in enumerate(_bloques_de_cita()):
-        assert "#2563EB" in bloque, f"bloque {i}: azul de asesora fuera de paleta"
-        assert "#D97706" in bloque, f"bloque {i}: falta el ámbar del bot"
-
-
-@pytest.mark.xfail(
-    reason="index.js:~6003 rotula 'Tu'/'Asesor' fijo en vez de usar sender_name",
-    strict=False,
-)
-def test_todos_los_renderizadores_usan_el_nombre_del_remitente():
-    for i, bloque in enumerate(_bloques_de_cita()):
-        assert "sender_name" in bloque, f"bloque {i}: rotulo fijo en vez de sender_name"
-
-
-@pytest.mark.xfail(
-    reason="index.js:~6003 pinta [image] en vez del icono; divergencia visual",
-    strict=False,
-)
-def test_todos_los_renderizadores_usan_los_mismos_iconos_de_media():
-    for i, bloque in enumerate(_bloques_de_cita()):
-        assert "📷 Imagen" in bloque, f"bloque {i}: iconos de media distintos"
-
+# ── Pendiente: anclas que no saltan (ejecución 2) ───────────────────────────
 
 @pytest.mark.xfail(
     reason="scrollToMessage hace `if (!el) return;` — el 16.4% de los clics no hace nada",
@@ -135,8 +121,7 @@ def test_el_clic_en_una_cita_avisa_cuando_no_puede_saltar():
         r"function scrollToMessage\([^)]*\)\s*\{(.*?)\n\}", INDEX_JS, re.DOTALL
     )
     assert cuerpo, "no se encontro scrollToMessage"
-    texto = cuerpo.group(1)
-    assert "if (!el) return;" not in texto, (
+    assert "if (!el) return;" not in cuerpo.group(1), (
         "el destino ausente se ignora en silencio: hay que cargar mas historial "
         "o avisar de que el mensaje citado no esta a la vista"
     )

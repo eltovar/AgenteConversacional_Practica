@@ -2913,18 +2913,7 @@ function renderChatBubbles(messages) {
             // --- QUOTE HTML (si este mensaje es respuesta a otro) ---
             let quoteHtml = '';
             if (msg.reply_to_id && msg.reply_to_preview) {
-                const rp = msg.reply_to_preview;
-                const rpSender = rp.sender_name || rp.sender || '';
-                let rpText = escapeHtml((rp.content || '').substring(0, 80));
-                if (rp.media_type && !rp.content) {
-                    rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[rp.media_type] || '📎 Archivo';
-                }
-                const rpColor = rp.sender === 'client' ? '#6B7280' : (rp.sender === 'bot' ? '#D97706' : '#2563EB');
-                quoteHtml = `
-                    <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${rpColor};" onclick="scrollToMessage('${msg.reply_to_id}')">
-                        <p class="text-xs font-semibold" style="color:${rpColor};">${escapeHtml(rpSender)}</p>
-                        <p class="text-xs text-gray-500 truncate">${rpText}</p>
-                    </div>`;
+                quoteHtml = construirCitaHtml(msg.reply_to_preview, { msgId: msg.reply_to_id });
             }
 
             // --- REPLY BUTTON (inside bubble, visible on bubble hover via CSS) ---
@@ -3049,6 +3038,47 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Construye la burbuja de un mensaje citado.
+ *
+ * Fuente única: antes existían tres copias de este HTML —el historial, el eco
+ * optimista del propio envío y la actualización por WebSocket— y habían
+ * divergido. La del WebSocket insertaba `rp.content` sin escapar mediante
+ * insertAdjacentHTML; ese texto es un mensaje de WhatsApp del cliente, o sea
+ * entrada controlada por un tercero.
+ *
+ * @param {object} rp  {sender, sender_name, content, media_type, timestamp}
+ * @param {string} [opciones.msgId]  Si viene, la cita salta al mensaje citado.
+ * @param {boolean} [opciones.marcar]  Marca la burbuja como inyectada en vivo.
+ */
+const CITA_ICONOS = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' };
+
+function construirCitaHtml(rp, opciones = {}) {
+    if (!rp) return '';
+    const { msgId = null, marcar = false } = opciones;
+
+    const remitente = rp.sender_name || rp.sender || '';
+    let texto = escapeHtml((rp.content || '').substring(0, 80));
+    if (rp.media_type && !rp.content) {
+        texto = CITA_ICONOS[rp.media_type] || '📎 Archivo';
+    }
+    const color = rp.sender === 'client' ? '#6B7280' : (rp.sender === 'bot' ? '#D97706' : '#2563EB');
+
+    // El id va dentro de un atributo onclick: sólo se emite si es un
+    // identificador limpio. Los reales son ObjectId hex o ids numéricos de
+    // HubSpot; cualquier otra cosa deja la cita sin salto antes que romper el
+    // atributo.
+    const salto = (msgId && /^[A-Za-z0-9_-]+$/.test(String(msgId)))
+        ? ` onclick="scrollToMessage('${msgId}')"`
+        : '';
+    const marca = marcar ? ' data-injected-quote' : '';
+
+    return `<div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${color};"${salto}${marca}>
+                        <p class="text-xs font-semibold" style="color:${color};">${escapeHtml(remitente)}</p>
+                        <p class="text-xs text-gray-500 truncate">${texto}</p>
+                    </div>`;
 }
 
 /**
@@ -5191,20 +5221,9 @@ async function sendMessage(e) {
                 }
 
                 // Cita en burbuja optimista
-                let _quoteHtml = '';
-                if (_replySnapshot) {
-                    const _rp = _replySnapshot;
-                    const _rpColor = _rp.sender === 'client' ? '#6B7280' : (_rp.sender === 'bot' ? '#D97706' : '#2563EB');
-                    let _rpText = escapeHtml((_rp.content || '').substring(0, 80));
-                    if (_rp.media_type && !_rp.content) {
-                        _rpText = { image: '📷 Imagen', audio: '🎵 Audio', video: '🎬 Video', document: '📄 Documento' }[_rp.media_type] || '📎 Archivo';
-                    }
-                    _quoteHtml = `
-                        <div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${_rpColor};">
-                            <p class="text-xs font-semibold" style="color:${_rpColor};">${escapeHtml(_rp.sender_name || _rp.sender)}</p>
-                            <p class="text-xs text-gray-500 truncate">${_rpText}</p>
-                        </div>`;
-                }
+                // Sin msgId: la burbuja optimista aún no tiene id permanente,
+                // así que la cita no puede saltar hasta que el envío confirme.
+                const _quoteHtml = construirCitaHtml(_replySnapshot);
 
                 const _senderName = ADVISOR_NAME || 'Asesor';
                 const _tempId = `temp-${Date.now()}`;
@@ -6001,14 +6020,10 @@ function handleWebSocketMessage(data) {
                 break;
             }
             if (data.reply_to_preview) {
-                const rp = data.reply_to_preview;
-                const rpColor = rp.sender === 'advisor' ? '#3b82f6' : '#6b7280';
-                const rpLabel = rp.sender === 'advisor' ? 'Asesor' : 'Tú';
-                const rpText  = rp.media_type ? `[${rp.media_type}]` : (rp.content || '');
-                const quoteHtml = `<div class="reply-quote mb-2 p-2 rounded" style="background:rgba(0,0,0,0.04);border-left:3px solid ${rpColor};" data-injected-quote>
-                    <p class="text-xs font-semibold" style="color:${rpColor}">${rpLabel}</p>
-                    <p class="text-xs text-gray-600 truncate">${rpText.substring(0, 80)}</p>
-                </div>`;
+                const quoteHtml = construirCitaHtml(data.reply_to_preview, {
+                    msgId: data.reply_to_id,
+                    marcar: true,
+                });
                 // Insertar o reemplazar quote existente
                 const existingQuote = _updEl.querySelector('[data-injected-quote]');
                 if (existingQuote) {

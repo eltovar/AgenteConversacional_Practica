@@ -107,21 +107,49 @@ def test_la_edicion_del_cliente_publica_un_tipo_distinto():
     assert '"type": "message_edited"' in WEBHOOK_PY
 
 
-# ── Pendiente: anclas que no saltan (ejecución 2) ───────────────────────────
+# ── El salto de la cita ─────────────────────────────────────────────────────
+#
+# Medido sobre 1.203 citas: 1.006 apuntan a un mensaje ya cargado, 163 apuntan
+# fuera de la primera página y 34 a un mensaje inexistente. Los 197 ultimos
+# eran un `return` mudo que la asesora leía como que el panel se colgó.
 
-@pytest.mark.xfail(
-    reason="scrollToMessage hace `if (!el) return;` — el 16.4% de los clics no hace nada",
-    strict=False,
-)
-def test_el_clic_en_una_cita_avisa_cuando_no_puede_saltar():
-    """Medido sobre 1.203 citas: 163 apuntan fuera de la página inicial de 50
-    mensajes y 34 a un mensaje inexistente. En los 197 casos el clic es un
-    no-op mudo, que la asesora lee como que el panel se colgó."""
-    cuerpo = re.search(
-        r"function scrollToMessage\([^)]*\)\s*\{(.*?)\n\}", INDEX_JS, re.DOTALL
+def _cuerpo_scroll_to_message() -> str:
+    m = re.search(
+        r"async function scrollToMessage\([^)]*\)\s*\{(.*?)\n\}", INDEX_JS, re.DOTALL
     )
-    assert cuerpo, "no se encontro scrollToMessage"
-    assert "if (!el) return;" not in cuerpo.group(1), (
-        "el destino ausente se ignora en silencio: hay que cargar mas historial "
-        "o avisar de que el mensaje citado no esta a la vista"
-    )
+    assert m, "no se encontro scrollToMessage (¿dejo de ser async?)"
+    return m.group(1)
+
+
+def test_el_destino_ausente_ya_no_se_ignora_en_silencio():
+    cuerpo = _cuerpo_scroll_to_message()
+    assert "if (!el) return;" not in cuerpo
+    assert "showToast" in cuerpo, "sin aviso, el clic sigue pareciendo un cuelgue"
+
+
+def test_busca_el_mensaje_en_las_paginas_anteriores():
+    """El 13,5% de las citas apuntan fuera de la primera página: hay que traer
+    historial antes de rendirse."""
+    assert "loadOlderMessages" in _cuerpo_scroll_to_message()
+
+
+def test_la_busqueda_tiene_tope_de_paginas():
+    """Sin tope, un solo clic podría encadenar decenas de peticiones."""
+    cuerpo = _cuerpo_scroll_to_message()
+    assert "CITA_MAX_PAGINAS" in cuerpo
+    assert re.search(r"const CITA_MAX_PAGINAS = \d+;", INDEX_JS), "el tope no es constante"
+
+
+def test_no_puede_quedarse_dando_vueltas():
+    """`loadOlderMessages` no hace nada si otra carga tiene el guard tomado.
+    Sin comprobar que el cursor avanzo, el bucle giraria sin fin."""
+    cuerpo = _cuerpo_scroll_to_message()
+    assert "cursorAntes" in cuerpo and "break" in cuerpo
+
+
+def test_el_aviso_distingue_los_dos_casos():
+    """No es lo mismo 'esta mas atras' que 'ya no existe': la primera invita a
+    seguir subiendo, la segunda cierra el asunto."""
+    cuerpo = _cuerpo_scroll_to_message()
+    assert "más atrás en la conversación" in cuerpo
+    assert "ya no está disponible" in cuerpo

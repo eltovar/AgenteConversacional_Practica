@@ -3577,9 +3577,40 @@ async function _executeDeleteMessage(msgId, notifyClient) {
     }
 }
 
-function scrollToMessage(msgId) {
-    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
-    if (!el) return;
+// Tope de páginas que se traen buscando el mensaje citado. Con CHAT_PAGE_SIZE
+// a 100 son 500 mensajes hacia atrás: cubre de sobra el caso normal sin que un
+// clic dispare una cascada de peticiones.
+const CITA_MAX_PAGINAS = 5;
+
+async function scrollToMessage(msgId) {
+    let el = document.querySelector(`[data-msg-id="${msgId}"]`);
+
+    // El mensaje citado puede estar más atrás de lo que hay cargado: medido
+    // sobre 1.203 citas, el 13,5% apunta fuera de la primera página. Antes
+    // esto era un `return` mudo y la asesora leía el clic como que el panel
+    // se había colgado.
+    let paginas = 0;
+    while (!el && chatHistoryState && chatHistoryState.hasMore && paginas < CITA_MAX_PAGINAS) {
+        const cursorAntes = chatHistoryState.oldestTs;
+        await loadOlderMessages();
+        // Si el cursor no avanzó, otra carga tenía el guard tomado o no hay
+        // más que traer: seguir daría vueltas sin fin.
+        if (chatHistoryState.oldestTs === cursorAntes) break;
+        paginas++;
+        el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    }
+
+    if (!el) {
+        // Nunca callarse: distinguir "está más atrás" de "ya no existe".
+        showToast(
+            (chatHistoryState && chatHistoryState.hasMore)
+                ? 'El mensaje citado está más atrás en la conversación'
+                : 'El mensaje citado ya no está disponible',
+            'info'
+        );
+        return;
+    }
+
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.style.transition = 'background-color 0.3s';
     el.style.backgroundColor = 'rgba(245, 196, 0, 0.15)';

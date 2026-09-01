@@ -35,6 +35,7 @@ cleanup_report_*.csv
 /scripts/
 /docs/*
 !/docs/rediseno/
+!/docs/README.md
 /backup_pre_migration_20260423/
 /tests/
 /test/

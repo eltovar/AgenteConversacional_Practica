@@ -279,11 +279,11 @@ El panel expone además un flujo de transferencia con aceptación explícita:
 - **Campañas masivas** — `POST /bulk-campaigns`, con vista previa
   (`/bulk-campaigns/preview`) y un procesador que corre cada 15 segundos.
 
-##Portales de cada asesora
-  **Asesora seguimieento:** Metro cuadrado y Finca Raiz
+## Portales de cada asesora
+  **Asesora seguimiento:** Metro cuadrado y Finca Raiz + contactos transferidos a la asesora de seguimiento
   **Asesora Interna:** Todos los portales exeptuando los de la Asesora ed seguimienoto
 
-##Embudos:
+## Embudos:
    Actualmente esta de la siguiente manera: Nuevo Lead, En conversacion, Visita Agendada, Visita Realizada, En Estudio, Cerrado Ganado, Cerrado Perdido, No Responde (gestion de seguimiento), Seguimiento, Hasta 1.5, Hasta 2, Hasta 2.5, Hasta 3 (Presupuestos para seguimiento), Aprobado, Local o Bodega (Seguimiento), Ventas, Otros municipios (seguimiento),Propietarios (seguimiento), Ya Encontro, Reubicados (Seguimiento)  
   *Actualmente la distribuicion de los portales se hacen modificando codigo. El plan es hacer sistema basado en datos donde esta seccion sea configurable*
 

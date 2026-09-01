@@ -279,6 +279,18 @@ El panel expone además un flujo de transferencia con aceptación explícita:
 - **Campañas masivas** — `POST /bulk-campaigns`, con vista previa
   (`/bulk-campaigns/preview`) y un procesador que corre cada 15 segundos.
 
+##Portales de cada asesora
+  **Asesora seguimieento:** Metro cuadrado y Finca Raiz
+  **Asesora Interna:** Todos los portales exeptuando los de la Asesora ed seguimienoto
+
+##Embudos:
+   Actualmente esta de la siguiente manera: Nuevo Lead, En conversacion, Visita Agendada, Visita Realizada, En Estudio, Cerrado Ganado, Cerrado Perdido, No Responde (gestion de seguimiento), Seguimiento, Hasta 1.5, Hasta 2, Hasta 2.5, Hasta 3 (Presupuestos para seguimiento), Aprobado, Local o Bodega (Seguimiento), Ventas, Otros municipios (seguimiento),Propietarios (seguimiento), Ya Encontro, Reubicados (Seguimiento)  
+  *Actualmente la distribuicion de los portales se hacen modificando codigo. El plan es hacer sistema basado en datos donde esta seccion sea configurable*
+
+  Estos son los 21 embudos actualmente en el panel. Como se esta haciendo sistema basado en roles, cada rol gestiona x embudos. Por ejemplo, los embudos escritos anteriormente, los que tienen el "Seguimiento" al lado son los que solamente gestiona el rol de seguimiento. Por lo tanto, cuando la asesora interna agrega un lead en el embudo de no responde automaticamente este es transferido al Owner_id / usuario de la asesora de seguimiento
+
+  
+
 ### Panel de asesoras
 
 Frontend en `middleware/PanelAsesores/`, servido en `/whatsapp/panel/static`.

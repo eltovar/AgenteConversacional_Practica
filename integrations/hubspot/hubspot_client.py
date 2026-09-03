@@ -9,6 +9,7 @@ import httpx
 from typing import Awaitable, Callable, Optional, Dict, Any, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -55,7 +56,7 @@ async def _run_contact_update_hooks(contact_id: str, properties: Dict[str, Any])
             await hook(contact_id, properties)
         except Exception as e:
             # Un cache caido nunca puede tumbar la sincronizacion con HubSpot.
-            logger.warning(f"[HubSpotClient] Hook post-update fallo (no critico): {e}")
+            logger.warning(f"[HubSpotClient] Hook post-update fallo (no critico): {safe_error(e)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,11 +211,11 @@ class HubSpotClient:
 
             # Errores de cliente (4xx): NO reintentar
             if 400 <= e.response.status_code < 500:
-                logger.error(f"[HubSpotClient] Client Error {e.response.status_code}: {e.response.text}")
+                logger.error(f"[HubSpotClient] Client Error {e.response.status_code}: {safe_error(e.response.text, 200)}")
                 raise e  # Romper el retry
 
             # Errores de servidor (5xx): Reintentar
-            logger.error(f"[HubSpotClient] Server Error {e.response.status_code}: {e.response.text}")
+            logger.error(f"[HubSpotClient] Server Error {e.response.status_code}: {safe_error(e.response.text, 200)}")
             raise e
 
     async def search_contact_by_phone(self, phone: str) -> Optional[str]:
@@ -234,14 +235,14 @@ class HubSpotClient:
 
             if results:
                 contact_id = results[0]["id"]
-                logger.info(f"[HubSpotClient] Contacto encontrado: {contact_id} (whatsapp_id: {phone})")
+                logger.info(f"[HubSpotClient] Contacto encontrado: {safe_id(contact_id, 'contact')} (whatsapp_id: {safe_phone(phone)})")
                 return contact_id
 
-            logger.info(f"[HubSpotClient] No se encontró contacto con whatsapp_id: {phone}")
+            logger.info(f"[HubSpotClient] No se encontró contacto con whatsapp_id: {safe_phone(phone)}")
             return None
 
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error buscando contacto: {e}", exc_info=True)
+            logger.error(f"[HubSpotClient] Error buscando contacto: {safe_error(e)}", exc_info=True)
             return None
 
     async def search_contact_by_phone_with_properties(self, phone: str) -> Optional[Dict[str, Any]]:
@@ -283,16 +284,16 @@ class HubSpotClient:
                 contact_id = contact["id"]
                 properties = contact.get("properties", {})
                 logger.info(
-                    f"[HubSpotClient] Contacto encontrado con propiedades: {contact_id} "
-                    f"(firstname: {properties.get('firstname', 'N/A')})"
+                    f"[HubSpotClient] Contacto encontrado con propiedades: {safe_id(contact_id, 'contact')} "
+                    f"(firstname: {safe_id(properties.get('firstname', 'N/A'), 'firstname')})"
                 )
                 return {"id": contact_id, "properties": properties}
 
-            logger.info(f"[HubSpotClient] No se encontró contacto con whatsapp_id: {phone}")
+            logger.info(f"[HubSpotClient] No se encontró contacto con whatsapp_id: {safe_phone(phone)}")
             return None
 
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error buscando contacto con propiedades: {e}", exc_info=True)
+            logger.error(f"[HubSpotClient] Error buscando contacto con propiedades: {safe_error(e)}", exc_info=True)
             return None
 
     async def search_contacts_by_lifecyclestage_and_owner(
@@ -335,7 +336,7 @@ class HubSpotClient:
         except Exception as e:
             logger.error(
                 f"[HubSpotClient] Error buscando contactos por stage+owner "
-                f"(stage={stage_id}, owner={owner_id}): {e}",
+                f"(stage={stage_id}, owner={safe_id(owner_id, 'owner')}): {safe_error(e)}",
                 exc_info=True,
             )
             raise
@@ -363,11 +364,11 @@ class HubSpotClient:
 
         try:
             response = await self._request("POST", endpoint, payload)
-            logger.info(f"[HubSpotClient] Búsqueda por email '{email}' ejecutada correctamente")
+            logger.info(f"[HubSpotClient] Búsqueda por email {safe_text(email, 80)} ejecutada correctamente")
             return response
 
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error buscando contactos por email: {e}", exc_info=True)
+            logger.error(f"[HubSpotClient] Error buscando contactos por email: {safe_error(e)}", exc_info=True)
             raise
 
     async def create_contact(self, properties: Dict[str, Any]) -> str:
@@ -383,7 +384,7 @@ class HubSpotClient:
         
         response = await self._request("POST", endpoint, {"properties": validated_props})
         contact_id = response["id"]
-        logger.info(f"[HubSpotClient] Contacto creado: {contact_id}")
+        logger.info(f"[HubSpotClient] Contacto creado: {safe_id(contact_id, 'contact')}")
         return contact_id
 
     async def update_contact(self, contact_id: str, properties: Dict[str, Any]) -> None:
@@ -401,13 +402,13 @@ class HubSpotClient:
         # Si no hay propiedades válidas después del filtrado, no enviar nada
         if not validated_props:
             logger.warning(
-                f"[HubSpotClient] No hay propiedades válidas para actualizar contacto {contact_id}. "
+                f"[HubSpotClient] No hay propiedades válidas para actualizar contacto {safe_id(contact_id, 'contact')}. "
                 f"Se filtraron: {filtered_out}. Abortando actualización."
             )
             return
         
         await self._request("PATCH", endpoint, {"properties": validated_props})
-        logger.info(f"[HubSpotClient] Contacto actualizado: {contact_id}")
+        logger.info(f"[HubSpotClient] Contacto actualizado: {safe_id(contact_id, 'contact')}")
 
         # HubSpot ya confirmo el cambio: avisar a quien cachee estos datos.
         # Se pasan las propiedades validadas, que son las que HubSpot recibio.
@@ -447,7 +448,7 @@ class HubSpotClient:
 
         response = await self._request("POST", endpoint, payload)
         deal_id = response["id"]
-        logger.info(f"[HubSpotClient] Deal creado: {deal_id} (asociado a contacto {contact_id})")
+        logger.info(f"[HubSpotClient] Deal creado: {safe_id(deal_id, 'deal')} (asociado a contacto {safe_id(contact_id, 'contact')})")
         return deal_id
 
     async def update_deal(self, deal_id: str, properties: Dict[str, Any]) -> None:
@@ -459,7 +460,7 @@ class HubSpotClient:
         """
         endpoint = f"/crm/v3/objects/deals/{deal_id}"
         await self._request("PATCH", endpoint, {"properties": properties})
-        logger.info(f"[HubSpotClient] Deal actualizado: {deal_id}")
+        logger.info(f"[HubSpotClient] Deal actualizado: {safe_id(deal_id, 'deal')}")
 
     async def create_note(
         self,
@@ -503,11 +504,11 @@ class HubSpotClient:
         try:
             response = await self._request("POST", endpoint, payload)
             note_id = response.get("id")
-            logger.info(f"[HubSpotClient] Nota creada: {note_id} (asociada a contacto {contact_id})")
+            logger.info(f"[HubSpotClient] Nota creada: {safe_id(note_id, 'note')} (asociada a contacto {safe_id(contact_id, 'contact')})")
             return note_id
 
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error creando nota para contacto {contact_id}: {e}")
+            logger.error(f"[HubSpotClient] Error creando nota para contacto {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             raise
 
     async def update_note(self, note_id: str, body: str) -> bool:
@@ -526,10 +527,10 @@ class HubSpotClient:
                 f"/crm/v3/objects/notes/{note_id}",
                 {"properties": {"hs_note_body": body}},
             )
-            logger.info(f"[HubSpotClient] Nota {note_id} actualizada")
+            logger.info(f"[HubSpotClient] Nota {safe_id(note_id, 'note')} actualizada")
             return True
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error actualizando nota {note_id}: {e}")
+            logger.error(f"[HubSpotClient] Error actualizando nota {safe_id(note_id, 'note')}: {safe_error(e)}")
             return False
 
     async def get_contact(self, contact_id: str, properties: Optional[list] = None) -> Dict[str, Any]:
@@ -545,11 +546,11 @@ class HubSpotClient:
 
         try:
             response = await self._request("GET", endpoint)
-            logger.debug(f"[HubSpotClient] Contacto obtenido: {contact_id}")
+            logger.debug(f"[HubSpotClient] Contacto obtenido: {safe_id(contact_id, 'contact')}")
             return response
 
         except Exception as e:
-            logger.error(f"[HubSpotClient] Error obteniendo contacto {contact_id}: {e}")
+            logger.error(f"[HubSpotClient] Error obteniendo contacto {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             raise
 
     async def get_contact_deals(self, contact_id: str) -> List[Dict[str, Any]]:
@@ -568,11 +569,11 @@ class HubSpotClient:
             response = await self._request("GET", endpoint)
             results = response.get("results", [])
             logger.info(
-                f"[HubSpotClient] Contacto {contact_id} tiene {len(results)} deals asociados"
+                f"[HubSpotClient] Contacto {safe_id(contact_id, 'contact')} tiene {len(results)} deals asociados"
             )
             return results
         except Exception as e:
             logger.warning(
-                f"[HubSpotClient] Error obteniendo deals para contacto {contact_id}: {e}"
+                f"[HubSpotClient] Error obteniendo deals para contacto {safe_id(contact_id, 'contact')}: {safe_error(e)}"
             )
             return []

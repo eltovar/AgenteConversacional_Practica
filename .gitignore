@@ -25,6 +25,7 @@ __pycache__/
 
 # Testing y análisis
 .pytest_cache/
+.tmp/
 .mypy_cache/
 htmlcov/
 .coverage
@@ -37,7 +38,8 @@ cleanup_report_*.csv
 !/docs/rediseno/
 !/docs/README.md
 /backup_pre_migration_20260423/
-/tests/
+/tests/*
+!/tests/test_safe_logging.py
 /test/
 
 # Archivos

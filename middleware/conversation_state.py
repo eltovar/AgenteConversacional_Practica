@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import redis.asyncio as redis
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILIDADES DE TIEMPO
@@ -209,7 +210,7 @@ class ConversationStateManager:
             filtered = {k: v for k, v in payload.items() if k in valid_fields}
             return ConversationMeta(**filtered)
         except Exception as e:
-            logger.error(f"[ConversationState] Error parseando meta JSON: {e}")
+            logger.error(f"[ConversationState] Error parseando meta JSON: {safe_error(e)}")
             return None
 
     async def get_meta(self, phone: str, canal: str = "whatsapp") -> Optional[ConversationMeta]:
@@ -226,7 +227,7 @@ class ConversationStateManager:
             payload = json.loads(data)
             return self._parse_meta_payload(payload)
         except Exception as e:
-            logger.error(f"[ConversationState] Error en get_meta para {phone}: {e}")
+            logger.error(f"[ConversationState] Error en get_meta para {safe_phone(phone)}: {safe_error(e)}")
             return None
 
     def _parse_meta_payload(self, payload: dict) -> ConversationMeta:
@@ -274,12 +275,12 @@ class ConversationStateManager:
             }
             await self.redis.set(meta_key, json.dumps(meta))
             logger.info(
-                f"[ConversationState] Cache-miss reload: {phone}:{canal} "
-                f"(owner: {meta['assigned_owner_id']})"
+                f"[ConversationState] Cache-miss reload: {safe_phone(phone)}:{canal} "
+                f"(owner: {safe_id(meta['assigned_owner_id'], 'owner')})"
             )
             return self._parse_meta_payload(meta)
         except Exception as e:
-            logger.debug(f"[ConversationState] Cache-miss reload falló (non-fatal): {e}")
+            logger.debug(f"[ConversationState] Cache-miss reload falló (non-fatal): {safe_error(e)}")
             return None
 
     async def get_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -356,7 +357,7 @@ class ConversationStateManager:
                         else:
                             status_raw = ConversationStatus.BOT_ACTIVE.value
                             logger.debug(
-                                f"[ConversationState] TTL state expirado para {phone}:{canal} — "
+                                f"[ConversationState] TTL state expirado para {safe_phone(phone)}:{canal} — "
                                 f"mostrando como BOT_ACTIVE en el panel"
                             )
 
@@ -377,7 +378,7 @@ class ConversationStateManager:
                             to_move_to_bot_set.append(member)
                             in_priority_zset = False
                             logger.debug(
-                                f"[ConversationState] {phone}:{canal} BOT_ACTIVE "
+                                f"[ConversationState] {safe_phone(phone)}:{canal} BOT_ACTIVE "
                                 f">48h inactivo, movido a BOT_CONTROLLED_SET (sigue visible)"
                             )
 
@@ -494,7 +495,7 @@ class ConversationStateManager:
                     )
 
         except Exception as e:
-            logger.error(f"[ConversationState] Error en get_active_contacts: {e}")
+            logger.error(f"[ConversationState] Error en get_active_contacts: {safe_error(e)}")
         return contacts
 
     async def get_all_human_active_contacts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -521,7 +522,7 @@ class ConversationStateManager:
                 if str(dueno) == str(owner_id)
             ]
         except Exception as e:
-            logger.warning(f"[ConversationState] Registro de canales no disponible: {e}")
+            logger.warning(f"[ConversationState] Registro de canales no disponible: {safe_error(e)}")
             return []
 
     async def get_archived_conversations_from_mongo(
@@ -619,7 +620,7 @@ class ConversationStateManager:
                 )
             return result
         except Exception as e:
-            logger.warning(f"[ConversationState][MongoFallback] Error: {e}")
+            logger.warning(f"[ConversationState][MongoFallback] Error: {safe_error(e)}")
             return []
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -648,7 +649,7 @@ class ConversationStateManager:
             logger.warning(f"[ConversationState] Estado no reconocido: {status_str}")
             return None
         except Exception as e:
-            logger.error(f"[ConversationState] Error en get_status: {e}")
+            logger.error(f"[ConversationState] Error en get_status: {safe_error(e)}")
             return None
 
     async def set_status(
@@ -674,10 +675,10 @@ class ConversationStateManager:
         try:
             ttl = ttl or self._calculate_dynamic_ttl()
             await self.redis.set(state_key, status.value, ex=ttl)
-            logger.debug(f"[ConversationState] Estado actualizado: {phone}:{canal} -> {status.value}")
+            logger.debug(f"[ConversationState] Estado actualizado: {safe_phone(phone)}:{canal} -> {status.value}")
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en set_status: {e}")
+            logger.error(f"[ConversationState] Error en set_status: {safe_error(e)}")
             return False
 
     async def is_bot_active(self, phone: str, canal: str = "whatsapp") -> bool:
@@ -718,10 +719,10 @@ class ConversationStateManager:
                 except Exception:
                     pass  # Meta update is best-effort
 
-            logger.info(f"[ConversationState] Bot reactivado para {phone}:{canal}")
+            logger.info(f"[ConversationState] Bot reactivado para {safe_phone(phone)}:{canal}")
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en activate_bot: {e}")
+            logger.error(f"[ConversationState] Error en activate_bot: {safe_error(e)}")
             return False
 
     async def activate_human(
@@ -812,7 +813,7 @@ class ConversationStateManager:
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
-            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {phone_num}:{canal_safe} (re-agregado al ZSET)")
+            logger.info(f"[ConversationState] HUMAN_ACTIVE activado: {safe_phone(phone_num)}:{canal_safe} (re-agregado al ZSET)")
 
             # ⚠️ 2026-05-30: Sincronizar metadatos a MongoDB `conversations` (fuente permanente).
             # Fire-and-forget — si falla no rompe el handoff.
@@ -839,7 +840,7 @@ class ConversationStateManager:
             return True
 
         except Exception as e:
-            logger.error(f"[ConversationState] Error en activate_human: {e}")
+            logger.error(f"[ConversationState] Error en activate_human: {safe_error(e)}")
             return False
 
     async def request_handoff(
@@ -905,7 +906,7 @@ class ConversationStateManager:
             await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
             await self.redis.srem(self.BOT_CONTROLLED_SET, index_member)  # Sale del modo bot
 
-            logger.info(f"[ConversationState] Handoff solicitado: {phone}:{canal_safe} - {reason} (ZSET índice 0)")
+            logger.info(f"[ConversationState] Handoff solicitado: {safe_phone(phone)}:{canal_safe} - {safe_id(reason, 'reason')} (ZSET índice 0)")
 
             # ⚠️ 2026-05-30: Sincronizar a MongoDB `conversations`.
             try:
@@ -932,7 +933,7 @@ class ConversationStateManager:
 
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en request_handoff: {e}")
+            logger.error(f"[ConversationState] Error en request_handoff: {safe_error(e)}")
             return False
 
     async def track_bot_turn(
@@ -973,7 +974,7 @@ class ConversationStateManager:
             await self.redis.set(meta_key, json.dumps(meta))
             return (turns, had_signal)
         except Exception as e:
-            logger.warning(f"[ConversationState] track_bot_turn falló: {e}")
+            logger.warning(f"[ConversationState] track_bot_turn falló: {safe_error(e)}")
             return (0, False)
 
     async def _unarchive_in_mongo(self, phone: str, canal: str) -> None:
@@ -1229,7 +1230,7 @@ class ConversationStateManager:
                     # Promover status si el stale tenía prioridad mayor
                     if best_status and best_status != wa_status:
                         await self.redis.set(wa_state_key, best_status, ex=self.HUMAN_PANEL_STATE_TTL)
-                        logger.info(f"[P3-D v2] Status promovido {phone}: {wa_status} → {best_status}")
+                        logger.info(f"[P3-D v2] Status promovido {safe_phone(phone)}: {wa_status} -> {best_status}")
 
                     # 5) Inbox migration: mover entry stale al canal whatsapp
                     if stale_advisor_id:
@@ -1249,7 +1250,7 @@ class ConversationStateManager:
 
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en update_activity: {e}")
+            logger.error(f"[ConversationState] Error en update_activity: {safe_error(e)}")
             return False
 
     async def ensure_meta_with_channel(
@@ -1383,7 +1384,7 @@ class ConversationStateManager:
                 if had_panel_before:
                     add_to_zset = True
                     meta["in_panel"] = True
-                    logger.info(f"[ConversationState] ↩ Re-entrada al panel (fue handoff antes): {phone}")
+                    logger.info(f"[ConversationState] Re-entrada al panel (fue handoff antes): {safe_phone(phone)}")
 
                 await self.redis.set(meta_key, json.dumps(meta))
 
@@ -1402,7 +1403,7 @@ class ConversationStateManager:
             return True
             
         except Exception as e:
-            logger.error(f"[ConversationState] Error en ensure_meta_with_channel: {e}")
+            logger.error(f"[ConversationState] Error en ensure_meta_with_channel: {safe_error(e)}")
             return False
 
     async def transfer_contact(
@@ -1434,7 +1435,7 @@ class ConversationStateManager:
 
             data = await self.redis.get(meta_key)
             if not data:
-                logger.warning(f"[ConversationState] No hay metadata para transferir: {phone}")
+                logger.warning(f"[ConversationState] No hay metadata para transferir: {safe_phone(phone)}")
                 return {"status": "error", "message": "Contacto no encontrado en sesión activa"}
 
             meta = json.loads(data)
@@ -1502,7 +1503,7 @@ class ConversationStateManager:
             }
 
         except Exception as e:
-            logger.error(f"[ConversationState] Error en transfer_contact: {e}")
+            logger.error(f"[ConversationState] Error en transfer_contact: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
     async def transfer_ownership(
@@ -1548,7 +1549,7 @@ class ConversationStateManager:
             return result
 
         except Exception as e:
-            logger.error(f"[ConversationState] Error en transfer_ownership: {e}")
+            logger.error(f"[ConversationState] Error en transfer_ownership: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
     async def _sync_hubspot_owner(
@@ -1590,7 +1591,7 @@ class ConversationStateManager:
             logger.warning(f"[TransferOwnership] HubSpot falló: {resp.status_code}")
             return False
         except Exception as e:
-            logger.warning(f"[TransferOwnership] HubSpot sync error (non-fatal): {e}")
+            logger.warning(f"[TransferOwnership] HubSpot sync error (non-fatal): {safe_error(e)}")
             return False
 
     async def update_client_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
@@ -1614,11 +1615,11 @@ class ConversationStateManager:
                     index_member = f"{phone}:{canal_safe}"
                     score = get_bogota_now().timestamp()
                     await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                    logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje cliente)")
+                    logger.info(f"[ConversationState] ↑ Contacto {safe_phone(phone)} reordenado al principio (mensaje cliente)")
 
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en update_client_message_timestamp: {e}")
+            logger.error(f"[ConversationState] Error en update_client_message_timestamp: {safe_error(e)}")
             return False
 
     async def update_advisor_message_timestamp(self, phone: str, canal: str = "whatsapp") -> bool:
@@ -1645,11 +1646,11 @@ class ConversationStateManager:
                     index_member = f"{phone}:{canal_safe}"
                     score = get_bogota_now().timestamp()
                     await self.redis.zadd(self.ACTIVE_CONTACTS_ZSET, {index_member: score})
-                    logger.info(f"[ConversationState] ↑ Contacto {phone} reordenado al principio (mensaje asesor)")
+                    logger.info(f"[ConversationState] ↑ Contacto {safe_phone(phone)} reordenado al principio (mensaje asesor)")
                 
             return True
         except Exception as e:
-            logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {e}")
+            logger.error(f"[ConversationState] Error en update_advisor_message_timestamp: {safe_error(e)}")
             return False
 
     # ─── Inbox de no-leídos por asesor ────────────────────────────────────────
@@ -1694,16 +1695,16 @@ class ConversationStateManager:
                     if not meta.get("in_panel", True):
                         meta["in_panel"] = True
                         await self.redis.set(meta_key, json.dumps(meta))
-                        logger.info(f"[Inbox][Add] Re-activado in_panel=True para {phone}")
+                        logger.info(f"[Inbox][Add] Re-activado in_panel=True para {safe_phone(phone)}")
                 except Exception:
                     pass
 
             logger.info(
-                f"[Inbox][Add] advisor={advisor_id} phone={phone} "
+                f"[Inbox][Add] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)} "
                 f"canal={canal_safe} ts={_score:.0f}"
             )
         except Exception as e:
-            logger.error(f"[Inbox][Error][Add] advisor={advisor_id} phone={phone}: {e}")
+            logger.error(f"[Inbox][Error][Add] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)}: {safe_error(e)}")
 
     async def remove_from_advisor_inbox(
         self,
@@ -1737,11 +1738,11 @@ class ConversationStateManager:
                 removed = await self.redis.zrem(key, *targets)
 
             logger.info(
-                f"[Inbox][Clear] advisor={advisor_id} phone={phone} "
-                f"removed={removed} targets={targets}"
+                f"[Inbox][Clear] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)} "
+                f"removed={removed} targets_count={len(targets)}"
             )
         except Exception as e:
-            logger.error(f"[Inbox][Error][Clear] advisor={advisor_id} phone={phone}: {e}")
+            logger.error(f"[Inbox][Error][Clear] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)}: {safe_error(e)}")
 
     async def get_inbox_unread_map(
         self,
@@ -1788,13 +1789,13 @@ class ConversationStateManager:
             no_leidos = sum(1 for v in unread_map.values() if v)
             leidos    = sum(1 for v in unread_map.values() if not v)
             logger.info(
-                f"[Inbox][Batch] advisor={advisor_id} "
+                f"[Inbox][Batch] advisor={safe_id(advisor_id, 'advisor')} "
                 f"no_leidos={no_leidos} leidos={leidos} total={len(contacts)} "
                 f"inbox_size={len(unread_phones)}"
             )
             return unread_map
         except Exception as e:
-            logger.error(f"[Inbox][Error][Batch] advisor={advisor_id}: {e}")
+            logger.error(f"[Inbox][Error][Batch] advisor={safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return {}  # Fail-safe: sin badges antes que romper la UI
 
     async def get_all_inbox_phones(self, advisor_id: str) -> Optional[set]:
@@ -1820,7 +1821,7 @@ class ConversationStateManager:
                 phones.add(m.split(":", 1)[0] if ":" in m else m)
             return phones
         except Exception as e:
-            logger.error(f"[Inbox][Error][GetPhones] advisor={advisor_id}: {e}")
+            logger.error(f"[Inbox][Error][GetPhones] advisor={safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return None
 
     # ─── Notificaciones persistentes por asesor ───────────────────────────────
@@ -1852,10 +1853,10 @@ class ConversationStateManager:
             key = f"{self.ADVISOR_NOTIF_PREFIX}{advisor_id}"
             await self.redis.zadd(key, {member: now_ts})
             await self.redis.expire(key, self.ADVISOR_NOTIF_TTL)
-            logger.info(f"[Notif][Add] advisor={advisor_id} type={notif_type} id={notif_id}")
+            logger.info(f"[Notif][Add] advisor={safe_id(advisor_id, 'advisor')} type={notif_type} id={safe_id(notif_id, 'notif')}")
             return notif_id
         except Exception as e:
-            logger.error(f"[Notif][Error][Add] advisor={advisor_id}: {e}")
+            logger.error(f"[Notif][Error][Add] advisor={safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return ""
 
     async def get_advisor_notifications(self, advisor_id: str) -> list:
@@ -1873,7 +1874,7 @@ class ConversationStateManager:
                     pass
             return result
         except Exception as e:
-            logger.error(f"[Notif][Error][Get] advisor={advisor_id}: {e}")
+            logger.error(f"[Notif][Error][Get] advisor={safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return []
 
     async def remove_advisor_notification(self, advisor_id: str, notif_id: str) -> bool:
@@ -1887,13 +1888,13 @@ class ConversationStateManager:
                 try:
                     if json.loads(m).get("id") == notif_id:
                         await self.redis.zrem(key, m)
-                        logger.info(f"[Notif][Remove] advisor={advisor_id} id={notif_id}")
+                        logger.info(f"[Notif][Remove] advisor={safe_id(advisor_id, 'advisor')} id={safe_id(notif_id, 'notif')}")
                         return True
                 except json.JSONDecodeError:
                     pass
             return False
         except Exception as e:
-            logger.error(f"[Notif][Error][Remove] advisor={advisor_id} id={notif_id}: {e}")
+            logger.error(f"[Notif][Error][Remove] advisor={safe_id(advisor_id, 'advisor')} id={safe_id(notif_id, 'notif')}: {safe_error(e)}")
             return False
 
     async def clear_inactivity_notifications_for_contact(
@@ -1918,11 +1919,11 @@ class ConversationStateManager:
                     pass
             if to_remove:
                 removed = await self.redis.zrem(key, *to_remove)
-                logger.info(f"[Notif][ClearContact] advisor={advisor_id} phone={phone} removed={removed}")
+                logger.info(f"[Notif][ClearContact] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)} removed={removed}")
                 return removed
             return 0
         except Exception as e:
-            logger.error(f"[Notif][Error][ClearContact] advisor={advisor_id} phone={phone}: {e}")
+            logger.error(f"[Notif][Error][ClearContact] advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)}: {safe_error(e)}")
             return 0
 
     async def get_conversation_state(self, phone: str, canal: str = "whatsapp") -> Optional[Dict[str, Any]]:
@@ -1955,7 +1956,7 @@ class ConversationStateManager:
 
             return result
         except Exception as e:
-            logger.error(f"[ConversationState] Error en get_conversation_state: {e}")
+            logger.error(f"[ConversationState] Error en get_conversation_state: {safe_error(e)}")
             return None
 
     async def cleanup_duplicate_states(self, phone: str, keep_canal: str = None) -> int:
@@ -2014,10 +2015,10 @@ class ConversationStateManager:
                     await self.redis.zrem(self.ACTIVE_CONTACTS_ZSET, index_member)
                     deleted += 1
 
-            logger.info(f"[ConversationState] Limpiados {deleted} estados duplicados para {phone}, manteniendo {canal_to_keep}")
+            logger.info(f"[ConversationState] Limpiados {deleted} estados duplicados para {safe_phone(phone)}, manteniendo {canal_to_keep}")
             return deleted
         except Exception as e:
-            logger.error(f"[ConversationState] Error en cleanup_duplicate_states: {e}")
+            logger.error(f"[ConversationState] Error en cleanup_duplicate_states: {safe_error(e)}")
             return 0
 
     async def cleanup_legacy_set(self):
@@ -2043,7 +2044,7 @@ class ConversationStateManager:
             await self.redis.delete(legacy_key)
             logger.info("[ConversationState] SET legacy 'active_conversations_index' eliminado de Redis")
         except Exception as e:
-            logger.warning(f"[ConversationState] cleanup_legacy_set: {e} (no crítico)")
+            logger.warning(f"[ConversationState] cleanup_legacy_set: {safe_error(e)} (no crítico)")
 
     async def close(self):
         """Cierra la conexión a Redis de forma segura."""
@@ -2052,4 +2053,4 @@ class ConversationStateManager:
                 await self.redis.aclose()
                 logger.info("[ConversationState] Conexión a Redis cerrada correctamente")
         except Exception as e:
-            logger.warning(f"[ConversationState] Error cerrando Redis: {e}")
+            logger.warning(f"[ConversationState] Error cerrando Redis: {safe_error(e)}")

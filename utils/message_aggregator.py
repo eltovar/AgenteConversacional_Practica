@@ -9,6 +9,7 @@ import os
 import time
 from typing import Optional, Dict, Any
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_phone, safe_text
 
 # Timeout de agregación configurable (default: 30 segundos)
 AGGREGATION_TIMEOUT = int(os.getenv("MESSAGE_AGGREGATION_TIMEOUT", "30"))
@@ -44,7 +45,7 @@ class MessageAggregator:
             else:
                 logger.warning("[MessageAggregator] REDIS_URL no configurado - agregación deshabilitada")
         except Exception as e:
-            logger.warning(f"[MessageAggregator] Redis no disponible: {e}")
+            logger.warning(f"[MessageAggregator] Redis no disponible: {safe_error(e)}")
             self._redis_available = False
 
     def _get_buffer_key(self, session_id: str) -> str:
@@ -124,7 +125,7 @@ class MessageAggregator:
             }
 
         except Exception as e:
-            logger.error(f"[Aggregator] Error en add_message_to_buffer: {e}")
+            logger.error(f"[Aggregator] Error en add_message_to_buffer para {safe_phone(session_id)}: {safe_error(e)}")
             # En caso de error, procesar normalmente
             return {
                 "should_process": True,
@@ -165,11 +166,11 @@ class MessageAggregator:
             self.redis.delete(lock_key)
             self.redis.delete(processing_key)
 
-            logger.info(f"[Aggregator] Mensajes combinados ({len(messages)}): '{combined[:100]}...'")
+            logger.info(f"[Aggregator] Mensajes combinados ({len(messages)}): {safe_text(combined, 100)}")
             return combined
 
         except Exception as e:
-            logger.error(f"[Aggregator] Error en wait_and_get_combined_message: {e}")
+            logger.error(f"[Aggregator] Error en wait_and_get_combined_message para {safe_phone(session_id)}: {safe_error(e)}")
             # Limpiar en caso de error
             try:
                 self.redis.delete(buffer_key)
@@ -190,7 +191,7 @@ class MessageAggregator:
             processing_key = self._get_processing_key(session_id)
             self.redis.delete(buffer_key, lock_key, processing_key)
         except Exception as e:
-            logger.warning(f"[Aggregator] Error limpiando buffer: {e}")
+            logger.warning(f"[Aggregator] Error limpiando buffer para {safe_phone(session_id)}: {safe_error(e)}")
 
 
 # Instancia global (singleton)

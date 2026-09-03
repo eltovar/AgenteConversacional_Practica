@@ -16,6 +16,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_text
 from prompts.middleware.brain import (
     SOFIA_MIDDLEWARE_SYSTEM_PROMPT,
     SOFIA_SINGLE_STREAM_SYSTEM_PROMPT,
@@ -278,7 +279,7 @@ class SofiaBrain:
         Returns:
             Respuesta generada por Sofía
         """
-        logger.info(f"[SofiaBrain] Procesando mensaje de {session_id} (modo legacy)")
+        logger.info(f"[SofiaBrain] Procesando mensaje de {safe_id(session_id, 'session')} (modo legacy)")
 
         # Crear runnable con historial
         with_message_history = RunnableWithMessageHistory(
@@ -309,7 +310,7 @@ class SofiaBrain:
             else:
                 response_text = str(response)
 
-            logger.info(f"[SofiaBrain] Respuesta generada para {session_id}")
+            logger.info(f"[SofiaBrain] Respuesta generada para {safe_id(session_id, 'session')}")
 
             # Truncar historial si excede el máximo
             await self._trim_history(session_id)
@@ -317,7 +318,7 @@ class SofiaBrain:
             return response_text
 
         except Exception as e:
-            logger.error(f"[SofiaBrain] Error procesando mensaje: {e}", exc_info=True)
+            logger.error(f"[SofiaBrain] Error procesando mensaje: {safe_error(e)}", exc_info=True)
             return MIDDLEWARE_MESSAGES["error_processing"]
 
     async def process_message_with_analysis(
@@ -329,7 +330,7 @@ class SofiaBrain:
         """
         Procesa un mensaje y retorna respuesta + análisis en una sola llamada LLM.
         """
-        logger.info(f"[SofiaBrain] Procesando mensaje Single-Stream de {session_id}")
+        logger.info(f"[SofiaBrain] Procesando mensaje Single-Stream de {safe_id(session_id, 'session')}")
 
         # Crear runnable con historial
         with_message_history = RunnableWithMessageHistory(
@@ -391,10 +392,10 @@ class SofiaBrain:
             # Log si se detectó nombre del cliente
             name_info = ""
             if parsed.analisis.nombre_detectado:
-                name_info = f", Nombre: {parsed.analisis.nombre_detectado}"
+                name_info = f", Nombre: {safe_text(parsed.analisis.nombre_detectado, 40)}"
 
             logger.info(
-                f"[SofiaBrain] Single-Stream completado para {session_id} | "
+                f"[SofiaBrain] Single-Stream completado para {safe_id(session_id, 'session')} | "
                 f"Emoción: {parsed.analisis.emocion}, "
                 f"Score: {parsed.analisis.sentiment_score}, "
                 f"Handoff: {parsed.analisis.handoff_priority}{social_info}{name_info}"
@@ -406,7 +407,7 @@ class SofiaBrain:
             return parsed
 
         except Exception as e:
-            logger.error(f"[SofiaBrain] Error en Single-Stream: {e}", exc_info=True)
+            logger.error(f"[SofiaBrain] Error en Single-Stream: {safe_error(e)}", exc_info=True)
             # El LLM no respondió: el análisis se marca como fallido para que el
             # webhook escale a una asesora en vez de leer el "none" por defecto
             # como ausencia de interés.
@@ -454,7 +455,7 @@ class SofiaBrain:
             )
 
         except json.JSONDecodeError as e:
-            logger.warning(f"[SofiaBrain] Error parseando JSON Single-Stream: {e}")
+            logger.warning(f"[SofiaBrain] Error parseando JSON Single-Stream: {safe_error(e)}")
             # Intentar extraer solo el campo "respuesta" con regex antes de fallar
             import re as _re
             _match = _re.search(r'"respuesta"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_content)
@@ -576,7 +577,7 @@ class SofiaBrain:
                 )
 
         except Exception as e:
-            logger.warning(f"[SofiaBrain] Error recortando historial: {e}")
+            logger.warning(f"[SofiaBrain] Error recortando historial: {safe_error(e)}")
 
     async def get_conversation_summary(
         self,
@@ -613,7 +614,7 @@ class SofiaBrain:
             return "\n".join(lines)
 
         except Exception as e:
-            logger.error(f"[SofiaBrain] Error obteniendo resumen: {e}")
+            logger.error(f"[SofiaBrain] Error obteniendo resumen: {safe_error(e)}")
             return "Error al obtener resumen de conversación."
 
     async def clear_history(
@@ -635,7 +636,7 @@ class SofiaBrain:
             history.clear()
             logger.info(f"[SofiaBrain] Historial limpiado para {composite_session_id}")
         except Exception as e:
-            logger.error(f"[SofiaBrain] Error limpiando historial: {e}")
+            logger.error(f"[SofiaBrain] Error limpiando historial: {safe_error(e)}")
 
     def detect_handoff_intent(self, message: str) -> bool:
         """

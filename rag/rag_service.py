@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from logging_config import logger
 from rag.data_loader import load_and_chunk_documents, load_placeholder_documents
 from rag.vector_store import pg_vector_store
+from utils.safe_logging import safe_error, safe_text
 
 # ===== LISTA DE NÚMEROS OBSOLETOS =====
 # Estos números fueron reemplazados y NO deben aparecer en respuestas
@@ -95,7 +96,7 @@ class RAGService:
             }
 
         except Exception as e:
-            logger.error(f"[RAG] ❌ Error CRÍTICO durante la recarga de la Base de Conocimiento: {e}", exc_info=True)
+            logger.error(f"[RAG] ❌ Error CRÍTICO durante la recarga de la Base de Conocimiento: {safe_error(e)}", exc_info=True)
             return {
                 "status": "error",
                 "chunks_indexed": 0,
@@ -143,7 +144,7 @@ class RAGService:
                 
         except Exception as e:
             # No es fatal si falla la limpieza, solo logueamos warning
-            logger.warning("[RAG] No se pudo limpiar vector store: %s", e)
+            logger.warning("[RAG] No se pudo limpiar vector store: %s", safe_error(e))
 
     def _validate_response_no_obsolete_numbers(self, response: str) -> str:
         """
@@ -186,7 +187,7 @@ class RAGService:
         # Ya no necesitamos _ensure_db_initialized, ya que se hizo en el startup.
 
         try:
-            logger.debug(f"[RAG] Búsqueda en '{document_path}' con query: '{query}'")
+            logger.debug(f"[RAG] Búsqueda en '{document_path}' con query: {safe_text(query, 80)}")
 
             # Normalizar ruta para comparación
             normalized_doc_path = document_path.replace("\\", "/")
@@ -213,7 +214,7 @@ class RAGService:
             return formatted_context
 
         except (ValueError, RuntimeError) as e:
-            logger.error("[RAG] Error en búsqueda: %s", e, exc_info=True)
+            logger.error("[RAG] Error en búsqueda: %s", safe_error(e), exc_info=True)
             return f"[ERROR] Error al buscar en '{document_path}': {str(e)}"
 
     def semantic_search(self, query: str, k: int = 5) -> List[Document]:
@@ -223,13 +224,13 @@ class RAGService:
         # Ya no se requiere _ensure_db_initialized (se hizo en startup)
 
         try:
-            logger.debug(f"[RAG] Búsqueda semántica: '{query}' (top-{k})")
+            logger.debug(f"[RAG] Búsqueda semántica: {safe_text(query, 80)} (top-{k})")
             results = pg_vector_store.similarity_search(query, k=k)
             logger.debug(f"[RAG] Encontrados {len(results)} resultados")
             return results
 
         except Exception as e:
-            logger.error(f"[RAG] Error en búsqueda: {e}", exc_info=True)
+            logger.error(f"[RAG] Error en búsqueda: {safe_error(e)}", exc_info=True)
             return []
 
     def get_context_for_query(self, query: str, k: int = 3) -> str:

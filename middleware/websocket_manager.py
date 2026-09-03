@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import WebSocket, WebSocketDisconnect
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 TIMEZONE_BOGOTA = ZoneInfo("America/Bogota")
 
@@ -58,7 +59,7 @@ class ConnectionManager:
         self.all_connections.add(websocket)
 
         logger.info(
-            f"[WebSocket] Asesor {advisor_id} conectado. "
+            f"[WebSocket] Asesor {safe_id(advisor_id, 'advisor')} conectado. "
             f"Total conexiones: {len(self.all_connections)}"
         )
 
@@ -82,7 +83,7 @@ class ConnectionManager:
         self.all_connections.discard(websocket)
 
         logger.info(
-            f"[WebSocket] Asesor {advisor_id} desconectado. "
+            f"[WebSocket] Asesor {safe_id(advisor_id, 'advisor')} desconectado. "
             f"Total conexiones: {len(self.all_connections)}"
         )
 
@@ -95,7 +96,7 @@ class ConnectionManager:
             advisor_id: ID del asesor asignado
         """
         self.phone_to_advisor[phone] = advisor_id
-        logger.debug(f"[WebSocket] Teléfono {phone} asignado a asesor {advisor_id}")
+        logger.debug(f"[WebSocket] Teléfono {safe_phone(phone)} asignado a asesor {safe_id(advisor_id, 'advisor')}")
 
     def unregister_phone(self, phone: str) -> None:
         """
@@ -126,7 +127,7 @@ class ConnectionManager:
                 await websocket.send_json(message)
                 sent_count += 1
             except Exception as e:
-                logger.warning(f"[WebSocket] Error enviando a asesor {advisor_id}: {e}")
+                logger.warning(f"[WebSocket] Error enviando a asesor {safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
                 failed_connections.append(websocket)
 
         # Limpiar conexiones fallidas
@@ -180,7 +181,10 @@ class ConnectionManager:
             "timestamp": datetime.now(TIMEZONE_BOGOTA).isoformat()
         }
 
-        logger.info(f"[WebSocket] notify_new_message: phone={phone}, preview={message_preview[:30] if message_preview else 'N/A'}")
+        logger.info(
+            f"[WebSocket] notify_new_message: phone={safe_phone(phone)}, "
+            f"preview={safe_text(message_preview, 30)}"
+        )
 
         if redis_client is not None:
             # Resolver advisor_id en cascada
@@ -193,13 +197,19 @@ class ConnectionManager:
                     if _m and getattr(_m, "assigned_owner_id", None):
                         advisor_id = _m.assigned_owner_id
                 except Exception as _e:
-                    logger.warning(f"[WebSocket] fallback get_meta falló para {phone}: {_e}")
+                    logger.warning(f"[WebSocket] fallback get_meta falló para {safe_phone(phone)}: {safe_error(_e)}")
 
             if advisor_id:
                 await self.publish_to_advisor(redis_client, advisor_id, notification)
-                logger.info(f"[WebSocket] notify_new_message → targeted advisor={advisor_id} phone={phone}")
+                logger.info(
+                    f"[WebSocket] notify_new_message -> targeted "
+                    f"advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)}"
+                )
             else:
-                logger.warning(f"[WebSocket] notify_new_message → broadcast global (sin owner) phone={phone}")
+                logger.warning(
+                    f"[WebSocket] notify_new_message -> broadcast global "
+                    f"(sin owner) phone={safe_phone(phone)}"
+                )
                 await self.publish_broadcast(redis_client, notification)
             return 0
 
@@ -297,7 +307,7 @@ class ConnectionManager:
                 await asyncio.wait_for(websocket.send_json(message), timeout=2.0)
                 return (websocket, True)
             except Exception as e:
-                logger.warning(f"[WebSocket] Error en broadcast a conexión: {e}")
+                logger.warning(f"[WebSocket] Error en broadcast a conexión: {safe_error(e)}")
                 return (websocket, False)
 
         results = await asyncio.gather(
@@ -441,13 +451,13 @@ class ConnectionManager:
                                 else:
                                     await self.broadcast(data)
                             except Exception as e:
-                                logger.error(f"[WebSocket] Error procesando mensaje Redis: {e}")
+                                logger.error(f"[WebSocket] Error procesando mensaje Redis: {safe_error(e)}")
 
                 except asyncio.CancelledError:
                     logger.info("[WebSocket] Redis listener cancelado limpiamente")
                     raise
                 except Exception as e:
-                    logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {e}")
+                    logger.error(f"[WebSocket] Redis listener caído, reconectando en 2s: {safe_error(e)}")
                 finally:
                     # Cerrar el pubsub explícitamente para evitar
                     # RuntimeError('aclose(): asynchronous generator is already running')

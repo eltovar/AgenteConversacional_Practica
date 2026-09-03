@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import httpx
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_url
 
 # Configuración de Twilio
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -167,7 +168,7 @@ class TwilioClient:
                 return None, None
             return doc.get("conversation_sid"), doc.get("chat_service_sid")
         except Exception as e:
-            logger.warning(f"[TwilioClient] resolve conv_sid fallo para {to}: {e}")
+            logger.warning(f"[TwilioClient] resolve conv_sid fallo para {safe_phone(to)}: {safe_error(e)}")
             return None, None
 
     async def _invalidate_stale_conv_sid(
@@ -210,10 +211,10 @@ class TwilioClient:
                 else:
                     logger.warning(
                         f"[TwilioClient] No se pudo cerrar conv {conversation_sid[:12]}...: "
-                        f"{resp.status_code} - {resp.text[:200]}"
+                        f"{resp.status_code} - {safe_error(resp.text, 200)}"
                     )
         except Exception as e:
-            logger.warning(f"[TwilioClient] Error cerrando conv en Twilio: {e}")
+            logger.warning(f"[TwilioClient] Error cerrando conv en Twilio: {safe_error(e)}")
 
         # Paso 2: limpiar MongoDB
         try:
@@ -231,7 +232,7 @@ class TwilioClient:
                     f"limpiado en {result.modified_count} docs"
                 )
         except Exception as e:
-            logger.warning(f"[TwilioClient] Error limpiando stale conv_sid: {e}")
+            logger.warning(f"[TwilioClient] Error limpiando stale conv_sid: {safe_error(e)}")
 
     async def _capture_outbound_wamid_deferred(
         self,
@@ -267,8 +268,8 @@ class TwilioClient:
                 if result.get("status") != "success":
                     if attempt == retries - 1:
                         logger.debug(
-                            f"[WAMidCapture] GET fallido para IM={im_sid[:20]} "
-                            f"tras {retries} intentos: {result.get('message')}"
+                            f"[WAMidCapture] GET fallido para IM={safe_id(im_sid, 'im')} "
+                            f"tras {retries} intentos: {safe_error(result.get('message'))}"
                         )
                     continue
                 msg = result.get("message") or {}
@@ -290,17 +291,17 @@ class TwilioClient:
                     await mm.store_wamid_for_im_sid(im_sid, wamid)
                     logger.info(
                         f"[WAMidCapture] ✅ Outbound WAMid capturado: "
-                        f"IM={im_sid[:20]} wamid={wamid[:40]} (intento {attempt+1})"
+                        f"IM={safe_id(im_sid, 'im')} wamid={safe_id(wamid, 'wamid')} (intento {attempt+1})"
                     )
                     return
                 if attempt == retries - 1:
                     logger.info(
                         f"[WAMidCapture] ⚠️ ChannelMetadata sin WAMid resoluble para "
-                        f"IM={im_sid[:20]} tras {retries} intentos. data_keys={list(data.keys())}"
+                        f"IM={safe_id(im_sid, 'im')} tras {retries} intentos. data_keys={list(data.keys())}"
                     )
             except Exception as e:
                 logger.warning(
-                    f"[WAMidCapture] Excepción intento {attempt+1} para IM={im_sid[:20]}: {e}"
+                    f"[WAMidCapture] Excepción intento {attempt+1} para IM={safe_id(im_sid, 'im')}: {safe_error(e)}"
                 )
 
     async def _post_with_429_retry(self, client, url, **kwargs):
@@ -393,14 +394,14 @@ class TwilioClient:
                         error_code=str(cod_error) if cod_error else None,
                     )
                     logger.info(
-                        f"[Receipts] IM={im_sid[:20]} SM={sm_sid} estado={estado} "
+                        f"[Receipts] IM={safe_id(im_sid, 'im')} SM={safe_id(sm_sid, 'sm')} estado={estado} "
                         f"error_code={cod_error}"
                     )
                     return
             except Exception as e:
-                logger.warning(f"[Receipts] Intento {intento + 1} falló para IM={im_sid[:20]}: {e}")
+                logger.warning(f"[Receipts] Intento {intento + 1} falló para IM={safe_id(im_sid, 'im')}: {safe_error(e)}")
 
-        logger.info(f"[Receipts] Sin recibo resoluble para IM={im_sid[:20]} tras {retries} intentos")
+        logger.info(f"[Receipts] Sin recibo resoluble para IM={safe_id(im_sid, 'im')} tras {retries} intentos")
 
     async def _chat_service_of(self, conversation_sid: str) -> Optional[str]:
         """Devuelve el ChatServiceSid de una conversación, o None si no se puede leer."""
@@ -412,7 +413,7 @@ class TwilioClient:
             if resp.status_code == 200:
                 return resp.json().get("chat_service_sid")
         except Exception as e:
-            logger.warning(f"[TwilioClient] No se pudo leer chat_service_sid: {e}")
+            logger.warning(f"[TwilioClient] No se pudo leer chat_service_sid: {safe_error(e)}")
         return None
 
     async def _create_conversation_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
@@ -446,7 +447,7 @@ class TwilioClient:
             if resp.status_code not in (200, 201):
                 logger.error(
                     f"[TwilioClient][ConvAuto] No se pudo crear conversación: "
-                    f"{resp.status_code} - {resp.text[:200]}"
+                    f"{resp.status_code} - {safe_error(resp.text, 200)}"
                 )
                 return None, None
             data = resp.json()
@@ -492,17 +493,17 @@ class TwilioClient:
 
                 logger.error(
                     f"[TwilioClient][ConvAuto] No se pudo agregar participante: "
-                    f"{p_resp.status_code} - {p_resp.text[:200]}"
+                    f"{p_resp.status_code} - {safe_error(p_resp.text, 200)}"
                 )
                 return None, None
 
             logger.info(
                 f"[TwilioClient][ConvAuto] Conversación creada {conv_sid[:12]}... "
-                f"para {to[-6:]} (workaround compliance)"
+                        f"para {safe_phone(to)} (workaround compliance)"
             )
             return conv_sid, svc_sid
         except Exception as e:
-            logger.error(f"[TwilioClient][ConvAuto] Excepción creando conversación: {e}")
+            logger.error(f"[TwilioClient][ConvAuto] Excepción creando conversación: {safe_error(e)}")
             return None, None
 
     async def _send_via_conversations(
@@ -582,12 +583,12 @@ class TwilioClient:
                     self._invalidate_stale_conv_sid(conversation_sid, chat_service_sid)
                 )
             logger.warning(
-                f"[TwilioClient][Conv] Error {resp.status_code} send conv={conversation_sid}: "
-                f"{resp.text[:200]}"
+                f"[TwilioClient][Conv] Error {resp.status_code} send conv={safe_id(conversation_sid, 'conv')}: "
+                f"{safe_error(resp.text, 200)}"
             )
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
-            logger.error(f"[TwilioClient][Conv] Excepción: {e}")
+            logger.error(f"[TwilioClient][Conv] Excepción: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
     async def send_whatsapp_message(
@@ -756,7 +757,7 @@ class TwilioClient:
                     payload["ContentVariables"] = json.dumps(content_variables)
                 logger.info(
                     f"[TwilioClient] Enviando con ContentSid={content_sid} "
-                    f"vars={content_variables}"
+                    f"vars={safe_id(content_variables, 'content_vars')}"
                 )
             else:
                 # Texto libre (solo funciona con ventana de 24h abierta)
@@ -768,7 +769,7 @@ class TwilioClient:
                 if not media_url.startswith("https://"):
                     logger.error(
                         f"[TwilioClient] ❌ URL de media inválida (falta https://): "
-                        f"{media_url[:80]}... - Twilio rechazará esta URL"
+                        f"{safe_url(media_url)} - Twilio rechazará esta URL"
                     )
                     return {
                         "status": "error",
@@ -777,7 +778,7 @@ class TwilioClient:
                     }
 
                 payload["MediaUrl"] = media_url
-                logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {media_url[:80]}...")
+                logger.info(f"[TwilioClient] 📤 Enviando con MediaUrl: {safe_url(media_url)}")
             else:
                 logger.debug(f"[TwilioClient] Enviando mensaje de texto (sin multimedia)")
 
@@ -799,7 +800,7 @@ class TwilioClient:
                     logger.warning(
                         f"[TwilioClient] ⚠️ Mensaje aceptado pero con error: "
                         f"SID={data.get('sid')}, status={msg_status}, "
-                        f"error_code={error_code}, error_message={error_message}"
+                        f"error_code={error_code}, error_message={safe_error(error_message)}"
                     )
                 else:
                     logger.info(
@@ -817,7 +818,7 @@ class TwilioClient:
                 }
             else:
                 error_msg = response.text
-                logger.error(f"[TwilioClient] Error enviando mensaje: {response.status_code} - {error_msg}")
+                logger.error(f"[TwilioClient] Error enviando mensaje: {response.status_code} - {safe_error(error_msg, 200)}")
                 twilio_error_code = None
                 try:
                     ct = response.headers.get("content-type", "")
@@ -842,7 +843,7 @@ class TwilioClient:
                 }
 
         except Exception as e:
-            logger.error(f"[TwilioClient] Excepción enviando mensaje: {e}")
+            logger.error(f"[TwilioClient] Excepción enviando mensaje: {safe_error(e)}")
             return {
                 "status": "error",
                 "message": str(e)
@@ -878,15 +879,15 @@ class TwilioClient:
             if resp.status_code in (200, 201):
                 data = resp.json()
                 logger.info(
-                    f"[TwilioClient] Mensaje editado conv={conversation_sid} im={message_sid}"
+                    f"[TwilioClient] Mensaje editado conv={safe_id(conversation_sid, 'conv')} im={safe_id(message_sid, 'im')}"
                 )
                 return {"status": "success", "message_sid": data.get("sid"), "body": data.get("body")}
             logger.error(
-                f"[TwilioClient] Error editando mensaje: {resp.status_code} - {resp.text}"
+                f"[TwilioClient] Error editando mensaje: {resp.status_code} - {safe_error(resp.text, 200)}"
             )
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
-            logger.error(f"[TwilioClient] Excepción editando mensaje: {e}")
+            logger.error(f"[TwilioClient] Excepción editando mensaje: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
     async def delete_conversation_message(
@@ -913,15 +914,15 @@ class TwilioClient:
             resp = await client.delete(url, auth=(sid, token))
             if resp.status_code in (200, 204):
                 logger.info(
-                    f"[TwilioClient] Mensaje eliminado conv={conversation_sid} im={message_sid}"
+                    f"[TwilioClient] Mensaje eliminado conv={safe_id(conversation_sid, 'conv')} im={safe_id(message_sid, 'im')}"
                 )
                 return {"status": "success"}
             logger.error(
-                f"[TwilioClient] Error eliminando mensaje: {resp.status_code} - {resp.text}"
+                f"[TwilioClient] Error eliminando mensaje: {resp.status_code} - {safe_error(resp.text, 200)}"
             )
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
-            logger.error(f"[TwilioClient] Excepción eliminando mensaje: {e}")
+            logger.error(f"[TwilioClient] Excepción eliminando mensaje: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
 
@@ -947,7 +948,7 @@ class TwilioClient:
                 return {"status": "success", "message": resp.json()}
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
-            logger.error(f"[TwilioClient] Excepción fetching message {message_sid}: {e}")
+            logger.error(f"[TwilioClient] Excepción fetching message {safe_id(message_sid, 'im')}: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
     async def list_conversation_messages(
@@ -984,16 +985,16 @@ class TwilioClient:
                     self._invalidate_stale_conv_sid(conversation_sid, chat_service_sid)
                 )
                 logger.info(
-                    f"[TwilioClient] Conv {conversation_sid[:12]}... 404 al listar "
+                    f"[TwilioClient] Conv {safe_id(conversation_sid, 'conv')} 404 al listar "
                     f"mensajes — invalidando SID stale"
                 )
                 return {"status": "error", "code": 404, "message": "stale_conv_sid"}
             logger.error(
-                f"[TwilioClient] Error listando mensajes: {resp.status_code} - {resp.text}"
+                f"[TwilioClient] Error listando mensajes: {resp.status_code} - {safe_error(resp.text, 200)}"
             )
             return {"status": "error", "code": resp.status_code, "message": resp.text}
         except Exception as e:
-            logger.error(f"[TwilioClient] Excepción listando mensajes: {e}")
+            logger.error(f"[TwilioClient] Excepción listando mensajes: {safe_error(e)}")
             return {"status": "error", "message": str(e)}
 
 

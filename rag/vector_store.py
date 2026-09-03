@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from sqlalchemy.exc import IntegrityError
 from llm_client import embeddings
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_mapping, safe_text
 
 
 class PgVectorStore:
@@ -88,7 +89,7 @@ class PgVectorStore:
 
         except Exception as e:
             self._is_initialized = False
-            logger.error(f"[VectorStore] ❌ Fallo al conectar o inicializar la DB: {e}", exc_info=True)
+            logger.error(f"[VectorStore] Fallo al conectar o inicializar la DB: {safe_error(e)}", exc_info=True)
             raise ConnectionError(f"No se pudo inicializar PGVector: {e}") from e
 
     def similarity_search(
@@ -114,7 +115,7 @@ class PgVectorStore:
             raise RuntimeError("Vector store no inicializado. Llame a initialize_db() primero.")
 
         try:
-            logger.debug(f"[VectorStore] Búsqueda de similitud: query='{query[:50]}...', k={k}, filter={filter}")
+            logger.debug(f"[VectorStore] Búsqueda de similitud: query={safe_text(query, 50)}, k={k}, filter={safe_mapping(filter or {}, 'filter')}")
 
             # Ejecutar búsqueda REAL con PGVector
             results = self.vector_db.similarity_search(
@@ -127,7 +128,7 @@ class PgVectorStore:
             return results
 
         except Exception as e:
-            logger.error(f"[VectorStore] Error durante búsqueda de similitud: {e}", exc_info=True)
+            logger.error(f"[VectorStore] Error durante búsqueda de similitud: {safe_error(e)}", exc_info=True)
             raise
 
     def add_documents(self, documents: List[Document]) -> List[str]:
@@ -153,7 +154,7 @@ class PgVectorStore:
             return ids
 
         except Exception as e:
-            logger.error(f"[VectorStore] Error al añadir documentos: {e}", exc_info=True)
+            logger.error(f"[VectorStore] Error al añadir documentos: {safe_error(e)}", exc_info=True)
             raise
 
     def delete_collection(self) -> None:
@@ -170,7 +171,7 @@ class PgVectorStore:
             self.vector_db.delete_collection()
             logger.info("[VectorStore] Colección eliminada exitosamente")
         except Exception as e:
-            logger.warning(f"[VectorStore] Error al eliminar colección: {e}")
+            logger.warning(f"[VectorStore] Error al eliminar colección: {safe_error(e)}")
 
 
 # ===== INSTANCIA GLOBAL =====

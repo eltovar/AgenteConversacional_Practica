@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import dateparser
+from utils.safe_logging import safe_error, safe_text
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ class AppointmentDateParser:
                     if parsed_date.tzinfo is None:
                         parsed_date = parsed_date.replace(tzinfo=TIMEZONE_BOGOTA)
                 except ValueError:
-                    logger.warning(f"[DateParser] No se pudo parsear fecha: {fecha_str}")
+                    logger.warning(f"[DateParser] No se pudo parsear fecha: {safe_text(fecha_str, 40)}")
                     return None
 
             # Asegurar que tenga timezone
@@ -159,7 +160,7 @@ class AppointmentDateParser:
             return parsed_date
 
         except Exception as e:
-            logger.error(f"[DateParser] Error parseando fecha '{fecha_str}': {e}")
+            logger.error(f"[DateParser] Error parseando fecha {safe_text(fecha_str, 40)}: {safe_error(e)}")
             return None
 
     @classmethod

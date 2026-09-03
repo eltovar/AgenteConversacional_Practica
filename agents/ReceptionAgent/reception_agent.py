@@ -11,6 +11,7 @@ from state_manager import ConversationState, ConversationStatus
 from langchain_core.messages import SystemMessage, HumanMessage
 from logging_config import logger
 from utils.link_detector import LinkDetector, LinkDetectionResult, PortalOrigen
+from utils.safe_logging import safe_error, safe_mapping, safe_text
 import random
 import json
 from typing import Dict, Any
@@ -27,7 +28,7 @@ class ReceptionAgent:
         """
         Procesa un mensaje del usuario según el estado actual de la conversación.
         """
-        logger.info(f"[ReceptionAgent] Estado: {state.status}, Mensaje: '{message[:50]}...'")
+        logger.info(f"[ReceptionAgent] Estado: {state.status}, Mensaje: {safe_text(message, 50)}")
 
         # Detectar links ANTES de clasificar intención
         link_result = self.link_detector.analizar_mensaje(message)
@@ -127,7 +128,7 @@ class ReceptionAgent:
                         property_data = await self._extract_property_entities(message)
                         if property_data:
                             state.lead_data['metadata'] = property_data
-                            logger.info(f"[ReceptionAgent] Metadata inicial extraída: {property_data}")
+                            logger.info(f"[ReceptionAgent] Metadata inicial extraída: {safe_mapping(property_data, 'property_data')}")
 
                         # Transferir al CRM Agent conversacional
                         state.status = ConversationStatus.CRM_CONVERSATION
@@ -162,7 +163,7 @@ class ReceptionAgent:
                 logger.warning(f"[ReceptionAgent] No se recibió tool_call en intento {attempt+1}")
 
             except Exception as e:
-                logger.error(f"[ReceptionAgent] Error en la invocación del LLM (Intento {attempt+1}): {e}")
+                logger.error(f"[ReceptionAgent] Error en la invocación del LLM (Intento {attempt+1}): {safe_error(e)}")
 
         # Fallback si se agotan todos los reintentos
         logger.error(f"[ReceptionAgent] Clasificación fallida después de {MAX_RETRIES + 1} intentos.")
@@ -205,17 +206,17 @@ class ReceptionAgent:
             if start_idx != -1 and end_idx > start_idx:
                 json_str = response_text[start_idx:end_idx]
                 property_data = json.loads(json_str)
-                logger.info(f"[ReceptionAgent] Entidades extraídas: {property_data}")
+                logger.info(f"[ReceptionAgent] Entidades extraídas: {safe_mapping(property_data, 'property_data')}")
                 return property_data
             else:
                 logger.warning("[ReceptionAgent] No se encontró JSON en la respuesta de extracción")
                 return {}
 
         except json.JSONDecodeError as e:
-            logger.error(f"[ReceptionAgent] Error parseando JSON de entidades: {e}")
+            logger.error(f"[ReceptionAgent] Error parseando JSON de entidades: {safe_error(e)}")
             return {}
         except Exception as e:
-            logger.error(f"[ReceptionAgent] Error extrayendo entidades: {e}")
+            logger.error(f"[ReceptionAgent] Error extrayendo entidades: {safe_error(e)}")
             return {}
 
 

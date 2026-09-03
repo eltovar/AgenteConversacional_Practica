@@ -8,6 +8,7 @@ import os
 import redis
 from typing import Optional, Dict, List, Any
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 from datetime import datetime, timezone, timedelta
 
 
@@ -77,7 +78,7 @@ class LeadAssigner:
                 logger.warning("[LeadAssigner] REDIS_URL no configurada. Usando asignación sin persistencia.")
 
         except Exception as e:
-            logger.warning(f"[LeadAssigner] No se pudo conectar a Redis: {e}. Usando asignación sin persistencia.")
+            logger.warning(f"[LeadAssigner] No se pudo conectar a Redis: {safe_error(e)}. Usando asignación sin persistencia.")
             self._redis_available = False
 
     def _get_redis_key(self, team: str) -> str:
@@ -112,7 +113,7 @@ class LeadAssigner:
         # Si solo hay un owner, retornarlo directamente
         if len(active_owners) == 1:
             owner_id = active_owners[0]["id"]
-            logger.info(f"[LeadAssigner] Asignando a único owner: {active_owners[0]['name']} (ID: {owner_id})")
+            logger.info(f"[LeadAssigner] Asignando a único owner: {safe_text(active_owners[0]['name'], 40)} (ID: {safe_id(owner_id, 'owner')})")
             return owner_id
 
         # Obtener índice actual de Redis (o inicializar en 0)
@@ -125,7 +126,7 @@ class LeadAssigner:
                 if stored_index is not None:
                     current_index = int(stored_index)
             except Exception as e:
-                logger.warning(f"[LeadAssigner] Error leyendo índice de Redis: {e}")
+                logger.warning(f"[LeadAssigner] Error leyendo índice de Redis: {safe_error(e)}")
 
         # Calcular owner actual usando módulo
         owner_index = current_index % len(active_owners)
@@ -138,11 +139,11 @@ class LeadAssigner:
             try:
                 self.redis.set(redis_key, next_index)
             except Exception as e:
-                logger.warning(f"[LeadAssigner] Error guardando índice en Redis: {e}")
+                logger.warning(f"[LeadAssigner] Error guardando índice en Redis: {safe_error(e)}")
 
         logger.info(
-            f"[LeadAssigner] Asignación Round Robin: {owner['name']} "
-            f"(ID: {owner['id']}, Canal: {channel_origin}, Equipo: {team}, Index: {owner_index})"
+            f"[LeadAssigner] Asignación Round Robin: {safe_text(owner['name'], 40)} "
+            f"(ID: {safe_id(owner['id'], 'owner')}, Canal: {channel_origin}, Equipo: {team}, Index: {owner_index})"
         )
 
         return owner["id"]
@@ -205,7 +206,7 @@ class LeadAssigner:
             logger.info(f"[LeadAssigner] Índice reiniciado para equipo '{team}'")
             return True
         except Exception as e:
-            logger.error(f"[LeadAssigner] Error reiniciando índice: {e}")
+            logger.error(f"[LeadAssigner] Error reiniciando índice: {safe_error(e)}")
             return False
 
     def get_assignment_stats(self) -> Dict[str, Any]:
@@ -282,8 +283,8 @@ class OrphanLeadAlert:
 
         # Log siempre a consola
         logger.warning(
-            f"[OrphanLeadAlert] ⚠️ LEAD HUÉRFANO - "
-            f"ContactID: {contact_id}, Phone: {phone}, Reason: {reason}"
+            f"[OrphanLeadAlert] LEAD HUERFANO - "
+            f"ContactID: {safe_id(contact_id, 'contact')}, Phone: {safe_phone(phone)}, Reason: {safe_id(reason, 'reason')}"
         )
 
         # Intentar guardar en Redis si está disponible
@@ -294,7 +295,7 @@ class OrphanLeadAlert:
                 # Mantener solo las últimas 100 alertas
                 self.redis.ltrim(self.REDIS_KEY, 0, 99)
             except Exception as e:
-                logger.error(f"[OrphanLeadAlert] Error guardando alerta en Redis: {e}")
+                logger.error(f"[OrphanLeadAlert] Error guardando alerta en Redis: {safe_error(e)}")
 
     def get_pending_alerts(self, limit: int = 10) -> List[Dict]:
         """
@@ -308,7 +309,7 @@ class OrphanLeadAlert:
             alerts_raw = self.redis.lrange(self.REDIS_KEY, 0, limit - 1)
             return [json.loads(a) for a in alerts_raw]
         except Exception as e:
-            logger.error(f"[OrphanLeadAlert] Error leyendo alertas: {e}")
+            logger.error(f"[OrphanLeadAlert] Error leyendo alertas: {safe_error(e)}")
             return []
 
 
@@ -405,7 +406,7 @@ class OrphanLeadMonitor:
             return orphans
 
         except Exception as e:
-            logger.error(f"[OrphanLeadMonitor] Error buscando leads huérfanos: {e}", exc_info=True)
+            logger.error(f"[OrphanLeadMonitor] Error buscando leads huérfanos: {safe_error(e)}", exc_info=True)
             return []
 
     async def _send_alert(self, orphan_leads: List[Dict], hours_window: int):
@@ -459,7 +460,7 @@ class OrphanLeadMonitor:
             logger.info(f"[OrphanLeadMonitor] {len(orphan_leads)} leads almacenados en Redis")
 
         except Exception as e:
-            logger.error(f"[OrphanLeadMonitor] Error guardando en Redis: {e}")
+            logger.error(f"[OrphanLeadMonitor] Error guardando en Redis: {safe_error(e)}")
 
     async def _send_webhook_alert(self, orphan_leads: List[Dict], hours_window: int):
         """
@@ -484,7 +485,7 @@ class OrphanLeadMonitor:
             logger.info(f"[OrphanLeadMonitor] ✅ Alerta enviada a webhook ({response.status_code})")
 
         except Exception as e:
-            logger.error(f"[OrphanLeadMonitor] Error enviando webhook: {e}")
+            logger.error(f"[OrphanLeadMonitor] Error enviando webhook: {safe_error(e)}")
 
     def _format_webhook_message(self, orphan_leads: List[Dict], hours_window: int) -> Dict:
         """
@@ -591,7 +592,7 @@ class OrphanLeadMonitor:
             return orphans
 
         except Exception as e:
-            logger.error(f"[OrphanLeadMonitor] Error leyendo cache: {e}")
+            logger.error(f"[OrphanLeadMonitor] Error leyendo cache: {safe_error(e)}")
             return []
 
 

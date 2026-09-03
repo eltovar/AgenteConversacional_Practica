@@ -86,6 +86,7 @@ from integrations.hubspot import get_outbound_router, get_timeline_logger
 # Importar función para actualizar ventana de 24h
 from middleware.outbound_panel import update_last_client_message
 from middleware.websocket_manager import ws_manager
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN INICIAL
@@ -168,7 +169,12 @@ import traceback
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     # Loguear el error completo
-    _diag_logger.error(f"[500 ERROR] path={request.url.path} error={exc} traceback={traceback.format_exc()}")
+    _diag_logger.error(
+        "[500 ERROR] path=%s error=%s traceback=%s",
+        request.url.path,
+        safe_error(exc),
+        safe_error(traceback.format_exc(), 500),
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -189,9 +195,9 @@ async def validation_exception_handler(request, exc):
     content_type = request.headers.get("content-type", "MISSING")
     try:
         raw_body = await request.body()
-        body_preview = raw_body[:300].decode("utf-8", errors="replace")
+        body_preview = safe_text(raw_body.decode("utf-8", errors="replace"), 300)
     except Exception as be:
-        body_preview = f"[error leyendo body: {be}]"
+        body_preview = safe_error(be)
     _diag_logger.error(
         f"[422 DETAIL] path={request.url.path} "
         f"content-type='{content_type}' "
@@ -262,10 +268,10 @@ async def process_aggregated_messages(session_id: str, to_number: str):
         combined_message = await message_aggregator.wait_and_get_combined_message(session_id)
 
         if not combined_message:
-            logger.warning("[BACKGROUND] No hay mensajes para procesar (session: %s)", session_id)
+            logger.warning("[BACKGROUND] No hay mensajes para procesar (session: %s)", safe_phone(session_id))
             return
 
-        logger.info("[BACKGROUND] Procesando mensajes agregados: '%s...'", combined_message[:80])
+        logger.info("[BACKGROUND] Procesando mensajes agregados: %s", safe_text(combined_message, 80))
 
         # 2. Normalizar teléfono
         phone_normalized = session_id.replace("whatsapp:", "").replace("+", "")
@@ -277,9 +283,9 @@ async def process_aggregated_messages(session_id: str, to_number: str):
         # 3. Actualizar ventana de 24h
         try:
             await update_last_client_message(phone_normalized)
-            logger.info("[BACKGROUND] ✅ Ventana 24h actualizada para %s", phone_normalized)
+            logger.info("[BACKGROUND] ✅ Ventana 24h actualizada para %s", safe_phone(phone_normalized))
         except Exception as window_err:
-            logger.error("[BACKGROUND] Error actualizando ventana 24h: %s", window_err)
+            logger.error("[BACKGROUND] Error actualizando ventana 24h: %s", safe_error(window_err))
 
         # 4. Verificar si bot debe responder
         state_manager = get_state_manager()
@@ -291,7 +297,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
                 current_status = await state_manager.get_status(phone_normalized)
                 logger.info(
                     "[BACKGROUND] 👤 Estado %s detectado para %s. Bot silenciado.",
-                    current_status.value, phone_normalized
+                    current_status.value, safe_phone(phone_normalized)
                 )
 
                 # Registrar mensaje en HubSpot aunque bot esté silenciado
@@ -310,12 +316,12 @@ async def process_aggregated_messages(session_id: str, to_number: str):
                         )
                         logger.info("[BACKGROUND] 📱 Mensaje registrado en HubSpot (bot silenciado)")
                 except Exception as hs_err:
-                    logger.error("[BACKGROUND] Error registrando en HubSpot: %s", hs_err)
+                    logger.error("[BACKGROUND] Error registrando en HubSpot: %s", safe_error(hs_err))
 
                 return  # No procesar con IA
 
         except Exception as state_err:
-            logger.error("[BACKGROUND] Error verificando estado: %s", state_err)
+            logger.error("[BACKGROUND] Error verificando estado: %s", safe_error(state_err))
 
         # 5. Registrar mensaje en HubSpot
         try:
@@ -326,7 +332,7 @@ async def process_aggregated_messages(session_id: str, to_number: str):
             ) 
 
             if contact_info and contact_info.contact_id:
-                logger.info("[BACKGROUND] 📱 Registrando mensaje en HubSpot (contact_id=%s)", contact_info.contact_id)
+                logger.info("[BACKGROUND] 📱 Registrando mensaje en HubSpot (%s)", safe_id(contact_info.contact_id, "contact"))
                 timeline_logger = get_timeline_logger()
                 await timeline_logger.log_client_message(
                     contact_id=contact_info.contact_id,
@@ -334,13 +340,13 @@ async def process_aggregated_messages(session_id: str, to_number: str):
                     session_id=phone_normalized
                 )
         except Exception as hubspot_err:
-            logger.error("[BACKGROUND] Error registrando en HubSpot: %s", hubspot_err)
+            logger.error("[BACKGROUND] Error registrando en HubSpot: %s", safe_error(hubspot_err))
 
         # 6. Procesar con orchestrator
         result = await process_message(session_id, combined_message)
 
         if not result or not result.get("response"):
-            logger.warning("[BACKGROUND] Orchestrator no generó respuesta para %s", session_id)
+            logger.warning("[BACKGROUND] Orchestrator no generó respuesta para %s", safe_phone(session_id))
             return
 
         # 7. CHECK FINAL antes de enviar (anti race-condition)
@@ -362,14 +368,14 @@ async def process_aggregated_messages(session_id: str, to_number: str):
                 body=result["response"]
             )
             if send_result["status"] == "success":
-                logger.info("[BACKGROUND] Respuesta enviada exitosamente a %s", to_number)
+                logger.info("[BACKGROUND] Respuesta enviada exitosamente a %s", safe_phone(to_number))
             else:
-                logger.error("[BACKGROUND] Error enviando respuesta: %s", send_result)
+                logger.error("[BACKGROUND] Error enviando respuesta: %s", safe_error(send_result))
         else:
             logger.error("[BACKGROUND] Twilio client no disponible")
 
     except Exception as e:
-        logger.error("[BACKGROUND] Error en procesamiento: %s", e, exc_info=True)
+        logger.error("[BACKGROUND] Error en procesamiento: %s", safe_error(e), exc_info=True)
         
 # ═══════════════════════════════════════════════════════════════════════════════
 # LÓGICA DE RECORDATORIOS DE CITAS
@@ -439,7 +445,7 @@ async def check_appointment_reminders():
 
             logger.info(
                 "[Scheduler][Reminder] Verificando cita %s: Diferencia %.2f horas, Estado cita: %s",
-                apt.phone_normalized, diff_hours, apt.status.value
+                safe_phone(apt.phone_normalized), diff_hours, apt.status.value
             )
 
             # Verificar estado de conversación — enviar si bot o asesor activo
@@ -448,21 +454,21 @@ async def check_appointment_reminders():
             if status not in VALID_STATUSES:
                 logger.info(
                     "[Scheduler][Reminder] Skip %s — estado inactivo: %s",
-                    apt.phone_normalized, status.value if status else "None"
+                    safe_phone(apt.phone_normalized), status.value if status else "None"
                 )
                 skipped += 1
                 continue
 
             logger.info(
                 "[Scheduler][Reminder] Enviando recordatorio a %s (estado conv: %s)",
-                apt.phone_normalized, status.value if status else "N/A"
+                safe_phone(apt.phone_normalized), status.value if status else "N/A"
             )
 
             # Construir mensaje de recordatorio — resolver nombre con fallback de 3 niveles
             contact_name, _name_source = await _resolver_nombre_cita(apt, state_manager)
             logger.info(
                 "[Scheduler][Naming] %s → nombre='%s' (source=%s)",
-                apt.phone_normalized, contact_name, _name_source
+                safe_phone(apt.phone_normalized), safe_id(contact_name, "name"), _name_source
             )
             message = (
                 f"¡Hola {contact_name}! 👋 Te recuerdo tu cita programada para hoy "
@@ -502,7 +508,7 @@ async def check_appointment_reminders():
                             logger.error("[Scheduler][Reminder] Error registrando en HubSpot: %s", hs_err)
 
                     sent += 1
-                    logger.info("[Scheduler][Reminder] ✅ Recordatorio enviado a %s", apt.phone_normalized)
+                    logger.info("[Scheduler][Reminder] Recordatorio enviado a %s", safe_phone(apt.phone_normalized))
                     # Guardar en MongoDB para que aparezca en el panel
                     try:
                         canal_apt = apt.canal or "whatsapp"
@@ -533,7 +539,7 @@ async def check_appointment_reminders():
                 else:
                     logger.warning(
                         "[Scheduler][Reminder] ❌ Error enviando recordatorio a %s: %s",
-                        apt.phone_normalized, result.get("message")
+                        safe_phone(apt.phone_normalized), safe_error(result.get("message"))
                     )
             else:
                 logger.warning("[Scheduler][Reminder] Twilio no disponible para recordatorios")
@@ -1337,16 +1343,16 @@ async def check_and_send_followups():
                         if result.get("status") == "success":
                             await r.set(followup_key, get_bogota_now_iso(), ex=7 * 24 * 60 * 60)
                             followups_sent += 1
-                            logger.info("[FOLLOWUP] ✅ Seguimiento enviado a %s", phone)
+                            logger.info("[FOLLOWUP] Seguimiento enviado a %s", safe_phone(phone))
                         else:
                             await r.delete(followup_key)
-                            logger.warning("[FOLLOWUP] ❌ Error enviando a %s", phone)
+                            logger.warning("[FOLLOWUP] Error enviando a %s", safe_phone(phone))
 
                 finally:
                     await r.delete(lock_key)
 
             except Exception as contact_err:
-                logger.error("[FOLLOWUP] Error procesando %s: %s", phone, contact_err)
+                logger.error("[FOLLOWUP] Error procesando %s: %s", safe_phone(phone), safe_error(contact_err))
 
         logger.info("[FOLLOWUP] Completado. Revisados: %d, Enviados: %d", contacts_checked, followups_sent)
 
@@ -1471,10 +1477,10 @@ async def check_aprobados_daily():
                 contacts_count = len(result.get("results", []))
                 logger.info(
                     "[Scheduler][Aprobados] advisor=%s stage='lead' → hs_total=%d results=%d",
-                    advisor_id, result.get("total", 0), contacts_count
+                    safe_id(advisor_id, "advisor"), result.get("total", 0), contacts_count
                 )
             except Exception as hs_err:
-                logger.warning("[Scheduler][Aprobados] Error HubSpot advisor=%s: %s", advisor_id, hs_err)
+                logger.warning("[Scheduler][Aprobados] Error HubSpot advisor=%s: %s", safe_id(advisor_id, "advisor"), safe_error(hs_err))
                 continue
 
             if contacts_count == 0:
@@ -1534,7 +1540,7 @@ async def check_appointment_followups():
                 if status not in VALID_STATUSES:
                     logger.info(
                         "[Scheduler][Followup] Skip %s — estado inactivo: %s",
-                        apt.phone_normalized, status.value if status else "None"
+                        safe_phone(apt.phone_normalized), status.value if status else "None"
                     )
                     skipped += 1
                     continue
@@ -1547,8 +1553,8 @@ async def check_appointment_followups():
 
                 logger.info(
                     "[Scheduler][Followup] Seguimiento post-cita %s: %.0f min después (estado conv: %s, nombre='%s' source=%s)",
-                    apt.phone_normalized, minutes_since, status.value if status else "N/A",
-                    contact_name, _name_source
+                    safe_phone(apt.phone_normalized), minutes_since, status.value if status else "N/A",
+                    safe_id(contact_name, "name"), _name_source
                 )
 
                 followup1_preview = (
@@ -1579,7 +1585,7 @@ async def check_appointment_followups():
                                 )
                                 asyncio.create_task(
                                     get_mongo_manager().mark_visit_completed(
-                                        apt.contact_id, apt.phone_normalized
+                                        safe_id(apt.contact_id, "contact"), safe_phone(apt.phone_normalized)
                                     )
                                 )
                             except Exception as lc_err:
@@ -1600,7 +1606,7 @@ async def check_appointment_followups():
                                 logger.error("[Scheduler][Followup] Error HubSpot followup: %s", hs_err)
 
                         sent += 1
-                        logger.info("[Scheduler][Followup] ✅ Seguimiento post-cita enviado a %s", apt.phone_normalized)
+                        logger.info("[Scheduler][Followup] Seguimiento post-cita enviado a %s", safe_phone(apt.phone_normalized))
                         try:
                             canal_apt = apt.canal or "whatsapp"
                             mongo_mgr = get_mongo_manager()
@@ -1628,12 +1634,12 @@ async def check_appointment_followups():
                                 "[Scheduler][Followup] No se pudo guardar en panel: %s", _panel_err
                             )
                     else:
-                        logger.warning("[Scheduler][Followup] ❌ Error enviando followup a %s", apt.phone_normalized)
+                        logger.warning("[Scheduler][Followup] Error enviando followup a %s", safe_phone(apt.phone_normalized))
                 else:
                     logger.warning("[Scheduler][Followup] Twilio no disponible para followup post-cita")
 
             except Exception as apt_err:
-                logger.error("[Scheduler][Followup] Error en followup post-cita %s: %s", apt.phone_normalized, apt_err)
+                logger.error("[Scheduler][Followup] Error en followup post-cita %s: %s", safe_phone(apt.phone_normalized), safe_error(apt_err))
 
         logger.info(
             "[Scheduler][Followup] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
@@ -1675,7 +1681,7 @@ async def check_appointment_followup2():
                 if status not in VALID_STATUSES:
                     logger.info(
                         "[Scheduler][Followup2] Skip %s — estado inactivo: %s",
-                        apt.phone_normalized, status.value if status else "None"
+                        safe_phone(apt.phone_normalized), status.value if status else "None"
                     )
                     continue
 
@@ -1683,7 +1689,7 @@ async def check_appointment_followup2():
                 contact_name, _name_source = await _resolver_nombre_cita(apt, state_manager)
                 logger.info(
                     "[Scheduler][Followup2] %s -> nombre='%s' (source=%s)",
-                    apt.phone_normalized, contact_name, _name_source
+                    safe_phone(apt.phone_normalized), safe_id(contact_name, "name"), _name_source
                 )
 
                 if twilio_client.is_available:
@@ -1698,7 +1704,7 @@ async def check_appointment_followup2():
                         await apt_manager.mark_followup2_sent(apt.phone_normalized, apt.canal)
 
                         sent += 1
-                        logger.info("[Scheduler][Followup2] ✅ Encuesta enviada a %s", apt.phone_normalized)
+                        logger.info("[Scheduler][Followup2] Encuesta enviada a %s", safe_phone(apt.phone_normalized))
 
                         try:
                             canal_apt = apt.canal or "whatsapp"
@@ -1729,12 +1735,12 @@ async def check_appointment_followup2():
                         except Exception as panel_err:
                             logger.warning("[Scheduler][Followup2] Error guardando en panel: %s", panel_err)
                     else:
-                        logger.warning("[Scheduler][Followup2] ❌ Error enviando encuesta a %s", apt.phone_normalized)
+                        logger.warning("[Scheduler][Followup2] Error enviando encuesta a %s", safe_phone(apt.phone_normalized))
                 else:
                     logger.warning("[Scheduler][Followup2] Twilio no disponible para followup2")
 
             except Exception as apt_err:
-                logger.error("[Scheduler][Followup2] Error en %s: %s", apt.phone_normalized, apt_err)
+                logger.error("[Scheduler][Followup2] Error en %s: %s", safe_phone(apt.phone_normalized), safe_error(apt_err))
 
         logger.info("[Scheduler][Followup2] ✓ Completado — enviadas: %d", sent)
 
@@ -1994,12 +2000,12 @@ async def startup_event():
 
                     acquired = await r.set(lock_key, "1", nx=True, ex=86400)
                     if not acquired:
-                        logger.debug("[SchedMsg] Lock ya existe para %s — skip", msg_id)
+                        logger.debug("[SchedMsg] Lock ya existe para %s — skip", safe_id(msg_id, "scheduled_msg"))
                         continue
 
                     try:
                         if not twilio_client.is_available:
-                            logger.warning("[SchedMsg] Twilio no disponible, skip %s", msg_id)
+                            logger.warning("[SchedMsg] Twilio no disponible, skip %s", safe_id(msg_id, "scheduled_msg"))
                             continue
 
                         await twilio_client.send_whatsapp_message(
@@ -2011,16 +2017,16 @@ async def startup_event():
                         await mongo_mgr.mark_scheduled_message_sent(msg_id)
                         logger.info(
                             "[SchedMsg] Enviado: id=%s template=%s phone=%s",
-                            msg_id, msg["template_name"], msg["phone"]
+                            safe_id(msg_id, "scheduled_msg"), msg["template_name"], safe_phone(msg["phone"])
                         )
                     except Exception as send_err:
                         await mongo_mgr.mark_scheduled_message_failed(msg_id, str(send_err))
-                        logger.error("[SchedMsg] Error enviando %s: %s", msg_id, send_err)
+                        logger.error("[SchedMsg] Error enviando %s: %s", safe_id(msg_id, "scheduled_msg"), safe_error(send_err))
 
                     await asyncio.sleep(0.1)
 
             except Exception as e:
-                logger.error("[SchedMsg] Error en ciclo: %s", e, exc_info=True)
+                logger.error("[SchedMsg] Error en ciclo: %s", safe_error(e), exc_info=True)
 
         scheduler.add_job(
             check_scheduled_messages,
@@ -2220,7 +2226,7 @@ async def shutdown_event():
             await _global_state_manager.close()
         logger.info("[SHUTDOWN] Conexión a Redis (singleton CSM) cerrada")
     except Exception as e:
-        logger.warning(f"[SHUTDOWN] Error cerrando Redis singleton: {e}")
+        logger.warning(f"[SHUTDOWN] Error cerrando Redis singleton: {safe_error(e)}")
 
     # 3. Cerrar conexión de MongoDB
     try:
@@ -2229,7 +2235,7 @@ async def shutdown_event():
             mongo_manager.client.close()
             logger.info("[SHUTDOWN] Conexión a MongoDB cerrada")
     except Exception as e:
-        logger.warning(f"[SHUTDOWN] Error cerrando MongoDB: {e}")
+        logger.warning(f"[SHUTDOWN] Error cerrando MongoDB: {safe_error(e)}")
 
     logger.info("[SHUTDOWN] Proceso de cierre completado")
 

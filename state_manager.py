@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 import redis
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_phone
 
 class ConversationStatus(str, Enum):
     RECEPTION_START = "RECEPTION_START"
@@ -107,14 +108,14 @@ class StateManager:
                 self._redis_initialized = True
 
             except redis.ConnectionError as e:
-                logger.error(f"[StateManager] Error de conexión a Redis: {e}")
+                logger.error(f"[StateManager] Error de conexión a Redis: {safe_error(e)}")
                 raise ConnectionError(
                     f"No se pudo conectar a Redis. "
                     f"Verifica que REDIS_URL esté configurado correctamente. "
                     f"Error: {e}"
                 ) from e
             except Exception as e:
-                logger.error(f"[StateManager] Error al inicializar Redis: {e}")
+                logger.error(f"[StateManager] Error al inicializar Redis: {safe_error(e)}")
                 raise
 
     def get_state(self, session_id: str) -> ConversationState:
@@ -132,25 +133,25 @@ class StateManager:
             if data:
                 # Deserializar JSON desde Redis
                 state = ConversationState.model_validate_json(data)
-                logger.debug(f"[StateManager] Estado recuperado para session_id={session_id}")
+                logger.debug(f"[StateManager] Estado recuperado para session_id={safe_phone(session_id)}")
                 return state
             else:
                 # Sesión no existe, crear nuevo estado
                 new_state = ConversationState(session_id=session_id)
-                logger.info(f"[StateManager] Nueva sesión creada: {session_id}")
+                logger.info(f"[StateManager] Nueva sesión creada: {safe_phone(session_id)}")
 
                 # IMPORTANTE: Guardar inmediatamente para evitar pérdida de sesión
                 # Esto previene el bug donde mensajes consecutivos no encuentran la sesión
                 self.update_state(new_state)
-                logger.debug(f"[StateManager] Nueva sesión guardada inmediatamente: {session_id}")
+                logger.debug(f"[StateManager] Nueva sesión guardada inmediatamente: {safe_phone(session_id)}")
 
                 return new_state
 
         except redis.RedisError as e:
-            logger.error(f"[StateManager] Error de Redis al obtener estado: {e}")
+            logger.error(f"[StateManager] Error de Redis al obtener estado: {safe_error(e)}")
             raise
         except Exception as e:
-            logger.error(f"[StateManager] Error al deserializar estado: {e}")
+            logger.error(f"[StateManager] Error al deserializar estado: {safe_error(e)}")
             raise
 
     def update_state(self, state: ConversationState):
@@ -171,15 +172,15 @@ class StateManager:
 
             # Verificar que se guardó correctamente
             if result:
-                logger.debug(f"[StateManager] Estado persistido para session_id={state.session_id} (TTL={self.session_ttl}s)")
+                logger.debug(f"[StateManager] Estado persistido para session_id={safe_phone(state.session_id)} (TTL={self.session_ttl}s)")
             else:
-                logger.warning(f"[StateManager] Redis.set retornó False para session_id={state.session_id}")
+                logger.warning(f"[StateManager] Redis.set retornó False para session_id={safe_phone(state.session_id)}")
 
         except redis.RedisError as e:
-            logger.error(f"[StateManager] Error de Redis al persistir estado: {e}")
+            logger.error(f"[StateManager] Error de Redis al persistir estado: {safe_error(e)}")
             raise
         except Exception as e:
-            logger.error(f"[StateManager] Error al serializar estado: {e}")
+            logger.error(f"[StateManager] Error al serializar estado: {safe_error(e)}")
             raise
 
     def verify_state_exists(self, session_id: str) -> bool:

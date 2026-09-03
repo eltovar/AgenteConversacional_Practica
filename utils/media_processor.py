@@ -27,6 +27,7 @@ from typing import Optional, Dict, Any, Tuple
 from openai import AsyncOpenAI
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text, safe_url
 
 # ============================================================================
 # CONFIGURACIÓN
@@ -70,10 +71,10 @@ def _get_bunny_pull_zone() -> str:
     if not url.startswith("https://"):
         if url.startswith("http://"):
             url = url.replace("http://", "https://", 1)
-            logger.info(f"[BunnyStorage] URL normalizada de http a https: {url}")
+            logger.info(f"[BunnyStorage] URL normalizada de http a https: {safe_url(url)}")
         else:
             url = f"https://{url}"
-            logger.info(f"[BunnyStorage] URL normalizada con https://: {url}")
+            logger.info(f"[BunnyStorage] URL normalizada con https://: {safe_url(url)}")
     
     return url
 
@@ -348,17 +349,17 @@ class MediaProcessor:
 
         # Detectar URL del Media Content Service (Conversations API)
         if "mcs." in url and "/Services/" in url and "/Media/" in url:
-            logger.info(f"[MediaProcessor] Resolviendo MCS URL: {url}")
+            logger.info(f"[MediaProcessor] Resolviendo MCS URL: {safe_url(url)}")
             meta_resp = await client.get(url, auth=self.twilio_auth, timeout=30.0)
             if meta_resp.status_code != 200:
                 logger.error(
-                    f"[MediaProcessor] Error consultando MCS: {meta_resp.status_code} - {meta_resp.text[:200]}"
+                    f"[MediaProcessor] Error consultando MCS: {meta_resp.status_code} - {safe_error(meta_resp.text, 200)}"
                 )
                 raise Exception(f"Error consultando MCS: {meta_resp.status_code}")
             try:
                 meta = meta_resp.json()
             except Exception as e:
-                logger.error(f"[MediaProcessor] MCS no devolvió JSON: {e} - body={meta_resp.text[:200]}")
+                logger.error(f"[MediaProcessor] MCS no devolvió JSON: {safe_error(e)} - body={safe_error(meta_resp.text, 200)}")
                 raise Exception("MCS respuesta inválida")
 
             links = meta.get("links") or {}
@@ -368,7 +369,7 @@ class MediaProcessor:
                 or links.get("content")
             )
             if not temp_url:
-                logger.error(f"[MediaProcessor] MCS sin links de descarga: {meta}")
+                logger.error(f"[MediaProcessor] MCS sin links de descarga: keys={list(meta.keys()) if isinstance(meta, dict) else 'invalid'}")
                 raise Exception("MCS no proveyó URL de descarga")
 
             logger.info(f"[MediaProcessor] MCS URL temporal obtenida ({len(temp_url)} chars)")
@@ -497,15 +498,15 @@ class MediaProcessor:
                 media_sid = resp.json().get("sid")
                 logger.info(
                     f"[MCS] ✅ Subido {len(file_bytes)} bytes ({content_type}) "
-                    f"-> {media_sid} filename={filename!r}"
+                    f"-> {safe_id(media_sid, 'media')} filename={safe_id(filename, 'filename')}"
                 )
                 return media_sid
             logger.error(
-                f"[MCS] ❌ Error subiendo media: {resp.status_code} - {resp.text[:200]}"
+                f"[MCS] ❌ Error subiendo media: {resp.status_code} - {safe_error(resp.text, 200)}"
             )
             return None
         except Exception as e:
-            logger.error(f"[MCS] ❌ Excepción subiendo media: {e}")
+            logger.error(f"[MCS] ❌ Excepción subiendo media: {safe_error(e)}")
             return None
 
     async def upload_to_bunny(
@@ -557,7 +558,7 @@ class MediaProcessor:
             if response.status_code in [200, 201]:
                 # URL pública del Pull Zone (CDN - desde donde se sirve)
                 public_url = f"{BUNNY_PULL_ZONE}/{folder}/{clean_filename}"
-                logger.info(f"[BunnyStorage] Archivo subido exitosamente: {public_url}")
+                logger.info(f"[BunnyStorage] Archivo subido exitosamente: {safe_url(public_url)}")
 
                 # =========================================================
                 # VERIFICAR DISPONIBILIDAD EN CDN (evita Error 63019)
@@ -576,7 +577,7 @@ class MediaProcessor:
                         if head_response.status_code == 200:
                             logger.info(
                                 f"[BunnyStorage] ✅ CDN verificado (intento {attempt + 1}): "
-                                f"{public_url} - status={head_response.status_code}"
+                                f"{safe_url(public_url)} - status={head_response.status_code}"
                             )
                             return public_url
                         elif head_response.status_code == 404:
@@ -594,7 +595,7 @@ class MediaProcessor:
 
                     except Exception as verify_err:
                         logger.warning(
-                            f"[BunnyStorage] Error verificando CDN (intento {attempt + 1}): {verify_err}"
+                            f"[BunnyStorage] Error verificando CDN (intento {attempt + 1}): {safe_error(verify_err)}"
                         )
                         await asyncio.sleep(retry_delay)
                         retry_delay *= 1.5
@@ -602,13 +603,13 @@ class MediaProcessor:
                 # Si llegamos aquí, no pudimos verificar pero el upload fue exitoso
                 logger.warning(
                     f"[BunnyStorage] ⚠️ No se pudo verificar CDN después de {max_retries} intentos. "
-                    f"Retornando URL de todas formas: {public_url}"
+                    f"Retornando URL de todas formas: {safe_url(public_url)}"
                 )
                 return public_url
             else:
                 logger.error(
                     f"[BunnyStorage] Error subiendo archivo: "
-                    f"status={response.status_code}, response={response.text[:200]}"
+                    f"status={response.status_code}, response={safe_error(response.text, 200)}"
                 )
                 raise Exception(f"Error en Bunny Storage: {response.status_code}")
 
@@ -616,7 +617,7 @@ class MediaProcessor:
             logger.error("[BunnyStorage] Timeout subiendo archivo a Bunny.net")
             raise Exception("Timeout subiendo archivo a Bunny.net")
         except Exception as e:
-            logger.error(f"[BunnyStorage] Error inesperado: {e}")
+            logger.error(f"[BunnyStorage] Error inesperado: {safe_error(e)}")
             raise
 
     # =========================================================================
@@ -667,14 +668,14 @@ class MediaProcessor:
             ]
 
             if any(phrase.lower() in text.lower() for phrase in phrases_to_ignore) and len(text) < 60:
-                logger.warning(f"[Whisper] Posible alucinación detectada: '{text}'")
+                logger.warning(f"[Whisper] Posible alucinación detectada: {safe_text(text, 60)}")
                 return "[Audio sin contenido verbal claro]"
 
-            logger.info(f"[Whisper] Transcripción exitosa: {text[:100]}...")
+            logger.info(f"[Whisper] Transcripción exitosa: {safe_text(text, 100)}")
             return text
 
         except Exception as e:
-            logger.error(f"[Whisper] Error en transcripción: {e}")
+            logger.error(f"[Whisper] Error en transcripción: {safe_error(e)}")
             return ""
 
     # =========================================================================
@@ -718,11 +719,11 @@ class MediaProcessor:
             )
 
             analysis = response.choices[0].message.content
-            logger.info(f"[GPT-Vision] Análisis de imagen: {analysis[:100]}...")
+            logger.info(f"[GPT-Vision] Análisis de imagen: {safe_text(analysis, 100)}")
             return analysis
 
         except Exception as e:
-            logger.error(f"[GPT-Vision] Error analizando imagen: {e}")
+            logger.error(f"[GPT-Vision] Error analizando imagen: {safe_error(e)}")
             return ""
 
     # =========================================================================
@@ -867,7 +868,7 @@ class MediaProcessor:
             )
 
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error procesando media entrante: {e}")
+            logger.error(f"[MediaProcessor] Error procesando media entrante: {safe_error(e)}")
             result["body_for_ai"] = "[Error procesando archivo multimedia]"
 
         finally:
@@ -1000,7 +1001,7 @@ class MediaProcessor:
             logger.error("[MediaProcessor] Timeout en conversión de audio → MP3")
             return audio_bytes, False
         except Exception as e:
-            logger.error(f"[MediaProcessor] Error en conversión de audio → MP3: {e}")
+            logger.error(f"[MediaProcessor] Error en conversion de audio a MP3: {safe_error(e)}")
             return audio_bytes, False
 
     # Alias para compatibilidad con código existente

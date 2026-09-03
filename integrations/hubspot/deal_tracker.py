@@ -8,6 +8,7 @@ import os
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone, timedelta
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id
 
 
 class DealStageTracker:
@@ -63,11 +64,11 @@ class DealStageTracker:
         try:
             # 1. Obtener etapa actual del deal
             current_stage = await self._get_deal_stage(deal_id)
-            logger.info(f"[DealStageTracker] Deal {deal_id} en etapa: {current_stage}")
+            logger.info(f"[DealStageTracker] Deal {safe_id(deal_id, 'deal')} en etapa: {safe_id(current_stage, 'stage')}")
 
             # 2. Solo actualizar si está en "Nuevo Lead"
             if current_stage != self.STAGE_IDS["nuevo_lead"]:
-                logger.debug(f"[DealStageTracker] Deal {deal_id} ya no está en 'Nuevo Lead', omitiendo")
+                logger.debug(f"[DealStageTracker] Deal {safe_id(deal_id, 'deal')} ya no está en 'Nuevo Lead', omitiendo")
                 return None
 
             # 3. Verificar actividades recientes del contacto
@@ -77,14 +78,14 @@ class DealStageTracker:
                 # Hay actividad → mover a "En Conversación"
                 new_stage = self.STAGE_IDS["en_conversacion"]
                 await self._update_deal_stage(deal_id, new_stage)
-                logger.info(f"[DealStageTracker] ✅ Deal {deal_id} movido: Nuevo Lead → En Conversación")
+                logger.info(f"[DealStageTracker] Deal {safe_id(deal_id, 'deal')} movido: Nuevo Lead -> En Conversación")
                 return new_stage
 
-            logger.debug(f"[DealStageTracker] No hay actividad reciente para deal {deal_id}")
+            logger.debug(f"[DealStageTracker] No hay actividad reciente para deal {safe_id(deal_id, 'deal')}")
             return None
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error verificando deal {deal_id}: {e}", exc_info=True)
+            logger.error(f"[DealStageTracker] Error verificando deal {safe_id(deal_id, 'deal')}: {safe_error(e)}", exc_info=True)
             return None
 
     async def check_for_scheduled_visit(
@@ -115,13 +116,13 @@ class DealStageTracker:
                     # Encontramos mención de visita → actualizar
                     new_stage = self.STAGE_IDS["visita_agendada"]
                     await self._update_deal_stage(deal_id, new_stage)
-                    logger.info(f"[DealStageTracker] ✅ Deal {deal_id} movido: En Conversación → Visita Agendada")
+                    logger.info(f"[DealStageTracker] Deal {safe_id(deal_id, 'deal')} movido: En Conversación -> Visita Agendada")
                     return True
 
             return False
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error verificando visita para deal {deal_id}: {e}")
+            logger.error(f"[DealStageTracker] Error verificando visita para deal {safe_id(deal_id, 'deal')}: {safe_error(e)}")
             return False
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -143,7 +144,7 @@ class DealStageTracker:
             return stage_id
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error obteniendo etapa de deal {deal_id}: {e}")
+            logger.error(f"[DealStageTracker] Error obteniendo etapa de deal {safe_id(deal_id, 'deal')}: {safe_error(e)}")
             return None
 
     async def _update_deal_stage(self, deal_id: str, new_stage_id: str) -> bool:
@@ -159,11 +160,11 @@ class DealStageTracker:
             }
 
             await self.hubspot._request("PATCH", endpoint, payload)
-            logger.info(f"[DealStageTracker] Deal {deal_id} actualizado a etapa {new_stage_id}")
+            logger.info(f"[DealStageTracker] Deal {safe_id(deal_id, 'deal')} actualizado a etapa {safe_id(new_stage_id, 'stage')}")
             return True
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error actualizando deal {deal_id}: {e}", exc_info=True)
+            logger.error(f"[DealStageTracker] Error actualizando deal {safe_id(deal_id, 'deal')}: {safe_error(e)}", exc_info=True)
             return False
 
     async def _has_recent_activity(self, contact_id: str, hours: int = 24) -> bool:
@@ -180,7 +181,7 @@ class DealStageTracker:
             return len(activities) > 0
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error verificando actividad de contacto {contact_id}: {e}")
+            logger.error(f"[DealStageTracker] Error verificando actividad de contacto {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return False
 
     async def _get_contact_activities(
@@ -209,11 +210,11 @@ class DealStageTracker:
             # Por ahora retornamos todas las actividades
             results = response.get("results", [])
 
-            logger.debug(f"[DealStageTracker] Contacto {contact_id}: {len(results)} actividades encontradas")
+            logger.debug(f"[DealStageTracker] Contacto {safe_id(contact_id, 'contact')}: {len(results)} actividades encontradas")
             return results
 
         except Exception as e:
-            logger.error(f"[DealStageTracker] Error obteniendo actividades de {contact_id}: {e}")
+            logger.error(f"[DealStageTracker] Error obteniendo actividades de {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return []
 
     def get_stage_name(self, stage_id: str) -> str:

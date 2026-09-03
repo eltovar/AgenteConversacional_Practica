@@ -24,6 +24,7 @@ from logging_config import logger
 from .phone_normalizer import PhoneNormalizer, PhoneValidationResult
 from integrations.hubspot.hubspot_client import HubSpotClient
 from integrations.hubspot.lead_assigner import lead_assigner
+from utils.safe_logging import safe_error, safe_id, safe_phone
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -608,7 +609,7 @@ class ContactManager:
             r = await self._get_redis()
             await r.set(f"phone_cache:{phone_normalized}", contact_id, ex=86400)
             await r.set(f"phone_cache:{contact_id}", phone_normalized, ex=86400)
-            logger.info("[ContactManager] phone_cache guardado para %s", phone_normalized)
+            logger.info("[ContactManager] phone_cache guardado para %s", safe_phone(phone_normalized))
         except Exception:
             pass
 
@@ -675,7 +676,7 @@ class ContactManager:
             )
             logger.info(
                 "[ContactManager] Deal creado: %s para contacto %s (canal=%s)",
-                deal_id, contact_id, source_channel
+                safe_id(deal_id, "deal"), safe_id(contact_id, "contact"), source_channel
             )
 
             # Cachear deal_id en Redis para que el CRM Agent pueda hacer sync parcial
@@ -685,22 +686,22 @@ class ContactManager:
                 await r.setex(f"deal_id_cache:{phone_normalized}", 72 * 3600, deal_id)
                 logger.info(
                     "[ContactManager] deal_id_cache guardado: deal=%s, phone=%s",
-                    deal_id, phone_normalized
+                    safe_id(deal_id, "deal"), safe_phone(phone_normalized)
                 )
             except Exception as redis_err:
                 logger.warning(
-                    "[ContactManager] No se pudo cachear deal_id en Redis: %s", redis_err
+                    "[ContactManager] No se pudo cachear deal_id en Redis: %s", safe_error(redis_err)
                 )
 
             # Escribir url_chat en el negocio si está disponible
             if url_chat and deal_id:
                 try:
                     await self.hubspot.update_deal(deal_id, {"url_chat": url_chat})
-                    logger.info("[ContactManager] url_chat escrito en negocio %s", deal_id)
+                    logger.info("[ContactManager] url_chat escrito en negocio %s", safe_id(deal_id, "deal"))
                 except Exception as deal_url_err:
                     logger.warning(
                         "[ContactManager] No se pudo escribir url_chat en negocio %s: %s",
-                        deal_id, deal_url_err
+                        safe_id(deal_id, "deal"), safe_error(deal_url_err)
                     )
 
             return {"deal_id": deal_id, "current_stage": STAGE_NUEVO_LEAD}
@@ -708,7 +709,7 @@ class ContactManager:
             # El fallo de creación de deal NO debe afectar la conversación
             logger.warning(
                 "[ContactManager] No se pudo crear deal para contacto %s: %s",
-                contact_id, e
+                safe_id(contact_id, "contact"), safe_error(e)
             )
             return None
 
@@ -719,9 +720,9 @@ class ContactManager:
         """
         try:
             await self.hubspot.update_contact(contact_id, {"url_chat": url_chat})
-            logger.info("[ContactManager] url_chat registrado para contacto %s", contact_id)
+            logger.info("[ContactManager] url_chat registrado para contacto %s", safe_id(contact_id, "contact"))
         except Exception as e:
-            logger.warning("[ContactManager] No se pudo escribir url_chat para %s: %s", contact_id, e)
+            logger.warning("[ContactManager] No se pudo escribir url_chat para %s: %s", safe_id(contact_id, "contact"), safe_error(e))
 
     async def _assign_owner_to_existing_contact(
         self,
@@ -748,13 +749,13 @@ class ContactManager:
                 logger.warning(
                     "[ContactManager] No se pudo obtener owner para canal %s. "
                     "Contacto %s no será asignado.",
-                    source_channel, contact_id
+                    source_channel, safe_id(contact_id, "contact")
                 )
                 return
             
             logger.info(
                 "[ContactManager] Asignando owner %s a contacto existente %s (canal: %s)",
-                owner_id, contact_id, source_channel
+                safe_id(owner_id, "owner"), safe_id(contact_id, "contact"), source_channel
             )
             
             # 2. Actualizar contacto con owner
@@ -763,7 +764,7 @@ class ContactManager:
             })
             logger.info(
                 "[ContactManager] ✅ Owner %s asignado a contacto %s",
-                owner_id, contact_id
+                safe_id(owner_id, "owner"), safe_id(contact_id, "contact")
             )
             
             # 3. Construir url_chat para deep link
@@ -780,16 +781,16 @@ class ContactManager:
             if url_chat:
                 try:
                     await self.hubspot.update_contact(contact_id, {"url_chat": url_chat})
-                    logger.info("[ContactManager] url_chat actualizado para contacto %s", contact_id)
+                    logger.info("[ContactManager] url_chat actualizado para contacto %s", safe_id(contact_id, "contact"))
                 except Exception as url_err:
                     logger.warning(
-                        "[ContactManager] No se pudo actualizar url_chat: %s", url_err
+                        "[ContactManager] No se pudo actualizar url_chat: %s", safe_error(url_err)
                     )
             
         except Exception as e:
             logger.warning(
                 "[ContactManager] Error asignando owner a contacto %s: %s",
-                contact_id, e
+                safe_id(contact_id, "contact"), safe_error(e)
             )
 
     async def _check_contact_has_deal(self, contact_id: str) -> bool:
@@ -808,7 +809,7 @@ class ContactManager:
         except Exception as e:
             logger.warning(
                 "[ContactManager] Error verificando deals para contacto %s: %s",
-                contact_id, e
+                safe_id(contact_id, "contact"), safe_error(e)
             )
             # En caso de error, asumir que no tiene deal para crear uno
             return False
@@ -912,7 +913,7 @@ class ContactManager:
         """
         try:
             await self.hubspot.update_contact(contact_id, properties)
-            logger.info("[ContactManager] Contacto %s actualizado", contact_id)
+            logger.info("[ContactManager] Contacto %s actualizado", safe_id(contact_id, "contact"))
             return True
 
         except Exception as e:

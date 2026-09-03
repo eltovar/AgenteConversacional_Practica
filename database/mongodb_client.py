@@ -22,6 +22,7 @@ from pymongo.errors import (
 from bson import ObjectId
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 # Timezone Colombia
 TIMEZONE = ZoneInfo("America/Bogota")
@@ -241,11 +242,11 @@ class MongoDBManager:
             return True
 
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-            logger.error(f"[MongoDB] Error de conexión: {e}")
+            logger.error(f"[MongoDB] Error de conexión: {safe_error(e)}")
             self._connected = False
             return False
         except Exception as e:
-            logger.error(f"[MongoDB] Error inesperado: {e}")
+            logger.error(f"[MongoDB] Error inesperado: {safe_error(e)}")
             self._connected = False
             return False
 
@@ -401,7 +402,7 @@ class MongoDBManager:
             logger.info("[MongoDB] Índices creados/verificados")
 
         except Exception as e:
-            logger.warning(f"[MongoDB] Error creando índices: {e}")
+            logger.warning(f"[MongoDB] Error creando índices: {safe_error(e)}")
 
     # =========================================================================
     # OPERACIONES DE MENSAJES
@@ -540,7 +541,7 @@ class MongoDBManager:
                     await asyncio.sleep(delay)
 
             except Exception as e:
-                logger.error(f"[MongoDB] Error no recuperable guardando mensaje: {e}")
+                logger.error(f"[MongoDB] Error no recuperable guardando mensaje: {safe_error(e)}")
                 return None
 
         logger.error(
@@ -629,12 +630,12 @@ class MongoDBManager:
                     "edited": bool(msg.get("edited", False)),
                 })
 
-            logger.debug(f"[MongoDB] Historial obtenido: {len(formatted_messages)} mensajes para {phone}")
+            logger.debug(f"[MongoDB] Historial obtenido: {len(formatted_messages)} mensajes para {safe_phone(phone)}")
 
             return formatted_messages
 
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo historial: {e}")
+            logger.error(f"[MongoDB] Error obteniendo historial: {safe_error(e)}")
             # Reset para forzar reconexión en la siguiente llamada
             self._connected = False
             self._last_ping = 0.0
@@ -700,7 +701,7 @@ class MongoDBManager:
             return formatted_messages
 
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo historial por contact_id: {e}")
+            logger.error(f"[MongoDB] Error obteniendo historial por {safe_id(hubspot_contact_id, 'contact')}: {safe_error(e)}")
             self._connected = False
             self._last_ping = 0.0
             return []
@@ -734,7 +735,7 @@ class MongoDBManager:
                 }
             return None
         except Exception as e:
-            logger.warning(f"[MongoDB] Error buscando mensaje por SID {message_sid}: {e}")
+            logger.warning(f"[MongoDB] Error buscando mensaje por {safe_id(message_sid, 'sid')}: {safe_error(e)}")
             return None
 
     async def update_message_reply_context(
@@ -760,7 +761,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.warning(f"[MongoDB] Error actualizando reply context para {message_sid}: {e}")
+            logger.warning(f"[MongoDB] Error actualizando reply context para {safe_id(message_sid, 'sid')}: {safe_error(e)}")
             return False
 
     async def store_wamid_for_im_sid(self, im_sid: str, wamid: str) -> None:
@@ -773,7 +774,7 @@ class MongoDBManager:
                 {"$set": {"wamid": wamid}},
             )
         except Exception as e:
-            logger.warning(f"[MongoDB] Error almacenando WAMid para IM={im_sid}: {e}")
+            logger.warning(f"[MongoDB] Error almacenando WAMid para {safe_id(im_sid, 'im_sid')}: {safe_error(e)}")
 
     async def search_messages_fulltext(
         self,
@@ -817,11 +818,11 @@ class MongoDBManager:
                     seen.add(phone)
                     unique_phones.append(phone)
 
-            logger.info(f"[MongoDB] Búsqueda fulltext '{query_text}': {len(unique_phones)} contactos encontrados")
+            logger.info(f"[MongoDB] Búsqueda fulltext {safe_text(query_text, 80)}: {len(unique_phones)} contactos encontrados")
             return unique_phones
 
         except Exception as e:
-            logger.error(f"[MongoDB] Error en búsqueda fulltext: {e}")
+            logger.error(f"[MongoDB] Error en búsqueda fulltext: {safe_error(e)}")
             return []
 
     async def mark_as_synced_to_hubspot(self, message_id: str) -> bool:
@@ -842,7 +843,7 @@ class MongoDBManager:
             return result.modified_count > 0
 
         except Exception as e:
-            logger.error(f"[MongoDB] Error marcando mensaje como sincronizado: {e}")
+            logger.error(f"[MongoDB] Error marcando mensaje como sincronizado {safe_id(message_id, 'message')}: {safe_error(e)}")
             return False
 
     async def update_delivery_status(
@@ -907,15 +908,15 @@ class MongoDBManager:
             )
 
             if result.matched_count > 0:
-                logger.debug(f"[MongoDB] Delivery status actualizado: {message_sid} -> {status}")
+                logger.debug(f"[MongoDB] Delivery status actualizado: {safe_id(message_sid, 'sid')} -> {status}")
                 return True
             else:
                 # No es error crítico - el mensaje puede ser muy antiguo o de otro origen
-                logger.debug(f"[MongoDB] Mensaje no encontrado para delivery update: {message_sid}")
+                logger.debug(f"[MongoDB] Mensaje no encontrado para delivery update: {safe_id(message_sid, 'sid')}")
                 return False
                 
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando delivery status: {e}")
+            logger.error(f"[MongoDB] Error actualizando delivery status: {safe_error(e)}")
             return False
 
     def _build_msg_filter(self, identifier: str) -> Dict[str, Any]:
@@ -946,12 +947,12 @@ class MongoDBManager:
                 projection={"_id": 1, "phone": 1, "content": 1, "sender": 1, "timestamp": 1, "conversation_sid": 1, "conversations_message_sid": 1, "message_sid": 1}
             )
             if result:
-                logger.info(f"[MongoDB] Mensaje editado: id={identifier}")
+                logger.info(f"[MongoDB] Mensaje editado: {safe_id(identifier, 'message')}")
             else:
-                logger.warning(f"[MongoDB] Mensaje no encontrado para edición: {identifier}")
+                logger.warning(f"[MongoDB] Mensaje no encontrado para edición: {safe_id(identifier, 'message')}")
             return result
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando contenido de mensaje: {e}")
+            logger.error(f"[MongoDB] Error actualizando contenido de mensaje: {safe_error(e)}")
             return None
 
     async def soft_delete_message(self, identifier: str) -> Optional[Dict]:
@@ -968,12 +969,12 @@ class MongoDBManager:
                 projection={"_id": 1, "phone": 1, "sender": 1, "timestamp": 1, "conversation_sid": 1, "conversations_message_sid": 1, "message_sid": 1}
             )
             if result:
-                logger.info(f"[MongoDB] Mensaje eliminado (soft): id={identifier}")
+                logger.info(f"[MongoDB] Mensaje eliminado (soft): {safe_id(identifier, 'message')}")
             else:
-                logger.warning(f"[MongoDB] Mensaje no encontrado para soft-delete: {identifier}")
+                logger.warning(f"[MongoDB] Mensaje no encontrado para soft-delete: {safe_id(identifier, 'message')}")
             return result
         except Exception as e:
-            logger.error(f"[MongoDB] Error en soft-delete de mensaje: {e}")
+            logger.error(f"[MongoDB] Error en soft-delete de mensaje: {safe_error(e)}")
             return None
 
     async def update_message_fields(self, mongo_id: str, fields: Dict[str, Any]) -> bool:
@@ -987,7 +988,7 @@ class MongoDBManager:
             )
             return res.matched_count > 0
         except Exception as e:
-            logger.warning(f"[MongoDB] update_message_fields {mongo_id} fallo: {e}")
+            logger.warning(f"[MongoDB] update_message_fields {safe_id(mongo_id, 'mongo')} fallo: {safe_error(e)}")
             return False
 
     async def get_message_by_id(self, mongo_id: str) -> Optional[Dict[str, Any]]:
@@ -997,7 +998,7 @@ class MongoDBManager:
         try:
             return await self.db.messages.find_one({"_id": ObjectId(mongo_id)})
         except Exception as e:
-            logger.warning(f"[MongoDB] get_message_by_id fallo {mongo_id}: {e}")
+            logger.warning(f"[MongoDB] get_message_by_id fallo {safe_id(mongo_id, 'mongo')}: {safe_error(e)}")
             return None
 
     async def backfill_conversations_sid(
@@ -1034,12 +1035,12 @@ class MongoDBManager:
             )
             if result:
                 _id = str(result["_id"])
-                logger.info(f"[MongoDB] Backfill IM SID OK: conv={conversation_sid} im={im_sid} -> {_id}")
+                logger.info(f"[MongoDB] Backfill IM SID OK: conv={safe_id(conversation_sid, 'conv')} im={safe_id(im_sid, 'im_sid')} -> {safe_id(_id, 'mongo')}")
                 return _id
-            logger.debug(f"[MongoDB] Backfill IM SID sin match: conv={conversation_sid} body={body[:40]!r}")
+            logger.debug(f"[MongoDB] Backfill IM SID sin match: conv={safe_id(conversation_sid, 'conv')} body={safe_text(body, 40)}")
             return None
         except Exception as e:
-            logger.warning(f"[MongoDB] Error en backfill_conversations_sid: {e}")
+            logger.warning(f"[MongoDB] Error en backfill_conversations_sid: {safe_error(e)}")
             return None
 
     # =========================================================================
@@ -1114,7 +1115,7 @@ class MongoDBManager:
             logger.info(f"[MongoDB] Advisors inicializados: {len(self.DEFAULT_ADVISORS)}")
             return True
         except Exception as e:
-            logger.error(f"[MongoDB] Error inicializando advisors: {e}")
+            logger.error(f"[MongoDB] Error inicializando advisors: {safe_error(e)}")
             return False
 
     async def get_advisors(self) -> List[Dict[str, Any]]:
@@ -1134,7 +1135,7 @@ class MongoDBManager:
                 for a in advisors
             ]
         except Exception as e:
-            logger.error(f"[MongoDB] Error listando advisors: {e}")
+            logger.error(f"[MongoDB] Error listando advisors: {safe_error(e)}")
             return []
 
     async def get_advisor_name(self, advisor_id: str) -> str:
@@ -1147,7 +1148,7 @@ class MongoDBManager:
                 return advisor["name"]
             return self.DEFAULT_ADVISORS.get(advisor_id, f"Asesor {advisor_id}")
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo advisor {advisor_id}: {e}")
+            logger.error(f"[MongoDB] Error obteniendo advisor {safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return self.DEFAULT_ADVISORS.get(advisor_id, f"Asesor {advisor_id}")
 
     async def update_advisor(self, advisor_id: str, name: str) -> bool:
@@ -1160,11 +1161,11 @@ class MongoDBManager:
                 {"$set": {"name": name.strip(), "updated_at": datetime.now(TIMEZONE)}}
             )
             if result.modified_count > 0:
-                logger.info(f"[MongoDB] Advisor {advisor_id} actualizado a: {name}")
+                logger.info(f"[MongoDB] Advisor actualizado: {safe_id(advisor_id, 'advisor')} name={safe_text(name, 40)}")
                 return True
             return False
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando advisor {advisor_id}: {e}")
+            logger.error(f"[MongoDB] Error actualizando advisor {safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -1187,7 +1188,7 @@ class MongoDBManager:
                 for w in workers
             ]
         except Exception as e:
-            logger.error(f"[MongoDB] Error listando workers: {e}")
+            logger.error(f"[MongoDB] Error listando workers: {safe_error(e)}")
             return []
 
     async def get_worker(self, worker_id: str) -> Optional[Dict[str, Any]]:
@@ -1210,7 +1211,7 @@ class MongoDBManager:
                 "active": bool(w.get("active")),
             }
         except Exception as e:
-            logger.error(f"[MongoDB] Error leyendo worker {worker_id}: {e}")
+            logger.error(f"[MongoDB] Error leyendo worker {safe_id(worker_id, 'worker')}: {safe_error(e)}")
             return None
 
     async def create_worker(self, name: str, phone: str = "") -> Optional[str]:
@@ -1232,7 +1233,7 @@ class MongoDBManager:
             return str(result.inserted_id)
         except Exception as e:
             # Duplicate key → ya existe
-            logger.warning(f"[MongoDB] Worker duplicado o error: {e}")
+            logger.warning(f"[MongoDB] Worker duplicado o error: {safe_error(e)}")
             return None
 
     async def update_worker(
@@ -1257,7 +1258,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando worker {worker_id}: {e}")
+            logger.error(f"[MongoDB] Error actualizando worker {safe_id(worker_id, 'worker')}: {safe_error(e)}")
             return False
 
     async def delete_worker(self, worker_id: str) -> bool:
@@ -1271,7 +1272,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error eliminando worker {worker_id}: {e}")
+            logger.error(f"[MongoDB] Error eliminando worker {safe_id(worker_id, 'worker')}: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -1326,7 +1327,7 @@ class MongoDBManager:
             })
             return str(result.inserted_id)
         except Exception as e:
-            logger.error(f"[MongoDB] Error creando cita: {e}")
+            logger.error(f"[MongoDB] Error creando cita: {safe_error(e)}")
             return None
 
     async def mark_visit_completed(
@@ -1351,16 +1352,16 @@ class MongoDBManager:
             )
             if result:
                 logger.info(
-                    f"[MongoDB] Cita marcada como completada: contact={contact_id}, "
-                    f"appointment_id={result.get('_id')}"
+                    f"[MongoDB] Cita marcada como completada: contact={safe_id(contact_id, 'contact')}, "
+                    f"appointment_id={safe_id(result.get('_id'), 'appointment')}"
                 )
                 return True
             logger.debug(
-                f"[MongoDB] No hay cita 'scheduled' para completar: contact={contact_id}"
+                f"[MongoDB] No hay cita 'scheduled' para completar: contact={safe_id(contact_id, 'contact')}"
             )
             return False
         except Exception as e:
-            logger.error(f"[MongoDB] Error marcando cita completada: {e}")
+            logger.error(f"[MongoDB] Error marcando cita completada: {safe_error(e)}")
             return False
 
     async def get_completed_appointments(
@@ -1388,7 +1389,7 @@ class MongoDBManager:
             )
             return await cursor.to_list(length=None)
         except Exception as e:
-            logger.error(f"[MongoDB] Error consultando citas completadas: {e}")
+            logger.error(f"[MongoDB] Error consultando citas completadas: {safe_error(e)}")
             return []
 
     async def count_completed_appointments(
@@ -1409,7 +1410,7 @@ class MongoDBManager:
                 query["worker_id"] = worker_id
             return await self.db.appointments.count_documents(query)
         except Exception as e:
-            logger.error(f"[MongoDB] Error contando citas completadas: {e}")
+            logger.error(f"[MongoDB] Error contando citas completadas: {safe_error(e)}")
             return 0
 
     async def get_appointments(self, contact_id: str) -> List[Dict[str, Any]]:
@@ -1439,7 +1440,7 @@ class MongoDBManager:
                 for a in appts
             ]
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo citas de {contact_id}: {e}")
+            logger.error(f"[MongoDB] Error obteniendo citas de {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return []
 
     async def get_contacts_with_appointments(self, contact_ids: List[str]) -> set:
@@ -1462,7 +1463,7 @@ class MongoDBManager:
             docs = await cursor.to_list(length=len(contact_ids) * 10)
             return {d["contact_id"] for d in docs}
         except Exception as e:
-            logger.error(f"[MongoDB] Error buscando citas activas: {e}")
+            logger.error(f"[MongoDB] Error buscando citas activas: {safe_error(e)}")
             return set()
 
     async def get_contacts_by_worker(
@@ -1513,7 +1514,7 @@ class MongoDBManager:
                 })
             return result
         except Exception as e:
-            logger.error(f"[MongoDB] Error buscando contactos por worker {worker_id}: {e}")
+            logger.error(f"[MongoDB] Error buscando contactos por {safe_id(worker_id, 'worker')}: {safe_error(e)}")
             return []
 
     async def cancel_appointment(self, appointment_id: str) -> bool:
@@ -1527,7 +1528,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error cancelando cita {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error cancelando cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return False
 
     async def update_appointment(
@@ -1564,7 +1565,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando cita {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error actualizando cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return False
 
     async def delete_appointment(self, appointment_id: str) -> bool:
@@ -1577,7 +1578,7 @@ class MongoDBManager:
             )
             return result.deleted_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error eliminando cita {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error eliminando cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return False
 
     async def marcar_confirmacion_enviada(
@@ -1599,7 +1600,7 @@ class MongoDBManager:
             )
             return r.matched_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error marcando confirmacion de {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error marcando confirmacion de {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return False
 
     async def update_appointment_note_message(
@@ -1636,13 +1637,13 @@ class MongoDBManager:
             )
             if result.matched_count == 0:
                 logger.info(
-                    f"[MongoDB] Sin nota en el hilo para la cita {appointment_id} "
+                    f"[MongoDB] Sin nota en el hilo para la cita {safe_id(appointment_id, 'appointment')} "
                     f"(cita anterior a que se guardara la nota)"
                 )
                 return False
             return True
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando nota de cita {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error actualizando nota de cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return False
 
     async def get_appointment_by_id(self, appointment_id: str) -> Optional[Dict[str, Any]]:
@@ -1655,7 +1656,7 @@ class MongoDBManager:
                 doc["_id"] = str(doc["_id"])
             return doc
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo cita {appointment_id}: {e}")
+            logger.error(f"[MongoDB] Error obteniendo cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
             return None
 
     # ------------------------------------------------------------------ #
@@ -1683,7 +1684,7 @@ class MongoDBManager:
             result = await self.db.contact_notes.insert_one(doc)
             return str(result.inserted_id)
         except Exception as e:
-            logger.error(f"[MongoDB] Error creando nota para {contact_id}: {e}")
+            logger.error(f"[MongoDB] Error creando nota para {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return None
 
     async def get_notes(self, contact_id: str) -> list:
@@ -1703,7 +1704,7 @@ class MongoDBManager:
                 notes.append(doc)
             return notes
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo notas para {contact_id}: {e}")
+            logger.error(f"[MongoDB] Error obteniendo notas para {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return []
 
     async def update_note(self, note_id: str, content: str) -> bool:
@@ -1717,7 +1718,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error actualizando nota {note_id}: {e}")
+            logger.error(f"[MongoDB] Error actualizando nota {safe_id(note_id, 'note')}: {safe_error(e)}")
             return False
 
     async def soft_delete_note(self, note_id: str) -> bool:
@@ -1731,7 +1732,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error eliminando nota {note_id}: {e}")
+            logger.error(f"[MongoDB] Error eliminando nota {safe_id(note_id, 'note')}: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -1772,7 +1773,7 @@ class MongoDBManager:
             result = await self.db.scheduled_messages.insert_one(doc)
             return str(result.inserted_id)
         except Exception as e:
-            logger.error(f"[MongoDB] Error creando scheduled_message: {e}")
+            logger.error(f"[MongoDB] Error creando scheduled_message: {safe_error(e)}")
             return None
 
     async def get_scheduled_messages(self, contact_id: str) -> List[Dict[str, Any]]:
@@ -1800,7 +1801,7 @@ class MongoDBManager:
                 for d in docs
             ]
         except Exception as e:
-            logger.error(f"[MongoDB] Error obteniendo scheduled_messages de {contact_id}: {e}")
+            logger.error(f"[MongoDB] Error obteniendo scheduled_messages de {safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return []
 
     async def cancel_scheduled_message(self, message_id: str) -> bool:
@@ -1814,7 +1815,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error cancelando scheduled_message {message_id}: {e}")
+            logger.error(f"[MongoDB] Error cancelando scheduled_message {safe_id(message_id, 'scheduled_message')}: {safe_error(e)}")
             return False
 
     async def get_pending_messages_due(self, now_utc: datetime) -> List[Dict[str, Any]]:
@@ -1841,7 +1842,7 @@ class MongoDBManager:
                 for d in docs
             ]
         except Exception as e:
-            logger.error(f"[MongoDB] Error buscando mensajes vencidos: {e}")
+            logger.error(f"[MongoDB] Error buscando mensajes vencidos: {safe_error(e)}")
             return []
 
     async def mark_scheduled_message_sent(self, message_id: str) -> bool:
@@ -1855,7 +1856,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error marcando sent {message_id}: {e}")
+            logger.error(f"[MongoDB] Error marcando sent {safe_id(message_id, 'scheduled_message')}: {safe_error(e)}")
             return False
 
     async def mark_scheduled_message_failed(self, message_id: str, error: str) -> bool:
@@ -1869,7 +1870,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB] Error marcando failed {message_id}: {e}")
+            logger.error(f"[MongoDB] Error marcando failed {safe_id(message_id, 'scheduled_message')}: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -1938,7 +1939,7 @@ class MongoDBManager:
             result = await self.db.bulk_campaigns.insert_one(doc)
             return str(result.inserted_id)
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error creando campaña: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error creando campaña: {safe_error(e)}")
             return None
 
     async def get_bulk_campaign(self, campaign_id: str) -> Optional[Dict[str, Any]]:
@@ -1951,7 +1952,7 @@ class MongoDBManager:
                 doc["_id"] = str(doc["_id"])
             return doc
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error get_bulk_campaign: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error get_bulk_campaign {safe_id(campaign_id, 'campaign')}: {safe_error(e)}")
             return None
 
     async def get_active_bulk_campaigns(self, limit: int = 5) -> List[Dict[str, Any]]:
@@ -1968,7 +1969,7 @@ class MongoDBManager:
                 docs.append(doc)
             return docs
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error get_active: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error get_active: {safe_error(e)}")
             return []
 
     async def claim_next_pending_contacts(
@@ -2018,7 +2019,7 @@ class MongoDBManager:
                 claimed.append(contact)
             return claimed
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error claim_next: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error claim_next {safe_id(campaign_id, 'campaign')}: {safe_error(e)}")
             return []
 
     async def mark_bulk_contact_sent(
@@ -2045,7 +2046,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error mark_sent: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error mark_sent campaign={safe_id(campaign_id, 'campaign')} contact={safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return False
 
     async def mark_bulk_contact_failed(
@@ -2070,7 +2071,7 @@ class MongoDBManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error mark_failed: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error mark_failed campaign={safe_id(campaign_id, 'campaign')} contact={safe_id(contact_id, 'contact')}: {safe_error(e)}")
             return False
 
     async def get_last_bulk_campaign_by_stage_and_advisor(
@@ -2090,7 +2091,7 @@ class MongoDBManager:
                 doc["_id"] = str(doc["_id"])
             return doc
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error last_by_stage_advisor: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error last_by_stage_advisor stage={safe_id(stage_id, 'stage')} advisor={safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
             return None
 
     async def recuperar_contactos_caducados(
@@ -2168,7 +2169,7 @@ class MongoDBManager:
             )
             return resultado
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error recuperando caducados: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error recuperando caducados {safe_id(campaign_id, 'campaign')}: {safe_error(e)}")
             return resultado
 
     async def cancel_bulk_campaign(self, campaign_id: str, motivo: str) -> Dict[str, Any]:
@@ -2212,12 +2213,12 @@ class MongoDBManager:
                 array_filters=[{"sinEnviar.status": {"$in": ["pending", "in_progress"]}}],
             )
             logger.info(
-                f"[MongoDB][BulkCampaign] Campaña {campaign_id} cancelada: "
-                f"{sin_enviar} contactos sin enviar. Motivo: {motivo}"
+                f"[MongoDB][BulkCampaign] Campaña {safe_id(campaign_id, 'campaign')} cancelada: "
+                f"{sin_enviar} contactos sin enviar. Motivo: {safe_text(motivo, 80)}"
             )
             return {"cancelados": sin_enviar, "ya_estaba_cerrada": False}
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error cancelando {campaign_id}: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error cancelando {safe_id(campaign_id, 'campaign')}: {safe_error(e)}")
             return vacio
 
     async def finalize_bulk_campaign_if_done(self, campaign_id: str) -> bool:
@@ -2245,7 +2246,7 @@ class MongoDBManager:
             )
             return True
         except Exception as e:
-            logger.error(f"[MongoDB][BulkCampaign] Error finalize: {e}")
+            logger.error(f"[MongoDB][BulkCampaign] Error finalize {safe_id(campaign_id, 'campaign')}: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -2326,10 +2327,10 @@ class MongoDBManager:
                 )
                 return True
             except Exception as e2:
-                logger.warning(f"[MongoDB][conv] Retry upsert falló para {phone}: {e2}")
+                logger.warning(f"[MongoDB][conv] Retry upsert falló para {safe_phone(phone)}: {safe_error(e2)}")
                 return False
         except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error upsert conversation {phone}: {e}")
+            logger.warning(f"[MongoDB][conv] Error upsert conversation {safe_phone(phone)}: {safe_error(e)}")
             return False
 
     async def update_conversation_meta(
@@ -2379,7 +2380,7 @@ class MongoDBManager:
             )
             return result.matched_count > 0
         except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error update_conversation_meta {phone}: {e}")
+            logger.warning(f"[MongoDB][conv] Error update_conversation_meta {safe_phone(phone)}: {safe_error(e)}")
             return False
 
     async def find_phones_awaiting_reply(self, phones: List[str]) -> set:
@@ -2409,7 +2410,7 @@ class MongoDBManager:
             docs = [d async for d in cursor]
             return phones_awaiting_from_docs(docs)
         except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error find_phones_awaiting_reply: {e}")
+            logger.warning(f"[MongoDB][conv] Error find_phones_awaiting_reply: {safe_error(e)}")
             return set()
 
     async def find_conversations_by_owner(
@@ -2466,7 +2467,7 @@ class MongoDBManager:
                 d["_id"] = str(d["_id"])
             return docs
         except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error find_conversations_by_owner {owner_id}: {e}")
+            logger.warning(f"[MongoDB][conv] Error find_conversations_by_owner {safe_id(owner_id, 'owner')}: {safe_error(e)}")
             return []
 
     async def find_recent_conversations(
@@ -2489,7 +2490,7 @@ class MongoDBManager:
                 d["_id"] = str(d["_id"])
             return docs
         except Exception as e:
-            logger.warning(f"[MongoDB][conv] Error find_recent_conversations: {e}")
+            logger.warning(f"[MongoDB][conv] Error find_recent_conversations: {safe_error(e)}")
             return []
 
     async def check_conversations_exist(self, phones: List[str]) -> Set[str]:
@@ -2503,7 +2504,7 @@ class MongoDBManager:
             docs = await cursor.to_list(length=len(phones))
             return {d["phone"] for d in docs if "phone" in d}
         except Exception as e:
-            logger.warning(f"[MongoDB] check_conversations_exist error: {e}")
+            logger.warning(f"[MongoDB] check_conversations_exist error: {safe_error(e)}")
             return set(phones)
 
     async def close(self):
@@ -2531,7 +2532,7 @@ class MongoDBManager:
                     }
             return result
         except Exception as e:
-            logger.warning(f"[MongoDB] get_message_previews_batch error: {e}")
+            logger.warning(f"[MongoDB] get_message_previews_batch error: {safe_error(e)}")
             return {}
 
 

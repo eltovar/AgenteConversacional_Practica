@@ -16,6 +16,7 @@ from prompts.conversation.info import (
 from state_manager import ConversationState
 from typing import Dict, Any, List, Optional
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_text
 
 # Mapeo de tools a documentos específicos (REORGANIZADO - 8 documentos)
 TOOL_DOCUMENT_MAP = {
@@ -67,7 +68,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
 
         # Obtener el tema/query desde tool_input
         query = tool_input.get('tema', 'información general')
-        logger.info(f"[InfoAgent] Búsqueda RAG con query: '{query}'")
+        logger.info(f"[InfoAgent] Búsqueda RAG con query: {safe_text(query, 80)}")
 
         # Obtener lista de documentos asociados a esta tool
         document_paths = TOOL_DOCUMENT_MAP[tool_name]
@@ -89,7 +90,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
             logger.info(f"[InfoAgent] Contexto combinado generado ({len(combined_context)} caracteres)")
             return combined_context
         else:
-            logger.warning(f"[InfoAgent] No se encontró contexto relevante para query: '{query}'")
+            logger.warning(f"[InfoAgent] No se encontró contexto relevante para query: {safe_text(query, 80)}")
             return f"No se encontró información específica sobre '{query}' en los documentos disponibles."
         
     async def process_info_query(self, user_input: str, state: Optional[ConversationState] = None) -> str:
@@ -115,7 +116,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         if state and state.lead_data.get('name'):
             user_name = state.lead_data['name']
             system_prompt = SYSTEM_AGENT_PROMPT_WITH_USER.format(user_name=user_name)
-            logger.info(f"[InfoAgent] Usando contexto de usuario: {user_name}")
+            logger.info(f"[InfoAgent] Usando contexto de usuario: {safe_id(user_name, 'name')}")
         else:
             system_prompt = SYSTEM_AGENT_PROMPT_BASE
 
@@ -196,7 +197,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
                 return response_llm.content
 
         except Exception as e:
-            logger.error(f"[InfoAgent] Error crítico en el flujo RAG/LLM: {e}", exc_info=True)
+            logger.error(f"[InfoAgent] Error crítico en el flujo RAG/LLM: {safe_error(e)}", exc_info=True)
             return "❌ Lo siento, no puedo procesar tu consulta en este momento. Inténtalo de nuevo más tarde."
 
     def reload_knowledge_base(self) -> Dict[str, Any]:
@@ -206,7 +207,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         """
         logger.info("[InfoAgent] Solicitando recarga de base de conocimiento...")
         result = rag_service.reload_knowledge_base()
-        logger.info(f"[InfoAgent] Recarga completada: {result.get('message')}")
+        logger.info(f"[InfoAgent] Recarga completada: {safe_error(result.get('message'))}")
         return result
 
 # Instancia global (Singleton)

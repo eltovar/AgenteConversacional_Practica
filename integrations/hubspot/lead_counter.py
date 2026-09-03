@@ -7,6 +7,7 @@ Genera notificaciones tipo "Tienes 4 nuevos leads por responder"
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id
 
 
 class LeadCounter:
@@ -68,7 +69,7 @@ class LeadCounter:
                 por_canal[canal] = por_canal.get(canal, 0) + 1
 
             logger.info(
-                f"[LeadCounter] Owner {owner_id}: {len(leads)} leads pendientes "
+                f"[LeadCounter] Owner {safe_id(owner_id, 'owner')}: {len(leads)} leads pendientes "
                 f"en las últimas {hours_window}h"
             )
 
@@ -79,7 +80,7 @@ class LeadCounter:
             }
 
         except Exception as e:
-            logger.error(f"[LeadCounter] Error obteniendo leads pendientes para {owner_id}: {e}")
+            logger.error(f"[LeadCounter] Error obteniendo leads pendientes para {safe_id(owner_id, 'owner')}: {safe_error(e)}")
             return {
                 "total": 0,
                 "por_canal": {},
@@ -120,7 +121,7 @@ class LeadCounter:
             }
 
         except Exception as e:
-            logger.error(f"[LeadCounter] Error obteniendo leads sin asignar: {e}")
+            logger.error(f"[LeadCounter] Error obteniendo leads sin asignar: {safe_error(e)}")
             return {
                 "total": 0,
                 "por_canal": {},
@@ -266,7 +267,7 @@ class LeadCounter:
             return leads
 
         except Exception as e:
-            logger.error(f"[LeadCounter] Error en búsqueda de leads pendientes: {e}")
+            logger.error(f"[LeadCounter] Error en búsqueda de leads pendientes: {safe_error(e)}")
             return []
 
     async def _search_unassigned_leads(
@@ -323,7 +324,7 @@ class LeadCounter:
             return leads
 
         except Exception as e:
-            logger.error(f"[LeadCounter] Error en búsqueda de leads sin asignar: {e}")
+            logger.error(f"[LeadCounter] Error en búsqueda de leads sin asignar: {safe_error(e)}")
             return []
 
     def _get_canal_emoji(self, canal: str) -> str:
@@ -364,7 +365,7 @@ async def generate_daily_summary(
             message = await counter.generate_notification_message(owner_id, hours_window=24)
             summaries[owner_id] = message
         except Exception as e:
-            logger.error(f"[LeadCounter] Error generando resumen para {owner_id}: {e}")
+            logger.error(f"[LeadCounter] Error generando resumen para {safe_id(owner_id, 'owner')}: {safe_error(e)}")
             summaries[owner_id] = f"❌ Error generando resumen: {e}"
 
     return summaries

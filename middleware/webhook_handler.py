@@ -60,6 +60,7 @@ from utils.twilio_client import twilio_client
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
 from utils import reply_trace
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESCATE DE LEADS ESTANCADOS
@@ -124,7 +125,7 @@ async def _get_historical_channel(
         if meta and meta.canal_origen and meta.canal_origen != "whatsapp":
             logger.info(
                 f"[ChannelHistory] Canal histórico de Redis: {meta.canal_origen} "
-                f"(teléfono: {phone_normalized})"
+                f"(teléfono: {safe_phone(phone_normalized)})"
             )
             return meta.canal_origen
         elif meta and meta.canal_origen:
@@ -141,17 +142,17 @@ async def _get_historical_channel(
                 if hs_canal and hs_canal not in ("whatsapp", "whatsapp_directo", ""):
                     logger.info(
                         f"[ChannelHistory] Canal histórico de HubSpot: {hs_canal} "
-                        f"(teléfono: {phone_normalized})"
+                        f"(teléfono: {safe_phone(phone_normalized)})"
                     )
                     return hs_canal
         except Exception as e:
-            logger.debug(f"[ChannelHistory] Error consultando HubSpot: {e}")
+            logger.debug(f"[ChannelHistory] Error consultando HubSpot: {safe_error(e)}")
     
     # ── 3. Contacto nuevo: usar canal detectado del mensaje actual ──
     if detected_channel and detected_channel != "whatsapp":
         logger.info(
             f"[ChannelHistory] Contacto nuevo con canal detectado: {detected_channel} "
-            f"(teléfono: {phone_normalized})"
+            f"(teléfono: {safe_phone(phone_normalized)})"
         )
     return detected_channel
 
@@ -181,7 +182,7 @@ async def _fetch_reply_context_deferred(
             chat_service_sid=chat_service_sid,
         )
         if result.get("status") != "success":
-            logger.debug(f"[ReplyFetch] Fetch fallo: {result.get('message')}")
+            logger.debug(f"[ReplyFetch] Fetch fallo: {safe_error(result.get('message'))}")
             return
 
         msg_data  = result["message"]
@@ -201,13 +202,13 @@ async def _fetch_reply_context_deferred(
         )
 
         if not replied_sid:
-            logger.info(f"[ReplyFetch] ⚠️ Attributes vacíos en REST API para {im_sid} — Twilio no expone reply context")
+            logger.info(f"[ReplyFetch] ⚠️ Attributes vacíos en REST API para {safe_id(im_sid, 'im')} — Twilio no expone reply context")
             return
 
         mongo_manager = get_mongo_manager()
         replied_msg = await mongo_manager.get_message_by_sid(replied_sid)
         if not replied_msg:
-            logger.warning(f"[ReplyFetch] SID citado {replied_sid} no en Mongo")
+            logger.warning(f"[ReplyFetch] SID citado {safe_id(replied_sid, 'message')} no en Mongo")
             return
 
         reply_to_id      = replied_msg["id"]
@@ -225,11 +226,11 @@ async def _fetch_reply_context_deferred(
             reply_to_preview=reply_to_preview,
         )
         if not updated:
-            logger.warning(f"[ReplyFetch] Mongo no actualizó {mongo_message_sid}")
+            logger.warning(f"[ReplyFetch] Mongo no actualizó {safe_id(mongo_message_sid, 'message')}")
             return
 
         logger.info(
-            f"[ReplyFetch] ✅ Reply context resuelto: {im_sid} cita {replied_sid} → mongo:{reply_to_id}"
+            f"[ReplyFetch] ✅ Reply context resuelto: {safe_id(im_sid, 'im')} cita {safe_id(replied_sid, 'message')} → mongo:{safe_id(reply_to_id, 'mongo')}"
         )
 
         # Notificar al panel via WebSocket para que refresque el mensaje
@@ -247,10 +248,10 @@ async def _fetch_reply_context_deferred(
             else:
                 await ws_manager.publish_broadcast(rc, payload)
         except Exception as ws_err:
-            logger.warning(f"[ReplyFetch] WS notify fallo: {ws_err}")
+            logger.warning(f"[ReplyFetch] WS notify fallo: {safe_error(ws_err)}")
 
     except Exception as e:
-        logger.warning(f"[ReplyFetch] Error inesperado para {im_sid}: {e}")
+        logger.warning(f"[ReplyFetch] Error inesperado para {safe_id(im_sid, 'im')}: {safe_error(e)}")
 
 
 async def _process_message_deferred(
@@ -279,7 +280,7 @@ async def _process_message_deferred(
     - Envío de respuesta via Twilio REST API
     """
     try:
-        logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {phone_normalized}")
+        logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {safe_phone(phone_normalized)}")
 
         # ════════════════════════════════════════════════════════════
         # IDEMPOTENCIA: Prevenir doble procesamiento por Twilio retry
@@ -293,7 +294,7 @@ async def _process_message_deferred(
         if _idem_key:
             _already_processed = await _redis_idem.get(_idem_key)
             if _already_processed:
-                logger.info(f"[DeferredProcess] Mensaje {message_sid} ya procesado — skip (Twilio retry)")
+                logger.info(f"[DeferredProcess] Mensaje {safe_id(message_sid, 'message')} ya procesado — skip (Twilio retry)")
                 return
 
         # ════════════════════════════════════════════════════════════
@@ -322,7 +323,7 @@ async def _process_message_deferred(
                     processed_body = media_result.get("body_for_ai", "[El cliente envió un documento]")
 
             except Exception as e:
-                logger.error(f"[DeferredProcess] Error procesando multimedia: {e}")
+                logger.error(f"[DeferredProcess] Error procesando multimedia: {safe_error(e)}")
                 processed_body = body or "[El cliente envió un archivo]"
         
         # ════════════════════════════════════════════════════════════
@@ -354,9 +355,9 @@ async def _process_message_deferred(
             )
             contact_id = contact_info.contact_id if contact_info else None
             _contact_is_new = contact_info.is_new if contact_info else False
-            logger.info(f"[DeferredProcess] Contacto: {contact_id} (nuevo={_contact_is_new})")
+            logger.info(f"[DeferredProcess] Contacto: {safe_id(contact_id, 'contact')} (nuevo={_contact_is_new})")
         except Exception as e:
-            logger.error(f"[DeferredProcess] Error con HubSpot: {e}")
+            logger.error(f"[DeferredProcess] Error con HubSpot: {safe_error(e)}")
             contact_id = None
             _contact_is_new = False
         
@@ -395,7 +396,7 @@ async def _process_message_deferred(
             }
 
         # Resolver reply context si el cliente citó un mensaje en WhatsApp
-        logger.info(f"[DeferredProcess][Reply] original_replied_message_sid={original_replied_message_sid}")
+        logger.info(f"[DeferredProcess][Reply] original_replied_message_sid={safe_id(original_replied_message_sid, 'message')}")
         reply_to_id = None
         reply_to_preview = None
         if original_replied_message_sid:
@@ -410,11 +411,11 @@ async def _process_message_deferred(
                         "media_type": replied_msg["media_type"],
                         "timestamp": replied_msg["timestamp"]
                     }
-                    logger.info(f"[DeferredProcess] Reply context resuelto: {original_replied_message_sid} → mongo:{reply_to_id}")
+                    logger.info(f"[DeferredProcess] Reply context resuelto: {safe_id(original_replied_message_sid, 'message')} → mongo:{safe_id(reply_to_id, 'mongo')}")
                 else:
-                    logger.warning(f"[DeferredProcess] Reply SID no encontrado en MongoDB: {original_replied_message_sid} (mensaje expirado o pre-sistema)")
+                    logger.warning(f"[DeferredProcess] Reply SID no encontrado en MongoDB: {safe_id(original_replied_message_sid, 'message')} (mensaje expirado o pre-sistema)")
             except Exception as e:
-                logger.warning(f"[DeferredProcess] Error resolviendo reply context: {e}")
+                logger.warning(f"[DeferredProcess] Error resolviendo reply context: {safe_error(e)}")
 
         # Cierre de la traza: si el parser sí trajo referencia, aquí se sabe si
         # llegó a casar contra Mongo. La señal de contexto ya quedó en la línea
@@ -492,9 +493,9 @@ async def _process_message_deferred(
                 doc_url = media_result.get("permanent_url")
                 note_body = f"📄 Documento recibido: {doc_name} - {doc_url}"
                 await hubspot_client.create_note(contact_id=contact_id, body=note_body)
-                logger.info(f"[HubSpot] Nota de documento creada para contacto {contact_id}")
+                logger.info(f"[HubSpot] Nota de documento creada para contacto {safe_id(contact_id, 'contact')}")
             except Exception as e:
-                logger.warning(f"[HubSpot] Error creando nota de documento: {e}")
+                logger.warning(f"[HubSpot] Error creando nota de documento: {safe_error(e)}")
 
         # Fix CR-1: actualizar ZSET antes de notificar via WS.
         # Garantiza que el contacto sea visible en GET /contacts cuando la asesora recibe el ping.
@@ -875,7 +876,7 @@ async def _process_message_deferred(
         if send_result.get("status") == "error":
             logger.error(f"[DeferredProcess] Error enviando respuesta: {send_result}")
         else:
-            logger.info(f"[DeferredProcess] ✅ Respuesta enviada: {send_result.get('message_sid', 'OK')}")
+            logger.info(f"[DeferredProcess] ✅ Respuesta enviada: {safe_id(send_result.get('message_sid', 'OK'), 'message')}")
             # Ejecutar handoff DESPUÉS de confirmar envío, para que el cliente
             # reciba el mensaje antes de que el bot quede bloqueado.
             if pending_handoff:
@@ -939,10 +940,10 @@ async def _process_message_deferred(
                 existing_bot_mongo_id=_bot_mongo_id,
             )
         
-        logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {phone_normalized}")
+        logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {safe_phone(phone_normalized)}")
         
     except Exception as e:
-        logger.error(f"[DeferredProcess] Error fatal: {e}", exc_info=True)
+        logger.error(f"[DeferredProcess] Error fatal: {safe_error(e)}", exc_info=True)
         # Intentar enviar mensaje de error al usuario
         try:
             await twilio_client.send_whatsapp_message(
@@ -1024,7 +1025,7 @@ async def _twilio_signature_is_valid(request: Request, raw_body: bytes, is_json:
             return validator.validate(url, raw_body.decode("utf-8"), signature)
         return validator.validate(url, await request.form(), signature)
     except Exception as e:
-        logger.error(f"[Webhook][Sig] Error validando firma: {type(e).__name__}: {e}")
+        logger.error(f"[Webhook][Sig] Error validando firma: {type(e).__name__}: {safe_error(e)}")
         return False
 
 
@@ -1154,7 +1155,7 @@ async def should_bot_respond(
     detected_redis_channel = "whatsapp"  # Default
 
     # LOG DE DEBUG: Mostrar que se está verificando
-    logger.info(f"🔍 [should_bot_respond] Verificando estado para: {phone_normalized}")
+    logger.info(f"🔍 [should_bot_respond] Verificando estado para: {safe_phone(phone_normalized)}")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 1. Verificar estado en Redis EN CUALQUIER CANAL
@@ -1201,7 +1202,7 @@ async def should_bot_respond(
     if estados_encontrados:
         logger.info(f"🔍 [should_bot_respond] Estados encontrados: {', '.join(estados_encontrados)}")
     else:
-        logger.info(f"🔍 [should_bot_respond] Sin estados en Redis para {phone_normalized} (todos los canales)")
+        logger.info(f"🔍 [should_bot_respond] Sin estados en Redis para {safe_phone(phone_normalized)} (todos los canales)")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 2. Verificar propiedad 'sofia_activa' en HubSpot
@@ -1374,7 +1375,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         try:
             data = await request.json()
         except Exception as e:
-            logger.error(f"[Webhook] Error parseando JSON de Conversations API: {e}")
+            logger.error(f"[Webhook] Error parseando JSON de Conversations API: {safe_error(e)}")
             return Response(content="", media_type="text/xml")
 
         From             = data.get("Author") or data.get("From", "")
@@ -1401,7 +1402,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         try:
             form_data = await request.form()
         except Exception as e:
-            logger.error(f"[Webhook] Error parseando form data: {e}")
+            logger.error(f"[Webhook] Error parseando form data: {safe_error(e)}")
             return Response(content="", media_type="text/xml")
 
         event_type = form_data.get("EventType", "")
@@ -1413,7 +1414,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 new_body    = form_data.get("Body", "")
                 logger.info(
                     f"[Webhook][Conversations] onMessageUpdated | "
-                    f"MessageSid={message_sid} | NewBody={new_body[:80]!r} | "
+                    f"MessageSid={safe_id(message_sid, 'message')} | NewBody={safe_text(new_body, 80)} | "
                     f"AllFields={list(form_data.keys())}"
                 )
                 if message_sid and new_body:
@@ -1606,8 +1607,10 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             if reply_keys:
                 logger.info(f"[Webhook][Form] Campos reply: { {k: form_data.get(k) for k in reply_keys} }")
 
-    body_preview = Body[:50] if Body else "[Sin texto]"
-    logger.info(f"[Webhook] Mensaje recibido de {From}: {body_preview}... NumMedia={NumMedia}")
+    logger.info(
+        f"[Webhook] Mensaje recibido de {safe_phone(From)}: "
+        f"{safe_text(Body, 50)} NumMedia={NumMedia}"
+    )
 
     if OriginalRepliedMessageSid:
         logger.info(f"[Webhook][Reply] ✅ Cliente citó mensaje: SID={OriginalRepliedMessageSid}")
@@ -1620,13 +1623,19 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         validation = normalizer.normalize(From)
 
         if not validation.is_valid:
-            logger.error(f"[Webhook] Número inválido: {From} - {validation.error_message}")
+            logger.error(
+                f"[Webhook] Número inválido: {safe_phone(From)} - "
+                f"{safe_error(validation.error_message)}"
+            )
             return _create_error_response(
                 "Lo siento, no pude procesar tu mensaje. Por favor intenta de nuevo."
             )
 
         phone_normalized = validation.normalized
-        logger.info(f"[Webhook] Número normalizado: {From} → {phone_normalized}")
+        logger.info(
+            f"[Webhook] Número normalizado: {safe_phone(From)} -> "
+            f"{safe_phone(phone_normalized)}"
+        )
 
         # ════════════════════════════════════════════════════════════
         # PASO 2: Detección temprana del canal (< 1ms)
@@ -1641,9 +1650,9 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         # PASO 3: Encolar procesamiento en background y retornar OK
         # ════════════════════════════════════════════════════════════
         logger.info(
-            f"[Checkpoint] MSG_PRE_PROCESS | phone={phone_normalized} | "
+            f"[Checkpoint] MSG_PRE_PROCESS | phone={safe_phone(phone_normalized)} | "
             f"sid={MessageSid or 'N/A'} | channel={incoming_channel or early_channel} | "
-            f"conv={conversation_sid or 'N/A'} | body={Body[:80]!r}"
+            f"conv={conversation_sid or 'N/A'} | body={safe_text(Body, 80)}"
         )
         # Traza de citaciones: contrasta la señal real de WhatsApp
         # (ChannelMetadata.data.context) contra la referencia que el parser
@@ -1741,16 +1750,16 @@ async def whatsapp_status_callback(
     # Log del estado recibido
     if MessageStatus in ["failed", "undelivered"]:
         logger.error(
-            f"[StatusCallback] ❌ Mensaje {MessageSid} FALLIDO: {MessageStatus} "
-            f"(Error: {ErrorCode} - {ErrorMessage}) | To: {To}"
+            f"[StatusCallback] Mensaje {MessageSid} FALLIDO: {MessageStatus} "
+            f"(Error: {ErrorCode} - {safe_error(ErrorMessage)}) | To: {safe_phone(To)}"
         )
     elif MessageStatus in ["delivered", "read"]:
         logger.info(
-            f"[StatusCallback] ✅ Mensaje {MessageSid}: {MessageStatus} | To: {To}"
+            f"[StatusCallback] Mensaje {MessageSid}: {MessageStatus} | To: {safe_phone(To)}"
         )
     else:
         logger.debug(
-            f"[StatusCallback] Mensaje {MessageSid}: {MessageStatus} | To: {To}"
+            f"[StatusCallback] Mensaje {MessageSid}: {MessageStatus} | To: {safe_phone(To)}"
         )
 
     # Actualizar estado en MongoDB para reconciliación
@@ -1775,7 +1784,7 @@ async def whatsapp_status_callback(
             )
             
             logger.warning(
-                f"[StatusCallback] ⚠️ ALERTA: Mensaje a {phone_normalized or To} NO entregado. "
+                f"[StatusCallback] ALERTA: Mensaje a {safe_phone(phone_normalized or To)} NO entregado. "
                 f"El panel puede mostrar mensaje que el cliente NO recibió."
             )
 
@@ -1828,7 +1837,7 @@ async def whatsapp_status_callback(
 
     except Exception as e:
         # No fallar el callback por errores de MongoDB
-        logger.error(f"[StatusCallback] Error actualizando delivery status: {e}")
+        logger.error(f"[StatusCallback] Error actualizando delivery status: {safe_error(e)}")
 
     return Response(content="", media_type="text/xml")
 
@@ -1879,7 +1888,7 @@ async def _check_bulk_no_responde_promotion(phone_normalized: str):
             return
         await _promote_no_responde_to_en_conversacion(contact_id, phone_normalized)
     except Exception as e:
-        logger.warning(f"[BulkNoResponde] Error en promoción (non-fatal): {e}")
+        logger.warning(f"[BulkNoResponde] Error en promoción (non-fatal): {safe_error(e)}")
 
 
 
@@ -1960,7 +1969,7 @@ async def _sync_message_to_hubspot(
         if mongo_message_id:
             logger.debug(f"[MongoDB] Mensaje guardado: {mongo_message_id} ({direction}, canal={channel})")
     except Exception as e:
-        logger.error(f"[MongoDB] Error guardando mensaje: {e}")
+        logger.error(f"[MongoDB] Error guardando mensaje: {safe_error(e)}")
         # Continuar con HubSpot aunque MongoDB falle
 
     # =========================================================================
@@ -2017,7 +2026,7 @@ async def _sync_message_to_hubspot(
             else:
                 logger.error(f"[HubSpot Sync] Error actualizando propiedades: {prop_err}")
 
-        logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {phone} (canal={channel})")
+        logger.debug(f"[HubSpot Sync] Mensaje sincronizado en Timeline para {safe_phone(phone)} (canal={channel})")
 
     except (ValueError, KeyError, TypeError) as e:
         logger.error("[HubSpot Sync] Error sincronizando mensaje: %s", e)
@@ -2079,7 +2088,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
             )
             logger.debug(f"[MongoDB] Mensaje del cliente guardado (background): {mongo_client_id}")
         else:
-            logger.debug(f"[MongoDB] Mensaje del cliente ya existente (pre-Sofía): {existing_client_mongo_id}")
+            logger.debug(f"[MongoDB] Mensaje del cliente ya existente (pre-Sofía): {safe_id(existing_client_mongo_id, 'mongo')}")
 
         # Guardar respuesta de Sofía SOLO si no fue guardada previamente
         if not existing_bot_mongo_id:
@@ -2096,13 +2105,13 @@ async def _sync_conversation_with_analysis_to_hubspot(
             )
             logger.debug(f"[MongoDB] Mensaje del bot guardado (background): {mongo_bot_id}")
         else:
-            logger.debug(f"[MongoDB] Mensaje del bot ya existente (pre-sync): {existing_bot_mongo_id}")
+            logger.debug(f"[MongoDB] Mensaje del bot ya existente (pre-sync): {safe_id(existing_bot_mongo_id, 'mongo')}")
 
         if mongo_client_id and mongo_bot_id:
             logger.debug(f"[MongoDB] Conversación guardada: client={mongo_client_id}, bot={mongo_bot_id}")
 
     except Exception as e:
-        logger.error(f"[MongoDB] Error guardando conversación: {e}")
+        logger.error(f"[MongoDB] Error guardando conversación: {safe_error(e)}")
         # Continuar con HubSpot aunque MongoDB falle
 
     # =========================================================================
@@ -2247,7 +2256,7 @@ async def _sync_conversation_with_analysis_to_hubspot(
                                 pass
                     # 2. Invalidar cache de nombre (GET /contacts lo refresca desde HubSpot)
                     await _rc.delete(f"contact_name:{contact_id}")
-                    logger.info(f"[Naming] display_name='{_new_name}' sincronizado en Redis para {phone}")
+                    logger.info(f"[Naming] display_name={safe_text(_new_name, 40)} sincronizado en Redis para {safe_phone(phone)}")
                     # 3. Notificar panel vía WebSocket (fire-and-forget)
                     # Fix-A: enrutamiento targeted por asesor dueño (evita broadcast global)
                     _name_notif = {
@@ -2268,9 +2277,9 @@ async def _sync_conversation_with_analysis_to_hubspot(
                         logger.warning(f"[Naming] fallback broadcast name_updated: {_ne}")
                         await ws_manager.publish_broadcast(_rc, _name_notif)
                 except Exception as _redis_err:
-                    logger.warning(f"[Naming] Error sincronizando nombre en Redis: {_redis_err}")
+                    logger.warning(f"[Naming] Error sincronizando nombre en Redis: {safe_error(_redis_err)}")
             except Exception as name_err:
-                logger.error(f"[HubSpot Sync] Error actualizando nombre: {name_err}")
+                logger.error(f"[HubSpot Sync] Error actualizando nombre: {safe_error(name_err)}")
 
         # Intentar actualizar propiedades opcionales (ignorar si no existen en HubSpot)
         if optional_properties:
@@ -2523,9 +2532,9 @@ async def admin_reset_contact(
                         })
                         deleted_items["mongodb"] = result.deleted_count
             except Exception as e:
-                logger.warning(f"[Admin] Error limpiando MongoDB: {e}")
+                logger.warning(f"[Admin] Error limpiando MongoDB: {safe_error(e)}")
 
-        logger.info(f"[Admin] Contacto {phone_norm} reseteado: {len(deleted_items['redis'])} claves Redis, {deleted_items['mongodb']} mensajes MongoDB")
+        logger.info(f"[Admin] Contacto {safe_phone(phone_norm)} reseteado: {len(deleted_items['redis'])} claves Redis, {deleted_items['mongodb']} mensajes MongoDB")
 
         return {
             "status": "success",
@@ -2535,7 +2544,7 @@ async def admin_reset_contact(
         }
 
     except Exception as e:
-        logger.error(f"[Admin] Error reseteando contacto: {e}")
+        logger.error(f"[Admin] Error reseteando contacto: {safe_error(e)}")
         return {"error": str(e)}
 
 
@@ -2625,12 +2634,12 @@ async def hubspot_webhook(
                             contact_id=contact_id,
                             reason="Desactivado desde HubSpot CRM"
                         )
-                        logger.info(f"[HubSpot Webhook] HUMAN_ACTIVE activado para {phone}")
+                        logger.info(f"[HubSpot Webhook] HUMAN_ACTIVE activado para {safe_phone(phone)}")
 
                     elif property_value.lower() in ["true", "yes", "1", "si", "sí"]:
                         # Sofia activada → Reactivar BOT_ACTIVE
                         await state_manager.activate_bot(phone)
-                        logger.info(f"[HubSpot Webhook] BOT_ACTIVE activado para {phone}")
+                        logger.info(f"[HubSpot Webhook] BOT_ACTIVE activado para {safe_phone(phone)}")
 
         return {"status": "ok", "processed": len(events)}
 
@@ -2700,7 +2709,7 @@ async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
                 if validation.is_valid:
                     return validation.normalized
 
-            logger.warning(f"[HubSpot Webhook] Contacto {contact_id} sin teléfono válido")
+            logger.warning(f"[HubSpot Webhook] Contacto {safe_id(contact_id, 'contact')} sin teléfono válido")
             return None
 
         else:
@@ -2711,5 +2720,5 @@ async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
             return None
 
     except Exception as e:
-        logger.error(f"[HubSpot Webhook] Error consultando HubSpot: {e}")
+        logger.error(f"[HubSpot Webhook] Error consultando HubSpot: {safe_error(e)}")
         return None

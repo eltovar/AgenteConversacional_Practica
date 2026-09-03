@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from utils.safe_logging import safe_error, safe_id
 
 if TYPE_CHECKING:
     from middleware.conversation_state import ConversationStateManager
@@ -34,7 +35,7 @@ async def _get_cached_stage_results(stage: str, owner_id: str) -> Optional[List[
         if raw:
             return json.loads(raw)
     except Exception as e:
-        logger.warning(f"[StageFilter] Cache read error: {e}")
+        logger.warning(f"[StageFilter] Cache read error: {safe_error(e)}")
     return None
 
 
@@ -49,7 +50,7 @@ async def _set_cached_stage_results(stage: str, owner_id: str, results: List[Dic
             json.dumps(results, default=str),
         )
     except Exception as e:
-        logger.warning(f"[StageFilter] Cache write error: {e}")
+        logger.warning(f"[StageFilter] Cache write error: {safe_error(e)}")
 
 
 # ── Paginated HubSpot search ─────────────────────────────────────────────────
@@ -77,7 +78,7 @@ async def _paginated_search(stage: str, owner_id: str) -> List[Dict[str, Any]]:
         if not after:
             break
     logger.info(
-        f"[StageFilter] Search stage={stage} owner={owner_id}: "
+        f"[StageFilter] Search stage={safe_id(stage, 'stage')} owner={safe_id(owner_id, 'owner')}: "
         f"{len(all_results)} resultados en {pages} páginas"
     )
     return all_results
@@ -121,7 +122,7 @@ async def _merge_with_redis(
             if cid:
                 redis_map[cid] = c
     except Exception as e:
-        logger.warning(f"[StageFilter] Redis merge error: {e}")
+        logger.warning(f"[StageFilter] Redis merge error: {safe_error(e)}")
 
     final: List[Dict[str, Any]] = []
     for cid in contact_ids:

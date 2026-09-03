@@ -35,6 +35,7 @@ import redis.asyncio as aioredis
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_text, safe_url
 
 
 # ============================================================================
@@ -177,11 +178,11 @@ class TimelineLogger:
 
             if cached:
                 note_ids = json.loads(cached)
-                logger.debug(f"[TimelineLogger] Cache HIT: {len(note_ids)} asociaciones para {contact_id}")
+                logger.debug(f"[TimelineLogger] Cache HIT: {len(note_ids)} asociaciones para {safe_id(contact_id, 'contact')}")
                 return note_ids
 
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error leyendo caché: {e}")
+            logger.warning(f"[TimelineLogger] Error leyendo caché: {safe_error(e)}")
 
         return None
 
@@ -202,10 +203,10 @@ class TimelineLogger:
             r = await self._get_redis()
             cache_key = f"hs_assoc:contact:{contact_id}:notes"
             await r.set(cache_key, json.dumps(note_ids), ex=ASSOCIATIONS_CACHE_TTL)
-            logger.debug(f"[TimelineLogger] Cache SET: {len(note_ids)} asociaciones para {contact_id}")
+            logger.debug(f"[TimelineLogger] Cache SET: {len(note_ids)} asociaciones para {safe_id(contact_id, 'contact')}")
 
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error guardando caché: {e}")
+            logger.warning(f"[TimelineLogger] Error guardando caché: {safe_error(e)}")
 
     async def invalidate_cache_for_contact(self, contact_id: str) -> bool:
         """
@@ -226,14 +227,14 @@ class TimelineLogger:
             deleted = await r.delete(cache_key)
 
             if deleted:
-                logger.info(f"[TimelineLogger] Cache INVALIDADO para contact_id={contact_id}")
+                logger.info(f"[TimelineLogger] Cache INVALIDADO para contact_id={safe_id(contact_id, 'contact')}")
             else:
-                logger.debug(f"[TimelineLogger] Cache ya no existía para contact_id={contact_id}")
+                logger.debug(f"[TimelineLogger] Cache ya no existía para contact_id={safe_id(contact_id, 'contact')}")
 
             return True
 
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error invalidando caché: {e}")
+            logger.warning(f"[TimelineLogger] Error invalidando caché: {safe_error(e)}")
             return False
 
     async def _rate_limited_request(
@@ -296,7 +297,7 @@ class TimelineLogger:
                     raise
 
             # Si llegamos aquí, agotamos los reintentos
-            logger.error(f"[TimelineLogger] Agotados {MAX_RETRIES_429} reintentos para {url}")
+            logger.error(f"[TimelineLogger] Agotados {MAX_RETRIES_429} reintentos para {safe_url(url)}")
             return response  # Retornar última respuesta (probablemente 429)
 
     @retry(
@@ -334,14 +335,14 @@ class TimelineLogger:
 
             if exists:
                 logger.info(
-                    f"[TimelineLogger] Nota ya procesada (idempotencia): {external_id}"
+                    f"[TimelineLogger] Nota ya procesada (idempotencia): {safe_id(external_id, 'external')}"
                 )
                 return True
 
             return False
 
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error verificando idempotencia: {e}")
+            logger.warning(f"[TimelineLogger] Error verificando idempotencia: {safe_error(e)}")
             # En caso de error, permitir crear (mejor duplicado que perdido)
             return False
 
@@ -359,10 +360,10 @@ class TimelineLogger:
             r = await self._get_redis()
             cache_key = f"{NOTE_IDEMPOTENCY_PREFIX}{external_id}"
             await r.set(cache_key, "1", ex=NOTE_IDEMPOTENCY_TTL)
-            logger.debug(f"[TimelineLogger] Nota marcada como procesada: {external_id}")
+            logger.debug(f"[TimelineLogger] Nota marcada como procesada: {safe_id(external_id, 'external')}")
 
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error marcando nota procesada: {e}")
+            logger.warning(f"[TimelineLogger] Error marcando nota procesada: {safe_error(e)}")
 
     async def _create_note(self, event: TimelineEvent) -> bool:
         """
@@ -382,7 +383,7 @@ class TimelineLogger:
         if event.external_id:
             if await self._is_note_already_processed(event.external_id):
                 logger.info(
-                    f"[TimelineLogger] Nota duplicada ignorada: external_id={event.external_id}"
+                    f"[TimelineLogger] Nota duplicada ignorada: external_id={safe_id(event.external_id, 'external')}"
                 )
                 return True  # Retornar True porque ya se procesó exitosamente antes
 
@@ -480,7 +481,7 @@ class TimelineLogger:
                 # Si es "false" (string), Sofía está desactivada
                 if sofia_activa == "false":
                     logger.info(
-                        f"[TimelineLogger] Sofía DESACTIVADA para contacto {contact_id}"
+                        f"[TimelineLogger] Sofía DESACTIVADA para contacto {safe_id(contact_id, 'contact')}"
                     )
                     return False
 
@@ -495,7 +496,7 @@ class TimelineLogger:
                 return True
 
         except Exception as e:
-            logger.error(f"[TimelineLogger] Error verificando sofia_activa: {e}")
+            logger.error(f"[TimelineLogger] Error verificando sofia_activa: {safe_error(e)}")
             # Por defecto, Sofía responde si hay error
             return True
 
@@ -522,19 +523,19 @@ class TimelineLogger:
             if response.status_code == 200:
                 estado = "ACTIVADA" if active else "DESACTIVADA"
                 logger.info(
-                    f"[TimelineLogger] Sofía {estado} para contacto {contact_id}"
+                    f"[TimelineLogger] Sofía {estado} para contacto {safe_id(contact_id, 'contact')}"
                 )
                 return True
 
             else:
                 logger.error(
                     f"[TimelineLogger] Error actualizando sofia_activa: "
-                    f"{response.status_code} - {response.text}"
+                    f"{response.status_code} - {safe_text(response.text, 160)}"
                 )
                 return False
 
         except Exception as e:
-            logger.error(f"[TimelineLogger] Error en set_sofia_active: {e}")
+            logger.error(f"[TimelineLogger] Error en set_sofia_active: {safe_error(e)}")
             return False
 
     async def log_client_message(
@@ -737,7 +738,7 @@ class TimelineLogger:
             except asyncio.QueueEmpty:
                 break
             except Exception as e:
-                logger.error(f"[TimelineLogger] Error procesando evento: {e}")
+                logger.error(f"[TimelineLogger] Error procesando evento: {safe_error(e)}")
 
         return processed
 
@@ -760,7 +761,7 @@ class TimelineLogger:
         - Rate limiting con semáforo para evitar 429
         - Retry con backoff exponencial si recibe 429
         """
-        logger.info(f"[TimelineLogger] Buscando notas para contact_id={contact_id}, limit={limit}")
+        logger.info(f"[TimelineLogger] Buscando notas para contact_id={safe_id(contact_id, 'contact')}, limit={limit}")
 
         try:
             # 1. Verificar caché de asociaciones primero
@@ -772,7 +773,7 @@ class TimelineLogger:
                 if note_ids is None:
                     assoc_endpoint = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/notes"
 
-                    logger.debug(f"[TimelineLogger] GET {assoc_endpoint} (con rate limiting)")
+                    logger.debug(f"[TimelineLogger] GET {safe_url(assoc_endpoint)} (con rate limiting)")
 
                     assoc_response = await self._rate_limited_request(
                         client,
@@ -787,7 +788,7 @@ class TimelineLogger:
                     if assoc_response.status_code != 200:
                         logger.warning(
                             f"[TimelineLogger] Error obteniendo asociaciones: "
-                            f"{assoc_response.status_code} - {assoc_response.text[:200]}"
+                            f"{assoc_response.status_code} - {safe_text(assoc_response.text, 200)}"
                         )
                         return []
 
@@ -804,7 +805,7 @@ class TimelineLogger:
                 logger.info(f"[TimelineLogger] Notas asociadas encontradas: {len(note_ids)}")
 
                 if not note_ids:
-                    logger.info(f"[TimelineLogger] No hay notas asociadas al contacto {contact_id}")
+                    logger.info(f"[TimelineLogger] No hay notas asociadas al contacto {safe_id(contact_id, 'contact')}")
                     return []
 
                 # 2. Obtener detalles de notas usando BATCH API (evita múltiples requests)
@@ -842,7 +843,7 @@ class TimelineLogger:
 
                             # Log del contenido de la nota para debug
                             body_preview = (props.get("hs_note_body", "") or "")[:100]
-                            logger.debug(f"[TimelineLogger] Nota {note_id}: '{body_preview}...'")
+                            logger.debug(f"[TimelineLogger] Nota {safe_id(note_id, 'note')}: {safe_text(body_preview, 100)}")
 
                             # Filtrar por fecha si se especificó
                             if since and props.get("hs_timestamp"):
@@ -864,7 +865,7 @@ class TimelineLogger:
                     else:
                         logger.warning(
                             f"[TimelineLogger] Error en batch request: "
-                            f"{batch_response.status_code} - {batch_response.text[:200]}"
+                            f"{batch_response.status_code} - {safe_text(batch_response.text, 200)}"
                         )
 
                 logger.info(f"[TimelineLogger] Notas obtenidas con contenido: {len(notes)}")
@@ -873,7 +874,7 @@ class TimelineLogger:
                 return self._format_notes_as_chat(notes)
 
         except Exception as e:
-            logger.error(f"[TimelineLogger] Error obteniendo notas: {e}", exc_info=True)
+            logger.error(f"[TimelineLogger] Error obteniendo notas: {safe_error(e)}", exc_info=True)
             return []
 
     def _format_notes_as_chat(self, notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -892,7 +893,7 @@ class TimelineLogger:
                 # Validación de seguridad: obtener el cuerpo de la nota
                 body = note.get("body") if note else None
                 if not body:
-                    logger.debug(f"[TimelineLogger] Nota sin body: {note.get('id')}")
+                    logger.debug(f"[TimelineLogger] Nota sin body: {safe_id(note.get('id'), 'note')}")
                     continue
 
                 # Limpiar HTML básico de HubSpot si existe
@@ -918,7 +919,7 @@ class TimelineLogger:
                     })
 
             except Exception as e:
-                logger.warning(f"[TimelineLogger] Error formateando nota: {e}")
+                logger.warning(f"[TimelineLogger] Error formateando nota: {safe_error(e)}")
                 continue
 
         logger.info(f"[TimelineLogger] Burbujas generadas: {len(bubbles)}")
@@ -927,7 +928,7 @@ class TimelineLogger:
         try:
             bubbles.sort(key=lambda x: x.get("timestamp") or "")
         except Exception as e:
-            logger.warning(f"[TimelineLogger] Error ordenando burbujas: {e}")
+            logger.warning(f"[TimelineLogger] Error ordenando burbujas: {safe_error(e)}")
 
         return bubbles
 
@@ -1200,7 +1201,7 @@ class TimelineLogger:
                 return _result
 
         except Exception as e:
-            logger.error(f"[TimelineLogger] Error buscando contactos: {e}")
+            logger.error(f"[TimelineLogger] Error buscando contactos: {safe_error(e)}")
             return {"contacts": [], "paging": {"next_after": None}}
 
 

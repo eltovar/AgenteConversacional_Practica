@@ -38,6 +38,7 @@ import redis.asyncio as aioredis
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from logging_config import logger
 import json
+from utils.safe_logging import safe_error, safe_id, safe_mapping, safe_phone, safe_text
 
 # Singleton Redis para CRMAgent (partial sync — handoff migrado a ConversationStateManager)
 _crm_redis: aioredis.Redis = None
@@ -90,7 +91,7 @@ class CRMAgent:
         IMPORTANTE: Siempre conversa al menos una vez antes de enviar al CRM.
         """
         try:
-            logger.info(f"[CRMAgent] Procesando conversación. Input: '{user_input[:50]}...'")
+            logger.info(f"[CRMAgent] Procesando conversación. Input: {safe_text(user_input, 50)}")
 
             # Verificar si es primera interacción llegando por link
             if (state.metadata.get("llegada_por_link") and
@@ -110,7 +111,7 @@ class CRMAgent:
                     metadata[key] = value
 
             state.lead_data['metadata'] = metadata
-            logger.info(f"[CRMAgent] Metadata acumulada: {metadata}")
+            logger.info(f"[CRMAgent] Metadata acumulada: {safe_mapping(metadata, 'metadata')}")
 
             # Sync parcial a HubSpot en background si hay entidades con valor real y no va a
             # ocurrir handoff completo en este mismo turno (process_lead_handoff ya hace sync completo).
@@ -138,13 +139,13 @@ class CRMAgent:
             existing_name = state.lead_data.get('name')
             if existing_name and str(existing_name).strip():
                 # Ya tenemos nombre, NO intentar extraer otro
-                logger.debug(f"[CRMAgent] Nombre ya existe: {existing_name}, omitiendo extracción")
+                logger.debug(f"[CRMAgent] Nombre ya existe: {safe_id(existing_name, 'name')}, omitiendo extracción")
             else:
                 # No tenemos nombre, intentar extraer
                 extracted_name = self._extract_name_from_message(user_input, state)
                 if extracted_name:
                     state.lead_data['name'] = extracted_name
-                    logger.info(f"[CRMAgent] Nombre detectado: {extracted_name}")
+                    logger.info(f"[CRMAgent] Nombre detectado: {safe_id(extracted_name, 'name')}")
 
             # 4. Verificar si estamos listos para registrar (tenemos nombre)
             lead_name = state.lead_data.get('name')
@@ -164,7 +165,7 @@ class CRMAgent:
             }
 
         except Exception as e:
-            logger.error(f"[CRMAgent] Error en conversación: {e}", exc_info=True)
+            logger.error(f"[CRMAgent] Error en conversación: {safe_error(e)}", exc_info=True)
             return {
                 "response": "Disculpa, tuve un inconveniente. ¿Podrías repetirme eso?",
                 "new_state": state,
@@ -278,7 +279,7 @@ class CRMAgent:
             metadata = state.lead_data.get('metadata', {})
             metadata.update(entities)
             state.lead_data['metadata'] = metadata
-            logger.info(f"[CRMAgent] Entidades extraídas del link: {entities}")
+            logger.info(f"[CRMAgent] Entidades extraídas del link: {safe_mapping(entities, 'entities')}")
 
         # Construir descripción del inmueble para el prompt
         info_inmueble = self._build_property_description(entities)
@@ -399,7 +400,7 @@ class CRMAgent:
             response = llama_client.invoke(messages)
             response_text = response.content.strip()
 
-            logger.debug(f"[CRMAgent] Respuesta LLM extracción: {response_text[:200]}")
+            logger.debug(f"[CRMAgent] Respuesta LLM extracción: {safe_text(response_text, 200)}")
 
             # Parsear JSON de la respuesta - buscar bloque JSON completo
             start_idx = response_text.find('{')
@@ -423,14 +424,14 @@ class CRMAgent:
             entities = {k: v for k, v in entities.items() if v and str(v).strip()}
 
             if entities:
-                logger.info(f"[CRMAgent] Entidades extraídas: {entities}")
+                logger.info(f"[CRMAgent] Entidades extraídas: {safe_mapping(entities, 'entities')}")
             return entities
 
         except json.JSONDecodeError as e:
-            logger.warning(f"[CRMAgent] JSON malformado: {e}")
+            logger.warning(f"[CRMAgent] JSON malformado: {safe_error(e)}")
             return {}
         except Exception as e:
-            logger.warning(f"[CRMAgent] Error extrayendo entidades: {e}")
+            logger.warning(f"[CRMAgent] Error extrayendo entidades: {safe_error(e)}")
             return {}
 
     def _extract_name_from_message(self, message: str, state: ConversationState) -> str:
@@ -454,7 +455,7 @@ class CRMAgent:
         # 1. INTENTO RÁPIDO: Regex para patrones explícitos ("Me llamo X", "Soy X")
         name = robust_extract_name(message)
         if name:
-            logger.info(f"[CRMAgent] Nombre extraído via regex: {name}")
+            logger.info(f"[CRMAgent] Nombre extraído via regex: {safe_id(name, 'name')}")
             return name
 
         # 2. INTENTO PRINCIPAL: Usar LLM para extraer nombre de CUALQUIER mensaje
@@ -483,11 +484,11 @@ class CRMAgent:
                     len(result) <= 60 and
                     not any(word in result.lower() for word in ['no_name', 'no hay', 'no encuentro', 'ninguno'])):
 
-                    logger.info(f"[CRMAgent] Nombre extraído via LLM: {result}")
+                    logger.info(f"[CRMAgent] Nombre extraído via LLM: {safe_id(result, 'name')}")
                     return result
 
         except Exception as e:
-            logger.warning(f"[CRMAgent] Error en extracción LLM de nombre: {e}")
+            logger.warning(f"[CRMAgent] Error en extracción LLM de nombre: {safe_error(e)}")
 
         return None
 
@@ -502,7 +503,7 @@ class CRMAgent:
 
             # Normalizar teléfono (session_id viene como "whatsapp:+...")
             normalized_phone = normalize_phone_e164(state.session_id)
-            logger.info(f"[CRMAgent] Teléfono normalizado: {normalized_phone}")
+            logger.info(f"[CRMAgent] Teléfono normalizado: {safe_phone(normalized_phone)}")
 
             # Extraer datos del lead desde state
             lead_name = state.lead_data.get('name', 'Lead')
@@ -600,7 +601,7 @@ class CRMAgent:
             # Asignar owner si está disponible
             if owner_id:
                 contact_properties["hubspot_owner_id"] = owner_id
-                logger.info(f"[CRMAgent] Lead asignado a owner ID: {owner_id} (canal: {channel_origin})")
+                logger.info(f"[CRMAgent] Lead asignado a {safe_id(owner_id, 'owner')} (canal: {channel_origin})")
             else:
                 logger.warning("[CRMAgent] No se pudo asignar owner. Lead será huérfano.")
 
@@ -610,14 +611,14 @@ class CRMAgent:
             contact_id = await self.hubspot.search_contact_by_phone(normalized_phone)
 
             if contact_id:
-                logger.info(f"[CRMAgent] Contacto existente encontrado: {contact_id}")
+                logger.info(f"[CRMAgent] Contacto existente encontrado: {safe_id(contact_id, 'contact')}")
                 try:
                     await self.hubspot.update_contact(contact_id, contact_properties)
                     action_type = "actualizado"
                 except Exception as update_err:
                     # La validación en HubSpotClient filtra propiedades inválidas
                     # Este try/except es defensa en profundidad
-                    logger.error(f"[CRMAgent] Error actualizando contacto {contact_id}: {update_err}")
+                    logger.error(f"[CRMAgent] Error actualizando contacto {safe_id(contact_id, 'contact')}: {safe_error(update_err)}")
                     # No fallar - el contacto existe, solo se perdió la actualización
                     action_type = "actualizado (con errores)"
             else:
@@ -626,10 +627,10 @@ class CRMAgent:
                     contact_id = await self.hubspot.create_contact(contact_properties)
                     action_type = "registrado"
                 except Exception as create_err:
-                    logger.error(f"[CRMAgent] Error creando contacto: {create_err}")
+                    logger.error(f"[CRMAgent] Error creando contacto: {safe_error(create_err)}")
                     raise  # Fallar aquí porque no podemos continuar sin contacto
 
-            logger.info(f"[CRMAgent] Contacto {action_type} exitosamente: {contact_id}")
+            logger.info(f"[CRMAgent] Contacto {action_type} exitosamente: {safe_id(contact_id, 'contact')}")
 
             # ═══════════════════════════════════════════════════════════════
             # ACTIVAR HUMAN_ACTIVE PARA QUE APAREZCA EN EL PANEL
@@ -647,7 +648,7 @@ class CRMAgent:
                 )
                 logger.info(f"[CRMAgent] ✅ HUMAN_ACTIVE activado - Contacto aparecerá en panel")
             except Exception as e:
-                logger.warning(f"[CRMAgent] No se pudo activar HUMAN_ACTIVE: {e}")
+                logger.warning(f"[CRMAgent] No se pudo activar HUMAN_ACTIVE: {safe_error(e)}")
 
             # ALERTAS PARA LEADS HUÉRFANOS
             if not owner_id:
@@ -673,7 +674,7 @@ class CRMAgent:
             }
 
         except Exception as e:
-            logger.error(f"[CRMAgent] Error crítico en sincronización HubSpot: {e}", exc_info=True)
+            logger.error(f"[CRMAgent] Error crítico en sincronización HubSpot: {safe_error(e)}", exc_info=True)
 
             error_response = (
                 f"Gracias por tu interés, {state.lead_data.get('name', 'usuario')}. "
@@ -728,7 +729,7 @@ class CRMAgent:
             digits = ''.join(filter(str.isdigit, str(budget_str)))
             return float(digits) if digits else 0.0
         except Exception as e:
-            logger.warning(f"[CRMAgent] No se pudo parsear presupuesto '{budget_str}': {e}")
+            logger.warning(f"[CRMAgent] No se pudo parsear presupuesto: {safe_text(budget_str, 40)} error={safe_error(e)}")
             return 0.0
 
     def _parse_budget_to_number(self, budget_str: str) -> int:
@@ -780,7 +781,7 @@ class CRMAgent:
             return 0
 
         except Exception as e:
-            logger.warning(f"[CRMAgent] No se pudo parsear presupuesto a número '{budget_str}': {e}")
+            logger.warning(f"[CRMAgent] No se pudo parsear presupuesto a número: {safe_text(budget_str, 40)} error={safe_error(e)}")
             return 0
 
 
@@ -842,12 +843,12 @@ class CRMAgent:
             await self.hubspot.update_contact(contact_id, partial_props)
             logger.info(
                 "[CRMAgent] Partial sync Contact %s: %s",
-                contact_id, list(partial_props.keys())
+                safe_id(contact_id, "contact"), list(partial_props.keys())
             )
 
         except Exception as e:
             # Errores del sync parcial no deben afectar la conversación
-            logger.warning("[CRMAgent] Partial sync fallido (no crítico): %s", e)
+            logger.warning("[CRMAgent] Partial sync fallido (no crítico): %s", safe_error(e))
 
     async def _activate_human_in_panel(
         self,
@@ -877,11 +878,11 @@ class CRMAgent:
         )
         if result:
             logger.info(
-                f"[CRMAgent] HUMAN_ACTIVE activado via CSM: {phone_normalized}:{canal_origen or 'default'} "
-                f"(owner: {owner_id or 'sin asignar'})"
+                f"[CRMAgent] HUMAN_ACTIVE activado via CSM: {safe_phone(phone_normalized)}:{canal_origen or 'default'} "
+                f"(owner: {safe_id(owner_id, 'owner') if owner_id else 'sin asignar'})"
             )
         else:
-            raise RuntimeError(f"CSM.activate_human retornó False para {phone_normalized}")
+            raise RuntimeError(f"CSM.activate_human retornó False para {safe_phone(phone_normalized)}")
 
 
 # Instancia global (Singleton)

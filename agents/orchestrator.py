@@ -22,6 +22,7 @@ from logging_config import logger
 from typing import Dict, Any
 from datetime import datetime, timedelta
 from utils.link_detector import LinkDetector
+from utils.safe_logging import safe_error, safe_phone
 
 # Instancia del detector de links para el flujo de bienvenida
 link_detector = LinkDetector()
@@ -140,7 +141,7 @@ async def process_message(session_id: str, user_message: str) -> Dict[str, Any]:
         return {"response": response_text, "status": state.status}
 
     except Exception as e:
-        logger.error(f"[ORCHESTRATOR] Error crítico: {e}", exc_info=True)
+        logger.error(f"[ORCHESTRATOR] Error crítico: {safe_error(e)}", exc_info=True)
         return {
             "response": "Lo siento, tuve un problema técnico momentáneo. ¿Podrías repetirme eso?",
             "status": "error"
@@ -174,6 +175,6 @@ def _update_history_and_state(state: ConversationState, user_msg: str, agent_msg
 
     try:
         state_manager.update_state(state)
-        logger.debug(f"[ORCHESTRATOR] Estado guardado exitosamente para {state.session_id}")
+        logger.debug(f"[ORCHESTRATOR] Estado guardado exitosamente para {safe_phone(state.session_id)}")
     except Exception as e:
-        logger.error(f"[ORCHESTRATOR] ERROR guardando estado para {state.session_id}: {e}", exc_info=True)
+        logger.error(f"[ORCHESTRATOR] ERROR guardando estado para {safe_phone(state.session_id)}: {safe_error(e)}", exc_info=True)

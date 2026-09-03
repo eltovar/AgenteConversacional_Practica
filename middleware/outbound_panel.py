@@ -62,6 +62,7 @@ limiter = Limiter(key_func=get_remote_address)
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 from utils.reply_quote_formatter import inject_quote, reply_audio_intro
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 
 # Router de FastAPI para el panel de envío
@@ -383,7 +384,7 @@ def _validate_api_key(api_key: Optional[str]) -> bool:
         return True
 
     # Log para debugging (solo primeros 8 chars por seguridad)
-    logger.warning(f"[Panel] API Key inválida. Recibido: '{provided[:8]}...' vs Esperado: '{expected[:8]}...'")
+    logger.warning(f"[Panel] API Key inválida. Recibido={safe_id(provided, 'api_key')} Esperado={safe_id(expected, 'api_key')}")
     return False
 
 
@@ -436,7 +437,7 @@ async def _get_contact_lifecyclestage(contact_id: str, strict: bool = False) -> 
                 pass
             return stage
     except Exception as e:
-        logger.debug(f"[Panel] Error leyendo lifecyclestage de contacto {contact_id}: {e}")
+        logger.debug(f"[Panel] Error leyendo lifecyclestage de contacto {safe_id(contact_id, 'contact')}: {safe_error(e)}")
 
     return _fallback
 
@@ -465,12 +466,12 @@ async def _invalidate_contact_stage_cache(
         cache_key = _contact_stage_cache_key(contact_id)
         if new_stage:
             await redis_client.set(cache_key, new_stage, ex=CONTACT_STAGE_CACHE_TTL)
-            logger.debug(f"[Panel] Caché de stage fijado a '{new_stage}' para {contact_id}")
+            logger.debug(f"[Panel] Caché de stage fijado a '{new_stage}' para {safe_id(contact_id, 'contact')}")
         else:
             await redis_client.delete(cache_key)
-            logger.debug(f"[Panel] Caché de stage invalidado para {contact_id}")
+            logger.debug(f"[Panel] Caché de stage invalidado para {safe_id(contact_id, 'contact')}")
     except Exception as e:
-        logger.debug(f"[Panel] Error sincronizando contact stage cache: {e}")
+        logger.debug(f"[Panel] Error sincronizando contact stage cache: {safe_error(e)}")
 
 
 async def _release_contacts_inflight(redis_client, inflight_key: Optional[str]) -> None:
@@ -583,12 +584,12 @@ async def _invalidate_contact_name_cache(
                 _contact_name_payload(firstname or "", lastname or ""),
                 ex=CONTACT_NAME_CACHE_TTL,
             )
-            logger.debug(f"[Panel] Caché de nombre fijado para {contact_id}")
+            logger.debug(f"[Panel] Caché de nombre fijado para {safe_id(contact_id, 'contact')}")
         else:
             await r.delete(key)
-            logger.debug(f"[Panel] Caché de nombre invalidado para {contact_id}")
+            logger.debug(f"[Panel] Caché de nombre invalidado para {safe_id(contact_id, 'contact')}")
     except Exception as e:
-        logger.debug(f"[Panel] Error sincronizando contact name cache: {e}")
+        logger.debug(f"[Panel] Error sincronizando contact name cache: {safe_error(e)}")
 
 
 async def _on_hubspot_contact_updated(
@@ -934,7 +935,7 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
             return {}
 
     except Exception as e:
-        logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {e}", exc_info=True)
+        logger.error(f"[Panel] Error en batch HubSpot: {type(e).__name__}: {safe_error(e)}", exc_info=True)
         return {}
 
 
@@ -972,7 +973,7 @@ async def _build_zset_phone_index() -> Dict[str, Dict[str, float]]:
                 float(score) if score is not None else 0.0
             )
     except Exception as e:
-        logger.warning(f"[Panel] No se pudo indexar el ZSET: {e}")
+        logger.warning(f"[Panel] No se pudo indexar el ZSET: {safe_error(e)}")
         return {}
     return index
 
@@ -990,10 +991,10 @@ async def _hydrate_contact(
     try:
         validation = PhoneNormalizer().normalize(phone)
     except Exception as e:
-        logger.warning(f"[Hydrate] Error normalizando phone '{phone}': {e}")
+        logger.warning(f"[Hydrate] Error normalizando phone {safe_phone(phone)}: {safe_error(e)}")
         return None
     if not validation.is_valid:
-        logger.debug(f"[Hydrate] Phone inválido '{phone}': {validation.error_message}")
+        logger.debug(f"[Hydrate] Phone inválido {safe_phone(phone)}: {safe_error(validation.error_message)}")
         return None
     phone_norm = validation.normalized
 
@@ -1039,7 +1040,7 @@ async def _hydrate_contact(
                     break
         except Exception as e:
             redis_ok = False
-            logger.warning(f"[Hydrate] Error zscan ZSET para {phone_norm}: {e}")
+            logger.warning(f"[Hydrate] Error zscan ZSET para {safe_phone(phone_norm)}: {safe_error(e)}")
 
     # Canales candidatos: los del ZSET + canal_hint + whatsapp (siempre probamos)
     probe_canals: list = []
@@ -1069,7 +1070,7 @@ async def _hydrate_contact(
             markers[c] = bool(_results[i * 3 + 2])
     except Exception as e:
         redis_ok = False
-        logger.warning(f"[Hydrate] Error pipeline lectura state/meta para {phone_norm}: {e}")
+        logger.warning(f"[Hydrate] Error pipeline lectura state/meta para {safe_phone(phone_norm)}: {safe_error(e)}")
 
     # Seleccionar el mejor canal: prioridad de status > score > bonus canal_hint
     best_canal: Optional[str] = None
@@ -1123,7 +1124,7 @@ async def _hydrate_contact(
             cm = _get_contact_manager()
             contact_id = await cm._search_contact(phone_norm)
         except Exception as e:
-            logger.debug(f"[Hydrate] _search_contact falló para {phone_norm}: {e}")
+            logger.debug(f"[Hydrate] _search_contact falló para {safe_phone(phone_norm)}: {safe_error(e)}")
 
     # ── Paso D: Enriquecer con HubSpot ──────────────────────────────────────
     display_name = (best_meta_dict.get("display_name") or "").strip()
@@ -1151,7 +1152,7 @@ async def _hydrate_contact(
                 if props.get("lifecyclestage"):
                     lifecyclestage_cached = props.get("lifecyclestage")
         except Exception as e:
-            logger.debug(f"[Hydrate] HubSpot direct lookup falló para {phone_norm}: {e}")
+            logger.debug(f"[Hydrate] HubSpot direct lookup falló para {safe_phone(phone_norm)}: {safe_error(e)}")
 
     if contact_id:
         try:
@@ -1182,7 +1183,7 @@ async def _hydrate_contact(
             if b.get("lifecyclestage"):
                 lifecyclestage_cached = b.get("lifecyclestage")
         except Exception as e:
-            logger.debug(f"[Hydrate] batch HubSpot falló para {contact_id}: {e}")
+            logger.debug(f"[Hydrate] batch HubSpot falló para {safe_id(contact_id, 'contact')}: {safe_error(e)}")
 
     # Último recurso: si aún no hay nombre, intentar search_contact_by_phone_with_properties
     if not display_name and HUBSPOT_API_KEY:
@@ -1201,7 +1202,7 @@ async def _hydrate_contact(
                 if not hs_owner_id and props.get("hubspot_owner_id"):
                     hs_owner_id = str(props.get("hubspot_owner_id"))
         except Exception as e:
-            logger.debug(f"[Hydrate] search_contact_by_phone_with_properties falló: {e}")
+            logger.debug(f"[Hydrate] search_contact_by_phone_with_properties falló: {safe_error(e)}")
 
     # Fallback final: phone como display (NUNCA None ni vacío)
     if not display_name:
@@ -1280,7 +1281,7 @@ async def _hydrate_contact(
 
     # Si no hay rastro alguno (ni Redis ni HubSpot), retornar None — contacto inexistente
     if source == "phone" and not best_meta_dict:
-        logger.info(f"[Hydrate] {phone_norm} sin rastro en Redis/HubSpot → None")
+        logger.info(f"[Hydrate] {safe_phone(phone_norm)} sin rastro en Redis/HubSpot → None")
         return None
 
     # ── Paso J: Persistencia opcional ───────────────────────────────────────
@@ -1302,7 +1303,7 @@ async def _hydrate_contact(
                 f"(owner={owner_id}, name='{display_name}')"
             )
         except Exception as e:
-            logger.warning(f"[Hydrate] Error persistiendo {phone_norm} al panel: {e}")
+            logger.warning(f"[Hydrate] Error persistiendo {safe_phone(phone_norm)} al panel: {safe_error(e)}")
 
     logger.debug(
         f"[Hydrate] {phone_norm} → canal={canal_final}, status={conversation_status}, "
@@ -1383,7 +1384,7 @@ async def _update_contact_to_visita_agendada(contact_id: str) -> Tuple[bool, str
         )
     except Exception as e:
         # Un corte de red entre los dos pasos deja el mismo hueco que un HTTP malo.
-        logger.warning(f"[Lifecycle] Error moviendo {contact_id} a Visita agendada: {e}")
+        logger.warning(f"[Lifecycle] Error moviendo {safe_id(contact_id, 'contact')} a Visita agendada: {safe_error(e)}")
         if etapa_previa:
             return False, await _deshacer_etapa(contact_id, etapa_previa, "error_de_red")
         return False, "error_de_red"
@@ -1411,7 +1412,7 @@ async def _deshacer_etapa(contact_id: str, etapa_previa: Optional[str], causa: s
             )
             return f"{causa} (deshecho: sigue en {etapa_previa})"
     except Exception as e:
-        logger.error(f"[Lifecycle] {contact_id}: fallo al deshacer tras {causa}: {e}")
+        logger.error(f"[Lifecycle] {safe_id(contact_id, 'contact')}: fallo al deshacer tras {causa}: {safe_error(e)}")
     logger.error(
         f"[Lifecycle] CONTACTO SIN ETAPA: {contact_id} tras {causa} — "
         f"no se pudo devolver a {etapa_previa}"
@@ -1465,7 +1466,7 @@ async def _update_contact_to_visita_realizada(contact_id: str) -> None:
                 f"[Lifecycle] Error actualizando lifecyclestage: {r.status_code} - {r.text}"
             )
     except Exception as e:
-        logger.error(f"[Lifecycle] Error en _update_contact_to_visita_realizada: {e}")
+        logger.error(f"[Lifecycle] Error en _update_contact_to_visita_realizada: {safe_error(e)}")
 
 
 async def _promote_no_responde_to_en_conversacion(
@@ -1517,7 +1518,7 @@ async def _promote_no_responde_to_en_conversacion(
         )
         return False
     except Exception as e:
-        logger.error(f"[BulkNoResponde] Error en promoción {contact_id}: {e}")
+        logger.error(f"[BulkNoResponde] Error en promoción {safe_id(contact_id, 'contact')}: {safe_error(e)}")
         return False
 
 
@@ -1580,7 +1581,7 @@ async def _promote_nuevo_lead_to_en_conversacion(
         )
         return False
     except Exception as e:
-        logger.error(f"[NuevoLead] Error promoviendo {contact_id}: {e}")
+        logger.error(f"[NuevoLead] Error promoviendo {safe_id(contact_id, 'contact')}: {safe_error(e)}")
         return False
 
 
@@ -1639,7 +1640,7 @@ async def check_24h_window(phone_normalized: str) -> WindowStatus:
             )
 
     except Exception as e:
-        logger.error(f"[Panel] Error verificando ventana 24h: {e}")
+        logger.error(f"[Panel] Error verificando ventana 24h: {safe_error(e)}")
         # En caso de error, asumir ventana abierta para no bloquear
         return WindowStatus(
             is_open=True,
@@ -1667,10 +1668,10 @@ async def update_last_client_message(phone_normalized: str) -> None:
             ex=25 * 60 * 60
         )
 
-        logger.debug(f"[Panel] Actualizado último mensaje del cliente: {phone_normalized}")
+        logger.debug(f"[Panel] Actualizado último mensaje del cliente: {safe_phone(phone_normalized)}")
 
     except Exception as e:
-        logger.error(f"[Panel] Error actualizando último mensaje: {e}")
+        logger.error(f"[Panel] Error actualizando último mensaje: {safe_error(e)}")
 
 
 # ============================================================================
@@ -1708,7 +1709,7 @@ async def _init_default_templates():
         _TEMPLATES_INITIALIZED = True
         logger.info("[Templates] Templates predefinidos sincronizados (%d)", len(DEFAULT_TEMPLATES))
     except Exception as e:
-        logger.error(f"[Templates] Error inicializando templates: {e}")
+        logger.error(f"[Templates] Error inicializando templates: {safe_error(e)}")
 
 
 async def _get_all_templates_by_advisor(advisor_id: str) -> list:
@@ -1767,7 +1768,7 @@ async def _save_template_by_advisor(advisor_id: str, template_data: dict) -> boo
         return False
     key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
     await r.set(key, json.dumps(template_data))
-    logger.info(f"[Templates] Template guardado: {template_id} para {advisor_id}")
+    logger.info(f"[Templates] Template guardado: {safe_id(template_id, 'template')} para {safe_id(advisor_id, 'advisor')}")
     return True
 
 
@@ -1782,7 +1783,7 @@ async def _delete_template_by_advisor(advisor_id: str, template_id: str) -> bool
             return False
     result = await r.delete(key)
     if result > 0:
-        logger.info(f"[Templates] Template eliminado: {template_id} para {advisor_id}")
+        logger.info(f"[Templates] Template eliminado: {safe_id(template_id, 'template')} para {safe_id(advisor_id, 'advisor')}")
         return True
     return False
 
@@ -1886,7 +1887,7 @@ async def send_message(
             )
             contact_id = contact_info.contact_id
         except Exception as e:
-            logger.warning(f"[Panel] No se pudo obtener contacto: {e}")
+            logger.warning(f"[Panel] No se pudo obtener contacto: {safe_error(e)}")
             # Continuar sin contact_id
 
     # Pausar Sofía y cambiar a IN_CONVERSATION (asesora está chateando activamente)
@@ -1907,7 +1908,7 @@ async def send_message(
                 ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
-            logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {phone_normalized}{canal_info}")
+            logger.info(f"[Panel] Estado cambiado a IN_CONVERSATION para {safe_phone(phone_normalized)}:{canal_final}")
         elif current_status == ConversationStatus.IN_CONVERSATION:
             # Ya está en conversación, solo refrescar TTL
             await state_manager.set_status(
@@ -1916,7 +1917,7 @@ async def send_message(
                 ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
-            logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {phone_normalized}{canal_info}")
+            logger.info(f"[Panel] TTL refrescado para IN_CONVERSATION: {safe_phone(phone_normalized)}:{canal_final}")
         else:
             # Era BOT_ACTIVE o CLOSED, activar humano y cambiar a IN_CONVERSATION
             _existing_owner = None
@@ -1935,9 +1936,9 @@ async def send_message(
                 ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
-            logger.info(f"[Panel] Sofía pausada y estado IN_CONVERSATION para {phone_normalized}{canal_info}")
+            logger.info(f"[Panel] Sofía pausada y estado IN_CONVERSATION para {safe_phone(phone_normalized)}:{canal_final}")
     except Exception as e:
-        logger.warning(f"[Panel] Error manejando estado: {e}")
+        logger.warning(f"[Panel] Error manejando estado: {safe_error(e)}")
 
     # =========================================================================
     # Procesar archivo multimedia si se envió (Bunny.net Storage)
@@ -1976,7 +1977,7 @@ async def send_message(
                 salida=media_subido,
             )
 
-            logger.info(f"[Panel] 📤 Bunny.net URL obtenida: {permanent_media_url}")
+            logger.info(f"[Panel] Bunny.net URL obtenida: {safe_url(permanent_media_url)}")
 
             # Determinar tipo de media (incluir webm como audio)
             if content_type in DOCUMENT_MIME_TYPES:
@@ -1990,10 +1991,10 @@ async def send_message(
             else:
                 media_type = "file"
 
-            logger.info(f"[Panel] ✅ Multimedia subido a Bunny.net: {media_type} -> {permanent_media_url}")
+            logger.info(f"[Panel] Multimedia subido a Bunny.net: {media_type} -> {safe_url(permanent_media_url)}")
 
         except Exception as e:
-            logger.error(f"[Panel] Error procesando multimedia: {e}")
+            logger.error(f"[Panel] Error procesando multimedia: {safe_error(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Error procesando archivo multimedia: {str(e)}"
@@ -2089,7 +2090,7 @@ async def send_message(
             if mongo_message_id:
                 logger.info(f"[Panel] Mensaje guardado en MongoDB: {mongo_message_id}, media_type={media_type}")
         except Exception as e:
-            logger.error(f"[Panel] Error guardando en MongoDB: {e}")
+            logger.error(f"[Panel] Error guardando en MongoDB: {safe_error(e)}")
             # No bloquear el flujo si MongoDB falla
 
         # Backfill solo si NO enviamos vía Conversations (sin IM SID en mano)
@@ -2147,10 +2148,10 @@ async def send_message(
                 _meta_ttl_la = await _rc.ttl(_meta_key_la)
                 _ex_la = _meta_ttl_la if _meta_ttl_la and _meta_ttl_la > 0 else 7 * 86400
                 await _rc.set(_meta_key_la, json.dumps(_meta_obj_la), ex=_ex_la)
-                logger.debug(f"[Panel] last_activity actualizado síncronamente para {phone_normalized}:{canal_final}")
+                logger.debug(f"[Panel] last_activity actualizado síncronamente para {safe_phone(phone_normalized)}:{canal_final}")
 
             await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
-            logger.info(f"[Panel] ZSET actualizado para {phone_normalized}:{canal_final}")
+            logger.info(f"[Panel] ZSET actualizado para {safe_phone(phone_normalized)}:{canal_final}")
         except Exception as _ze:
             logger.warning(f"[Panel] No se pudo actualizar ZSET en send_message: {_ze}")
 
@@ -2225,7 +2226,7 @@ async def _resolve_conversation_sid_for_phone(
             return None, None
         return doc.get("conversation_sid"), doc.get("chat_service_sid")
     except Exception as e:
-        logger.warning(f"[Panel][Backfill] resolve conv_sid fallo: {e}")
+        logger.warning(f"[Panel][Backfill] resolve conv_sid fallo: {safe_error(e)}")
         return None, None
 
 
@@ -2301,7 +2302,7 @@ async def _backfill_im_sid_after_send(
                 f"[Panel][Backfill] No se pudo persistir IM SID para mongo_id={mongo_message_id}"
             )
     except Exception as e:
-        logger.error(f"[Panel][Backfill] Excepción: {e}")
+        logger.error(f"[Panel][Backfill] Excepción: {safe_error(e)}")
 
 
 def _msg_age_seconds(msg_doc: Dict[str, Any]) -> float:
@@ -2604,7 +2605,7 @@ async def send_message_json(
             )
             contact_id = contact_info.contact_id
         except Exception as e:
-            logger.warning(f"[Panel-JSON] No se pudo obtener contacto: {e}")
+            logger.warning(f"[Panel-JSON] No se pudo obtener contacto: {safe_error(e)}")
 
     # Pausar Sofía y cambiar estado
     try:
@@ -2619,7 +2620,7 @@ async def send_message_json(
                 ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
-            logger.info(f"[Panel-JSON] Estado: IN_CONVERSATION para {phone_normalized}:{canal_final}")
+            logger.info(f"[Panel-JSON] Estado: IN_CONVERSATION para {safe_phone(phone_normalized)}:{canal_final}")
         else:
             # Crear nuevo estado para la conversación
             await state_manager.set_status(
@@ -2628,10 +2629,10 @@ async def send_message_json(
                 ttl=state_manager.HUMAN_PANEL_STATE_TTL,
                 canal=canal_final
             )
-            logger.info(f"[Panel-JSON] Nuevo estado IN_CONVERSATION para {phone_normalized}:{canal_final}")
+            logger.info(f"[Panel-JSON] Nuevo estado IN_CONVERSATION para {safe_phone(phone_normalized)}:{canal_final}")
 
     except Exception as e:
-        logger.error(f"[Panel-JSON] Error actualizando estado: {e}")
+        logger.error(f"[Panel-JSON] Error actualizando estado: {safe_error(e)}")
 
     # ── Citación inline: prepend quote SOLO para Twilio. Mongo guarda body original. ──
     body_to_send = body
@@ -2651,7 +2652,7 @@ async def send_message_json(
         conv_sid_from_send = result.get("conversation_sid")
         im_sid_from_send = result.get("conversations_message_sid")
         chat_svc_sid_from_send = result.get("chat_service_sid")
-        logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {message_sid} a {phone_normalized} (via={sent_via or 'legacy'})")
+        logger.info(f"[Panel-JSON] ✅ Mensaje enviado: {safe_id(message_sid, 'message')} a {safe_phone(phone_normalized)} (via={sent_via or 'legacy'})")
 
         # Guardar en MongoDB
         mongo_message_id = None
@@ -2672,7 +2673,7 @@ async def send_message_json(
                 chat_service_sid=chat_svc_sid_from_send,
             )
         except Exception as e:
-            logger.error(f"[Panel-JSON] Error guardando en MongoDB: {e}")
+            logger.error(f"[Panel-JSON] Error guardando en MongoDB: {safe_error(e)}")
 
         if mongo_message_id and not im_sid_from_send:
             background_tasks.add_task(
@@ -2712,10 +2713,10 @@ async def send_message_json(
                 _meta_ttl_la = await _rc.ttl(_meta_key_la)
                 _ex_la = _meta_ttl_la if _meta_ttl_la and _meta_ttl_la > 0 else 7 * 86400
                 await _rc.set(_meta_key_la, json.dumps(_meta_obj_la), ex=_ex_la)
-                logger.debug(f"[Panel-JSON] last_activity actualizado síncronamente para {phone_normalized}:{canal_final}")
+                logger.debug(f"[Panel-JSON] last_activity actualizado síncronamente para {safe_phone(phone_normalized)}:{canal_final}")
 
             await _rc.zadd("active_conversations_sorted", {f"{phone_normalized}:{canal_final}": _now_ts})
-            logger.info(f"[Panel-JSON] ZSET actualizado para {phone_normalized}:{canal_final}")
+            logger.info(f"[Panel-JSON] ZSET actualizado para {safe_phone(phone_normalized)}:{canal_final}")
         except Exception as _ze:
             logger.warning(f"[Panel-JSON] No se pudo actualizar ZSET: {_ze}")
 
@@ -2850,10 +2851,10 @@ async def send_template_message(
 
         template_message = template_body.format_map(SafeDict(vars_dict))
     except Exception as e:
-        logger.warning(f"[Panel] Error formateando template: {e}")
+        logger.warning(f"[Panel] Error formateando template: {safe_error(e)}")
         template_message = template_body  # Usar el body sin formato si hay error
 
-    logger.info(f"[Panel] Enviando template '{template_id}' a {phone_normalized}")
+    logger.info(f"[Panel] Enviando template '{template_id}' a {safe_phone(phone_normalized)}")
 
     # Construir content_variables numeradas para Twilio Content API
     # (solo se usa cuando el template tiene content_sid aprobado por Meta)
@@ -2941,7 +2942,7 @@ async def send_template_message(
             if mongo_message_id:
                 logger.info(f"[Panel] Template guardado en MongoDB: {mongo_message_id}")
         except Exception as e:
-            logger.error(f"[Panel] Error guardando template en MongoDB: {e}")
+            logger.error(f"[Panel] Error guardando template en MongoDB: {safe_error(e)}")
 
         if mongo_message_id and not im_sid_from_send:
             background_tasks.add_task(
@@ -3181,7 +3182,11 @@ async def create_manual_contact(
     """
     Crea un contacto manualmente desde el panel de asesores.
     """
-    logger.info(f"[Panel] POST /contacts/create - phone={phone}, firstname={firstname}, canal={canal}, advisor_id={advisor_id}")
+    logger.info(
+        f"[Panel] POST /contacts/create - phone={safe_phone(phone)}, "
+        f"firstname={safe_id(firstname, 'firstname')}, canal={canal}, "
+        f"advisor_id={safe_id(advisor_id, 'advisor')}"
+    )
 
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -3196,7 +3201,7 @@ async def create_manual_contact(
         )
     phone_normalized = validation.normalized
 
-    logger.info(f"[Panel] Teléfono normalizado: {phone_normalized}")
+    logger.info(f"[Panel] Teléfono normalizado: {safe_phone(phone_normalized)}")
 
     # === 2. Verificar si el contacto ya existe (deduplicación) ===
     import httpx
@@ -3228,7 +3233,7 @@ async def create_manual_contact(
                 existing_name = f"{_fn} {_ln}".strip()
                 existing_owner_id = existing_props.get("hubspot_owner_id") or ""
 
-                logger.warning(f"[Panel] Contacto ya existe: {existing_id} ({existing_name})")
+                logger.warning(f"[Panel] Contacto ya existe: {safe_id(existing_id, 'contact')} ({safe_text(existing_name, 40)})")
 
                 # Resolver nombre del asesor desde OWNERS_CONFIG (lookup local, sin IO)
                 from integrations.hubspot.lead_assigner import LeadAssigner
@@ -3275,7 +3280,7 @@ async def create_manual_contact(
                     }
                 )
     except Exception as e:
-        logger.error(f"[Panel] Error buscando contacto existente: {e}")
+        logger.error(f"[Panel] Error buscando contacto existente: {safe_error(e)}")
         # Continuar con la creación si falla la búsqueda
 
     # === 3. Determinar owner_id ===
@@ -3283,14 +3288,14 @@ async def create_manual_contact(
     # Solo se usa round-robin (LeadAssigner) cuando la creación es automática/API.
     if advisor_id:
         owner_id = advisor_id
-        logger.info(f"[Panel] Contacto asignado directamente al asesor creador: {advisor_id}")
+        logger.info(f"[Panel] Contacto asignado directamente al asesor creador: {safe_id(advisor_id, 'advisor')}")
     else:
         from integrations.hubspot.lead_assigner import lead_assigner
         owner_id = await asyncio.to_thread(lead_assigner.get_next_owner, canal)
         if not owner_id:
             logger.warning(f"[Panel] No se pudo asignar owner para canal: {canal}")
         else:
-            logger.info(f"[Panel] Contacto asignado por round-robin (canal={canal}): {owner_id}")
+            logger.info(f"[Panel] Contacto asignado por round-robin (canal={canal}): {safe_id(owner_id, 'owner')}")
 
     # === 4. Crear contacto en HubSpot ===
     from datetime import timezone as tz
@@ -3332,23 +3337,23 @@ async def create_manual_contact(
         if response.status_code in [200, 201]:
             contact_data = response.json()
             contact_id = contact_data.get("id")
-            logger.info(f"[Panel] Contacto creado exitosamente: {contact_id}")
+            logger.info(f"[Panel] Contacto creado exitosamente: {safe_id(contact_id, 'contact')}")
         elif response.status_code == 409:
             # Conflicto - contacto ya existe (race condition)
-            logger.warning(f"[Panel] Conflicto 409 al crear contacto: {response.text}")
+            logger.warning(f"[Panel] Conflicto 409 al crear contacto: {safe_error(response.text, 200)}")
             raise HTTPException(
                 status_code=409,
                 detail="El contacto ya existe. Por favor busca en el panel."
             )
         else:
-            logger.error(f"[Panel] Error creando contacto: {response.status_code} - {response.text}")
+            logger.error(f"[Panel] Error creando contacto: {response.status_code} - {safe_error(response.text, 200)}")
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Error de HubSpot: {response.text}"
             )
 
     except httpx.HTTPError as e:
-        logger.error(f"[Panel] Error HTTP creando contacto: {e}")
+        logger.error(f"[Panel] Error HTTP creando contacto: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=f"Error de conexión: {str(e)}")
 
     # === 5.5. Escribir url_chat en Contacto ===
@@ -3368,9 +3373,9 @@ async def create_manual_contact(
                 headers={"Authorization": f"Bearer {hubspot_api_key}", "Content-Type": "application/json"},
                 json={"properties": {"url_chat": url_chat}}
             )
-            logger.info(f"[Panel] url_chat escrito en contacto {contact_id}")
+            logger.info(f"[Panel] url_chat escrito en contacto {safe_id(contact_id, 'contact')}")
     except Exception as e:
-        logger.warning(f"[Panel] Error escribiendo url_chat (no crítico): {e}")
+        logger.warning(f"[Panel] Error escribiendo url_chat (no crítico): {safe_error(e)}")
 
     # === 6. Activar HUMAN_ACTIVE en Redis ===
     try:
@@ -3387,7 +3392,7 @@ async def create_manual_contact(
             contact_id=contact_id
         )
 
-        logger.info(f"[Panel] HUMAN_ACTIVE activado para {phone_normalized}")
+        logger.info(f"[Panel] HUMAN_ACTIVE activado para {safe_phone(phone_normalized)}")
 
         # Escribir clave inversa phone_cache:{contact_id} → phone para que
         # update_contact_name pueda resolver el teléfono desde el contact_id
@@ -3398,7 +3403,7 @@ async def create_manual_contact(
             pass
 
     except Exception as e:
-        logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {e}", exc_info=True)
+        logger.error(f"[Panel] Error activando HUMAN_ACTIVE: {safe_error(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=(
@@ -3434,7 +3439,7 @@ async def transfer_contact(
     """
     Transfiere un contacto a otro asesor.
     """
-    logger.info(f"[Panel] POST /contacts/{phone}/transfer -> {to_owner_id} (modo: {mode})")
+    logger.info(f"[Panel] POST /contacts/{safe_phone(phone)}/transfer -> {safe_id(to_owner_id, 'owner')} (modo: {mode})")
 
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
@@ -3483,7 +3488,7 @@ async def transfer_contact(
             redis_client=state_manager.redis
         )
     except Exception as e:
-        logger.warning(f"[Panel] Error notificando WebSocket: {e}")
+        logger.warning(f"[Panel] Error notificando WebSocket: {safe_error(e)}")
 
     # Inbox: agregar al inbox del receptor, remover del emisor
     try:
@@ -3561,7 +3566,7 @@ async def request_transfer(
             reason=f"Transferencia directa desde modal de creación"
         )
     except Exception as e:
-        logger.warning(f"[Panel] activate_human en transfer-request falló: {e}")
+        logger.warning(f"[Panel] activate_human en transfer-request falló: {safe_error(e)}")
 
     # 2. Reasignar owner en HubSpot via centralizado
     _sm_hs = _get_state_manager()
@@ -3599,7 +3604,7 @@ async def request_transfer(
     except Exception as _tr_req_inbox_err:
         logger.warning(f"[Panel][Inbox] Error inbox transfer-request (non-fatal): {_tr_req_inbox_err}")
 
-    logger.info(f"[Panel] Transfer directo: {owner_advisor_id} -> {requesting_advisor_id} para {contact_id} ({canal})")
+    logger.info(f"[Panel] Transfer directo: {safe_id(owner_advisor_id, 'advisor')} -> {safe_id(requesting_advisor_id, 'advisor')} para {safe_id(contact_id, 'contact')} ({canal})")
     return {"status": "transferred", "phone": phone, "canal": canal}
 
 
@@ -3643,7 +3648,7 @@ async def accept_transfer(
                 reason="transfer_accepted",
             )
     except Exception as e:
-        logger.warning(f"[Panel] Error en transfer_ownership en transfer-accept: {e}")
+        logger.warning(f"[Panel] Error en transfer_ownership en transfer-accept: {safe_error(e)}")
 
     # 3. Limpiar solicitud pendiente
     await _rc.delete(f"transfer_req:{contact_id}")
@@ -3672,7 +3677,7 @@ async def accept_transfer(
     except Exception as _ta_inbox_err:
         logger.warning(f"[Panel][Inbox] Error inbox transfer-accept (non-fatal): {_ta_inbox_err}")
 
-    logger.info(f"[Panel] Transfer accept: {by_advisor_id} -> {requester_id} para {contact_id}")
+    logger.info(f"[Panel] Transfer accept: {safe_id(by_advisor_id, 'advisor')} -> {safe_id(requester_id, 'advisor')} para {safe_id(contact_id, 'contact')}")
     return {"status": "accepted"}
 
 
@@ -3707,7 +3712,7 @@ async def reject_transfer(
             "message": "El asesor rechazó la transferencia"
         })
 
-    logger.info(f"[Panel] Transfer reject: {by_advisor_id} para {contact_id}")
+    logger.info(f"[Panel] Transfer reject: {safe_id(by_advisor_id, 'advisor')} para {safe_id(contact_id, 'contact')}")
     return {"status": "rejected"}
 
 
@@ -3728,21 +3733,21 @@ async def update_contact_name(
     Permite a los asesores corregir nombres de contactos directamente
     desde el panel sin ir a HubSpot.
     """
-    logger.info(f"[Panel] PATCH nombre - contact_id={contact_id}, firstname={firstname}, lastname={lastname}")
+    logger.info(f"[Panel] PATCH nombre - contact_id={safe_id(contact_id, 'contact')}, firstname={safe_id(firstname, 'firstname')}, lastname={safe_id(lastname, 'lastname')}")
 
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
     # Validar contact_id
     if not contact_id or contact_id == "null" or contact_id == "undefined":
-        logger.error(f"[Panel] contact_id inválido: {contact_id}")
+        logger.error(f"[Panel] contact_id inválido: {safe_id(contact_id, 'contact')}")
         raise HTTPException(status_code=400, detail="ID de contacto inválido")
 
     # Validar que sea numérico (IDs de HubSpot son numéricos)
     try:
         int(contact_id)
     except ValueError:
-        logger.error(f"[Panel] contact_id no es numérico: {contact_id}")
+        logger.error(f"[Panel] contact_id no es numérico: {safe_id(contact_id, 'contact')}")
         raise HTTPException(status_code=400, detail="ID de contacto debe ser numérico")
 
     hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
@@ -3758,7 +3763,7 @@ async def update_contact_name(
         }
     }
 
-    logger.debug(f"[Panel] Enviando PATCH a HubSpot: {url}")
+    logger.debug(f"[Panel] Enviando PATCH a HubSpot: {safe_url(url)}")
 
     try:
         response = await _hubspot_patch(url, payload, hubspot_api_key)
@@ -3766,7 +3771,7 @@ async def update_contact_name(
         logger.info(f"[Panel] Respuesta HubSpot: {response.status_code}")
 
         if response.status_code == 200:
-            logger.info(f"[Panel] Nombre actualizado para contacto {contact_id}: {firstname} {lastname}")
+            logger.info(f"[Panel] Nombre actualizado para contacto {safe_id(contact_id, 'contact')}: {safe_id(firstname, 'firstname')} {safe_id(lastname, 'lastname')}")
             # Sincronizar display_name en Redis para todos los canales del contacto
             try:
                 _rc = await _get_redis_client()
@@ -3783,7 +3788,7 @@ async def update_contact_name(
                                 await _rc.set(_meta_key, json.dumps(_meta))
                             except (json.JSONDecodeError, Exception):
                                 pass
-                    logger.info(f"[Panel] display_name '{_display}' sincronizado en Redis para {_phone}")
+                    logger.info(f"[Panel] display_name {safe_id(_display, 'display')} sincronizado en Redis para {safe_phone(_phone)}")
             except Exception as redis_err:
                 logger.warning(f"[Panel] No se pudo actualizar display_name en Redis: {redis_err}")
             # El renombrado va por _hubspot_patch, no por hubspot_client.update_contact,
@@ -3814,25 +3819,25 @@ async def update_contact_name(
                 "display_name": f"{firstname} {lastname}".strip()
             }
         elif response.status_code == 404:
-            logger.warning(f"[Panel] Contacto no encontrado en HubSpot: {contact_id}")
+            logger.warning(f"[Panel] Contacto no encontrado en HubSpot: {safe_id(contact_id, 'contact')}")
             raise HTTPException(
                 status_code=404,
                 detail="Contacto no encontrado en HubSpot"
             )
         else:
-            logger.error(f"[Panel] Error actualizando nombre: {response.status_code} - {response.text}")
+            logger.error(f"[Panel] Error actualizando nombre: {response.status_code} - {safe_error(response.text, 200)}")
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Error de HubSpot: {response.text[:200]}"
             )
 
     except httpx.TimeoutException:
-        logger.error(f"[Panel] Timeout actualizando nombre para {contact_id}")
+        logger.error(f"[Panel] Timeout actualizando nombre para {safe_id(contact_id, 'contact')}")
         raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
     except HTTPException:
         raise  # Re-raise HTTPExceptions sin modificar
     except Exception as e:
-        logger.error(f"[Panel] Error inesperado actualizando nombre: {e}", exc_info=True)
+        logger.error(f"[Panel] Error inesperado actualizando nombre: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -3882,9 +3887,9 @@ async def _close_conversation_internal(
                 meta_close["in_panel"] = False
                 await r.set(meta_key_close, json.dumps(meta_close))
             except Exception as e_meta:
-                logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {phone_normalized}: {e_meta}")
+                logger.warning(f"[Panel] No se pudo setear in_panel=False al cerrar {safe_phone(phone_normalized)}: {safe_error(e_meta)}")
     except Exception as e:
-        logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {phone_normalized}: {e}")
+        logger.warning(f"[Panel] No se pudo remover del ZSET al cerrar {safe_phone(phone_normalized)}: {safe_error(e)}")
 
     # Espejo en MongoDB: sin esto el contacto reaparece en el panel, porque el
     # fallback GET /contacts (find_conversations_by_owner) y el rebuild nocturno
@@ -3897,7 +3902,7 @@ async def _close_conversation_internal(
             archived=True,
         )
     except Exception as e_arch:
-        logger.warning(f"[Panel] No se pudo archivar en MongoDB al cerrar {phone_normalized}: {e_arch}")
+        logger.warning(f"[Panel] No se pudo archivar en MongoDB al cerrar {safe_phone(phone_normalized)}: {safe_error(e_arch)}")
 
     try:
         _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
@@ -3941,7 +3946,7 @@ async def close_conversation(
             **result,
         }
     except Exception as e:
-        logger.error(f"[Panel] Error cerrando conversación: {e}")
+        logger.error(f"[Panel] Error cerrando conversación: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3977,7 +3982,7 @@ async def mark_contact_read(
             await sm.remove_from_advisor_inbox(advisor_id, phone_norm, canal)
         return {"status": "ok", "phone": phone_norm}
     except Exception as e:
-        logger.warning(f"[Panel][Inbox] mark_contact_read error (non-fatal): {e}")
+        logger.warning(f"[Panel][Inbox] mark_contact_read error (non-fatal): {safe_error(e)}")
         return {"status": "error"}
 
 
@@ -4030,7 +4035,7 @@ async def _transfer_to_luisa(
         await _close_conversation_internal(phone_normalized, canal_safe)
         result["closed"] = True
     except Exception as e_close:
-        logger.error(f"{tag} Close falló para {phone_normalized}: {e_close}")
+        logger.error(f"{tag} Close falló para {safe_phone(phone_normalized)}: {safe_error(e_close)}")
         result["transfer_error"] = f"Close falló: {e_close}"
 
     # ② Transferir owner en Redis + MongoDB + HubSpot (centralizado)
@@ -4043,7 +4048,7 @@ async def _transfer_to_luisa(
             # transferencia se saltaba en silencio y HubSpot conservaba al owner
             # anterior, aunque el contacto sí llegara al panel destino vía ③.
             # add_to_zset=False: el paso ① acaba de cerrarlo y ③ lo re-activa.
-            logger.info(f"{tag} Sin meta previa para {phone_normalized} — creando antes de transferir")
+            logger.info(f"{tag} Sin meta previa para {safe_phone(phone_normalized)} — creando antes de transferir")
             await state_manager.ensure_meta_with_channel(
                 phone=phone_normalized,
                 canal=canal_safe,
@@ -4064,7 +4069,7 @@ async def _transfer_to_luisa(
             logger.warning(f"{tag} Transfer falló: {transfer_result}")
             result["transfer_error"] = transfer_result.get("message")
     except Exception as e_transfer:
-        logger.error(f"{tag} Transfer error: {e_transfer}")
+        logger.error(f"{tag} Transfer error: {safe_error(e_transfer)}")
         result["transfer_error"] = str(e_transfer)
 
     # ③ Activar en panel de Luisa con HUMAN_ACTIVE
@@ -4088,7 +4093,7 @@ async def _transfer_to_luisa(
         )
         result["transferred"] = True
     except Exception as e_activate:
-        logger.error(f"{tag} Activate human falló: {e_activate}")
+        logger.error(f"{tag} Activate human falló: {safe_error(e_activate)}")
         if not result["transfer_error"]:
             result["transfer_error"] = str(e_activate)
 
@@ -4103,7 +4108,7 @@ async def _transfer_to_luisa(
             meta_dict["assigned_owner_id"] = LUISA_TRANSFER_TARGET
             await r.set(meta_key, json.dumps(meta_dict))
     except Exception as e_meta:
-        logger.warning(f"{tag} Meta update falló (non-fatal): {e_meta}")
+        logger.warning(f"{tag} Meta update falló (non-fatal): {safe_error(e_meta)}")
 
     # ⑤ Agregar al inbox de Luisa
     try:
@@ -4111,7 +4116,7 @@ async def _transfer_to_luisa(
             LUISA_TRANSFER_TARGET, phone_normalized, canal_safe
         )
     except Exception as e_inbox:
-        logger.warning(f"{tag} Inbox add falló (non-fatal): {e_inbox}")
+        logger.warning(f"{tag} Inbox add falló (non-fatal): {safe_error(e_inbox)}")
 
     # ⑥ WebSocket notify
     try:
@@ -4126,7 +4131,7 @@ async def _transfer_to_luisa(
             redis_client=state_manager.redis
         )
     except Exception as e_ws:
-        logger.warning(f"{tag} WS notify falló (non-fatal): {e_ws}")
+        logger.warning(f"{tag} WS notify falló (non-fatal): {safe_error(e_ws)}")
 
     result["to_owner"] = LUISA_TRANSFER_TARGET
     logger.info(
@@ -4173,7 +4178,7 @@ async def _auto_close_by_stage(
         phone_normalized = close_result["phone"]
         result["closed"] = True
     except Exception as e_close:
-        logger.error(f"{tag} Close falló para {phone}: {e_close}")
+        logger.error(f"{tag} Close falló para {safe_phone(phone)}: {safe_error(e_close)}")
         result["close_error"] = str(e_close)
         return result
 
@@ -4187,9 +4192,9 @@ async def _auto_close_by_stage(
             contact_name=(meta.display_name if meta else "") or "",
         )
     except Exception as e_ws:
-        logger.warning(f"{tag} WS notify falló (non-fatal): {e_ws}")
+        logger.warning(f"{tag} WS notify falló (non-fatal): {safe_error(e_ws)}")
 
-    logger.info(f"{tag} Conversación cerrada por embudo — phone={phone_normalized}")
+    logger.info(f"{tag} Conversación cerrada por embudo — phone={safe_phone(phone_normalized)}")
     return result
 
 
@@ -4235,7 +4240,7 @@ async def update_contact_stage(
 
         if response.status_code == 200:
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
-            logger.info(f"[Panel] Contacto {contact_id} actualizado a etapa '{stage_name}'")
+            logger.info(f"[Panel] Contacto {safe_id(contact_id, 'contact')} actualizado a etapa '{stage_name}'")
             await _invalidate_contact_stage_cache(contact_id, stage_id)
 
             payload = {
@@ -4284,7 +4289,7 @@ async def update_contact_stage(
 
             return payload
         else:
-            logger.error(f"[Panel] Error actualizando lifecyclestage: {response.status_code} - {response.text}")
+            logger.error(f"[Panel] Error actualizando lifecyclestage: {response.status_code} - {safe_error(response.text, 200)}")
             raise HTTPException(
                 status_code=response.status_code,
                 detail=f"Error actualizando etapa: {response.text[:200]}"
@@ -4295,7 +4300,7 @@ async def update_contact_stage(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[Panel] Error inesperado actualizando etapa: {e}", exc_info=True)
+        logger.error(f"[Panel] Error inesperado actualizando etapa: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -4348,13 +4353,13 @@ async def update_contact_canal_display(
         meta_dict["canal_display"] = canal_display_clean
         await state_manager.redis.set(meta_key, json.dumps(meta_dict))
 
-        logger.info(f"[Panel] canal_display actualizado: {phone_normalized}:{canal_meta} → {canal_display_clean}")
+        logger.info(f"[Panel] canal_display actualizado: {safe_phone(phone_normalized)}:{canal_meta} → {canal_display_clean}")
         return {"status": "success", "phone": phone_normalized, "canal_display": canal_display_clean}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[Panel] Error actualizando canal_display: {e}", exc_info=True)
+        logger.error(f"[Panel] Error actualizando canal_display: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -4381,7 +4386,7 @@ async def get_advisor_notifications(
             "unread_count": len(notifications),
         }
     except Exception as e:
-        logger.error(f"[Panel] Error obteniendo notificaciones advisor={advisor}: {e}")
+        logger.error(f"[Panel] Error obteniendo notificaciones advisor={safe_id(advisor, 'advisor')}: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -4400,7 +4405,7 @@ async def mark_notification_read(
         removed = await state_manager.remove_advisor_notification(advisor, notif_id)
         return {"status": "success", "removed": removed}
     except Exception as e:
-        logger.error(f"[Panel] Error marcando notificación leída: {e}")
+        logger.error(f"[Panel] Error marcando notificación leída: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -4428,7 +4433,7 @@ async def mark_all_notifications_read(
                     removed += 1
         return {"status": "success", "removed": removed}
     except Exception as e:
-        logger.error(f"[Panel] Error marcando todas las notificaciones: {e}")
+        logger.error(f"[Panel] Error marcando todas las notificaciones: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
@@ -4499,7 +4504,7 @@ async def reset_bot_state(
                         canales_to_reset.append(c)
 
         if not canales_to_reset:
-            logger.warning(f"[Panel] Reset: No se encontró estado para {phone_normalized}")
+            logger.warning(f"[Panel] Reset: No se encontró estado para {safe_phone(phone_normalized)}")
             return {
                 "status": "warning",
                 "message": f"No se encontró conversación activa para {phone_normalized}",
@@ -4545,7 +4550,7 @@ async def reset_bot_state(
                     "error": str(canal_error),
                     "action": "failed"
                 })
-                logger.error(f"[Panel] Error reseteando {phone_normalized}:{c}: {canal_error}")
+                logger.error(f"[Panel] Error reseteando {safe_phone(phone_normalized)}:{c}: {safe_error(canal_error)}")
 
         success_count = len([r for r in results if r.get("action") == "reset successful"])
 
@@ -4557,7 +4562,7 @@ async def reset_bot_state(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error en reset-bot: {e}")
+        logger.error(f"[Panel] Error en reset-bot: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -4668,7 +4673,7 @@ async def get_contact_detail(
                     return_exceptions=True,
                 )
                 if isinstance(mongo2_msgs, Exception):
-                    logger.warning(f"[Panel] MongoDB contact_id falló: {mongo2_msgs}")
+                    logger.warning(f"[Panel] MongoDB contact_id falló: {safe_error(mongo2_msgs)}")
                     mongo2_msgs = []
                 if isinstance(hs_messages, Exception):
                     logger.warning(f"[Panel] HubSpot falló: {hs_messages}")
@@ -4691,7 +4696,7 @@ async def get_contact_detail(
                 return mongo_msgs, "mongodb"
 
         except Exception as e:
-            logger.error(f"[Panel] Error obteniendo mensajes en detail: {e}")
+            logger.error(f"[Panel] Error obteniendo mensajes en detail: {safe_error(e)}")
         return [], "none"
 
     # Ejecutar historial + window-status en paralelo (1 round-trip combinado)
@@ -4869,7 +4874,7 @@ async def get_conversation_history(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[Panel] Error obteniendo historial: {e}")
+        logger.error(f"[Panel] Error obteniendo historial: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -4902,7 +4907,7 @@ async def get_history_by_contact_id(
 
     # Validar que contact_id sea numérico (ID de HubSpot)
     if not contact_id or not contact_id.isdigit():
-        logger.warning(f"[Panel] contact_id inválido recibido: '{contact_id}'")
+        logger.warning(f"[Panel] contact_id inválido recibido: {safe_id(contact_id, 'contact')}")
         return JSONResponse(
             status_code=200,
             content={
@@ -4988,7 +4993,7 @@ async def get_history_by_contact_id(
             try:
                 hs_messages = await asyncio.wait_for(_hs_task, timeout=15.0)
             except asyncio.TimeoutError:
-                logger.warning(f"[Panel] HubSpot timeout (>15s) para contact_id={contact_id} — historial puede ser parcial")
+                logger.warning(f"[Panel] HubSpot timeout (>15s) para contact_id={safe_id(contact_id, 'contact')} — historial puede ser parcial")
                 hs_messages = []
                 hs_timeout = True
             except Exception as hs_err:
@@ -5037,7 +5042,7 @@ async def get_history_by_contact_id(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error obteniendo historial para {contact_id}: {e}", exc_info=True)
+        logger.error(f"[Panel] Error obteniendo historial para {safe_id(contact_id, 'contact')}: {safe_error(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={
@@ -5169,7 +5174,7 @@ async def take_control_of_conversation(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error en take-control: {e}")
+        logger.error(f"[Panel] Error en take-control: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -5231,7 +5236,7 @@ async def debug_redis(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error en debug Redis: {e}")
+        logger.error(f"[Panel] Error en debug Redis: {safe_error(e)}")
         return {
             "error": str(e),
             "redis_url": os.getenv("REDIS_PUBLIC_URL", os.getenv("REDIS_URL", "redis://localhost:6379"))
@@ -5263,7 +5268,7 @@ async def search_contacts_by_keyword(
         mongo_manager = get_mongo_manager()
         matching_phones = await mongo_manager.search_messages_fulltext(q, limit=limit)
 
-        logger.info(f"[Panel] Búsqueda '{q}': {len(matching_phones)} contactos encontrados")
+        logger.info(f"[Panel] Búsqueda {safe_text(q, 60)}: {len(matching_phones)} contactos encontrados")
 
         # Enriquecimiento UNIFICADO via _hydrate_contact — garantiza que cada contacto
         # venga con owner_id, owner_name, canal, current_stage, etc. (mismos campos que
@@ -5304,7 +5309,7 @@ async def search_contacts_by_keyword(
         }
 
     except Exception as e:
-        logger.error(f"[Panel] Error en búsqueda por palabra clave: {e}", exc_info=True)
+        logger.error(f"[Panel] Error en búsqueda por palabra clave: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -5488,7 +5493,7 @@ async def _resolve_pending_reply_phones(contacts: list) -> set:
     try:
         return await get_mongo_manager().find_phones_awaiting_reply(phones)
     except Exception as e:
-        logger.warning(f"[Panel] No se pudo resolver pendientes (non-fatal): {e}")
+        logger.warning(f"[Panel] No se pudo resolver pendientes (non-fatal): {safe_error(e)}")
         return set()
 
 
@@ -5651,7 +5656,7 @@ async def get_active_contacts(
             _sm = _get_state_manager()
             _stage_result = await get_contacts_by_stage_full(stage, advisor, _sm)
             if worker_id:
-                logger.info(f"[StageFilter] worker_id={worker_id} ignorado al combinar con stage={stage}")
+                logger.info(f"[StageFilter] worker_id={safe_id(worker_id, 'worker')} ignorado al combinar con stage={safe_id(stage, 'stage')}")
             return {
                 "contacts": _stage_result["contacts"],
                 "total": _stage_result["total"],
@@ -5745,7 +5750,7 @@ async def get_active_contacts(
         try:
             _cached = await state_manager.redis.get(_contacts_cache_key)
             if _cached:
-                logger.debug(f"[Panel] GET /contacts cache HIT para advisor={advisor or 'all'}")
+                logger.debug(f"[Panel] GET /contacts cache HIT para advisor={safe_id(advisor, 'advisor') if advisor else 'all'}")
                 return json.loads(_cached)
         except Exception:
             pass  # Cache miss o error Redis → continuar con lógica normal
@@ -5783,7 +5788,7 @@ async def get_active_contacts(
                 if c.get("owner_id") == advisor
                 or advisor in (c.get("assigned_owner_ids") or [])
             ]
-            logger.info(f"[Panel] Pre-filtrado por advisor {advisor}: {len(advisor_contacts)} contactos")
+            logger.info(f"[Panel] Pre-filtrado por advisor {safe_id(advisor, 'advisor')}: {len(advisor_contacts)} contactos")
 
             # ⚠️ 2026-05-30: Fallback MongoDB — recupera conversaciones del owner que
             # ya no estén en el ZSET Redis (TTL expirado, ghost cleanup histórico,
@@ -6098,7 +6103,7 @@ async def get_active_contacts(
                         try:
                             contact["current_stage"] = await _get_contact_lifecyclestage(cid)
                         except Exception as e:
-                            logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {e}")
+                            logger.debug(f"[Panel] No se pudo obtener lifecyclestage: {safe_error(e)}")
                             contact["current_stage"] = HUBSPOT_STAGE_EN_CONVERSACION
 
             # Si aún no tenemos nombre, usar teléfono
@@ -6202,7 +6207,7 @@ async def get_active_contacts(
                         contact["time_ago"] = "en espera"
 
                     filtered_active.append(contact)
-                    logger.debug(f"[Panel] Contacto {contact.get('phone')} incluido (activo/en espera)")
+                    logger.debug(f"[Panel] Contacto {safe_phone(contact.get('phone'))} incluido (activo/en espera)")
                     continue
 
                 # PRIORIDAD 2: Para contactos no activos, filtrar por el campo elegido
@@ -6230,7 +6235,7 @@ async def get_active_contacts(
                                 f"[Panel] Contacto histórico {contact.get('phone')} excluido por filtro de tiempo"
                             )
                     except (ValueError, TypeError) as e:
-                        logger.debug(f"[Panel] Error parseando fecha: {e}")
+                        logger.debug(f"[Panel] Error parseando fecha: {safe_error(e)}")
                         filtered_active.append(contact)
                 else:
                     contact["time_ago"] = "reciente"
@@ -6269,7 +6274,7 @@ async def get_active_contacts(
                     contact["display_name"] = f"{firstname} {lastname}".strip() or "Sin nombre"
 
             except Exception as e:
-                logger.warning(f"[Panel] Error obteniendo historial de HubSpot: {e}")
+                    logger.warning(f"[Panel] Error obteniendo historial de HubSpot: {safe_error(e)}")
 
         # === PASO 5: Combinar y deduplicar ===
         seen_phones = {c.get("phone") for c in active_contacts if c.get("phone")}
@@ -6323,11 +6328,11 @@ async def get_active_contacts(
                         )
                     else:
                         logger.warning(
-                            f"[Sync] _hydrate_contact({_ip_norm}) retornó None "
+                            f"[Sync] _hydrate_contact({safe_phone(_ip_norm)}) retornó None "
                             f"— contacto no existe en Redis/HubSpot"
                         )
                 except Exception as _he:
-                    logger.warning(f"[Sync] Error hidratando include_phone={_ip_norm}: {_he}")
+                    logger.warning(f"[Sync] Error hidratando include_phone={safe_phone(_ip_norm)}: {safe_error(_he)}")
 
         # === PASO 7: El orden ya viene correcto del ZSET (por last_activity descendente) ===
         # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"
@@ -6436,7 +6441,7 @@ async def get_active_contacts(
             await _release_contacts_inflight(_get_state_manager().redis, _inflight_key)
         except Exception:
             pass
-        logger.error(f"[Panel] Error obteniendo contactos: {e}")
+        logger.error(f"[Panel] Error obteniendo contactos: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -6545,7 +6550,7 @@ async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
         return result
 
     except Exception as e:
-        logger.error(f"[Panel][Diagnose] Error: {e}", exc_info=True)
+        logger.error(f"[Panel][Diagnose] Error: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -6572,10 +6577,10 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
             data = response.json()
             return data.get("properties", {})
         elif response.status_code == 429:
-            logger.warning(f"[Panel] HubSpot 429 persistente al obtener contacto {contact_id}")
+            logger.warning(f"[Panel] HubSpot 429 persistente al obtener contacto {safe_id(contact_id, 'contact')}")
 
     except Exception as e:
-        logger.debug(f"[Panel] Error obteniendo info de HubSpot: {e}")
+        logger.debug(f"[Panel] Error obteniendo info de HubSpot: {safe_error(e)}")
 
     return None
 
@@ -6611,7 +6616,7 @@ async def update_advisor(
     ok = await mongo_mgr.update_advisor(advisor_id, body.name)
     if not ok:
         raise HTTPException(status_code=404, detail="Asesor no encontrado")
-    logger.info(f"[Panel] Advisor {advisor_id} renombrado a: {body.name}")
+    logger.info(f"[Panel] Advisor {safe_id(advisor_id, 'advisor')} renombrado a: {safe_id(body.name, 'name')}")
     return {"ok": True, "id": advisor_id, "name": body.name}
 
 
@@ -6679,7 +6684,7 @@ async def create_worker(
     worker_id = await mongo_mgr.create_worker(body.name, telefono)
     if not worker_id:
         raise HTTPException(status_code=409, detail="Ya existe un worker con ese nombre")
-    logger.info(f"[Panel] Worker creado: {body.name} ({worker_id})")
+    logger.info(f"[Panel] Worker creado: {safe_id(body.name, 'name')} ({safe_id(worker_id, 'worker')})")
     return {"worker_id": worker_id, "name": body.name, "phone": telefono}
 
 
@@ -6817,7 +6822,7 @@ async def _enviar_confirmacion_cita(
 
         return True, "enviado"
     except Exception as e:
-        logger.error(f"[Panel] Error enviando mensaje de cita {appointment_id}: {e}")
+        logger.error(f"[Panel] Error enviando mensaje de cita {safe_id(appointment_id, 'appointment')}: {safe_error(e)}")
         return False, f"error: {e}"
 
 
@@ -6930,7 +6935,7 @@ async def create_appointment(
         if ficha:
             telefono_encargado = (ficha.get("phone") or "").strip()
     except Exception as e_worker:
-        logger.warning(f"[Panel] No se pudo leer la ficha del encargado: {e_worker}")
+        logger.warning(f"[Panel] No se pudo leer la ficha del encargado: {safe_error(e_worker)}")
 
     note_body = _texto_nota_cita(body.worker_name, appt_dt_bogota, direccion, body.notes)
 
@@ -6959,9 +6964,9 @@ async def create_appointment(
     except Exception:
         pass
     if contact_firstname:
-        logger.info(f"[Naming] Nombre resuelto desde HubSpot: '{contact_firstname}' para contact_id={contact_id}")
+        logger.info(f"[Naming] Nombre resuelto desde HubSpot: {safe_id(contact_firstname, 'firstname')} para contact_id={safe_id(contact_id, 'contact')}")
     else:
-        logger.info(f"[Naming] Sin firstname en HubSpot para contact_id={contact_id} — se usará fallback en scheduler")
+        logger.info(f"[Naming] Sin firstname en HubSpot para contact_id={safe_id(contact_id, 'contact')} — se usará fallback en scheduler")
 
     # Persistir en MongoDB
     appointment_id = await mongo_mgr.create_appointment(
@@ -6998,7 +7003,7 @@ async def create_appointment(
                     "fecha_display": fecha_str,
                 }
             )
-            logger.info(f"[Panel] Nota de cita guardada en historial: contact={contact_id}")
+            logger.info(f"[Panel] Nota de cita guardada en historial: contact={safe_id(contact_id, 'contact')}")
         except Exception as msg_err:
             logger.warning(f"[Panel] No se pudo guardar nota de cita en historial: {msg_err}")
 
@@ -7128,7 +7133,7 @@ async def cancel_appointment(
             apt_mgr = AppointmentManager(redis_url)
             try:
                 await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
-                logger.info("[Panel] Cita cancelada en Redis: %s", apt_doc["phone"])
+                logger.info("[Panel] Cita cancelada en Redis: %s", safe_phone(apt_doc["phone"]))
             finally:
                 await apt_mgr.close()
         except Exception as redis_err:
@@ -7178,7 +7183,7 @@ async def update_appointment(
             ficha = await mongo_mgr.get_worker(body.worker_id)
             telefono_encargado = (ficha or {}).get("phone", "")
         except Exception as e_worker:
-            logger.warning(f"[Panel] No se pudo releer el encargado al editar cita: {e_worker}")
+            logger.warning(f"[Panel] No se pudo releer el encargado al editar cita: {safe_error(e_worker)}")
 
     ok = await mongo_mgr.update_appointment(
         appointment_id=appointment_id,
@@ -7278,11 +7283,11 @@ async def update_appointment(
                             "appointment_id": appointment_id,
                         })
                     except Exception as e_ws:
-                        logger.warning(f"[Panel] WS de cita editada falló: {e_ws}")
+                        logger.warning(f"[Panel] WS de cita editada falló: {safe_error(e_ws)}")
     except Exception as e_nota:
         # La cita ya está actualizada; que la nota no se refresque no puede
         # convertir una edición correcta en un error para la asesora.
-        logger.error(f"[Panel] No se pudo refrescar la nota de la cita {appointment_id}: {e_nota}")
+        logger.error(f"[Panel] No se pudo refrescar la nota de la cita {safe_id(appointment_id, 'appointment')}: {safe_error(e_nota)}")
 
     # Sync Redis si cambió appointment_dt — actualiza ZSET score y resetea flags
     # para que el scheduler use la nueva ventana de recordatorio/seguimiento
@@ -7302,9 +7307,9 @@ async def update_appointment(
                 finally:
                     await apt_mgr.close()
                 if rescheduled:
-                    logger.info("[Panel] Cita reprogramada en Redis: %s → %s", apt_doc["phone"], appt_dt)
+                    logger.info("[Panel] Cita reprogramada en Redis: %s → %s", safe_phone(apt_doc["phone"]), appt_dt)
                 else:
-                    logger.warning("[Panel] Cita no encontrada en Redis para reprogramar: %s", apt_doc["phone"])
+                    logger.warning("[Panel] Cita no encontrada en Redis para reprogramar: %s", safe_phone(apt_doc["phone"]))
         except Exception as redis_err:
             logger.warning("[Panel] Error sync Redis en reprogramación (non-fatal): %s", redis_err)
 
@@ -7336,7 +7341,7 @@ async def delete_appointment(
             apt_mgr = AppointmentManager(redis_url)
             try:
                 await apt_mgr.cancel_appointment(apt_doc["phone"], apt_doc.get("canal", "whatsapp"))
-                logger.info("[Panel] Cita eliminada de Redis: %s", apt_doc["phone"])
+                logger.info("[Panel] Cita eliminada de Redis: %s", safe_phone(apt_doc["phone"]))
             finally:
                 await apt_mgr.close()
         except Exception as redis_err:
@@ -7518,7 +7523,7 @@ async def _log_advisor_message_to_hubspot(
             session_id=phone
         )
 
-        logger.info(f"[Panel] Mensaje del asesor registrado en Timeline: {contact_id}")
+        logger.info(f"[Panel] Mensaje del asesor registrado en Timeline: {safe_id(contact_id, 'contact')}")
 
         # Marcar mensaje como sincronizado en MongoDB
         if mongo_message_id:
@@ -7530,7 +7535,7 @@ async def _log_advisor_message_to_hubspot(
                 logger.warning(f"[Panel] Error marcando sincronización: {sync_error}")
 
     except Exception as e:
-        logger.error(f"[Panel] Error registrando en HubSpot: {e}")
+        logger.error(f"[Panel] Error registrando en HubSpot: {safe_error(e)}")
 
 
 async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] = None) -> None:
@@ -7543,7 +7548,7 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
     try:
         state_manager = _get_state_manager()
         await state_manager.update_advisor_message_timestamp(phone_normalized, canal)
-        logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {phone_normalized}:{canal or 'default'}")
+        logger.info(f"[Panel] ✓ Timestamp asesor actualizado: {safe_phone(phone_normalized)}:{canal or 'default'}")
         meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
         if meta and meta.assigned_owner_id:
             # Inbox: el asesor está enviando → ya vio el contacto → remover del inbox
@@ -7575,7 +7580,7 @@ async def _update_advisor_timestamp(phone_normalized: str, canal: Optional[str] 
                 f"···{phone_normalized[-4:]}:{canal or 'default'} — no se puede promover"
             )
     except Exception as e:
-        logger.error(f"[Panel] Error actualizando timestamp asesor: {e}")
+        logger.error(f"[Panel] Error actualizando timestamp asesor: {safe_error(e)}")
 
 
 # ============================================================================
@@ -7845,7 +7850,7 @@ async def get_social_media_metrics(
             )
 
             if response.status_code != 200:
-                logger.error(f"[Metrics] HubSpot error: {response.status_code} - {response.text}")
+                logger.error(f"[Metrics] HubSpot error: {response.status_code} - {safe_error(response.text, 200)}")
                 raise HTTPException(
                     status_code=503,
                     detail=f"Error consultando HubSpot: {response.status_code}. Intenta de nuevo en unos minutos."
@@ -7941,7 +7946,7 @@ async def get_social_media_metrics(
             if contactos:
                 # Mostrar primer contacto como ejemplo
                 ejemplo = contactos[0]
-                logger.info(f"[Metrics] Ejemplo contacto: nombre='{ejemplo.get('nombre')}', tel='{ejemplo.get('telefono')}'")
+                logger.info(f"[Metrics] Ejemplo contacto: nombre={safe_id(ejemplo.get('nombre'), 'name')}, tel={safe_phone(ejemplo.get('telefono'))}")
 
         return {
             "period_days": days,
@@ -7955,7 +7960,7 @@ async def get_social_media_metrics(
         }
 
     except Exception as e:
-        logger.error(f"[Metrics] Error obteniendo métricas: {e}")
+        logger.error(f"[Metrics] Error obteniendo métricas: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -8217,7 +8222,7 @@ async def export_metrics_excel(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[Metrics] Error exportando Excel: {e}", exc_info=True)
+        logger.error(f"[Metrics] Error exportando Excel: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error generando Excel: {str(e)}")
 
 
@@ -8327,7 +8332,7 @@ async def get_appointments_metrics(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[AppointmentsMetrics] Error: {e}", exc_info=True)
+        logger.error(f"[AppointmentsMetrics] Error: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -8467,7 +8472,7 @@ async def export_appointments_excel(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[AppointmentsMetrics] Error export Excel: {e}", exc_info=True)
+        logger.error(f"[AppointmentsMetrics] Error export Excel: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -8572,7 +8577,7 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
                     phone = message.get("phone")
                     if phone:
                         ws_manager.register_phone_owner(phone, advisor_id)
-                        logger.debug(f"[WebSocket] Asesor {advisor_id} observando {phone}")
+                        logger.debug(f"[WebSocket] Asesor {safe_id(advisor_id, 'advisor')} observando {safe_phone(phone)}")
 
             except asyncio.TimeoutError:
                 # Sin mensajes del cliente → ping proactivo para mantener viva la conexión
@@ -8586,10 +8591,10 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, advisor_id)
-        logger.info(f"[WebSocket] Asesor {advisor_id} desconectado")
+        logger.info(f"[WebSocket] Asesor {safe_id(advisor_id, 'advisor')} desconectado")
 
     except Exception as e:
-        logger.error(f"[WebSocket] Error en conexión de {advisor_id}: {e}")
+        logger.error(f"[WebSocket] Error en conexión de {safe_id(advisor_id, 'advisor')}: {safe_error(e)}")
         ws_manager.disconnect(websocket, advisor_id)
 
 
@@ -8727,7 +8732,7 @@ async def restore_panel_from_hubspot(
                 pipe.zadd(state_manager.ACTIVE_CONTACTS_ZSET, {f"{phone_norm}:{canal_safe}": now_ts})
                 await pipe.execute()
                 restored += 1
-                logger.info(f"[RestorePanel] Contacto restaurado: {phone_norm} ({canal_safe})")
+                logger.info(f"[RestorePanel] Contacto restaurado: {safe_phone(phone_norm)} ({canal_safe})")
 
             except Exception as ce:
                 errors.append(str(ce))
@@ -8743,7 +8748,7 @@ async def restore_panel_from_hubspot(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[RestorePanel] Error: {e}", exc_info=True)
+        logger.error(f"[RestorePanel] Error: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -8843,7 +8848,7 @@ async def recover_outage(
                     logger.warning(f"[Recovery] Parse error en {key}: {pe}")
 
     # 1. Scan + MGET en batches (3-5 ordenes de magnitud más rápido que GET individual)
-    logger.info(f"[Recovery] Iniciando scan con ventana {start_iso} → {end_iso}")
+    logger.info(f"[Recovery] Iniciando scan con ventana {safe_id(start_iso, 'from')} -> {safe_id(end_iso, 'to')}")
     keys_buffer: List[str] = []
     try:
         async for key_bytes in rc.scan_iter(match=f"{state_manager.META_PREFIX}*", count=500):
@@ -8910,12 +8915,12 @@ async def recover_outage(
                         "action": "new_message",
                     })
                 except Exception as we:
-                    logger.warning(f"[Recovery] WS broadcast falló para {phone}: {we}")
+                    logger.warning(f"[Recovery] WS broadcast falló para {safe_phone(phone)}: {safe_error(we)}")
 
                 applied.append(phone)
             except Exception as ae:
                 apply_errors.append({"phone": phone, "error": str(ae)})
-                logger.error(f"[Recovery] Apply error para {phone}: {ae}", exc_info=True)
+                logger.error(f"[Recovery] Apply error para {safe_phone(phone)}: {safe_error(ae)}", exc_info=True)
 
     return {
         "window": {"start": start_iso, "end": end_iso},
@@ -9615,7 +9620,7 @@ async def cancel_scheduled_message(
             status_code=404,
             detail="Mensaje no encontrado o ya no está en estado pending."
         )
-    logger.info(f"[Panel] Mensaje programado cancelado: {message_id}")
+    logger.info(f"[Panel] Mensaje programado cancelado: {safe_id(message_id, 'scheduled_message')}")
     return {"ok": True}
 
 
@@ -9738,7 +9743,7 @@ async def _resolve_advisor_name(advisor_id: str) -> str:
         if doc:
             return doc.get("name") or doc.get("display_name") or "tu asesora"
     except Exception as e:
-        logger.debug(f"[BulkCampaign] No se pudo resolver advisor_name: {e}")
+        logger.debug(f"[BulkCampaign] No se pudo resolver advisor_name: {safe_error(e)}")
     return "tu asesora"
 
 
@@ -9759,7 +9764,7 @@ async def _hubspot_search_contacts_for_bulk(
         if cached:
             return json.loads(cached)
     except Exception as e:
-        logger.debug(f"[BulkCampaign] cache miss/error: {e}")
+        logger.debug(f"[BulkCampaign] cache miss/error: {safe_error(e)}")
 
     all_contacts: List[Dict[str, Any]] = []
     after: Optional[str] = None
@@ -9774,7 +9779,7 @@ async def _hubspot_search_contacts_for_bulk(
                 after=after,
             )
         except Exception as e:
-            logger.error(f"[BulkCampaign] Error HubSpot search: {e}")
+            logger.error(f"[BulkCampaign] Error HubSpot search: {safe_error(e)}")
             break
         for r_item in resp.get("results", []):
             props = r_item.get("properties") or {}
@@ -9797,7 +9802,7 @@ async def _hubspot_search_contacts_for_bulk(
         r = await _get_redis_client()
         await r.set(cache_key, json.dumps(all_contacts), ex=HUBSPOT_BULK_SEARCH_CACHE_TTL)
     except Exception as e:
-        logger.debug(f"[BulkCampaign] Error guardando cache: {e}")
+        logger.debug(f"[BulkCampaign] Error guardando cache: {safe_error(e)}")
 
     return all_contacts
 
@@ -9819,7 +9824,7 @@ async def _filter_contacts_by_last_message_range(
         from_dt = datetime.fromisoformat(date_from + "T00:00:00+00:00") if date_from else None
         to_dt = datetime.fromisoformat(date_to + "T23:59:59+00:00") if date_to else None
     except Exception as e:
-        logger.warning(f"[BulkCampaign] date parse error: {e}")
+        logger.warning(f"[BulkCampaign] date parse error: {safe_error(e)}")
         return contacts
 
     r = await _get_redis_client()
@@ -10061,7 +10066,7 @@ async def _send_bulk_template_message(
             metadata={"is_bulk_send": True, "campaign_id": campaign_id, "stage_id": campaign_stage_id},
         )
     except Exception as e:
-        logger.warning(f"[BulkCampaign] No se pudo guardar mensaje en Mongo: {e}")
+        logger.warning(f"[BulkCampaign] No se pudo guardar mensaje en Mongo: {safe_error(e)}")
 
     # Caso especial No Responde: setear flag para auto-promoción
     if campaign_stage_id == "other":
@@ -10070,7 +10075,7 @@ async def _send_bulk_template_message(
             flag_key = f"{BULK_NO_RESPONDE_FLAG_PREFIX}{phone}"
             await r.set(flag_key, campaign_id, ex=BULK_NO_RESPONDE_FLAG_TTL)
         except Exception as e:
-            logger.warning(f"[BulkCampaign] No se pudo setear flag No Responde: {e}")
+            logger.warning(f"[BulkCampaign] No se pudo setear flag No Responde: {safe_error(e)}")
 
     return result
 
@@ -10093,7 +10098,7 @@ async def _process_bulk_campaign_tick():
         if not lock_acquired:
             return
     except Exception as e:
-        logger.warning(f"[BulkCampaign] No se pudo adquirir lock: {e}")
+        logger.warning(f"[BulkCampaign] No se pudo adquirir lock: {safe_error(e)}")
         return
 
     try:
@@ -10147,7 +10152,7 @@ async def _process_bulk_campaign_tick():
                 except Exception:
                     dedup_set = True
                 if not dedup_set:
-                    logger.info(f"[BulkCampaign] {campaign_id}: skip {contact_id} (dedup)")
+                    logger.info(f"[BulkCampaign] {safe_id(campaign_id, 'campaign')}: skip {safe_id(contact_id, 'contact')} (dedup)")
                     await mongo_mgr.mark_bulk_contact_sent(campaign_id, contact_id, None)
                     return
 
@@ -10205,7 +10210,7 @@ async def _process_bulk_campaign_tick():
         await mongo_mgr.finalize_bulk_campaign_if_done(campaign_id)
 
     except Exception as e:
-        logger.error(f"[BulkCampaign] Error en tick: {e}", exc_info=True)
+        logger.error(f"[BulkCampaign] Error en tick: {safe_error(e)}", exc_info=True)
     finally:
         try:
             if r is not None:
@@ -10219,4 +10224,4 @@ async def _process_bulk_campaign_tick_safe():
     try:
         await _process_bulk_campaign_tick()
     except Exception as e:
-        logger.error(f"[BulkCampaign] Error fatal en tick (capturado): {e}", exc_info=True)
+        logger.error(f"[BulkCampaign] Error fatal en tick (capturado): {safe_error(e)}", exc_info=True)

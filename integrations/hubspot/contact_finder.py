@@ -20,6 +20,7 @@ import redis
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 
 @dataclass
@@ -92,7 +93,7 @@ class ContactFinder:
                 self._redis_client = redis.from_url(self.redis_url, max_connections=5)
                 self._redis_client.ping()
             except Exception as e:
-                logger.warning(f"[ContactFinder] Redis no disponible para caché: {e}")
+                logger.warning(f"[ContactFinder] Redis no disponible para caché: {safe_error(e)}")
                 self._redis_client = None
         return self._redis_client
 
@@ -124,10 +125,10 @@ class ContactFinder:
             cached = redis_client.get(self._cache_key(phone))
             if cached:
                 data = json.loads(cached)
-                logger.debug(f"[ContactFinder] Cache HIT para {phone}")
+                logger.debug(f"[ContactFinder] Cache HIT para {safe_phone(phone)}")
                 return ContactInfo(**data)
         except Exception as e:
-            logger.warning(f"[ContactFinder] Error leyendo caché: {e}")
+            logger.warning(f"[ContactFinder] Error leyendo caché: {safe_error(e)}")
 
         return None
 
@@ -153,9 +154,9 @@ class ContactFinder:
                 self.CACHE_TTL,
                 json.dumps(data)
             )
-            logger.debug(f"[ContactFinder] Contacto guardado en caché: {phone} -> {contact.vid}")
+            logger.debug(f"[ContactFinder] Contacto guardado en caché: {safe_phone(phone)} -> {safe_id(contact.vid, 'contact')}")
         except Exception as e:
-            logger.warning(f"[ContactFinder] Error guardando en caché: {e}")
+            logger.warning(f"[ContactFinder] Error guardando en caché: {safe_error(e)}")
 
     def _invalidate_cache(self, phone: str) -> None:
         """Invalida el caché para un número de teléfono."""
@@ -233,7 +234,7 @@ class ContactFinder:
         elif response.status_code >= 400:
             logger.warning(
                 f"[ContactFinder] Error buscando por {property_name}: "
-                f"{response.status_code} - {response.text}"
+                f"{response.status_code} - {safe_text(response.text, 160)}"
             )
 
         return None
@@ -254,7 +255,7 @@ class ContactFinder:
 
         # 2. Generar variantes del número
         phone_variants = self._generate_phone_variants(phone_e164)
-        logger.info(f"[ContactFinder] Buscando contacto con variantes: {phone_variants}")
+        logger.info(f"[ContactFinder] Buscando contacto con variantes: {[safe_phone(v) for v in phone_variants]}")
 
         # 3. Buscar en cada propiedad con cada variante
         for prop in self.SEARCH_PROPERTIES:
@@ -265,8 +266,8 @@ class ContactFinder:
                     if result:
                         contact = self._parse_contact_result(result, found_by=prop)
                         logger.info(
-                            f"[ContactFinder] Contacto encontrado: vid={contact.vid} "
-                            f"(por {prop}={variant})"
+                            f"[ContactFinder] Contacto encontrado: vid={safe_id(contact.vid, 'contact')} "
+                            f"(por {prop}={safe_phone(variant)})"
                         )
 
                         # Guardar en caché
@@ -276,10 +277,10 @@ class ContactFinder:
                         return contact
 
                 except Exception as e:
-                    logger.warning(f"[ContactFinder] Error buscando {prop}={variant}: {e}")
+                    logger.warning(f"[ContactFinder] Error buscando {prop}={safe_phone(variant)}: {safe_error(e)}")
                     continue
 
-        logger.info(f"[ContactFinder] No se encontró contacto para {phone_e164}")
+        logger.info(f"[ContactFinder] No se encontró contacto para {safe_phone(phone_e164)}")
         return None
 
     def _parse_contact_result(self, result: Dict[str, Any], found_by: str) -> ContactInfo:
@@ -312,7 +313,7 @@ class ContactFinder:
             return contact
 
         # Crear nuevo contacto
-        logger.info(f"[ContactFinder] Creando nuevo contacto para {phone_e164}")
+        logger.info(f"[ContactFinder] Creando nuevo contacto para {safe_phone(phone_e164)}")
 
         properties = {
             "phone": phone_e164,

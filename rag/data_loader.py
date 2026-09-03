@@ -10,6 +10,7 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id
 
 
 def load_and_chunk_documents(
@@ -55,7 +56,7 @@ def load_and_chunk_documents(
             except (UnicodeDecodeError, UnicodeError):
                 continue
             except Exception as e:
-                logger.error(f"[DataLoader] Error leyendo '{rel_path}': {e}")
+                logger.error(f"[DataLoader] Error leyendo {safe_id(rel_path, 'path')}: {safe_error(e)}")
                 break
 
         if content:

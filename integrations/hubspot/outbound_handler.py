@@ -22,6 +22,7 @@ from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from twilio.rest import Client as TwilioClient
 
 from logging_config import logger
+from utils.safe_logging import safe_error, safe_id, safe_mapping, safe_phone
 from .contact_finder import get_contact_finder
 from .timeline_logger import get_timeline_logger
 
@@ -113,7 +114,7 @@ class OutboundHandler:
                 self._redis_client = redis.from_url(self.redis_url)
                 self._redis_client.ping()
             except Exception as e:
-                logger.warning(f"[OutboundHandler] Redis no disponible: {e}")
+                logger.warning(f"[OutboundHandler] Redis no disponible: {safe_error(e)}")
                 self._redis_client = None
         return self._redis_client
 
@@ -170,9 +171,9 @@ class OutboundHandler:
 
         try:
             redis_client.setex(key, self.THREAD_TTL, json.dumps(data))
-            logger.debug(f"[OutboundHandler] Mapeo guardado: thread={thread_id} -> phone={phone_e164}")
+            logger.debug(f"[OutboundHandler] Mapeo guardado: thread={safe_id(thread_id, 'thread')} -> phone={safe_phone(phone_e164)}")
         except Exception as e:
-            logger.error(f"[OutboundHandler] Error guardando mapeo: {e}")
+            logger.error(f"[OutboundHandler] Error guardando mapeo: {safe_error(e)}")
 
     def get_phone_from_thread(self, thread_id: str) -> Optional[Dict[str, str]]:
         """
@@ -195,7 +196,7 @@ class OutboundHandler:
             if data:
                 return json.loads(data)
         except Exception as e:
-            logger.error(f"[OutboundHandler] Error obteniendo mapeo: {e}")
+            logger.error(f"[OutboundHandler] Error obteniendo mapeo: {safe_error(e)}")
 
         return None
 
@@ -234,13 +235,13 @@ class OutboundHandler:
             )
 
             logger.info(
-                f"[OutboundHandler] Mensaje enviado: SID={message_obj.sid}, "
-                f"to={to_phone}"
+                f"[OutboundHandler] Mensaje enviado: SID={safe_id(message_obj.sid, 'sid')}, "
+                f"to={safe_phone(to_phone)}"
             )
             return True
 
         except Exception as e:
-            logger.error(f"[OutboundHandler] Error enviando mensaje: {e}")
+            logger.error(f"[OutboundHandler] Error enviando mensaje: {safe_error(e)}")
             return False
 
     # =========================================================================
@@ -287,10 +288,10 @@ class OutboundHandler:
                     }
                     redis_client.set(state_key, json.dumps(new_state))
 
-                logger.info(f"[OutboundHandler] Sofía pausada en Redis para {phone_e164}")
+                logger.info(f"[OutboundHandler] Sofía pausada en Redis para {safe_phone(phone_e164)}")
 
             except Exception as e:
-                logger.error(f"[OutboundHandler] Error pausando en Redis: {e}")
+                logger.error(f"[OutboundHandler] Error pausando en Redis: {safe_error(e)}")
                 success = False
 
         # 2. Actualizar en HubSpot
@@ -301,10 +302,10 @@ class OutboundHandler:
                 status="pausada",
                 phone_e164=phone_e164
             )
-            logger.info(f"[OutboundHandler] Sofía pausada en HubSpot para contact={contact_id}")
+            logger.info(f"[OutboundHandler] Sofía pausada en HubSpot para contact={safe_id(contact_id, 'contact')}")
 
         except Exception as e:
-            logger.error(f"[OutboundHandler] Error pausando en HubSpot: {e}")
+            logger.error(f"[OutboundHandler] Error pausando en HubSpot: {safe_error(e)}")
             success = False
 
         return success
@@ -321,7 +322,7 @@ class OutboundHandler:
         """
         Procesa el webhook de salida desde HubSpot.
         """
-        logger.info(f"[OutboundHandler] Webhook recibido: {json.dumps(payload, default=str)[:500]}")
+        logger.info(f"[OutboundHandler] Webhook recibido: {safe_mapping(payload, 'payload')}")
 
         # Extraer datos del payload (ajustar según formato real de HubSpot)
         # El formato depende de cómo configures el webhook en HubSpot
@@ -355,12 +356,12 @@ class OutboundHandler:
                 # Esto requiere una llamada adicional a HubSpot
                 phone_e164 = await self._get_phone_from_contact(contact_id)
             except Exception as e:
-                logger.error(f"[OutboundHandler] Error obteniendo teléfono: {e}")
+                logger.error(f"[OutboundHandler] Error obteniendo teléfono: {safe_error(e)}")
 
         if not phone_e164:
             logger.error(
                 "[OutboundHandler] No se pudo determinar el número de destino. "
-                f"thread_id={thread_id}, contact_id={contact_id}"
+                f"thread_id={safe_id(thread_id, 'thread')}, contact_id={safe_id(contact_id, 'contact')}"
             )
             return {"status": "error", "reason": "no_phone"}
 

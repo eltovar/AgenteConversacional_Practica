@@ -1671,12 +1671,21 @@ async function _handleDeepLinkMiss(phone) {
     }
 }
 
-async function loadChatHistory(contactId) {
+/**
+ * @param {string} contactId
+ * @param {object} [opciones]
+ * @param {boolean} [opciones.todosLosCanales]  Ignora el filtro de canal y trae
+ *   el hilo completo del contacto. Lo usa `scrollToMessage` cuando el mensaje
+ *   citado quedó bajo otra etiqueta de canal: el cliente ve una sola
+ *   conversación de WhatsApp, pero nosotros la partimos por canal y el ancla
+ *   deja de existir en la vista.
+ */
+async function loadChatHistory(contactId, opciones = {}) {
     // Capturar el contactId y phone al momento de iniciar la petición
     // para verificar que no cambió durante el fetch (race condition fix)
     const requestedContactId = contactId;
     const requestedPhone = currentPhone;
-    const requestedCanal = currentCanal;
+    const requestedCanal = opciones.todosLosCanales ? null : currentCanal;
 
     // ⚠️ 2026-06-02: reset del state de paginación al cambiar conversación.
     // Garantiza que el cursor (oldestTs) y hasMore correspondan SIEMPRE al
@@ -1721,7 +1730,9 @@ async function loadChatHistory(contactId) {
                 console.warn('[Panel] Server reiniciando — reintentando historial en 3s');
                 setTimeout(() => {
                     if (currentContactId === requestedContactId) {
-                        loadChatHistory(contactId);
+                        // Conservar `opciones`: si veníamos de ampliar a todos
+                        // los canales, reintentar filtrado deshace la ampliación.
+                        loadChatHistory(contactId, opciones);
                     }
                 }, 3000);
                 return;
@@ -1758,7 +1769,7 @@ async function loadChatHistory(contactId) {
             showToast('Cargando historial completo...', 'info');
             setTimeout(() => {
                 if (currentContactId === requestedContactId) {
-                    loadChatHistory(contactId);
+                    loadChatHistory(contactId, opciones);
                 }
             }, 8000);
         }
@@ -1797,7 +1808,7 @@ async function loadChatHistory(contactId) {
                 console.warn('[Panel] Error de red — reintentando historial en 3s');
                 setTimeout(() => {
                     if (currentContactId === requestedContactId) {
-                        loadChatHistory(contactId);
+                        loadChatHistory(contactId, opciones);
                     }
                 }, 3000);
                 return;
@@ -3600,6 +3611,22 @@ async function scrollToMessage(msgId) {
         el = document.querySelector(`[data-msg-id="${msgId}"]`);
     }
 
+    // Última oportunidad: el mensaje citado puede seguir existiendo pero bajo
+    // otra etiqueta de canal. El canal se decide POR MENSAJE según el link que
+    // trae el texto, así que un mismo hilo de WhatsApp queda repartido — 1.144
+    // de 3.382 teléfonos están partidos. La resolución de la cita busca sin
+    // filtro de canal y acierta, pero el historial filtra por canal y el ancla
+    // nunca llega al DOM: paginar hacia atrás no puede encontrarlo jamás.
+    //
+    // Medido sobre los 106 casos: mediana 2 mensajes de distancia, máximo 17.
+    // Una sola carga sin filtro los cubre todos.
+    let ampliado = false;
+    if (!el && chatHistoryState && chatHistoryState.canal && chatHistoryState.contactId) {
+        await loadChatHistory(chatHistoryState.contactId, { todosLosCanales: true });
+        el = document.querySelector(`[data-msg-id="${msgId}"]`);
+        ampliado = !!el;
+    }
+
     if (!el) {
         // Nunca callarse: distinguir "está más atrás" de "ya no existe".
         showToast(
@@ -3609,6 +3636,12 @@ async function scrollToMessage(msgId) {
             'info'
         );
         return;
+    }
+
+    if (ampliado) {
+        // La vista acaba de cambiar: aparecieron mensajes de otros canales del
+        // mismo contacto. Decirlo, o la asesora ve mensajes que no estaban.
+        showToast('Se añadieron los mensajes de otros canales de este contacto', 'info');
     }
 
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });

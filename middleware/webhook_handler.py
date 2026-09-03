@@ -253,6 +253,49 @@ async def _fetch_reply_context_deferred(
         logger.warning(f"[ReplyFetch] Error inesperado para {im_sid}: {e}")
 
 
+async def _persistir_saliente(
+    phone: str,
+    contenido: str,
+    resultado_envio: Optional[dict],
+    canal: str,
+    contact_id: Optional[str] = None,
+    conversation_sid: Optional[str] = None,
+    chat_service_sid: Optional[str] = None,
+) -> None:
+    """Guarda en Mongo un saliente que ya salió por Twilio.
+
+    Why: tres ramas de `_process_message_deferred` enviaban un mensaje al
+    cliente y retornaban sin guardarlo nunca. El cliente lo recibía, lo leía y
+    lo citaba, y `get_message_by_sid` no lo encontraba: la cita se caía sin
+    error, sin log y sin campo en Mongo. Medido el 2-sep-2026 sobre un caso
+    real — enviado 17:37:32, citado 17:37:49, no encontrado 17:37:52.
+
+    El segundo efecto es peor que el primero: esos mensajes tampoco salían en
+    el historial del panel, así que la asesora no veía lo que el bot le acababa
+    de decir al cliente justo antes de entregarle la conversación.
+
+    `save_message` deduplica por `message_sid`, así que llamarla dos veces con
+    el mismo envío es inocuo. Nunca propaga: un fallo de Mongo no puede tumbar
+    el procesamiento del entrante, que es lo que ya funcionaba.
+    """
+    if not resultado_envio or resultado_envio.get("status") == "error":
+        return
+    try:
+        await get_mongo_manager().save_message(
+            phone=phone,
+            content=contenido,
+            sender="bot",
+            channel=canal,
+            hubspot_contact_id=contact_id,
+            message_sid=resultado_envio.get("message_sid"),
+            conversation_sid=resultado_envio.get("conversation_sid") or conversation_sid,
+            conversations_message_sid=resultado_envio.get("conversations_message_sid"),
+            chat_service_sid=chat_service_sid,
+        )
+    except Exception as e:
+        logger.warning(f"[DeferredProcess] No se pudo persistir el saliente: {e}")
+
+
 async def _process_message_deferred(
     phone_normalized: str,
     phone_raw: str,
@@ -278,6 +321,13 @@ async def _process_message_deferred(
     - Procesamiento con Sofia
     - Envío de respuesta via Twilio REST API
     """
+    # Valores por defecto para el manejador de error del final: si algo falla
+    # antes de PASO 2, estos nombres no estarían ligados y el aviso de error
+    # que sí recibe el cliente volvería a quedarse sin guardar. En la ruta
+    # normal los sobrescribe PASO 2.
+    final_channel = incoming_channel or early_channel
+    contact_id = None
+
     try:
         logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {phone_normalized}")
 
@@ -622,7 +672,18 @@ async def _process_message_deferred(
                     chat_service_sid=chat_service_sid,
                 )
                 logger.info(f"[DeferredProcess] Mensaje especial enviado: {result}")
-            
+                # El cliente ya lo tiene y puede citarlo: sin esto no existe
+                # para nosotros y su cita no resuelve.
+                await _persistir_saliente(
+                    phone=phone_normalized,
+                    contenido=special_message,
+                    resultado_envio=result,
+                    canal=final_channel,
+                    contact_id=contact_id,
+                    conversation_sid=conversation_sid,
+                    chat_service_sid=chat_service_sid,
+                )
+
             return
         
         # ════════════════════════════════════════════════════════════
@@ -850,9 +911,18 @@ async def _process_message_deferred(
                 )
             
             if out_of_hours_msg:
-                await twilio_client.send_whatsapp_message(
+                _res_fuera_horario = await twilio_client.send_whatsapp_message(
                     to=phone_normalized,
                     body=out_of_hours_msg,
+                    conversation_sid=conversation_sid,
+                    chat_service_sid=chat_service_sid,
+                )
+                await _persistir_saliente(
+                    phone=phone_normalized,
+                    contenido=out_of_hours_msg,
+                    resultado_envio=_res_fuera_horario,
+                    canal=final_channel,
+                    contact_id=contact_id,
                     conversation_sid=conversation_sid,
                     chat_service_sid=chat_service_sid,
                 )
@@ -945,11 +1015,23 @@ async def _process_message_deferred(
         logger.error(f"[DeferredProcess] Error fatal: {e}", exc_info=True)
         # Intentar enviar mensaje de error al usuario
         try:
-            await twilio_client.send_whatsapp_message(
+            _texto_error = "Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
+            _res_error = await twilio_client.send_whatsapp_message(
                 to=phone_normalized,
-                body="Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
+                body=_texto_error
             )
-        except:
+            # Que la asesora vea que el bot falló: hasta ahora este aviso
+            # llegaba al cliente y no dejaba rastro en el panel.
+            await _persistir_saliente(
+                phone=phone_normalized,
+                contenido=_texto_error,
+                resultado_envio=_res_error,
+                canal=final_channel,
+                contact_id=contact_id,
+                conversation_sid=conversation_sid,
+                chat_service_sid=chat_service_sid,
+            )
+        except Exception:
             pass
 
 

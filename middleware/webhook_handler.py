@@ -24,6 +24,7 @@ from twilio.request_validator import RequestValidator
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
+from .whatsapp_identity import WhatsAppIdentityType, resolve_whatsapp_identity
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
 from .sofia_brain import SofiaBrain
@@ -88,6 +89,97 @@ RESCUE_ENGAGEMENT_TURNS = 5
 # todos los contactos activos ante un glitch transitorio; el primero solo deja la
 # marca, de la que se encarga el job de rescate si el cliente no vuelve a escribir.
 RESCUE_FAILURE_TURNS = 2
+
+BSUID_SUPPORT_FLAG = "FEATURE_WHATSAPP_BSUID_SUPPORT"
+BSUID_CONTACT_CONTENT_SID_ENV = "TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID"
+
+
+def _feature_whatsapp_bsuid_support_enabled() -> bool:
+    return os.getenv(BSUID_SUPPORT_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _handle_bsuid_identity(
+    raw_to: str,
+    message_sid: Optional[str],
+    conversation_sid: Optional[str] = None,
+    chat_service_sid: Optional[str] = None,
+    identity_label: str = "BSUID",
+) -> Response:
+    """Corta el flujo telefonico para identidades no-phone y solicita contacto."""
+    content_sid = os.getenv(BSUID_CONTACT_CONTENT_SID_ENV, "").strip()
+    if not content_sid:
+        logger.error(
+            "[Webhook][%s] contact_request_missing_content_sid "
+            "sid=%s env=%s",
+            identity_label,
+            safe_id(message_sid, "message"),
+            BSUID_CONTACT_CONTENT_SID_ENV,
+        )
+        return Response(content="", media_type="text/xml")
+
+    idem_key = f"bsuid_contact_request:{message_sid}" if message_sid else None
+    redis_client = None
+    if idem_key:
+        try:
+            redis_client = get_state_manager().redis
+            already_sent = await redis_client.get(idem_key)
+            if already_sent:
+                logger.info(
+                    "[Webhook][%s] contact_request_already_sent sid=%s",
+                    identity_label,
+                    safe_id(message_sid, "message"),
+                )
+                return Response(content="", media_type="text/xml")
+            in_flight = await redis_client.set(f"{idem_key}:lock", "1", nx=True, ex=60)
+            if not in_flight:
+                logger.info(
+                    "[Webhook][%s] contact_request_in_flight sid=%s",
+                    identity_label,
+                    safe_id(message_sid, "message"),
+                )
+                return Response(content="", media_type="text/xml")
+        except Exception as idem_err:
+            logger.warning(
+                "[Webhook][%s] idempotency_unavailable sid=%s err=%s",
+                identity_label,
+                safe_id(message_sid, "message"),
+                safe_error(idem_err),
+            )
+
+    result = await twilio_client.send_whatsapp_message(
+        to=raw_to,
+        body="",
+        content_sid=content_sid,
+        conversation_sid=conversation_sid,
+        chat_service_sid=chat_service_sid,
+    )
+
+    if result.get("status") == "success":
+        logger.info(
+            "[Webhook][%s] contact_request_sent sid=%s twilio_sid=%s",
+            identity_label,
+            safe_id(message_sid, "message"),
+            safe_id(result.get("message_sid"), "message"),
+        )
+        if idem_key and redis_client:
+            try:
+                await redis_client.set(idem_key, "1", ex=24 * 3600)
+            except Exception:
+                pass
+    else:
+        logger.error(
+            "[Webhook][%s] contact_request_failed sid=%s err=%s",
+            identity_label,
+            safe_id(message_sid, "message"),
+            safe_error(result.get("message")),
+        )
+        if idem_key and redis_client:
+            try:
+                await redis_client.delete(f"{idem_key}:lock")
+            except Exception:
+                pass
+
+    return Response(content="", media_type="text/xml")
 
 
 
@@ -1298,6 +1390,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     From: str = ""
     Body: str = ""
     ProfileName: Optional[str] = None
+    ExternalUserId: Optional[str] = None
+    Username: Optional[str] = None
     MessageSid: Optional[str] = None
     NumMedia: int = 0
     MediaUrl0: Optional[str] = None
@@ -1381,6 +1475,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         From             = data.get("Author") or data.get("From", "")
         Body             = data.get("Body", "")
         ProfileName      = data.get("ProfileName") or data.get("AuthorAttributes", {}).get("name")
+        ExternalUserId   = data.get("ExternalUserId")
+        Username         = data.get("Username")
         MessageSid       = data.get("MessageSid") or data.get("Sid")
         conversation_sid = data.get("ConversationSid")
         chat_service_sid_inbound = data.get("ChatServiceSid")
@@ -1500,6 +1596,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             From             = form_data.get("Author", "")
             Body             = form_data.get("Body", "")
             ProfileName      = None  # Conversations no provee ProfileName directamente
+            ExternalUserId   = form_data.get("ExternalUserId")
+            Username         = form_data.get("Username")
             MessageSid       = form_data.get("MessageSid") or form_data.get("Sid")
             conversation_sid = form_data.get("ConversationSid")
             chat_service_sid_inbound = form_data.get("ChatServiceSid")
@@ -1587,6 +1685,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             From              = form_data.get("From", "")
             Body              = form_data.get("Body", "")
             ProfileName       = form_data.get("ProfileName")
+            ExternalUserId    = form_data.get("ExternalUserId")
+            Username          = form_data.get("Username")
             MessageSid        = form_data.get("MessageSid")
             NumMedia          = int(form_data.get("NumMedia", 0))
             MediaUrl0         = form_data.get("MediaUrl0")
@@ -1614,6 +1714,55 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
 
     if OriginalRepliedMessageSid:
         logger.info(f"[Webhook][Reply] ✅ Cliente citó mensaje: SID={OriginalRepliedMessageSid}")
+
+    if _feature_whatsapp_bsuid_support_enabled():
+        identity_payload = {
+            "Author": From,
+            "From": From,
+            "ProfileName": ProfileName,
+            "ExternalUserId": ExternalUserId,
+            "Username": Username,
+            "ChannelMetadata": channel_metadata_raw,
+        }
+        identity = resolve_whatsapp_identity(identity_payload, channel_metadata_raw)
+        if identity.identity_type == WhatsAppIdentityType.BSUID:
+            logger.info(
+                "[Webhook][BSUID] detected sid=%s has_waid=%s has_username=%s has_profile=%s",
+                safe_id(MessageSid, "message"),
+                bool(identity.wa_id),
+                bool(identity.username),
+                identity.profile_name_present,
+            )
+            return await _handle_bsuid_identity(
+                raw_to=identity.bsuid or From,
+                message_sid=MessageSid,
+                conversation_sid=conversation_sid,
+                chat_service_sid=chat_service_sid_inbound,
+                identity_label="BSUID",
+            )
+        if identity.identity_type == WhatsAppIdentityType.USERNAME:
+            logger.info(
+                "[Webhook][USERNAME] detected sid=%s has_waid=%s has_profile=%s",
+                safe_id(MessageSid, "message"),
+                bool(identity.wa_id),
+                identity.profile_name_present,
+            )
+            return await _handle_bsuid_identity(
+                raw_to=identity.raw_from or (f"whatsapp:{identity.username}" if identity.username else From),
+                message_sid=MessageSid,
+                conversation_sid=conversation_sid,
+                chat_service_sid=chat_service_sid_inbound,
+                identity_label="USERNAME",
+            )
+        if identity.identity_type == WhatsAppIdentityType.UNKNOWN:
+            logger.warning(
+                "[Webhook][Identity] unknown sid=%s has_waid=%s has_username=%s has_profile=%s",
+                safe_id(MessageSid, "message"),
+                bool(identity.wa_id),
+                bool(identity.username),
+                identity.profile_name_present,
+            )
+            return Response(content="", media_type="text/xml")
 
     try:
         # ════════════════════════════════════════════════════════════

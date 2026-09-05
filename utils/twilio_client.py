@@ -138,11 +138,23 @@ class TwilioClient:
     async def _resolve_conv_sid_for_phone(self, to: str) -> tuple[Optional[str], Optional[str]]:
         """Busca el (conversation_sid, chat_service_sid) activo (< 23h) en MongoDB.
 
+        Esta búsqueda está indexada por teléfono y por tanto NO aplica a BSUID.
+        Un BSUID debe conservarse como routing address de Twilio y nunca pasar por
+        PhoneNormalizer ni por lookups de MongoDB basados en el campo ``phone``.
+
         Retorna ambos campos porque Conversations API requiere el ChatServiceSid
         para resolver convs de Services no-Default. Sin esto, las URLs apuntan
         al Default y devuelven 404 para convs de otros services.
         """
         try:
+            from middleware.whatsapp_identity import is_whatsapp_bsuid
+
+            if is_whatsapp_bsuid(to):
+                logger.debug(
+                    "[TwilioClient] BSUID detectado; se omite lookup telefónico de ConversationSid"
+                )
+                return None, None
+
             from database.mongodb_client import get_mongo_manager
             from middleware.phone_normalizer import normalize_phone
 

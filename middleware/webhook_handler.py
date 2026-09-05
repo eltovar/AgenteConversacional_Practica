@@ -1392,6 +1392,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     ProfileName: Optional[str] = None
     ExternalUserId: Optional[str] = None
     Username: Optional[str] = None
+    WaId: Optional[str] = None
     MessageSid: Optional[str] = None
     NumMedia: int = 0
     MediaUrl0: Optional[str] = None
@@ -1477,6 +1478,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         ProfileName      = data.get("ProfileName") or data.get("AuthorAttributes", {}).get("name")
         ExternalUserId   = data.get("ExternalUserId")
         Username         = data.get("Username")
+        WaId             = data.get("WaId")
         MessageSid       = data.get("MessageSid") or data.get("Sid")
         conversation_sid = data.get("ConversationSid")
         chat_service_sid_inbound = data.get("ChatServiceSid")
@@ -1598,6 +1600,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             ProfileName      = None  # Conversations no provee ProfileName directamente
             ExternalUserId   = form_data.get("ExternalUserId")
             Username         = form_data.get("Username")
+            WaId             = form_data.get("WaId")
             MessageSid       = form_data.get("MessageSid") or form_data.get("Sid")
             conversation_sid = form_data.get("ConversationSid")
             chat_service_sid_inbound = form_data.get("ChatServiceSid")
@@ -1687,6 +1690,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             ProfileName       = form_data.get("ProfileName")
             ExternalUserId    = form_data.get("ExternalUserId")
             Username          = form_data.get("Username")
+            WaId              = form_data.get("WaId")
             MessageSid        = form_data.get("MessageSid")
             NumMedia          = int(form_data.get("NumMedia", 0))
             MediaUrl0         = form_data.get("MediaUrl0")
@@ -1715,55 +1719,80 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     if OriginalRepliedMessageSid:
         logger.info(f"[Webhook][Reply] ✅ Cliente citó mensaje: SID={OriginalRepliedMessageSid}")
 
-    if _feature_whatsapp_bsuid_support_enabled():
-        identity_payload = {
-            "Author": From,
-            "From": From,
-            "ProfileName": ProfileName,
-            "ExternalUserId": ExternalUserId,
-            "Username": Username,
-            "ChannelMetadata": channel_metadata_raw,
-        }
-        identity = resolve_whatsapp_identity(identity_payload, channel_metadata_raw)
-        if identity.identity_type == WhatsAppIdentityType.BSUID:
-            logger.info(
-                "[Webhook][BSUID] detected sid=%s has_waid=%s has_username=%s has_profile=%s",
-                safe_id(MessageSid, "message"),
-                bool(identity.wa_id),
-                bool(identity.username),
-                identity.profile_name_present,
-            )
-            return await _handle_bsuid_identity(
-                raw_to=identity.bsuid or From,
-                message_sid=MessageSid,
-                conversation_sid=conversation_sid,
-                chat_service_sid=chat_service_sid_inbound,
-                identity_label="BSUID",
-            )
-        if identity.identity_type == WhatsAppIdentityType.USERNAME:
-            logger.info(
-                "[Webhook][USERNAME] detected sid=%s has_waid=%s has_profile=%s",
-                safe_id(MessageSid, "message"),
-                bool(identity.wa_id),
-                identity.profile_name_present,
-            )
-            return await _handle_bsuid_identity(
-                raw_to=identity.raw_from or (f"whatsapp:{identity.username}" if identity.username else From),
-                message_sid=MessageSid,
-                conversation_sid=conversation_sid,
-                chat_service_sid=chat_service_sid_inbound,
-                identity_label="USERNAME",
-            )
-        if identity.identity_type == WhatsAppIdentityType.UNKNOWN:
+    # ════════════════════════════════════════════════════════════
+    # IDENTIDAD WHATSAPP — SIEMPRE ANTES DE PhoneNormalizer
+    #
+    # El feature flag controla el envío de REQUEST_CONTACT_INFO,
+    # pero nunca debe permitir que un BSUID o Username llegue al
+    # pipeline que presupone un teléfono.
+    # ════════════════════════════════════════════════════════════
+    identity_payload = {
+        "Author": From,
+        "From": From,
+        "ProfileName": ProfileName,
+        "WaId": WaId,
+        "ExternalUserId": ExternalUserId,
+        "Username": Username,
+        "ChannelMetadata": channel_metadata_raw,
+    }
+    identity = resolve_whatsapp_identity(identity_payload, channel_metadata_raw)
+
+    if identity.identity_type == WhatsAppIdentityType.PHONE:
+        logger.info(
+            "[Webhook][Identity] kind=PHONE sid=%s has_external_user_id=%s has_username=%s",
+            safe_id(MessageSid, "message"),
+            bool(identity.external_user_id),
+            bool(identity.username),
+        )
+        # Sin return: conserva exactamente el pipeline telefónico existente.
+
+    elif identity.identity_type == WhatsAppIdentityType.BSUID:
+        logger.info(
+            "[Webhook][Identity] kind=BSUID sid=%s has_waid=%s has_username=%s has_profile=%s",
+            safe_id(MessageSid, "message"),
+            bool(identity.wa_id),
+            bool(identity.username),
+            identity.profile_name_present,
+        )
+
+        # Safe-stop incluso con la feature apagada. El flag controla la nueva
+        # acción de pedir contacto; no puede reactivar la normalización errónea.
+        if not _feature_whatsapp_bsuid_support_enabled():
             logger.warning(
-                "[Webhook][Identity] unknown sid=%s has_waid=%s has_username=%s has_profile=%s",
+                "[Webhook][BSUID] support_disabled_safe_stop sid=%s flag=%s",
                 safe_id(MessageSid, "message"),
-                bool(identity.wa_id),
-                bool(identity.username),
-                identity.profile_name_present,
+                BSUID_SUPPORT_FLAG,
             )
             return Response(content="", media_type="text/xml")
 
+        return await _handle_bsuid_identity(
+            raw_to=identity.bsuid,
+            message_sid=MessageSid,
+            conversation_sid=conversation_sid,
+            chat_service_sid=chat_service_sid_inbound,
+            identity_label="BSUID",
+        )
+
+    elif identity.identity_type == WhatsAppIdentityType.USERNAME:
+        # Username es informativo según Twilio. No construir
+        # whatsapp:<username> ni usarlo como destino de entrega.
+        logger.warning(
+            "[Webhook][Identity] kind=USERNAME_NO_ROUTING sid=%s has_external_user_id=%s",
+            safe_id(MessageSid, "message"),
+            bool(identity.external_user_id),
+        )
+        return Response(content="", media_type="text/xml")
+
+    else:
+        # Identidad desconocida: fail-safe. No fabricar un teléfono.
+        logger.warning(
+            "[Webhook][Identity] kind=UNKNOWN sid=%s has_waid=%s has_external_user_id=%s has_username=%s",
+            safe_id(MessageSid, "message"),
+            bool(identity.wa_id),
+            bool(identity.external_user_id),
+            bool(identity.username),
+        )
+        return Response(content="", media_type="text/xml")
     try:
         # ════════════════════════════════════════════════════════════
         # PASO 1: Validación rápida del número (< 1ms)

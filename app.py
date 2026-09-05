@@ -1585,7 +1585,7 @@ async def check_appointment_followups():
                                 )
                                 asyncio.create_task(
                                     get_mongo_manager().mark_visit_completed(
-                                        safe_id(apt.contact_id, "contact"), safe_phone(apt.phone_normalized)
+                                        apt.contact_id, apt.phone_normalized
                                     )
                                 )
                             except Exception as lc_err:

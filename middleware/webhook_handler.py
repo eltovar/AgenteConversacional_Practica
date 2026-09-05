@@ -14,6 +14,7 @@ Flujo:
 
 import os
 import json
+import re
 from typing import Any, Optional
 from datetime import datetime
 
@@ -24,7 +25,11 @@ from twilio.request_validator import RequestValidator
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
-from .whatsapp_identity import WhatsAppIdentityType, resolve_whatsapp_identity
+from .whatsapp_identity import (
+    WhatsAppIdentityType,
+    make_bsuid_identity_key,
+    resolve_whatsapp_identity,
+)
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactManager
 from .sofia_brain import SofiaBrain
@@ -92,10 +97,27 @@ RESCUE_FAILURE_TURNS = 2
 
 BSUID_SUPPORT_FLAG = "FEATURE_WHATSAPP_BSUID_SUPPORT"
 BSUID_CONTACT_CONTENT_SID_ENV = "TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID"
+_EXPLICIT_PHONE_RE = re.compile(
+    r"(?:whatsapp:)?\+\d[\d\s().-]{6,}\d|\b(?:57)?3\d{9}\b|\b0?3\d{9}\b",
+    re.IGNORECASE,
+)
 
 
 def _feature_whatsapp_bsuid_support_enabled() -> bool:
     return os.getenv(BSUID_SUPPORT_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_explicit_phone_from_text(text: str) -> Optional[str]:
+    """Normaliza solo teléfonos escritos claramente por el cliente."""
+    if not text:
+        return None
+
+    normalizer = PhoneNormalizer()
+    for match in _EXPLICIT_PHONE_RE.finditer(text):
+        validation = normalizer.normalize(match.group(0))
+        if validation.is_valid:
+            return validation.normalized
+    return None
 
 
 async def _handle_bsuid_identity(
@@ -360,6 +382,12 @@ async def _process_message_deferred(
     incoming_channel: Optional[str] = None,
     conversation_sid: Optional[str] = None,
     chat_service_sid: Optional[str] = None,
+    identity_type: str = WhatsAppIdentityType.PHONE.value,
+    identity_key: Optional[str] = None,
+    routing_address: Optional[str] = None,
+    username: Optional[str] = None,
+    wa_id: Optional[str] = None,
+    external_user_id: Optional[str] = None,
 ):
     """
     Procesa un mensaje de WhatsApp de forma diferida (background task).
@@ -372,7 +400,24 @@ async def _process_message_deferred(
     - Envío de respuesta via Twilio REST API
     """
     try:
-        logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {safe_phone(phone_normalized)}")
+        is_bsuid_identity = identity_type == WhatsAppIdentityType.BSUID.value
+        conversation_key = identity_key or phone_normalized
+        outbound_to = routing_address or phone_normalized
+        bsuid_display_name = profile_name or username or "Cliente WhatsApp sin teléfono"
+        identity_metadata = {
+            "identity_type": identity_type,
+            "has_phone": not is_bsuid_identity,
+        }
+        if is_bsuid_identity:
+            identity_metadata.update({
+                "routing_address": routing_address,
+                "username": username,
+                "wa_id": wa_id,
+                "external_user_id": external_user_id,
+                "display_name": bsuid_display_name,
+            })
+
+        logger.info(f"[DeferredProcess] Iniciando procesamiento diferido para {safe_phone(conversation_key)}")
 
         # ════════════════════════════════════════════════════════════
         # IDEMPOTENCIA: Prevenir doble procesamiento por Twilio retry
@@ -401,7 +446,7 @@ async def _process_message_deferred(
                 media_result = await media_processor.process_incoming_media(
                     media_url=media_url,
                     content_type=media_content_type or "application/octet-stream",
-                    phone=phone_normalized
+                    phone=conversation_key
                 )
                 
                 if media_result.get("transcription"):
@@ -421,43 +466,51 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         # PASO 2: Obtener canal histórico y crear/identificar contacto
         # ════════════════════════════════════════════════════════════
-        contact_manager = get_contact_manager()
         contact_info = None
-        
-        # ✅ FIX: Obtener canal histórico ANTES de crear el contacto
-        # Si el contacto ya existe, usa su canal persistido (portales, redes sociales)
-        # Si es nuevo y el mensaje tiene link, usa ese canal
-        # Esto asegura asignación correcta al asesor correspondiente
-        historical_channel = await _get_historical_channel(
-            phone_normalized=phone_normalized,
-            detected_channel=early_channel,
-            hubspot_client=contact_manager.hubspot if contact_manager else None
-        )
-        
-        logger.info(
-            f"[DeferredProcess] Canal: detectado={early_channel}, "
-            f"histórico={historical_channel}"
-        )
-        
-        try:
-            contact_info = await contact_manager.identify_or_create_contact(
-                phone_raw=phone_raw,
-                source_channel=historical_channel,  # ← Usar canal histórico
-                create_deal=False
-            )
-            contact_id = contact_info.contact_id if contact_info else None
-            _contact_is_new = contact_info.is_new if contact_info else False
-            logger.info(f"[DeferredProcess] Contacto: {safe_id(contact_id, 'contact')} (nuevo={_contact_is_new})")
-        except Exception as e:
-            logger.error(f"[DeferredProcess] Error con HubSpot: {safe_error(e)}")
+        if is_bsuid_identity:
+            historical_channel = "whatsapp"
             contact_id = None
-            _contact_is_new = False
+            _contact_is_new = True
+            logger.info(
+                "[DeferredProcess][BSUID] ContactManager omitido para identidad sin teléfono"
+            )
+        else:
+            contact_manager = get_contact_manager()
+
+            # ✅ FIX: Obtener canal histórico ANTES de crear el contacto
+            # Si el contacto ya existe, usa su canal persistido (portales, redes sociales)
+            # Si es nuevo y el mensaje tiene link, usa ese canal
+            # Esto asegura asignación correcta al asesor correspondiente
+            historical_channel = await _get_historical_channel(
+                phone_normalized=phone_normalized,
+                detected_channel=early_channel,
+                hubspot_client=contact_manager.hubspot if contact_manager else None
+            )
+
+            logger.info(
+                f"[DeferredProcess] Canal: detectado={early_channel}, "
+                f"histórico={historical_channel}"
+            )
+
+            try:
+                contact_info = await contact_manager.identify_or_create_contact(
+                    phone_raw=phone_raw,
+                    source_channel=historical_channel,  # ← Usar canal histórico
+                    create_deal=False
+                )
+                contact_id = contact_info.contact_id if contact_info else None
+                _contact_is_new = contact_info.is_new if contact_info else False
+                logger.info(f"[DeferredProcess] Contacto: {safe_id(contact_id, 'contact')} (nuevo={_contact_is_new})")
+            except Exception as e:
+                logger.error(f"[DeferredProcess] Error con HubSpot: {safe_error(e)}")
+                contact_id = None
+                _contact_is_new = False
         
         # ════════════════════════════════════════════════════════════
         # PASO 3: Verificar si Sofía debe responder
         # ════════════════════════════════════════════════════════════
         should_respond, reason, special_message, redis_channel = await should_bot_respond(
-            phone_normalized=phone_normalized,
+            phone_normalized=conversation_key,
             contact_id=contact_id
         )
         
@@ -529,12 +582,13 @@ async def _process_message_deferred(
             logger.debug(f"[CitaTrace] traza de salida fallida: {_e_cita}")
 
         client_mongo_id = await mongo_manager.save_message(
-            phone=phone_normalized,
+            phone=conversation_key,
             content=processed_body,
             sender="client",
             channel=final_channel,
             hubspot_contact_id=contact_id,
             message_sid=message_sid,
+            metadata=identity_metadata,
             media=media_dict,
             reply_to_id=reply_to_id,
             reply_to_preview=reply_to_preview,
@@ -559,7 +613,7 @@ async def _process_message_deferred(
                 conversation_sid=conversation_sid,
                 chat_service_sid=chat_service_sid,
                 mongo_message_sid=message_sid,
-                phone=phone_normalized,
+                phone=conversation_key,
                 advisor_id=None,
                 delay=3.0,
             ))
@@ -600,7 +654,7 @@ async def _process_message_deferred(
         # mensaje ENTRANTE. Si la conversacion estaba cerrada, que el cliente
         # vuelva a escribir la devuelve al panel — ver update_activity().
         await get_state_manager().update_activity(
-            phone_normalized, canal=final_channel or "whatsapp", reopen_if_closed=True
+            conversation_key, canal=final_channel or "whatsapp", reopen_if_closed=True
         )
 
         # Inbox de no-leídos: registrar actividad para el asesor asignado.
@@ -609,7 +663,7 @@ async def _process_message_deferred(
         _inbox_meta = None  # Fix-A: inicializar fuera del try para usar en notify_new_message
         try:
             _inbox_meta = await get_state_manager().get_meta(
-                phone_normalized, final_channel or "whatsapp"
+                conversation_key, final_channel or "whatsapp"
             )
             # FIX: Para contactos nuevos el temp_meta no tiene assigned_owner_id aún.
             # Usamos hubspot_owner_id de contact_info como fallback para garantizar inbox write
@@ -624,7 +678,7 @@ async def _process_message_deferred(
             if _assigned_owner_def and not should_respond:
                 await get_state_manager().add_to_advisor_inbox(
                     advisor_id=_assigned_owner_def,
-                    phone=phone_normalized,
+                    phone=conversation_key,
                     canal=final_channel or "whatsapp",
                 )
         except Exception as _inbox_err:
@@ -635,11 +689,11 @@ async def _process_message_deferred(
         # Fix-A: pasar assigned_owner_id para enrutamiento targeted (evita broadcast global)
         # _assigned_owner_def ya fue calculado en el bloque anterior (con fallback hubspot_owner)
         await ws_manager.notify_new_message(
-            phone=phone_normalized,
+            phone=conversation_key,
             canal=final_channel or "whatsapp",
             message_preview=processed_body[:100] if processed_body else "",
             sender="client",
-            contact_name="",
+            contact_name=bsuid_display_name if is_bsuid_identity else "",
             redis_client=get_state_manager().redis,
             assigned_owner_id=_assigned_owner_def,
             state_manager=get_state_manager(),
@@ -652,7 +706,7 @@ async def _process_message_deferred(
         # Si hay otro mensaje siendo procesado, este se agrega al buffer y termina
         # El proceso principal espera ~30s y procesa todos los mensajes juntos
         aggregation_result = await message_aggregator.add_message_to_buffer(
-            session_id=phone_normalized,
+            session_id=conversation_key,
             message=processed_body
         )
         
@@ -683,7 +737,7 @@ async def _process_message_deferred(
                 f"[DeferredProcess] Proceso principal. Esperando mensajes adicionales..."
             )
             # Esperar y obtener mensajes combinados
-            combined_message = await message_aggregator.wait_and_get_combined_message(phone_normalized)
+            combined_message = await message_aggregator.wait_and_get_combined_message(conversation_key)
             
             if combined_message:
                 logger.info(
@@ -709,7 +763,7 @@ async def _process_message_deferred(
             # Enviar mensaje especial si existe (ej: PENDING_HANDOFF)
             if special_message:
                 result = await twilio_client.send_whatsapp_message(
-                    to=phone_normalized,
+                    to=outbound_to,
                     body=special_message,
                     conversation_sid=conversation_sid,
                     chat_service_sid=chat_service_sid,
@@ -801,7 +855,7 @@ async def _process_message_deferred(
 
         # Procesar mensaje con Sofia
         result = await sofia.process_message_with_analysis(
-            session_id=phone_normalized,
+            session_id=conversation_key,
             user_message=processed_body,
             lead_context=lead_context
         )
@@ -842,7 +896,7 @@ async def _process_message_deferred(
             _failed = analysis.analysis_failed
             _has_signal = _failed or analysis.handoff_priority in RESCUE_SIGNAL_PRIORITIES
             _turns, _had_signal = await state_manager.track_bot_turn(
-                phone_normalized, final_channel, has_signal=_has_signal
+                conversation_key, final_channel, has_signal=_has_signal
             )
             _rescue_by_failure = _failed and _turns >= RESCUE_FAILURE_TURNS
             _rescue_by_signal = _had_signal and _turns >= RESCUE_SIGNAL_TURNS
@@ -883,20 +937,25 @@ async def _process_message_deferred(
         # "else" de ensure_meta_with_channel no corre → add_to_zset no tiene efecto.
         _is_new_contact = contact_info.is_new if contact_info else True
         _add_to_panel = (
-            not _is_new_contact          # Contacto que regresa: sin cambio de comportamiento
+            is_bsuid_identity            # Identidad sin teléfono: visible como lead temporal
+            or not _is_new_contact       # Contacto que regresa: sin cambio de comportamiento
             or not analysis              # Sin análisis (error): safe default = mostrar en panel
             or analysis.handoff_priority not in ("none", "low")  # Señal comercial confirmada
             or not is_business_hours()   # Fuera de horario → siempre visible para seguimiento
         )
 
         await state_manager.ensure_meta_with_channel(
-            phone=phone_normalized,
+            phone=conversation_key,
             canal=final_channel,
             canal_origen=historical_channel,
             contact_id=contact_id,
-            display_name=contact_info.firstname if contact_info else None,
+            display_name=bsuid_display_name if is_bsuid_identity else (contact_info.firstname if contact_info else None),
             owner_id=hubspot_owner_id,
-            add_to_zset=_add_to_panel
+            add_to_zset=_add_to_panel,
+            identity_type=identity_type,
+            has_phone=not is_bsuid_identity,
+            routing_address=routing_address,
+            username=username,
         )
 
         # Sincronizar owner_id en MongoDB conversations (espejo del fix Redis)
@@ -905,7 +964,7 @@ async def _process_message_deferred(
                 _mongo = get_mongo_manager()
                 asyncio.create_task(
                     _mongo.update_conversation_meta(
-                        phone=phone_normalized,
+                        phone=conversation_key,
                         canal=final_channel or "whatsapp",
                         owner_id=hubspot_owner_id,
                     )
@@ -921,7 +980,7 @@ async def _process_message_deferred(
             out_of_hours_msg = get_out_of_hours_message()
         
         # Re-verificar estado (anti race-condition)
-        final_status = await state_manager.get_status(phone_normalized)
+        final_status = await state_manager.get_status(conversation_key)
         if final_status in [
             ConversationStatus.HUMAN_ACTIVE,
             ConversationStatus.IN_CONVERSATION,
@@ -944,7 +1003,7 @@ async def _process_message_deferred(
             
             if out_of_hours_msg:
                 await twilio_client.send_whatsapp_message(
-                    to=phone_normalized,
+                    to=outbound_to,
                     body=out_of_hours_msg,
                     conversation_sid=conversation_sid,
                     chat_service_sid=chat_service_sid,
@@ -959,7 +1018,7 @@ async def _process_message_deferred(
         # PASO 7: Enviar respuesta via Twilio REST API
         # ════════════════════════════════════════════════════════════
         send_result = await twilio_client.send_whatsapp_message(
-            to=phone_normalized,
+            to=outbound_to,
             body=response_text,
             conversation_sid=conversation_sid,
             chat_service_sid=chat_service_sid,
@@ -973,7 +1032,7 @@ async def _process_message_deferred(
             # reciba el mensaje antes de que el bot quede bloqueado.
             if pending_handoff:
                 await state_manager.request_handoff(
-                    phone_normalized,
+                    conversation_key,
                     reason=handoff_reason,
                     contact_id=contact_id,
                     canal=final_channel
@@ -989,7 +1048,7 @@ async def _process_message_deferred(
                 try:
                     _hs_payload = {
                         "type":       "status_change",
-                        "phone":      phone_normalized,
+                        "phone":      conversation_key,
                         "canal":      final_channel,
                         "old_status": ConversationStatus.BOT_ACTIVE.value,
                         "new_status": ConversationStatus.PENDING_HANDOFF.value,
@@ -1006,12 +1065,13 @@ async def _process_message_deferred(
         _out_conv_sid = send_result.get("conversation_sid") or conversation_sid
         _out_im_sid = send_result.get("conversations_message_sid")
         _bot_mongo_id = await mongo_manager.save_message(
-            phone=phone_normalized,
+            phone=conversation_key,
             content=response_text,
             sender="bot",
             channel=final_channel,
             hubspot_contact_id=contact_id,
             message_sid=send_result.get("message_sid"),
+            metadata=identity_metadata,
             conversation_sid=_out_conv_sid,
             conversations_message_sid=_out_im_sid,
             chat_service_sid=chat_service_sid,
@@ -1032,14 +1092,14 @@ async def _process_message_deferred(
                 existing_bot_mongo_id=_bot_mongo_id,
             )
         
-        logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {safe_phone(phone_normalized)}")
+        logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {safe_phone(conversation_key)}")
         
     except Exception as e:
         logger.error(f"[DeferredProcess] Error fatal: {safe_error(e)}", exc_info=True)
         # Intentar enviar mensaje de error al usuario
         try:
             await twilio_client.send_whatsapp_message(
-                to=phone_normalized,
+                to=outbound_to if "outbound_to" in locals() else phone_normalized,
                 body="Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
             )
         except:
@@ -1765,13 +1825,59 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             )
             return Response(content="", media_type="text/xml")
 
-        return await _handle_bsuid_identity(
-            raw_to=identity.bsuid,
-            message_sid=MessageSid,
-            conversation_sid=conversation_sid,
-            chat_service_sid=chat_service_sid_inbound,
-            identity_label="BSUID",
+        shared_phone = _extract_explicit_phone_from_text(Body)
+        if shared_phone:
+            shared_phone_channel = detect_channel_dynamic(Body, None)
+            background_tasks.add_task(
+                _process_message_deferred,
+                shared_phone,
+                shared_phone,
+                Body,
+                ProfileName,
+                MessageSid,
+                NumMedia,
+                MediaUrl0,
+                MediaContentType0,
+                shared_phone_channel,
+                OriginalRepliedMessageSid,
+                "whatsapp",
+                conversation_sid,
+                chat_service_sid_inbound,
+            )
+            logger.info(
+                "[Webhook][BSUID] Teléfono explícito detectado; flujo normal encolado phone=%s",
+                safe_phone(shared_phone),
+            )
+            return Response(content="", media_type="text/xml")
+
+        identity_key = make_bsuid_identity_key(identity.bsuid)
+        background_tasks.add_task(
+            _process_message_deferred,
+            identity_key,
+            identity.bsuid,
+            Body,
+            ProfileName,
+            MessageSid,
+            NumMedia,
+            MediaUrl0,
+            MediaContentType0,
+            "whatsapp",
+            OriginalRepliedMessageSid,
+            "whatsapp",
+            conversation_sid,
+            chat_service_sid_inbound,
+            identity_type=WhatsAppIdentityType.BSUID.value,
+            identity_key=identity_key,
+            routing_address=identity.bsuid,
+            username=identity.username,
+            wa_id=identity.wa_id,
+            external_user_id=identity.external_user_id,
         )
+        logger.info(
+            "[Webhook][BSUID] Procesamiento encolado con identity_key=%s",
+            safe_id(identity_key, "identity"),
+        )
+        return Response(content="", media_type="text/xml")
 
     elif identity.identity_type == WhatsAppIdentityType.USERNAME:
         # Username es informativo según Twilio. No construir

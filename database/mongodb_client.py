@@ -511,6 +511,7 @@ class MongoDBManager:
                             content=content,
                             sender=sender,
                             hubspot_contact_id=hubspot_contact_id,
+                            metadata=metadata or {},
                         )
                     )
                 except Exception as _conv_err:
@@ -2266,6 +2267,7 @@ class MongoDBManager:
         content: str,
         sender: str,
         hubspot_contact_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Upsert atómico de un documento `conversations` cuando llega/sale un mensaje.
@@ -2284,6 +2286,7 @@ class MongoDBManager:
             canal_safe = (canal or "whatsapp").lower()
             now = datetime.now(TIMEZONE)
             preview = (content or "")[:200]
+            meta = metadata or {}
 
             set_fields = {
                 "last_message_at": now,
@@ -2291,6 +2294,9 @@ class MongoDBManager:
                 "last_message_sender": sender,
                 "updated_at": now,
             }
+            for key in ("identity_type", "has_phone", "routing_address", "username", "display_name"):
+                if key in meta and meta[key] is not None:
+                    set_fields[key] = meta[key]
             # Solo setear contact_id si llega (no sobrescribir con None)
             if hubspot_contact_id:
                 set_fields["contact_id"] = hubspot_contact_id

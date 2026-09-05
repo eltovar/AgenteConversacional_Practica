@@ -5,6 +5,7 @@ import pytest
 from middleware.whatsapp_identity import (
     WhatsAppIdentityType,
     is_whatsapp_bsuid,
+    make_bsuid_identity_key,
     resolve_whatsapp_identity,
 )
 
@@ -57,6 +58,15 @@ def test_resuelve_bsuid_desde_external_user_id_si_no_hay_from():
     assert identity.identity_type == WhatsAppIdentityType.BSUID
     assert identity.bsuid == "whatsapp:CO.899759302823042"
     assert identity.external_user_id == "whatsapp:CO.899759302823042"
+
+
+def test_identity_key_bsuid_es_estable_y_segura_para_redis():
+    first = make_bsuid_identity_key("whatsapp:CO.899759302823042")
+    second = make_bsuid_identity_key(" WHATSAPP:co.899759302823042 ")
+
+    assert first == second
+    assert first.startswith("bsuid_")
+    assert ":" not in first
 
 
 def test_external_user_id_bsuid_no_queda_oculto_por_from_desconocido():

@@ -96,6 +96,10 @@ class ConversationMeta:
     last_advisor_message: Optional[str] = None
     canal_display: Optional[str] = None  # Canal visible en UI (editable por asesor), no afecta routing
     seguimiento_origin: Optional[str] = None  # Timestamp ISO de cuándo se movió al embudo Seguimiento
+    identity_type: str = "phone"
+    has_phone: bool = True
+    routing_address: Optional[str] = None
+    username: Optional[str] = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -257,6 +261,8 @@ class ConversationStateManager:
                 {
                     "owner_id": 1, "contact_id": 1, "display_name": 1,
                     "canal": 1, "phone": 1, "last_message_at": 1,
+                    "identity_type": 1, "has_phone": 1,
+                    "routing_address": 1, "username": 1,
                     "_id": 0,
                 },
             )
@@ -272,6 +278,10 @@ class ConversationStateManager:
                 "status": "BOT_ACTIVE",
                 "last_activity": doc.get("last_message_at", get_bogota_now_iso()),
                 "in_panel": True,
+                "identity_type": doc.get("identity_type", "phone"),
+                "has_phone": doc.get("has_phone", True),
+                "routing_address": doc.get("routing_address"),
+                "username": doc.get("username"),
             }
             await self.redis.set(meta_key, json.dumps(meta))
             logger.info(
@@ -402,6 +412,10 @@ class ConversationStateManager:
                         "deal_id": meta.deal_id if meta else None,
                         "deal_stage": meta.deal_stage if meta else None,
                         "last_advisor_message": meta.last_advisor_message if meta else None,
+                        "identity_type": meta.identity_type if meta else "phone",
+                        "has_phone": meta.has_phone if meta else True,
+                        "routing_address": meta.routing_address if meta else None,
+                        "username": meta.username if meta else None,
                     })
 
             # ── Paso 3: Escrituras pendientes en un solo pipeline ─────────────────────
@@ -486,6 +500,10 @@ class ConversationStateManager:
                         "deal_stage": meta.deal_stage,
                         "last_advisor_message": meta.last_advisor_message,
                         "seguimiento_origin": meta.seguimiento_origin,
+                        "identity_type": meta.identity_type,
+                        "has_phone": meta.has_phone,
+                        "routing_address": meta.routing_address,
+                        "username": meta.username,
                     })
 
                 if bot_ghost_count:
@@ -607,6 +625,10 @@ class ConversationStateManager:
                     "deal_id": None,
                     "deal_stage": None,
                     "last_advisor_message": None,
+                    "identity_type": d.get("identity_type", "phone"),
+                    "has_phone": d.get("has_phone", True),
+                    "routing_address": d.get("routing_address"),
+                    "username": d.get("username"),
                     "_from_mongo_fallback": True,  # marca para debugging/logs
                     "last_message_preview": d.get("last_message_preview", ""),
                     "message_count": d.get("message_count", 0),
@@ -1076,30 +1098,32 @@ class ConversationStateManager:
                 # Disparar hidratación async (fire-and-forget) para enriquecer con nombre de
                 # HubSpot, owner, current_stage. Lazy import para evitar ciclo con outbound_panel.
                 # Si existe marker conv_was_panel, es un contacto que ya tuvo handoff — prioritario.
-                try:
-                    marker_key = f"conv_was_panel:{phone}:{canal_safe}"
-                    had_panel_before = await self.redis.exists(marker_key)
-                    if had_panel_before:
-                        logger.info(
-                            f"[ConversationState] Marker conv_was_panel presente para {phone} "
-                            f"— disparando _hydrate_contact_and_ensure_panel async"
-                        )
-
-                    async def _hydrate_async():
-                        try:
-                            from .outbound_panel import _hydrate_contact_and_ensure_panel
-                            await _hydrate_contact_and_ensure_panel(phone, canal_hint=canal_safe)
-                        except Exception as _he:
-                            logger.warning(
-                                f"[ConversationState] Hydrate async falló para {phone}: {_he}"
+                # Las identidades BSUID no son teléfonos reales y no deben tocar HubSpot por phone.
+                if not str(phone).startswith("bsuid_"):
+                    try:
+                        marker_key = f"conv_was_panel:{phone}:{canal_safe}"
+                        had_panel_before = await self.redis.exists(marker_key)
+                        if had_panel_before:
+                            logger.info(
+                                f"[ConversationState] Marker conv_was_panel presente para {phone} "
+                                f"— disparando _hydrate_contact_and_ensure_panel async"
                             )
 
-                    import asyncio as _asyncio
-                    _asyncio.create_task(_hydrate_async())
-                except Exception as _e:
-                    logger.debug(
-                        f"[ConversationState] No se pudo disparar hydrate async para {phone}: {_e}"
-                    )
+                        async def _hydrate_async():
+                            try:
+                                from .outbound_panel import _hydrate_contact_and_ensure_panel
+                                await _hydrate_contact_and_ensure_panel(phone, canal_hint=canal_safe)
+                            except Exception as _he:
+                                logger.warning(
+                                    f"[ConversationState] Hydrate async falló para {phone}: {_he}"
+                                )
+
+                        import asyncio as _asyncio
+                        _asyncio.create_task(_hydrate_async())
+                    except Exception as _e:
+                        logger.debug(
+                            f"[ConversationState] No se pudo disparar hydrate async para {phone}: {_e}"
+                        )
 
             # P3-D: Fusionar identidad de canal — cuando llega mensaje WhatsApp, eliminar
             # entradas ZSET de otros canales (ej. phone:instagram) para el mismo teléfono.
@@ -1261,7 +1285,11 @@ class ConversationStateManager:
         contact_id: str = None,
         display_name: str = None,
         owner_id: str = None,
-        add_to_zset: bool = True
+        add_to_zset: bool = True,
+        identity_type: str = None,
+        has_phone: Optional[bool] = None,
+        routing_address: str = None,
+        username: str = None,
     ) -> bool:
         """
         Asegura que exista conv_meta y actualiza el canal_origen si es específico.
@@ -1284,6 +1312,10 @@ class ConversationStateManager:
             contact_id: ID del contacto en HubSpot
             display_name: Nombre para mostrar
             owner_id: ID del propietario en HubSpot (para filtrado en panel)
+            identity_type: Tipo de identidad ("phone", "bsuid", etc.)
+            has_phone: Indica si la identidad tiene teléfono real
+            routing_address: Dirección real para responder por Twilio
+            username: Nombre de usuario recibido como metadata
             
         Returns:
             True si se creó/actualizó correctamente
@@ -1314,8 +1346,16 @@ class ConversationStateManager:
                 # Actualizar otros campos si se proporcionan
                 if contact_id and not meta.get("contact_id"):
                     meta["contact_id"] = contact_id
-                if display_name and not meta.get("display_name"):
+                if display_name and (not meta.get("display_name") or meta.get("_temp_meta")):
                     meta["display_name"] = display_name
+                if identity_type:
+                    meta["identity_type"] = identity_type
+                if has_phone is not None:
+                    meta["has_phone"] = has_phone
+                if routing_address:
+                    meta["routing_address"] = routing_address
+                if username:
+                    meta["username"] = username
                 
                 # Sincronizar assigned_owner_id con HubSpot (fuente de verdad)
                 if owner_id and meta.get("assigned_owner_id") != owner_id:
@@ -1374,6 +1414,10 @@ class ConversationStateManager:
                     "created_at": now_iso,
                     # ✅ FIX: Incluir assigned_owner_id para filtrado correcto en panel de asesores
                     "assigned_owner_id": owner_id,
+                    "identity_type": identity_type or "phone",
+                    "has_phone": True if has_phone is None else has_phone,
+                    "routing_address": routing_address,
+                    "username": username,
                     # Flag que controla si este contacto debe aparecer en el panel de asesoras
                     "in_panel": add_to_zset,
                 }

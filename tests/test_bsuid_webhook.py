@@ -1,4 +1,5 @@
 from urllib.parse import urlencode
+from types import SimpleNamespace
 
 from fastapi import BackgroundTasks
 from starlette.requests import Request
@@ -27,6 +28,28 @@ class _FakeRedis:
 class _FakeStateManager:
     def __init__(self, redis):
         self.redis = redis
+        self.activities = []
+        self.meta_calls = []
+
+    async def update_activity(self, phone, canal="whatsapp", reopen_if_closed=False):
+        self.activities.append((phone, canal, reopen_if_closed))
+        return True
+
+    async def get_meta(self, phone, canal="whatsapp"):
+        return None
+
+    async def ensure_meta_with_channel(self, **kwargs):
+        self.meta_calls.append(kwargs)
+        return True
+
+    async def track_bot_turn(self, phone, canal, has_signal=False):
+        return 1, has_signal
+
+    async def get_status(self, phone, canal="whatsapp"):
+        return None
+
+    async def request_handoff(self, *args, **kwargs):
+        return True
 
 
 class _FakeTwilioClient:
@@ -37,6 +60,66 @@ class _FakeTwilioClient:
     async def send_whatsapp_message(self, **kwargs):
         self.calls.append(kwargs)
         return self.result
+
+
+class _FakeMongoManager:
+    def __init__(self):
+        self.messages = []
+
+    async def save_message(self, **kwargs):
+        self.messages.append(kwargs)
+        return f"mongo_{len(self.messages)}"
+
+    async def get_message_by_sid(self, _sid):
+        return None
+
+    async def update_conversation_meta(self, **_kwargs):
+        return True
+
+
+class _FakeAggregator:
+    def __init__(self):
+        self.sessions = []
+
+    async def add_message_to_buffer(self, session_id, message):
+        self.sessions.append((session_id, message))
+        return {"should_process": True, "is_aggregating": False}
+
+    async def wait_and_get_combined_message(self, _session_id):
+        return None
+
+
+class _FakeSofia:
+    def __init__(self):
+        self.calls = []
+
+    async def process_message_with_analysis(self, **kwargs):
+        self.calls.append(kwargs)
+        analysis = SimpleNamespace(
+            handoff_priority="none",
+            intencion_visita=False,
+            emocion="neutral",
+            analysis_failed=False,
+        )
+        return SimpleNamespace(respuesta="Respuesta BSUID", analisis=analysis)
+
+
+class _FakeWSManager:
+    def __init__(self):
+        self.notifications = []
+
+    async def notify_new_message(self, **kwargs):
+        self.notifications.append(kwargs)
+
+    async def publish_broadcast(self, *_args, **_kwargs):
+        return None
+
+    async def publish_to_advisor(self, *_args, **_kwargs):
+        return None
+
+
+async def _bot_responds(**_kwargs):
+    return True, "bot_active", None, "whatsapp"
 
 
 def _peticion_legacy(campos: dict) -> Request:
@@ -142,40 +225,35 @@ async def test_feature_ausente_bsuid_hace_safe_stop(monkeypatch):
     assert fake_twilio.calls == []
 
 
-async def test_bsuid_con_flag_on_solicita_contacto_y_no_encola(monkeypatch):
+async def test_bsuid_con_flag_on_encola_flujo_sin_telefono(monkeypatch):
     monkeypatch.setattr(wh, "TWILIO_SIGNATURE_MODE", "off")
     monkeypatch.setenv("FEATURE_WHATSAPP_BSUID_SUPPORT", "true")
-    monkeypatch.setenv("TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID", "HX_CONTACT_REQUEST")
     fake_twilio = _FakeTwilioClient()
-    fake_redis = _FakeRedis()
     monkeypatch.setattr(wh, "twilio_client", fake_twilio)
-    monkeypatch.setattr(wh, "get_state_manager", lambda: _FakeStateManager(fake_redis))
 
     tareas = BackgroundTasks()
     response = await wh.whatsapp_webhook(_peticion_legacy(_bsuid_campos()), tareas)
 
     assert response.status_code == 200
     assert response.body == b""
-    assert len(tareas.tasks) == 0
-    assert fake_twilio.calls == [
-        {
-            "to": "whatsapp:CO.899759302823042",
-            "body": "",
-            "content_sid": "HX_CONTACT_REQUEST",
-            "conversation_sid": None,
-            "chat_service_sid": None,
-        }
-    ]
+    assert len(tareas.tasks) == 1
+    task = tareas.tasks[0]
+    assert task.func.__name__ == "_process_message_deferred"
+    assert task.args[0].startswith("bsuid_")
+    assert ":" not in task.args[0]
+    assert task.args[1] == "whatsapp:CO.899759302823042"
+    assert task.kwargs["identity_type"] == "bsuid"
+    assert task.kwargs["identity_key"] == task.args[0]
+    assert task.kwargs["routing_address"] == "whatsapp:CO.899759302823042"
+    assert task.kwargs["username"] == "juan_rodriguez_18"
+    assert fake_twilio.calls == []
 
 
 async def test_bsuid_alfanumerico_otro_pais_se_preserva(monkeypatch):
     monkeypatch.setattr(wh, "TWILIO_SIGNATURE_MODE", "off")
     monkeypatch.setenv("FEATURE_WHATSAPP_BSUID_SUPPORT", "true")
-    monkeypatch.setenv("TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID", "HX_CONTACT_REQUEST")
     fake_twilio = _FakeTwilioClient()
-    fake_redis = _FakeRedis()
     monkeypatch.setattr(wh, "twilio_client", fake_twilio)
-    monkeypatch.setattr(wh, "get_state_manager", lambda: _FakeStateManager(fake_redis))
 
     bsuid = "whatsapp:US.ABC123XYZ"
     tareas = BackgroundTasks()
@@ -184,26 +262,49 @@ async def test_bsuid_alfanumerico_otro_pais_se_preserva(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert len(tareas.tasks) == 0
-    assert fake_twilio.calls[0]["to"] == bsuid
+    assert len(tareas.tasks) == 1
+    assert tareas.tasks[0].args[1] == bsuid
+    assert tareas.tasks[0].kwargs["routing_address"] == bsuid
+    assert fake_twilio.calls == []
 
 
 async def test_bsuid_puede_venir_en_external_user_id(monkeypatch):
     monkeypatch.setattr(wh, "TWILIO_SIGNATURE_MODE", "off")
     monkeypatch.setenv("FEATURE_WHATSAPP_BSUID_SUPPORT", "true")
-    monkeypatch.setenv("TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID", "HX_CONTACT_REQUEST")
     fake_twilio = _FakeTwilioClient()
-    fake_redis = _FakeRedis()
     monkeypatch.setattr(wh, "twilio_client", fake_twilio)
-    monkeypatch.setattr(wh, "get_state_manager", lambda: _FakeStateManager(fake_redis))
 
     tareas = BackgroundTasks()
     response = await wh.whatsapp_webhook(_peticion_legacy(_external_user_id_campos()), tareas)
 
     assert response.status_code == 200
     assert response.body == b""
-    assert len(tareas.tasks) == 0
-    assert fake_twilio.calls[0]["to"] == "whatsapp:CO.899759302823042"
+    assert len(tareas.tasks) == 1
+    assert tareas.tasks[0].args[1] == "whatsapp:CO.899759302823042"
+    assert tareas.tasks[0].kwargs["routing_address"] == "whatsapp:CO.899759302823042"
+    assert fake_twilio.calls == []
+
+
+async def test_bsuid_con_telefono_explicito_pasa_a_flujo_normal(monkeypatch):
+    monkeypatch.setattr(wh, "TWILIO_SIGNATURE_MODE", "off")
+    monkeypatch.setenv("FEATURE_WHATSAPP_BSUID_SUPPORT", "true")
+    fake_twilio = _FakeTwilioClient()
+    monkeypatch.setattr(wh, "twilio_client", fake_twilio)
+
+    campos = _bsuid_campos()
+    campos["Body"] = "Mi número es 3001234567"
+    tareas = BackgroundTasks()
+    response = await wh.whatsapp_webhook(_peticion_legacy(campos), tareas)
+
+    assert response.status_code == 200
+    assert response.body == b""
+    assert len(tareas.tasks) == 1
+    task = tareas.tasks[0]
+    assert task.func.__name__ == "_process_message_deferred"
+    assert task.args[0] == "+573001234567"
+    assert task.args[1] == "+573001234567"
+    assert task.kwargs == {}
+    assert fake_twilio.calls == []
 
 
 async def test_username_no_se_usa_como_routing(monkeypatch):
@@ -234,27 +335,79 @@ async def test_bsuid_sin_content_sid_no_contamina_ni_encola(monkeypatch):
 
     assert response.status_code == 200
     assert response.body == b""
-    assert len(tareas.tasks) == 0
+    assert len(tareas.tasks) == 1
     assert fake_twilio.calls == []
 
 
-async def test_bsuid_contact_request_es_idempotente_por_message_sid(monkeypatch):
+async def test_bsuid_flujo_diferido_usa_identity_key_y_routing_address(monkeypatch):
     monkeypatch.setattr(wh, "TWILIO_SIGNATURE_MODE", "off")
-    monkeypatch.setenv("FEATURE_WHATSAPP_BSUID_SUPPORT", "true")
-    monkeypatch.setenv("TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID", "HX_CONTACT_REQUEST")
     fake_twilio = _FakeTwilioClient()
     fake_redis = _FakeRedis()
+    fake_state = _FakeStateManager(fake_redis)
+    fake_mongo = _FakeMongoManager()
+    fake_sofia = _FakeSofia()
+    fake_ws = _FakeWSManager()
+
+    def _no_contact_manager():
+        raise AssertionError("ContactManager no debe ejecutarse para BSUID")
+
     monkeypatch.setattr(wh, "twilio_client", fake_twilio)
-    monkeypatch.setattr(wh, "get_state_manager", lambda: _FakeStateManager(fake_redis))
-
-    await wh.whatsapp_webhook(
-        _peticion_legacy(_bsuid_campos("SM_DUPLICATE")), BackgroundTasks()
+    monkeypatch.setattr(wh, "get_state_manager", lambda: fake_state)
+    monkeypatch.setattr(wh, "get_mongo_manager", lambda: fake_mongo)
+    monkeypatch.setattr(wh, "get_sofia_brain", lambda: fake_sofia)
+    monkeypatch.setattr(wh, "get_contact_manager", _no_contact_manager)
+    monkeypatch.setattr(wh, "message_aggregator", _FakeAggregator())
+    monkeypatch.setattr(wh, "ws_manager", fake_ws)
+    monkeypatch.setattr(
+        wh,
+        "detect_property_code",
+        lambda _body: SimpleNamespace(has_code=False, code=None, context=None),
     )
-    await wh.whatsapp_webhook(
-        _peticion_legacy(_bsuid_campos("SM_DUPLICATE")), BackgroundTasks()
+    monkeypatch.setattr(
+        wh,
+        "get_link_detector",
+        lambda: SimpleNamespace(
+            analizar_mensaje=lambda _body: SimpleNamespace(
+                tiene_link=False,
+                portal=None,
+                url_original=None,
+                es_inmueble=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(wh, "should_bot_respond", _bot_responds)
+
+    identity_key = wh.make_bsuid_identity_key("whatsapp:CO.899759302823042")
+    await wh._process_message_deferred(
+        phone_normalized=identity_key,
+        phone_raw="whatsapp:CO.899759302823042",
+        body="Hola",
+        profile_name="Cliente Usuario",
+        message_sid="SM_BSUID_FLOW",
+        num_media=0,
+        media_url=None,
+        media_content_type=None,
+        early_channel="whatsapp",
+        incoming_channel="whatsapp",
+        identity_type="bsuid",
+        identity_key=identity_key,
+        routing_address="whatsapp:CO.899759302823042",
+        username="juan_rodriguez_18",
+        external_user_id="whatsapp:CO.899759302823042",
     )
 
-    assert len(fake_twilio.calls) == 1
+    assert fake_sofia.calls[0]["session_id"] == identity_key
+    assert fake_mongo.messages[0]["phone"] == identity_key
+    assert fake_mongo.messages[0]["metadata"]["identity_type"] == "bsuid"
+    assert fake_mongo.messages[0]["metadata"]["routing_address"] == "whatsapp:CO.899759302823042"
+    assert fake_twilio.calls[0]["to"] == "whatsapp:CO.899759302823042"
+    assert fake_state.activities == [(identity_key, "whatsapp", True)]
+    assert fake_state.meta_calls[0]["phone"] == identity_key
+    assert fake_state.meta_calls[0]["display_name"] == "Cliente Usuario"
+    assert fake_state.meta_calls[0]["identity_type"] == "bsuid"
+    assert fake_state.meta_calls[0]["has_phone"] is False
+    assert fake_state.meta_calls[0]["routing_address"] == "whatsapp:CO.899759302823042"
+    assert fake_state.meta_calls[0]["username"] == "juan_rodriguez_18"
 
 
 async def test_telefono_tradicional_sigue_encolando(monkeypatch):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from hashlib import sha256
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -50,6 +51,13 @@ def is_whatsapp_bsuid(value: Optional[str]) -> bool:
     if not value:
         return False
     return bool(_BSUID_RE.fullmatch(str(value).strip()))
+
+
+def make_bsuid_identity_key(value: str) -> str:
+    """Construye una llave interna estable y segura para Redis/Mongo/panel."""
+    cleaned = str(value or "").strip().lower()
+    digest = sha256(cleaned.encode("utf-8")).hexdigest()[:24]
+    return f"bsuid_{digest}"
 
 
 def _as_dict(value: Any) -> Optional[dict]:

@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 from logging_config import logger
 from utils.safe_logging import safe_error, safe_id, safe_phone, safe_url
+from utils.environment import require_twilio_outbound_allowed
 
 # Configuración de Twilio
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -628,6 +629,19 @@ class TwilioClient:
         Returns:
             dict con status y mensaje_sid o error
         """
+        allowed, reason = require_twilio_outbound_allowed(to)
+        if not allowed:
+            logger.warning(
+                "[TwilioClient] Outbound bloqueado por safety gate: reason=%s to=%s",
+                reason,
+                safe_phone(to),
+            )
+            return {
+                "status": "blocked",
+                "message": reason,
+                "blocked_by_safety_gate": True,
+            }
+
         sid, token, phone = self._resolve_credentials()
         if not self._available:
             logger.error("[TwilioClient] Cliente no disponible - configuración incompleta")

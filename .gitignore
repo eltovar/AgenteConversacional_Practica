@@ -47,6 +47,9 @@ cleanup_report_*.csv
 !/tests/test_panel_bsuid_compat.py
 !/tests/test_phone_normalizer_international.py
 !/tests/test_multimedia_regresion.py
+!/tests/test_bsuid_phone_capture.py
+!/tests/test_identity_migration.py
+!/tests/test_panel_phone_edit.py
 !/tests/fixtures/
 !/tests/fixtures/fixtures_bsuid.json
 /test/

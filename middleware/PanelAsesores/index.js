@@ -2224,6 +2224,14 @@ async function loadContactDetail(phone, contactId, canal) {
             chatHistoryState.contactId = currentContactId;
         }
 
+        // El detalle lee la meta del backend, asi que manda sobre lo que traia la
+        // lista: corrige la cabecera si el listado venia de un poll anterior.
+        if (typeof data.has_phone === 'boolean') {
+            const phoneEl = document.getElementById('contactPhone');
+            if (phoneEl) phoneEl.textContent = _textoTelefonoCabecera(currentPhone, data.has_phone);
+            _updateEditPhoneButton(data.has_phone);
+        }
+
         // Renderizar mensajes
         renderChatBubbles(data.messages || []);
 
@@ -2373,6 +2381,9 @@ function _getContactFingerprint(contact) {
         contact.has_appointment ? '1' : '0',
         contactId === currentContactId ? 'active' : '',
         contact.last_message_preview || '',
+        // Sin esto, un contacto que acaba de dar su numero conserva el chip
+        // "Sin tel." hasta que cambie cualquier otro campo.
+        contact.has_phone === false ? 'notel' : '',
     ].join('|');
 }
 
@@ -2429,6 +2440,13 @@ function _buildContactHTML(contact) {
     const canalLabel = CANAL_LABELS[canalOrigen] || (canalOrigen ? canalOrigen.slice(0, 3).toUpperCase() : '');
     const canalBadge = canalLabel
         ? `<span class="text-xs ${canalColorClass} px-1.5 py-0.5 rounded font-semibold">${canalLabel}</span>`
+        : '';
+
+    // Contacto que llego por username de WhatsApp y todavia no tiene numero.
+    // La asesora necesita verlo desde la lista para poder pedirselo.
+    const sinTelefono = contact.has_phone === false || _esClaveSinTelefono(phone);
+    const sinTelefonoBadge = sinTelefono
+        ? `<span class="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold flex-shrink-0" title="Sin numero de telefono">Sin tel.</span>`
         : '';
 
     const cacheKey = contactId || phone;
@@ -2522,6 +2540,7 @@ function _buildContactHTML(contact) {
                     </div>
                     <div class="flex items-center gap-1 mt-0.5 min-w-0">
                         ${canalBadge}
+                        ${sinTelefonoBadge}
                         <div class="min-w-0 overflow-hidden">${stageRow}</div>
                     </div>
                     ${previewRow}
@@ -3185,6 +3204,150 @@ function openEditNameModal() {
     modal.classList.remove('hidden');
 }
 
+// =========================================================================
+// EDICION DEL TELEFONO DEL CONTACTO
+// =========================================================================
+// Las conversaciones que llegan por username de WhatsApp (BSUID) no traen
+// numero: el backend las indexa con una clave interna "bsuid_...". Para la
+// asesora eso es un hash sin significado, asi que aqui se muestra "Sin telefono"
+// y se le deja escribirlo. Guardar dispara la migracion de la clave en el
+// backend; el envio por Twilio NO cambia (sigue yendo al BSUID).
+
+function _esClaveSinTelefono(valor) {
+    return typeof valor === 'string' && valor.toLowerCase().startsWith('bsuid_');
+}
+
+/** Texto que se muestra en la cabecera: el numero, o el aviso de que falta. */
+function _textoTelefonoCabecera(phone, hasPhone) {
+    if (hasPhone === false || _esClaveSinTelefono(phone)) return 'Sin telefono';
+    return phone || '';
+}
+
+/** Muestra el lapiz del telefono y resalta la cabecera cuando falta el numero. */
+function _updateEditPhoneButton(hasPhone) {
+    const btn = document.getElementById('editPhoneBtn');
+    if (btn) {
+        btn.classList.remove('hidden');
+        btn.title = hasPhone ? 'Editar telefono' : 'Agregar telefono';
+    }
+    const phoneEl = document.getElementById('contactPhone');
+    if (phoneEl) {
+        phoneEl.classList.toggle('text-amber-600', !hasPhone);
+        phoneEl.classList.toggle('font-medium', !hasPhone);
+        phoneEl.classList.toggle('text-gray-500', !!hasPhone);
+    }
+}
+
+function openEditPhoneModal() {
+    if (!currentContactId) {
+        alert('Selecciona un contacto primero');
+        return;
+    }
+
+    const actual = _esClaveSinTelefono(currentPhone) ? '' : (currentPhone || '');
+
+    let modal = document.getElementById('editPhoneModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'editPhoneModal';
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center hidden';
+        modal.innerHTML = `
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold">Telefono del contacto</h3>
+                    <button onclick="closeEditPhoneModal()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+                </div>
+                <form id="editPhoneForm" onsubmit="savePhoneChange(event)">
+                    <div class="mb-2">
+                        <label class="block text-sm font-medium mb-1">Numero</label>
+                        <input type="tel" id="editPhoneInput" name="phone" required
+                            class="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                            placeholder="3001234567">
+                    </div>
+                    <p class="text-xs text-gray-500 mb-4">
+                        El chat sigue funcionando igual: este numero es para poder llamar
+                        al cliente y encontrarlo en HubSpot.
+                    </p>
+                    <div class="flex gap-2 justify-end">
+                        <button type="button" onclick="closeEditPhoneModal()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">
+                            Cancelar
+                        </button>
+                        <button type="submit" id="savePhoneBtn" class="px-4 py-2 bg-[#F5C400] text-[#1A1A1A] font-semibold rounded hover:bg-[#D4A800]">
+                            Guardar
+                        </button>
+                    </div>
+                </form>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    }
+
+    document.getElementById('editPhoneInput').value = actual;
+    modal.classList.remove('hidden');
+}
+
+function closeEditPhoneModal() {
+    const modal = document.getElementById('editPhoneModal');
+    if (modal) modal.classList.add('hidden');
+}
+
+async function savePhoneChange(event) {
+    event.preventDefault();
+
+    const nuevo = document.getElementById('editPhoneInput').value.trim();
+    if (!nuevo) {
+        alert('El telefono es obligatorio');
+        return;
+    }
+
+    const btn = document.getElementById('savePhoneBtn');
+    const anterior = currentPhone;
+    if (btn) { btn.disabled = true; btn.textContent = 'Guardando...'; }
+
+    try {
+        const formData = new FormData();
+        formData.append('phone', nuevo);
+        if (currentCanal) formData.append('canal', currentCanal);
+
+        const response = await fetch(`${BASE_URL}/contacts/${currentContactId}/phone`, {
+            method: 'PATCH',
+            headers: { 'X-API-Key': API_KEY },
+            body: formData
+        });
+
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Error actualizando telefono');
+
+        // Actualizacion optimista: el WS phone_migrated hara lo mismo, pero puede
+        // tardar y la asesora acaba de pulsar Guardar.
+        const phoneFinal = data.phone || nuevo;
+        currentPhone = phoneFinal;
+        if (data.contact_id) currentContactId = data.contact_id;
+        document.getElementById('contactPhone').textContent = phoneFinal;
+        const selPhone = document.getElementById('selectedPhone');
+        if (selPhone) selPhone.value = phoneFinal;
+        _updateEditPhoneButton(true);
+        _syncUrlToContact(phoneFinal);
+
+        const idx = allContacts.findIndex(c => c.phone === anterior);
+        if (idx !== -1) {
+            allContacts[idx].phone = phoneFinal;
+            allContacts[idx].has_phone = true;
+            _contactFingerprints.delete(anterior);
+            _applyFiltersAndRender();
+        }
+
+        closeEditPhoneModal();
+        showToast('Telefono actualizado correctamente', 'success');
+
+    } catch (error) {
+        console.error('[Panel] Error actualizando telefono:', error);
+        alert('Error: ' + error.message);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Guardar'; }
+    }
+}
+
 function closeEditNameModal() {
     const modal = document.getElementById('editNameModal');
     if (modal) modal.classList.add('hidden');
@@ -3218,6 +3381,7 @@ function _performCloseCleanup(closedPhone) {
         document.getElementById('messageInput').disabled = true;
         document.getElementById('sendBtn').disabled = true;
         document.getElementById('editNameBtn').classList.add('hidden');
+        document.getElementById('editPhoneBtn')?.classList.add('hidden');
         document.getElementById('closeConversationBtn').classList.add('hidden');
         document.getElementById('transferContactBtn').classList.add('hidden');
         document.getElementById('detailsPanelToggle')?.classList.add('hidden');
@@ -4249,6 +4413,7 @@ function deselectContact() {
     const sendBtn = document.getElementById('sendBtn');
     if (sendBtn) sendBtn.disabled = true;
     document.getElementById('editNameBtn')?.classList.add('hidden');
+    document.getElementById('editPhoneBtn')?.classList.add('hidden');
     document.getElementById('closeConversationBtn')?.classList.add('hidden');
     document.getElementById('transferContactBtn')?.classList.add('hidden');
     document.getElementById('detailsPanelToggle')?.classList.add('hidden');
@@ -4361,8 +4526,15 @@ async function selectContact(contactId, phone, displayName, canal = null) {
     }
 
     // Actualizar header
+    // Un contacto que llego por username de WhatsApp no tiene numero: mostrar la
+    // clave interna ("bsuid_ab12...") seria ruido, asi que se avisa que falta.
+    const _contactoLista = allContacts.find(c => c.phone === phone);
+    const _tieneTelefono = _contactoLista
+        ? _contactoLista.has_phone !== false
+        : !_esClaveSinTelefono(phone);
     document.getElementById('contactName').textContent = displayName;
-    document.getElementById('contactPhone').textContent = phone;
+    document.getElementById('contactPhone').textContent = _textoTelefonoCabecera(phone, _tieneTelefono);
+    _updateEditPhoneButton(_tieneTelefono);
 
     // Mostrar boton de editar nombre
     const editBtn = document.getElementById('editNameBtn');
@@ -5974,6 +6146,42 @@ function handleWebSocketMessage(data) {
                 if (document.hidden && !_alreadyCounted) {
                     showBrowserNotification(data.phone, 'Nuevo mensaje');
                 }
+            }
+
+            // phone_migrated: la conversacion cambio de clave (bsuid_... -> +57...).
+            // Hay que reindexar TODO lo que el panel guarda por telefono, o el chat
+            // abierto se queda apuntando a una clave que ya no existe en el backend.
+            if (data.action === 'phone_migrated' && data.old_phone && data.phone) {
+                const _old = data.old_phone;
+                const _new = data.phone;
+                console.log('[Panel] phone_migrated:', _old, '->', _new);
+
+                const mi = allContacts.findIndex(c => c.phone === _old);
+                if (mi !== -1) {
+                    allContacts[mi].phone = _new;
+                    allContacts[mi].has_phone = true;
+                    if (data.contact_id) allContacts[mi].contact_id = data.contact_id;
+                }
+                if (unreadCounts[_old] !== undefined) {
+                    unreadCounts[_new] = unreadCounts[_old];
+                    delete unreadCounts[_old];
+                }
+                _contactFingerprints.delete(_old);
+                _contactFingerprints.delete(_new);
+
+                if (currentPhone === _old) {
+                    currentPhone = _new;
+                    if (data.contact_id) currentContactId = data.contact_id;
+                    const _phoneEl = document.getElementById('contactPhone');
+                    if (_phoneEl) _phoneEl.textContent = _new;
+                    const _selPhone = document.getElementById('selectedPhone');
+                    if (_selPhone) _selPhone.value = _new;
+                    _syncUrlToContact(_new);
+                    _updateEditPhoneButton(true);
+                    showToast('Telefono del contacto actualizado', 'success');
+                }
+                _applyFiltersAndRender();
+                break;
             }
 
             // name_updated: actualizar memoria directamente sin recargar desde HubSpot.

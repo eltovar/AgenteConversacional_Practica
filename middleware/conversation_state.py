@@ -100,6 +100,12 @@ class ConversationMeta:
     has_phone: bool = True
     routing_address: Optional[str] = None
     username: Optional[str] = None
+    # Sofía ya le pidió el teléfono a este contacto (identidades BSUID).
+    # Se pide una vez por conversación; ver mark_phone_asked().
+    phone_asked: bool = False
+    # De dónde salió el teléfono cuando la clave se migró desde un BSUID:
+    # "sofia" (lo dio el cliente en el chat) o "panel" (lo escribió la asesora).
+    phone_source: Optional[str] = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GESTOR DE ESTADO
@@ -998,6 +1004,38 @@ class ConversationStateManager:
         except Exception as e:
             logger.warning(f"[ConversationState] track_bot_turn falló: {safe_error(e)}")
             return (0, False)
+
+    async def mark_phone_asked(self, phone: str, canal: str = "whatsapp") -> bool:
+        """
+        Deja constancia de que ya se le pidió el teléfono a este contacto.
+
+        La unidad correcta es la CONVERSACIÓN, no el mensaje: pedirlo una vez y
+        no volver a mencionarlo es la misma regla que rige el nombre. El flag lo
+        lee `_process_message_deferred` para inyectar la variante "ya lo pediste"
+        del contexto (ver `_format_lead_context`).
+
+        Devuelve False si el meta no existe o si hubo error — en ese caso Sofía
+        volverá a pedirlo, que es el fallo benigno de los dos.
+        """
+        try:
+            canal_safe = canal.lower() if canal else "whatsapp"
+            meta_key = f"{self.META_PREFIX}{phone}:{canal_safe}"
+
+            raw = await self.redis.get(meta_key)
+            if not raw:
+                return False
+
+            meta = json.loads(raw)
+            if meta.get("phone_asked"):
+                return True
+
+            meta["phone_asked"] = True
+            meta["phone_asked_at"] = get_bogota_now_iso()
+            await self.redis.set(meta_key, json.dumps(meta))
+            return True
+        except Exception as e:
+            logger.warning(f"[ConversationState] mark_phone_asked falló: {safe_error(e)}")
+            return False
 
     async def _unarchive_in_mongo(self, phone: str, canal: str) -> None:
         """

@@ -62,7 +62,7 @@ limiter = Limiter(key_func=get_remote_address)
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 from utils.reply_quote_formatter import inject_quote, reply_audio_intro
-from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
+from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text, safe_url
 
 
 # Router de FastAPI para el panel de envío

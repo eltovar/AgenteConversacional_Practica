@@ -27,7 +27,7 @@ from typing import Optional, Dict, Any, Tuple
 from openai import AsyncOpenAI
 
 from logging_config import logger
-from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text, safe_url
+from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text, safe_url
 
 # ============================================================================
 # CONFIGURACIÓN
@@ -591,11 +591,32 @@ class MediaProcessor:
                             logger.warning(
                                 f"[BunnyStorage] CDN respuesta inesperada: {head_response.status_code}"
                             )
+                            logger.warning(
+                                obs_event(
+                                    "bunny",
+                                    "storage",
+                                    "cdn_head",
+                                    status=head_response.status_code,
+                                    url=public_url,
+                                    attempt=attempt + 1,
+                                )
+                            )
                             return public_url
 
                     except Exception as verify_err:
                         logger.warning(
                             f"[BunnyStorage] Error verificando CDN (intento {attempt + 1}): {safe_error(verify_err)}"
+                        )
+                        logger.warning(
+                            obs_event(
+                                "bunny",
+                                "storage",
+                                "cdn_verify",
+                                status="error",
+                                url=public_url,
+                                attempt=attempt + 1,
+                                error=verify_err,
+                            )
                         )
                         await asyncio.sleep(retry_delay)
                         retry_delay *= 1.5
@@ -611,13 +632,43 @@ class MediaProcessor:
                     f"[BunnyStorage] Error subiendo archivo: "
                     f"status={response.status_code}, response={safe_error(response.text, 200)}"
                 )
+                logger.error(
+                    obs_event(
+                        "bunny",
+                        "storage",
+                        "upload",
+                        status=response.status_code,
+                        url=storage_url,
+                        error=response.text,
+                    )
+                )
                 raise Exception(f"Error en Bunny Storage: {response.status_code}")
 
         except httpx.TimeoutException:
             logger.error("[BunnyStorage] Timeout subiendo archivo a Bunny.net")
+            logger.error(
+                obs_event(
+                    "bunny",
+                    "storage",
+                    "upload",
+                    status="timeout",
+                    url=storage_url,
+                    error="timeout",
+                )
+            )
             raise Exception("Timeout subiendo archivo a Bunny.net")
         except Exception as e:
             logger.error(f"[BunnyStorage] Error inesperado: {safe_error(e)}")
+            logger.error(
+                obs_event(
+                    "bunny",
+                    "storage",
+                    "upload",
+                    status="error",
+                    url=storage_url,
+                    error=e,
+                )
+            )
             raise
 
     # =========================================================================

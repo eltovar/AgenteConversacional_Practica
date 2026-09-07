@@ -63,7 +63,7 @@ limiter = Limiter(key_func=get_remote_address)
 from database.mongodb_client import get_mongo_manager
 from utils.media_processor import media_processor, DOCUMENT_MIME_TYPES, MAX_DOCUMENT_SIZE_BYTES, MAX_VIDEO_SIZE_BYTES
 from utils.reply_quote_formatter import inject_quote, reply_audio_intro
-from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text, safe_url
+from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text, safe_url
 
 
 # Router de FastAPI para el panel de envío
@@ -248,6 +248,8 @@ CONTACTS_PENDING_MAX = 100
 CONTACTS_INFLIGHT_TTL = 30
 CONTACTS_INFLIGHT_WAIT_SECONDS = 3.0
 CONTACTS_INFLIGHT_POLL_INTERVAL = 0.25
+CONTACTS_PERF_TOTAL_SLOW_MS = float(os.getenv("CONTACTS_PERF_TOTAL_SLOW_MS", "1000"))
+CONTACTS_PERF_STEP_SLOW_MS = float(os.getenv("CONTACTS_PERF_STEP_SLOW_MS", "250"))
 
 CONTACT_STAGE_CACHE_TTL = 3600  # 1 hora
 CONTACT_STAGE_CACHE_PREFIX = "contact_stage:"
@@ -259,6 +261,50 @@ CONTACT_NAME_CACHE_PREFIX = "contact_name:"
 # Los tres escritores (CRMAgent, ContactManager y el renombrado del panel) se
 # apoyan en esta tupla en vez de repetir los literales.
 CONTACT_NAME_PROPERTIES = ("firstname", "lastname")
+
+
+class _ContactsPerfTrace:
+    """Traza interna para ubicar PERF-001 sin cambiar contrato de /contacts."""
+
+    def __init__(self, advisor: Optional[str], filter_time: str, page: int, limit: int):
+        self.advisor = advisor
+        self.filter_time = filter_time
+        self.page = page
+        self.limit = limit
+        self._start = time.perf_counter()
+        self._last = self._start
+        self._steps: List[Tuple[str, float]] = []
+
+    def mark(self, step: str) -> None:
+        now = time.perf_counter()
+        self._steps.append((step, (now - self._last) * 1000.0))
+        self._last = now
+
+    def emit(self, *, status: str, contact_count: Optional[int] = None) -> None:
+        total_ms = (time.perf_counter() - self._start) * 1000.0
+        slow_steps = [
+            f"{name}={elapsed:.0f}ms"
+            for name, elapsed in self._steps
+            if elapsed >= CONTACTS_PERF_STEP_SLOW_MS
+        ]
+        if status == "ok" and total_ms < CONTACTS_PERF_TOTAL_SLOW_MS and not slow_steps:
+            return
+
+        logger.warning(
+            obs_event(
+                "panel",
+                "contacts",
+                "perf_trace",
+                status=status,
+                advisor=self.advisor if self.advisor else "all",
+                filter=self.filter_time,
+                page=self.page,
+                limit=self.limit,
+                contact_count=contact_count if contact_count is not None else 0,
+                duration_ms=round(total_ms),
+                slow_steps=";".join(slow_steps) if slow_steps else "none",
+            )
+        )
 
 def get_httpx_client() -> httpx.AsyncClient:
     """
@@ -5869,12 +5915,14 @@ async def get_active_contacts(
     # Fuera del try: el manejador de errores lo consulta para soltar el turno de
     # single-flight, y si fallara antes de asignarlo daría NameError.
     _inflight_key = None
+    _perf_trace: Optional[_ContactsPerfTrace] = None
 
     try:
         from zoneinfo import ZoneInfo
         TIMEZONE = ZoneInfo("America/Bogota")
 
         now = datetime.now(TIMEZONE)
+        _perf_trace = _ContactsPerfTrace(advisor, filter_time, page, limit)
 
         # Helpers para time_ago en español (locale-agnostic)
         _DIAS_CORTOS  = ['lun','mar','mié','jue','vie','sáb','dom']
@@ -5947,6 +5995,7 @@ async def get_active_contacts(
                 return json.loads(_cached)
         except Exception:
             pass  # Cache miss o error Redis → continuar con lógica normal
+        _perf_trace.mark("cache_lookup")
 
         # Cache miss. Single-flight: solo una petición reconstruye; las demás
         # esperan su resultado. Sin esto, con la lista lenta se apilan decenas de
@@ -5970,6 +6019,7 @@ async def get_active_contacts(
                 # Se agotó la espera: reconstruir igual (fail-open).
         except Exception:
             pass  # Si Redis falla aquí, seguir sin single-flight.
+        _perf_trace.mark("singleflight")
 
         if advisor:
             # Cuando hay filtro de advisor: escanear todo el ZSET para no perder contactos
@@ -6053,6 +6103,7 @@ async def get_active_contacts(
             active_contacts = await state_manager.get_all_human_active_contacts(limit=limit, offset=zset_offset)
             total_for_advisor = None
             logger.info(f"[Panel] Encontrados {len(active_contacts)} contactos activos en Redis")
+        _perf_trace.mark("load_active")
 
         # ── Pre-calcular has_unread ANTES del sort para usarlo en el ordenamiento.
         # get_inbox_unread_map() es O(N) con 1 round-trip Redis (ZRANGE) → <5ms.
@@ -6069,6 +6120,7 @@ async def get_active_contacts(
                     c["has_unread"] = _unread_map.get(c.get("phone", ""), False)
             except Exception as _pre_unread_err:
                 logger.warning(f"[Panel] Error pre-calculando has_unread (non-fatal): {_pre_unread_err}")
+        _perf_trace.mark("unread_precalc")
 
         # ── Pre-limitar ANTES del enriquecimiento con HubSpot.
         # Los contactos de prioridad (ZSET) siempre van; del resto solo los más recientes.
@@ -6113,6 +6165,7 @@ async def get_active_contacts(
             f"({len(priority_contacts)} prioridad [{_priority_no_unread} sin unread] + "
             f"{len(bot_contacts[:remaining_slots])} bot) — pre-segregación"
         )
+        _perf_trace.mark("prelimit_sort")
 
         # === PASO 6 (MOVIDO ANTES de enriquecimiento): SEGREGACIÓN ESTRICTA por equipo/portal ===
         # Filtrar ANTES de llamar a HubSpot para reducir llamadas API y evitar 429.
@@ -6194,6 +6247,7 @@ async def get_active_contacts(
                     f"{len(active_contacts)} visibles, {excluded_count} excluidos. "
                     f"Canales: {sorted(allowed_channels)}"
                 )
+        _perf_trace.mark("segregation")
 
         # === PASO 1.5: Batch MongoDB — inyectar preview del último mensaje ===
         _phones_need_preview = [
@@ -6210,6 +6264,7 @@ async def get_active_contacts(
                         c.setdefault("last_message_sender", _p.get("last_message_sender", ""))
             except Exception as _prev_err:
                 logger.warning(f"[Panel] Batch previews falló (non-fatal): {_prev_err}")
+        _perf_trace.mark("previews")
 
         # === PASO 2: Enriquecer contactos activos con HubSpot (OPTIMIZADO CON BATCH) ===
         contact_manager = _get_contact_manager()
@@ -6344,6 +6399,7 @@ async def get_active_contacts(
                 await _pipe.execute()
             except Exception:
                 pass
+        _perf_trace.mark("hubspot_enrichment")
 
         # === PASO 3: Calcular rango de tiempo para historial ===
         if filter_time == "24h":
@@ -6439,6 +6495,7 @@ async def get_active_contacts(
                 f"{len(filtered_active)}/{len(active_contacts)} (activos siempre incluidos)"
             )
             active_contacts = filtered_active
+        _perf_trace.mark("time_filter")
 
         # === PASO 4: Obtener historial de HubSpot (si hay espacio) ===
         remaining_slots = limit - len(active_contacts)
@@ -6468,6 +6525,7 @@ async def get_active_contacts(
 
             except Exception as e:
                     logger.warning(f"[Panel] Error obteniendo historial de HubSpot: {safe_error(e)}")
+        _perf_trace.mark("historical")
 
         # === PASO 5: Combinar y deduplicar ===
         seen_phones = {c.get("phone") for c in active_contacts if c.get("phone")}
@@ -6526,6 +6584,7 @@ async def get_active_contacts(
                         )
                 except Exception as _he:
                     logger.warning(f"[Sync] Error hidratando include_phone={safe_phone(_ip_norm)}: {safe_error(_he)}")
+        _perf_trace.mark("include_phone")
 
         # === PASO 7: El orden ya viene correcto del ZSET (por last_activity descendente) ===
         # NO reordenar por activated_at porque destruye el orden de "actividad reciente primero"
@@ -6551,6 +6610,7 @@ async def get_active_contacts(
             logger.warning(f"[Badge] Error verificando citas activas: {appt_err}")
             for c in contacts_sorted:
                 c["has_appointment"] = False
+        _perf_trace.mark("appointments")
 
         # === PASO 7.6: Calcular has_unread desde advisor_inbox ===
         # Reutiliza _unread_map pre-calculado antes del sort (evita 2do round-trip Redis).
@@ -6576,6 +6636,7 @@ async def get_active_contacts(
                 logger.warning(f"[Panel] Error calculando has_unread (non-fatal): {_ue}")
                 for c in contacts_sorted:
                     c["has_unread"] = False
+        _perf_trace.mark("unread_final")
 
         # active_count = solo contactos ESPERANDO respuesta (HUMAN_ACTIVE / PENDING_HANDOFF)
         # IN_CONVERSATION no cuenta: ya están siendo atendidos
@@ -6625,6 +6686,8 @@ async def get_active_contacts(
             pass  # No bloquear la respuesta si el cache write falla
         finally:
             await _release_contacts_inflight(state_manager.redis, _inflight_key)
+        _perf_trace.mark("cache_write_release")
+        _perf_trace.emit(status="ok", contact_count=len(_dynamic_result))
         return _response_data
 
     except Exception as e:
@@ -6634,6 +6697,8 @@ async def get_active_contacts(
             await _release_contacts_inflight(_get_state_manager().redis, _inflight_key)
         except Exception:
             pass
+        if _perf_trace is not None:
+            _perf_trace.emit(status="error")
         logger.error(f"[Panel] Error obteniendo contactos: {safe_error(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

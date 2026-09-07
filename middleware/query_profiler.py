@@ -35,6 +35,8 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from utils.safe_logging import obs_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,6 +161,17 @@ def _build_mongo_listener():
                     "[QueryProfiler][Mongo] SLOW %s on %s — %.1fms",
                     event.command_name, self._collection(event), ms,
                 )
+                logger.warning(
+                    obs_event(
+                        "mongo",
+                        "query_profiler",
+                        "mongo_slow",
+                        status="slow",
+                        command=event.command_name,
+                        collection=self._collection(event),
+                        duration_ms=round(ms),
+                    )
+                )
 
         def failed(self, event):
             if event.command_name in _IGNORED_COMMANDS:
@@ -168,6 +181,16 @@ def _build_mongo_listener():
             logger.error(
                 "[QueryProfiler][Mongo] FAILED %s — %.1fms",
                 event.command_name, ms,
+            )
+            logger.error(
+                obs_event(
+                    "mongo",
+                    "query_profiler",
+                    "mongo_failed",
+                    status="failed",
+                    command=event.command_name,
+                    duration_ms=round(ms),
+                )
             )
 
     return MongoCommandLogger()
@@ -228,6 +251,17 @@ async def _on_response(response):
             response.status_code,
             ms,
         )
+        logger.warning(
+            obs_event(
+                "hubspot",
+                "query_profiler",
+                "http_slow",
+                status=response.status_code,
+                method=response.request.method,
+                route=_safe_path(response.request.url.path),
+                duration_ms=round(ms),
+            )
+        )
 
 
 def build_httpx_event_hooks() -> Dict[str, list]:
@@ -287,6 +321,22 @@ async def server_timing_middleware(request, call_next):
                 mongo_ms, stats.get("mongo_count", 0),
                 hubspot_ms, stats.get("hubspot_count", 0),
                 other_ms,
+            )
+            logger.warning(
+                obs_event(
+                    "server",
+                    "request",
+                    "slow_request",
+                    status=getattr(response, "status_code", "unknown"),
+                    method=request.method,
+                    route=_safe_path(request.url.path),
+                    duration_ms=round(total_ms),
+                    mongo_ms=round(mongo_ms),
+                    mongo_count=stats.get("mongo_count", 0),
+                    hubspot_ms=round(hubspot_ms),
+                    hubspot_count=stats.get("hubspot_count", 0),
+                    other_ms=round(other_ms),
+                )
             )
     except Exception as e:
         logger.debug("[QueryProfiler] Error emitiendo Server-Timing: %s", e)

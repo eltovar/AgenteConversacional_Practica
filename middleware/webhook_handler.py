@@ -69,7 +69,7 @@ from utils.twilio_client import twilio_client
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
 from utils import reply_trace
-from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
+from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESCATE DE LEADS ESTANCADOS
@@ -2107,6 +2107,16 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
                 f"[Webhook] Número inválido: {safe_phone(From)} - "
                 f"{safe_error(validation.error_message)}"
             )
+            logger.error(
+                obs_event(
+                    "twilio",
+                    "webhook",
+                    "invalid_number",
+                    status="rejected",
+                    phone=From,
+                    error=validation.error_message,
+                )
+            )
             return _create_error_response(
                 "Lo siento, no pude procesar tu mensaje. Por favor intenta de nuevo."
             )
@@ -2233,9 +2243,32 @@ async def whatsapp_status_callback(
             f"[StatusCallback] Mensaje {MessageSid} FALLIDO: {MessageStatus} "
             f"(Error: {ErrorCode} - {safe_error(ErrorMessage)}) | To: {safe_phone(To)}"
         )
+        logger.error(
+            obs_event(
+                "twilio",
+                "status_callback",
+                "delivery",
+                status=MessageStatus,
+                message_sid=MessageSid,
+                phone=To,
+                error_code=ErrorCode,
+                error=ErrorMessage,
+            )
+        )
     elif MessageStatus in ["delivered", "read"]:
         logger.info(
             f"[StatusCallback] Mensaje {MessageSid}: {MessageStatus} | To: {safe_phone(To)}"
+        )
+        logger.info(
+            obs_event(
+                "twilio",
+                "status_callback",
+                "delivery",
+                status=MessageStatus,
+                message_sid=MessageSid,
+                phone=To,
+                error="none",
+            )
         )
     else:
         logger.debug(

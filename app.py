@@ -86,7 +86,9 @@ from integrations.hubspot import get_outbound_router, get_timeline_logger
 # Importar función para actualizar ventana de 24h
 from middleware.outbound_panel import update_last_client_message
 from middleware.websocket_manager import ws_manager
-from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
+from utils.architecture_contract import architecture_contract_summary
+from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text
+from utils.scheduler_observability import SCHEDULER_OBS_EVENT_MASK, log_scheduler_event
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN INICIAL
@@ -239,6 +241,7 @@ class MessageResponse(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 scheduler = AsyncIOScheduler(timezone=str(TIMEZONE_BOGOTA))
+_scheduler_obs_listener_registered = False
 SCHEDULER_JITTER_SECONDS = 5
 
 # Configuración de seguimiento
@@ -944,7 +947,7 @@ async def _renew_scheduler_lock():
     Se re-escribe el valor con el PID propio: si el lock hubiera expirado en un
     hueco de red, esto lo recupera en vez de dejar el puesto vacante.
     """
-    global _scheduler_lock_held
+    global _scheduler_lock_held, _scheduler_obs_listener_registered
     if not _scheduler_lock_held:
         return
     try:
@@ -980,9 +983,28 @@ async def _renew_scheduler_lock():
                 "%d jobs pausados, reintentando cada %ss",
                 _paused, SCHEDULER_ELECTION_INTERVAL
             )
+            logger.warning(
+                obs_event(
+                    "scheduler",
+                    "lock",
+                    "leadership_lost",
+                    status="paused",
+                    paused_jobs=_paused,
+                    retry_seconds=SCHEDULER_ELECTION_INTERVAL,
+                )
+            )
     except Exception as e:
         # No es fatal: quedan varios ciclos de heartbeat antes de que el TTL expire.
         logger.warning("[Scheduler] Heartbeat del lock falló (non-fatal): %s", e)
+        logger.warning(
+            obs_event(
+                "redis",
+                "scheduler_lock",
+                "heartbeat",
+                status="error",
+                error=e,
+            )
+        )
 
 
 async def _try_become_scheduler_leader():
@@ -1028,6 +1050,15 @@ async def _try_become_scheduler_leader():
             pass  # Ya no está: nada que limpiar.
     except Exception as e:
         logger.warning("[Scheduler] Reintento de liderazgo falló (non-fatal): %s", e)
+        logger.warning(
+            obs_event(
+                "redis",
+                "scheduler_lock",
+                "leader_election",
+                status="error",
+                error=e,
+            )
+        )
 
 
 async def _release_scheduler_lock():
@@ -1798,6 +1829,7 @@ async def startup_event():
     pid = os.getpid()
     logger.info("=" * 60)
     logger.info("[STARTUP] Iniciando servidor Sofía v2.0... (Worker PID: %s)", pid)
+    logger.info(architecture_contract_summary())
 
     # Cargar Knowledge Base — un solo worker indexa (lock Redis para evitar stampede)
     # Con 4 workers Gunicorn, sin lock todos ejecutan reload_knowledge_base() simultáneamente:
@@ -1860,6 +1892,15 @@ async def startup_event():
         _is_scheduler_leader = True
         _scheduler_lock_held = False  # sin lock real: no hay nada que renovar ni liberar
         logger.warning("[STARTUP] Lock scheduler Redis fallo (%s) — scheduler sin coordinacion", _sched_err)
+        logger.warning(
+            obs_event(
+                "redis",
+                "scheduler_lock",
+                "startup_election",
+                status="error",
+                error=_sched_err,
+            )
+        )
 
     # Los jobs se registran SIEMPRE. Si este worker no gano el lock, se pausan justo
     # despues de arrancar el scheduler y los reanuda _try_become_scheduler_leader()
@@ -2139,6 +2180,10 @@ async def startup_event():
         except Exception as _ers:
             logger.error("[STARTUP] FALLO registrando rescue_stalled_leads: %s", _ers, exc_info=True)
 
+        # Observabilidad pasiva: escucha APScheduler sin envolver ni alterar jobs.
+        if not _scheduler_obs_listener_registered:
+            scheduler.add_listener(lambda event: log_scheduler_event(logger, event), SCHEDULER_OBS_EVENT_MASK)
+            _scheduler_obs_listener_registered = True
         scheduler.start()
         registered_job_ids = [j.id for j in scheduler.get_jobs()]
 

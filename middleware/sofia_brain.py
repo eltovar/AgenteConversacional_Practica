@@ -16,7 +16,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from logging_config import logger
-from utils.safe_logging import safe_error, safe_id, safe_text
+from utils.safe_logging import obs_event, safe_error, safe_id, safe_text
 from prompts.middleware.brain import (
     SOFIA_MIDDLEWARE_SYSTEM_PROMPT,
     SOFIA_SINGLE_STREAM_SYSTEM_PROMPT,
@@ -319,6 +319,16 @@ class SofiaBrain:
 
         except Exception as e:
             logger.error(f"[SofiaBrain] Error procesando mensaje: {safe_error(e)}", exc_info=True)
+            logger.error(
+                obs_event(
+                    "openai",
+                    "sofia_brain",
+                    "process_message",
+                    status="error",
+                    session_id=session_id,
+                    error=e,
+                )
+            )
             return MIDDLEWARE_MESSAGES["error_processing"]
 
     async def process_message_with_analysis(
@@ -408,6 +418,16 @@ class SofiaBrain:
 
         except Exception as e:
             logger.error(f"[SofiaBrain] Error en Single-Stream: {safe_error(e)}", exc_info=True)
+            logger.error(
+                obs_event(
+                    "openai",
+                    "sofia_brain",
+                    "single_stream",
+                    status="error",
+                    session_id=session_id,
+                    error=e,
+                )
+            )
             # El LLM no respondió: el análisis se marca como fallido para que el
             # webhook escale a una asesora en vez de leer el "none" por defecto
             # como ausencia de interés.

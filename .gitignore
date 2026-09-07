@@ -42,6 +42,9 @@ cleanup_report_*.csv
 /backup_pre_migration_20260423/
 /tests/*
 !/tests/test_safe_logging.py
+!/tests/test_panel_contacts_perf.py
+!/tests/test_scheduler_observability.py
+!/tests/test_architecture_contract.py
 !/tests/test_whatsapp_identity.py
 !/tests/test_bsuid_webhook.py
 !/tests/test_panel_bsuid_compat.py

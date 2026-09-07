@@ -47,6 +47,10 @@ class MessageAnalysis:
     cita_confirmada: bool = False  # True si el cliente confirma una cita propuesta
     # Campo para extracción de nombre del cliente
     nombre_detectado: Optional[str] = None  # Nombre del cliente cuando lo menciona
+    # Teléfono que el cliente comparte, TAL CUAL lo escribió. Es una propuesta del
+    # LLM, no un dato validado: quien decide si es un teléfono es PhoneNormalizer.
+    # Se usa para identidades BSUID, que llegan sin número desde Twilio.
+    telefono_detectado: Optional[str] = None
     # Campos CRM extraídos de la conversación (Single-Stream)
     tipo_propiedad: Optional[str] = None
     tipo_operacion: Optional[str] = None
@@ -84,6 +88,7 @@ class MessageAnalysis:
             hora_cita_mencionada=data.get("hora_cita_mencionada"),
             cita_confirmada=data.get("cita_confirmada", False),
             nombre_detectado=data.get("nombre_detectado"),
+            telefono_detectado=data.get("telefono_detectado"),
             tipo_propiedad=data.get("tipo_propiedad"),
             tipo_operacion=data.get("tipo_operacion"),
             ubicacion=data.get("ubicacion"),
@@ -394,11 +399,16 @@ class SofiaBrain:
             if parsed.analisis.nombre_detectado:
                 name_info = f", Nombre: {safe_text(parsed.analisis.nombre_detectado, 40)}"
 
+            # Solo la señal, nunca el número: este log sale en producción.
+            phone_info = ""
+            if parsed.analisis.telefono_detectado:
+                phone_info = ", Teléfono propuesto: ✓"
+
             logger.info(
                 f"[SofiaBrain] Single-Stream completado para {safe_id(session_id, 'session')} | "
                 f"Emoción: {parsed.analisis.emocion}, "
                 f"Score: {parsed.analisis.sentiment_score}, "
-                f"Handoff: {parsed.analisis.handoff_priority}{social_info}{name_info}"
+                f"Handoff: {parsed.analisis.handoff_priority}{social_info}{name_info}{phone_info}"
             )
 
             # Truncar historial si excede el máximo
@@ -548,6 +558,32 @@ class SofiaBrain:
                 "NO preguntes por tipo de inmueble, zona, presupuesto ni características.",
                 "NO le pidas más información sobre el inmueble.",
             ]
+
+        # ── Contacto sin teléfono (identidad BSUID de WhatsApp) ────────────────
+        # Va FUERA de la cadena elif anterior: un contacto sin teléfono puede
+        # llegar además por un portal o por redes sociales, y las dos
+        # instrucciones deben convivir en el mismo turno.
+        if lead_context.get("needs_phone"):
+            if lead_context.get("phone_already_asked"):
+                parts += [
+                    "",
+                    "[INSTRUCCIÓN ESPECIAL - TELÉFONO YA SOLICITADO]:",
+                    "Ya le pediste el número de contacto y no lo dio.",
+                    "NO se lo vuelvas a pedir y NO lo menciones.",
+                    "Continúa normal: la asesora seguirá por este mismo chat.",
+                ]
+            else:
+                parts += [
+                    "",
+                    "[INSTRUCCIÓN ESPECIAL - CONTACTO SIN TELÉFONO]:",
+                    "De este cliente NO tenemos número de contacto.",
+                    "Pídeselo UNA sola vez, en el mismo turno en que le pides el "
+                    "nombre y en una sola frase natural.",
+                    "Ejemplo: \"¿Me compartes tu nombre y un número de contacto?\"",
+                    "Si no lo da, NO insistas y NO retengas el handoff: marca "
+                    "handoff_priority según el interés real del cliente.",
+                    "NO expliques por qué se lo pides ni menciones nada técnico.",
+                ]
 
         return "\n".join(parts)
 

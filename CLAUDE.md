@@ -131,6 +131,8 @@ PGVECTOR_DATABASE_URL
 BUNNY_STORAGE_API_KEY
 ADMIN_API_KEY
 TWILIO_CONVERSATIONS_ENABLED   # feature flag migración
+FEATURE_WHATSAPP_BSUID_SUPPORT # default false — atender identidades BSUID (Meta usernames)
+FEATURE_BSUID_PHONE_CAPTURE    # default true — Sofía pide el teléfono y migra la clave
 
 # Profiler de consultas (middleware/query_profiler.py)
 QUERY_PROFILER_ENABLED         # default true — apaga toda la instrumentación

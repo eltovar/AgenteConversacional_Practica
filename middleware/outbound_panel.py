@@ -27,6 +27,7 @@ import redis.asyncio as redis
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
 from .whatsapp_identity import is_bsuid_identity_key, is_whatsapp_bsuid
+from .identity_migration import migrate_identity_to_phone
 from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso, TIMEZONE_BOGOTA
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
@@ -1403,6 +1404,14 @@ async def _hydrate_contact(
         "deal_stage": best_meta_dict.get("deal_stage"),
         "last_advisor_message": best_meta_dict.get("last_advisor_message"),
         "source": source,
+        # Identidad: sin esto el panel solo puede deducir que un contacto no
+        # tiene teléfono mirando si la clave empieza por "bsuid_", y no sabría
+        # cuándo ofrecer el botón de agregar número.
+        "identity_type": best_meta_dict.get("identity_type") or "phone",
+        "has_phone": bool(
+            best_meta_dict.get("has_phone", not is_bsuid_identity_key(phone_norm))
+        ),
+        "routing_address": best_meta_dict.get("routing_address"),
     }
 
     # Si no hay rastro alguno (ni Redis ni HubSpot), retornar None — contacto inexistente
@@ -4037,6 +4046,115 @@ async def update_contact_name(
 
 
 # ============================================================================
+# Endpoint para editar el teléfono de un contacto
+# ============================================================================
+
+@router.patch("/contacts/{contact_id}/phone")
+async def update_contact_phone(
+    contact_id: str,
+    phone: str = Form(..., description="Teléfono del contacto"),
+    canal: str = Form("whatsapp", description="Canal de la conversación"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Fija el teléfono de un contacto, migrando la clave si venía de un BSUID.
+
+    Gemelo de PATCH /contacts/{contact_id}/name. Existe porque las
+    conversaciones que llegan por username de WhatsApp no traen número: la
+    asesora lo consigue hablando y aquí lo deja escrito.
+
+    Cuando la conversación estaba indexada bajo una clave BSUID, esto NO es un
+    simple update de HubSpot: `migrate_identity_to_phone` mueve la clave en
+    Redis y Mongo. El BSUID sobrevive como dirección de entrega — el routing de
+    Twilio no cambia.
+    """
+    logger.info(f"[Panel] PATCH teléfono - contact_id={safe_id(contact_id, 'contact')}")
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    if not contact_id or contact_id in ("null", "undefined"):
+        raise HTTPException(status_code=400, detail="ID de contacto inválido")
+    try:
+        int(contact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ID de contacto debe ser numérico")
+
+    validation = PhoneNormalizer().normalize(phone or "")
+    if not validation.is_valid:
+        logger.warning(f"[Panel] Teléfono rechazado: {safe_error(validation.error_message)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Número inválido: {validation.error_message}",
+        )
+    phone_norm = validation.normalized
+
+    redis_client = await _get_redis_client()
+    clave_actual = await redis_client.get(f"phone_cache:{contact_id}")
+    clave_actual = clave_actual if isinstance(clave_actual, str) else (
+        clave_actual.decode() if clave_actual else None
+    )
+
+    # ── Caso 1: la conversación venía de un BSUID → migrar la clave ──
+    if clave_actual and is_bsuid_identity_key(clave_actual):
+        resultado = await migrate_identity_to_phone(
+            clave_actual, phone_norm, canal or "whatsapp", source="panel",
+        )
+        if not resultado.ok:
+            _detalles = {
+                "invalid_phone": (400, "El número no es válido"),
+                "locked": (409, "Hay otra actualización en curso, intenta de nuevo"),
+            }
+            code, msg = _detalles.get(resultado.outcome, (500, "No se pudo actualizar el teléfono"))
+            raise HTTPException(status_code=code, detail=msg)
+
+        return {
+            "status": "success",
+            "message": "Teléfono actualizado correctamente",
+            "contact_id": resultado.contact_id or contact_id,
+            "phone": resultado.phone,
+            "old_phone": clave_actual,
+            "migrated": True,
+            "outcome": resultado.outcome,
+        }
+
+    # ── Caso 2: contacto telefónico → corregir el número en HubSpot ──
+    # No se migran claves aquí: cambiar el teléfono de un contacto que YA tenía
+    # uno es una operación distinta (y hoy no soportada desde el panel), no una
+    # migración de identidad.
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key:
+        raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+    try:
+        response = await _hubspot_patch(url, {"properties": {"phone": phone_norm}}, hubspot_api_key)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
+    except Exception as e:
+        logger.error(f"[Panel] Error actualizando teléfono: {safe_error(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno actualizando el teléfono")
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Contacto no encontrado en HubSpot")
+    if response.status_code != 200:
+        logger.error(
+            f"[Panel] HubSpot rechazó el teléfono: {response.status_code} - "
+            f"{safe_error(response.text, 200)}"
+        )
+        raise HTTPException(status_code=response.status_code, detail="HubSpot rechazó el cambio")
+
+    return {
+        "status": "success",
+        "message": "Teléfono actualizado correctamente",
+        "contact_id": contact_id,
+        "phone": phone_norm,
+        "migrated": False,
+        "outcome": "updated",
+    }
+
+
+# ============================================================================
 # Endpoint para cerrar conversación (transicionar a BOT_ACTIVE)
 # ============================================================================
 
@@ -4912,10 +5030,27 @@ async def get_contact_detail(
     has_more = len(messages) >= limit and source == "mongodb"
     oldest_ts = messages[0].get("timestamp") if messages else None
 
+    # Identidad: el panel necesita saber si este contacto tiene teléfono real
+    # para decidir si muestra el número o el botón de agregarlo.
+    _detail_meta = None
+    try:
+        _detail_meta = await _get_state_manager().get_meta(
+            phone_normalized, canal or "whatsapp"
+        )
+    except Exception as _det_err:
+        logger.debug(f"[Panel][Detail] meta de identidad no legible: {safe_error(_det_err)}")
+
     return {
         "phone": phone_normalized,
         "contact_id": contact_id,
         "canal": canal,
+        # Identidad
+        "identity_type": getattr(_detail_meta, "identity_type", None) or "phone",
+        "has_phone": (
+            bool(getattr(_detail_meta, "has_phone", True))
+            if _detail_meta else not target.is_bsuid
+        ),
+        "routing_address": getattr(_detail_meta, "routing_address", None),
         # Historial
         "messages": messages,
         "message_count": len(messages),

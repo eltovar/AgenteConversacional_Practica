@@ -32,6 +32,7 @@ from .whatsapp_identity import (
     make_bsuid_identity_key,
     resolve_whatsapp_identity,
 )
+from .identity_migration import migrate_identity_to_phone, resolver_alias
 from .conversation_state import ConversationStateManager, ConversationStatus
 from .contact_manager import ContactInfo, ContactManager, STAGE_NUEVO_LEAD
 from .sofia_brain import SofiaBrain
@@ -99,7 +100,7 @@ RESCUE_ENGAGEMENT_TURNS = 5
 RESCUE_FAILURE_TURNS = 2
 
 BSUID_SUPPORT_FLAG = "FEATURE_WHATSAPP_BSUID_SUPPORT"
-BSUID_CONTACT_CONTENT_SID_ENV = "TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID"
+BSUID_PHONE_CAPTURE_FLAG = "FEATURE_BSUID_PHONE_CAPTURE"
 _EXPLICIT_PHONE_RE = re.compile(
     r"(?:whatsapp:)?\+\d[\d\s().-]{6,}\d|\b(?:57)?3\d{9}\b|\b0?3\d{9}\b",
     re.IGNORECASE,
@@ -108,6 +109,11 @@ _EXPLICIT_PHONE_RE = re.compile(
 
 def _feature_whatsapp_bsuid_support_enabled() -> bool:
     return os.getenv(BSUID_SUPPORT_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _feature_bsuid_phone_capture_enabled() -> bool:
+    """Captura y migración del teléfono de un BSUID. Apagable sin deploy."""
+    return os.getenv(BSUID_PHONE_CAPTURE_FLAG, "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _extract_explicit_phone_from_text(text: str) -> Optional[str]:
@@ -123,103 +129,41 @@ def _extract_explicit_phone_from_text(text: str) -> Optional[str]:
     return None
 
 
-async def _handle_bsuid_identity(
-    raw_to: str,
-    message_sid: Optional[str],
-    conversation_sid: Optional[str] = None,
-    chat_service_sid: Optional[str] = None,
-    identity_label: str = "BSUID",
-) -> Response:
-    """Corta el flujo telefonico para identidades no-phone y solicita contacto."""
-    content_sid = os.getenv(BSUID_CONTACT_CONTENT_SID_ENV, "").strip()
-    if not content_sid:
-        logger.error(
-            "[Webhook][%s] contact_request_missing_content_sid "
-            "sid=%s env=%s",
-            identity_label,
-            safe_id(message_sid, "message"),
-            BSUID_CONTACT_CONTENT_SID_ENV,
-        )
-        return Response(content="", media_type="text/xml")
+def _validated_phone_from_analysis(propuesta: Optional[str]) -> Optional[str]:
+    """
+    Convierte el `telefono_detectado` del LLM en un teléfono E.164, o en nada.
 
-    idem_key = f"bsuid_contact_request:{message_sid}" if message_sid else None
-    redis_client = None
-    if idem_key:
-        try:
-            redis_client = get_state_manager().redis
-            already_sent = await redis_client.get(idem_key)
-            if already_sent:
-                logger.info(
-                    "[Webhook][%s] contact_request_already_sent sid=%s",
-                    identity_label,
-                    safe_id(message_sid, "message"),
-                )
-                return Response(content="", media_type="text/xml")
-            in_flight = await redis_client.set(f"{idem_key}:lock", "1", nx=True, ex=60)
-            if not in_flight:
-                logger.info(
-                    "[Webhook][%s] contact_request_in_flight sid=%s",
-                    identity_label,
-                    safe_id(message_sid, "message"),
-                )
-                return Response(content="", media_type="text/xml")
-        except Exception as idem_err:
-            logger.warning(
-                "[Webhook][%s] idempotency_unavailable sid=%s err=%s",
-                identity_label,
-                safe_id(message_sid, "message"),
-                safe_error(idem_err),
-            )
+    El LLM PROPONE; quien decide es PhoneNormalizer. Sin este filtro una
+    alucinación —un presupuesto, un código de inmueble— se convertiría en la
+    clave de una conversación, que es irreversible sin intervención manual.
 
-    result = await twilio_client.send_whatsapp_message(
-        to=raw_to,
-        body="",
-        content_sid=content_sid,
-        conversation_sid=conversation_sid,
-        chat_service_sid=chat_service_sid,
-    )
-    persist_phone = make_bsuid_identity_key(raw_to) if identity_label == "BSUID" else raw_to
-    await _persistir_saliente(
-        phone=persist_phone,
-        contenido="[Solicitud de información de contacto]",
-        resultado_envio=result,
-        canal="whatsapp",
-        conversation_sid=conversation_sid,
-        chat_service_sid=chat_service_sid,
-        metadata={
-            "identity_type": WhatsAppIdentityType.BSUID.value,
-            "has_phone": False,
-            "routing_address": raw_to,
-        } if identity_label == "BSUID" else None,
-    )
+    Se exige además que el texto propuesto contenga una forma telefónica
+    reconocible: `normalize()` por sí solo acepta cadenas de dígitos que el
+    cliente nunca escribió como número de contacto.
+    """
+    if not propuesta:
+        return None
 
-    if result.get("status") == "success":
-        logger.info(
-            "[Webhook][%s] contact_request_sent sid=%s twilio_sid=%s",
-            identity_label,
-            safe_id(message_sid, "message"),
-            safe_id(result.get("message_sid"), "message"),
-        )
-        if idem_key and redis_client:
-            try:
-                await redis_client.set(idem_key, "1", ex=24 * 3600)
-            except Exception:
-                pass
-    else:
-        logger.error(
-            "[Webhook][%s] contact_request_failed sid=%s err=%s",
-            identity_label,
-            safe_id(message_sid, "message"),
-            safe_error(result.get("message")),
-        )
-        if idem_key and redis_client:
-            try:
-                await redis_client.delete(f"{idem_key}:lock")
-            except Exception:
-                pass
+    candidato = str(propuesta).strip()
+    if not candidato or is_bsuid_identity_key(candidato):
+        return None
 
-    return Response(content="", media_type="text/xml")
+    # Camino 1: el número aparece dentro de una frase ("mi numero es 300...").
+    encontrado = _extract_explicit_phone_from_text(candidato)
+    if encontrado:
+        return encontrado
 
+    # Camino 2: el LLM ya extrajo solo el número, pero separado ("300 123 4567").
+    # `_EXPLICIT_PHONE_RE` exige dígitos contiguos y se lo pierde, y así lo
+    # escribe buena parte de la gente. Se acepta únicamente si la propuesta
+    # ENTERA es un número: en cuanto trae letras ("300 millones") se descarta.
+    solo_digitos = re.sub(r"[\s().\-]", "", candidato)
+    if solo_digitos.lstrip("+").isdigit():
+        validacion = PhoneNormalizer().normalize(solo_digitos)
+        if validacion.is_valid:
+            return validacion.normalized
+
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -555,10 +499,19 @@ async def _process_message_deferred(
         is_bsuid_identity = identity_type == WhatsAppIdentityType.BSUID.value
         conversation_key = identity_key or phone_normalized
         outbound_to = routing_address or phone_normalized
+
+        # Una identidad BSUID cuya conversación ya migró conserva su routing por
+        # BSUID pero se indexa por teléfono. Sigue siendo identity_type=bsuid —
+        # eso es lo que hace que el panel resuelva la dirección de envío— pero ya
+        # NO es un contacto sin teléfono, y confundir ambas cosas devolvería el
+        # meta a has_phone=False en el siguiente mensaje.
+        _bsuid_ya_migrado = is_bsuid_identity and not is_bsuid_identity_key(conversation_key)
+        _identity_has_phone = (not is_bsuid_identity) or _bsuid_ya_migrado
+
         bsuid_display_name = profile_name or username or "Cliente WhatsApp sin teléfono"
         identity_metadata = {
             "identity_type": identity_type,
-            "has_phone": not is_bsuid_identity,
+            "has_phone": _identity_has_phone,
         }
         if is_bsuid_identity:
             identity_metadata.update({
@@ -1026,6 +979,28 @@ async def _process_message_deferred(
                 f"({link_result.url_original[:80]})"
             )
 
+        # ── Contacto sin teléfono: pedirle el número una sola vez ──────────────
+        # Solo aplica a identidades BSUID (Meta usernames). Para el 100% del
+        # tráfico telefónico estas claves no se escriben y el prompt no cambia.
+        _phone_already_asked = False
+        _necesita_telefono = (
+            is_bsuid_identity
+            and not _bsuid_ya_migrado
+            and _feature_bsuid_phone_capture_enabled()
+        )
+        if _necesita_telefono:
+            try:
+                _pa_meta = await get_state_manager().get_meta(
+                    conversation_key, final_channel or "whatsapp"
+                )
+                _phone_already_asked = bool(
+                    getattr(_pa_meta, "phone_asked", False) if _pa_meta else False
+                )
+            except Exception as _pa_err:
+                logger.debug(f"[DeferredProcess][BSUID] phone_asked no legible: {safe_error(_pa_err)}")
+            lead_context["needs_phone"] = True
+            lead_context["phone_already_asked"] = _phone_already_asked
+
         # Procesar mensaje con Sofia
         result = await sofia.process_message_with_analysis(
             session_id=conversation_key,
@@ -1110,7 +1085,11 @@ async def _process_message_deferred(
         # "else" de ensure_meta_with_channel no corre → add_to_zset no tiene efecto.
         _is_new_contact = contact_info.is_new if contact_info else True
         _add_to_panel = (
-            is_bsuid_identity            # Identidad sin teléfono: visible como lead temporal
+            # Identidad BSUID: siempre visible. Antes de migrar, porque es un lead
+            # que nadie mas puede rastrear; despues de migrar, porque dar el
+            # numero es la senal de interes mas fuerte que existe y seria absurdo
+            # que el contacto desapareciera del panel justo entonces.
+            is_bsuid_identity
             or not _is_new_contact       # Contacto que regresa: sin cambio de comportamiento
             or not analysis              # Sin análisis (error): safe default = mostrar en panel
             or analysis.handoff_priority not in ("none", "low")  # Señal comercial confirmada
@@ -1126,7 +1105,7 @@ async def _process_message_deferred(
             owner_id=hubspot_owner_id,
             add_to_zset=_add_to_panel,
             identity_type=identity_type,
-            has_phone=not is_bsuid_identity,
+            has_phone=_identity_has_phone,
             routing_address=routing_address,
             username=username,
         )
@@ -1275,8 +1254,43 @@ async def _process_message_deferred(
                 existing_bot_mongo_id=_bot_mongo_id,
             )
         
+        # ════════════════════════════════════════════════════════════
+        # PASO 8: El cliente compartió su teléfono → migrar la clave
+        # ════════════════════════════════════════════════════════════
+        # Va al FINAL, después del envío y de los dos save_message, por la misma
+        # razón que el handoff: así el turno completo queda escrito bajo una sola
+        # clave y la migración arrastra un estado coherente.
+        #
+        # El LLM propone; PhoneNormalizer decide. Y el migrador nunca lanza: si
+        # falla, el cliente ya fue atendido y el alias permite reintentarlo.
+        if _necesita_telefono and getattr(analysis, "telefono_detectado", None):
+            _telefono = _validated_phone_from_analysis(analysis.telefono_detectado)
+            if _telefono:
+                _mig = await migrate_identity_to_phone(
+                    conversation_key, _telefono, final_channel or "whatsapp",
+                    source="sofia",
+                )
+                if _mig.ok:
+                    logger.info(
+                        "[DeferredProcess][BSUID] Teléfono capturado por Sofía "
+                        "(outcome=%s, contacto=%s)",
+                        _mig.outcome, safe_id(_mig.contact_id, "contact"),
+                    )
+                else:
+                    logger.warning(
+                        "[DeferredProcess][BSUID] Migración no aplicada: %s", _mig.outcome
+                    )
+            else:
+                # Propuesta descartada. Se marca igual como "ya preguntado" para
+                # no entrar en bucle pidiéndoselo cada turno.
+                logger.info("[DeferredProcess][BSUID] telefono_detectado descartado por validación")
+                await state_manager.mark_phone_asked(conversation_key, final_channel or "whatsapp")
+        elif _necesita_telefono and not _phone_already_asked:
+            # Sofía lo pidió en este turno: que no vuelva a pedirlo en el siguiente.
+            await state_manager.mark_phone_asked(conversation_key, final_channel or "whatsapp")
+
         logger.info(f"[DeferredProcess] ✅ Procesamiento completado para {safe_phone(conversation_key)}")
-        
+
     except Exception as e:
         logger.error(f"[DeferredProcess] Error fatal: {safe_error(e)}", exc_info=True)
         # Intentar enviar mensaje de error al usuario
@@ -2021,35 +2035,30 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             )
             return Response(content="", media_type="text/xml")
 
-        shared_phone = _extract_explicit_phone_from_text(Body)
-        if shared_phone:
-            shared_phone_channel = detect_channel_dynamic(Body, None)
-            background_tasks.add_task(
-                _process_message_deferred,
-                shared_phone,
-                shared_phone,
-                Body,
-                ProfileName,
-                MessageSid,
-                NumMedia,
-                MediaUrl0,
-                MediaContentType0,
-                shared_phone_channel,
-                OriginalRepliedMessageSid,
-                "whatsapp",
-                conversation_sid,
-                chat_service_sid_inbound,
-            )
-            logger.info(
-                "[Webhook][BSUID] Teléfono explícito detectado; flujo normal encolado phone=%s",
-                safe_phone(shared_phone),
-            )
-            return Response(content="", media_type="text/xml")
-
         identity_key = make_bsuid_identity_key(identity.bsuid)
+
+        # Si esta identidad ya migró a un teléfono, la conversación vive bajo esa
+        # clave. Sin esta consulta el siguiente mensaje —que ya no trae el
+        # número— recrearía la conversación vieja y el historial haría ping-pong
+        # entre las dos claves.
+        #
+        # El routing NO cambia: seguimos respondiendo al BSUID. Solo cambia el
+        # índice con el que Redis, Mongo y el panel guardan la conversación.
+        conversation_key = identity_key
+        try:
+            _alias = await resolver_alias(get_state_manager().redis, identity_key)
+            if _alias:
+                conversation_key = _alias
+                logger.info(
+                    "[Webhook][BSUID] alias activo %s → teléfono migrado",
+                    safe_id(identity_key, "identity"),
+                )
+        except Exception as _alias_err:
+            logger.warning(f"[Webhook][BSUID] alias no consultable: {safe_error(_alias_err)}")
+
         background_tasks.add_task(
             _process_message_deferred,
-            identity_key,
+            conversation_key,
             identity.bsuid,
             Body,
             ProfileName,
@@ -2063,7 +2072,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             conversation_sid,
             chat_service_sid_inbound,
             identity_type=WhatsAppIdentityType.BSUID.value,
-            identity_key=identity_key,
+            identity_key=conversation_key,
             routing_address=identity.bsuid,
             username=identity.username,
             wa_id=identity.wa_id,
@@ -2071,7 +2080,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         )
         logger.info(
             "[Webhook][BSUID] Procesamiento encolado con identity_key=%s",
-            safe_id(identity_key, "identity"),
+            safe_id(conversation_key, "identity"),
         )
         return Response(content="", media_type="text/xml")
 

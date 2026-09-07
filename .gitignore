@@ -44,6 +44,7 @@ cleanup_report_*.csv
 !/tests/test_safe_logging.py
 !/tests/test_whatsapp_identity.py
 !/tests/test_bsuid_webhook.py
+!/tests/test_panel_bsuid_compat.py
 !/tests/test_phone_normalizer_international.py
 !/tests/test_multimedia_regresion.py
 !/tests/fixtures/

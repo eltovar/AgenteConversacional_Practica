@@ -16,7 +16,8 @@ import os
 import json
 import re
 from typing import Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request, BackgroundTasks
 from fastapi.responses import Response
@@ -27,16 +28,18 @@ from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
 from .whatsapp_identity import (
     WhatsAppIdentityType,
+    is_bsuid_identity_key,
     make_bsuid_identity_key,
     resolve_whatsapp_identity,
 )
 from .conversation_state import ConversationStateManager, ConversationStatus
-from .contact_manager import ContactManager
+from .contact_manager import ContactInfo, ContactManager, STAGE_NUEVO_LEAD
 from .sofia_brain import SofiaBrain
 from .websocket_manager import ws_manager
 
 # Importaciones para integración con HubSpot Timeline
 from integrations.hubspot import get_timeline_logger, hubspot_client
+from integrations.hubspot.lead_assigner import lead_assigner
 
 # MongoDB para almacenamiento en tiempo real
 from database.mongodb_client import get_mongo_manager
@@ -285,6 +288,89 @@ async def _get_historical_channel(
     return detected_channel
 
 
+def _build_panel_url(phone_key: str, owner_id: Optional[str]) -> str:
+    panel_base_url = os.getenv("PANEL_BASE_URL", "").rstrip("/")
+    admin_api_key = os.getenv("ADMIN_API_KEY", "")
+    if not panel_base_url or not admin_api_key:
+        return ""
+
+    phone_encoded = quote(phone_key, safe="")
+    url = f"{panel_base_url}/whatsapp/panel/?key={admin_api_key}&phone={phone_encoded}"
+    if owner_id:
+        url += f"&advisor={quote(str(owner_id), safe='')}"
+    return url
+
+
+async def _identify_or_create_bsuid_contact(
+    identity_key: str,
+    display_name: str,
+    source_channel: str,
+) -> Optional[ContactInfo]:
+    """Crea/enlaza HubSpot para BSUID usando whatsapp_id y sin inventar phone."""
+    try:
+        contact_manager = get_contact_manager()
+        hs = contact_manager.hubspot
+        hs_canal = "whatsapp_directo" if source_channel == "whatsapp" else source_channel
+
+        existing = await hs.search_contact_by_phone_with_properties(identity_key)
+        if existing:
+            props = existing.get("properties") or {}
+            contact_id = existing.get("id")
+            owner_id = props.get("hubspot_owner_id")
+            url_chat = _build_panel_url(identity_key, owner_id)
+            if contact_id and url_chat:
+                await hs.update_contact(contact_id, {"url_chat": url_chat})
+            return ContactInfo(
+                contact_id=contact_id,
+                phone_normalized=identity_key,
+                is_new=False,
+                firstname=props.get("firstname"),
+                lastname=props.get("lastname"),
+                email=props.get("email"),
+                properties=props,
+            )
+
+        owner_id = await asyncio.to_thread(lead_assigner.get_next_owner, hs_canal)
+        midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        url_chat = _build_panel_url(identity_key, owner_id)
+        properties = {
+            "firstname": (display_name or "Cliente WhatsApp sin teléfono")[:80],
+            "lastname": "WhatsApp",
+            "whatsapp_id": identity_key,
+            "canal_origen": hs_canal,
+            "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
+            "lifecyclestage": STAGE_NUEVO_LEAD,
+        }
+        if owner_id:
+            properties["hubspot_owner_id"] = owner_id
+        if url_chat:
+            properties["url_chat"] = url_chat
+
+        contact_id = await hs.create_contact(properties)
+        try:
+            r = await contact_manager._get_redis()
+            await r.set(f"phone_cache:{identity_key}", contact_id, ex=86400)
+            await r.set(f"phone_cache:{contact_id}", identity_key, ex=86400)
+        except Exception:
+            pass
+        logger.info(
+            "[Webhook][BSUID] Contacto HubSpot asegurado %s con url_chat para %s",
+            safe_id(contact_id, "contact"),
+            safe_id(identity_key, "identity"),
+        )
+        return ContactInfo(
+            contact_id=contact_id,
+            phone_normalized=identity_key,
+            is_new=True,
+            firstname=properties["firstname"],
+            lastname=properties["lastname"],
+            properties={"hubspot_owner_id": owner_id, **properties},
+        )
+    except Exception as e:
+        logger.warning(f"[Webhook][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
+        return None
+
+
 async def _fetch_reply_context_deferred(
     im_sid: str,
     conversation_sid: str,
@@ -500,6 +586,8 @@ async def _process_message_deferred(
                 logger.info(f"[DeferredProcess] Mensaje {safe_id(message_sid, 'message')} ya procesado — skip (Twilio retry)")
                 return
 
+        await update_last_client_message(conversation_key)
+
         # ════════════════════════════════════════════════════════════
         # PASO 1: Procesamiento de Multimedia (si existe)
         # ════════════════════════════════════════════════════════════
@@ -535,10 +623,17 @@ async def _process_message_deferred(
         contact_info = None
         if is_bsuid_identity:
             historical_channel = "whatsapp"
-            contact_id = None
-            _contact_is_new = True
+            contact_info = await _identify_or_create_bsuid_contact(
+                identity_key=conversation_key,
+                display_name=bsuid_display_name,
+                source_channel=historical_channel,
+            )
+            contact_id = contact_info.contact_id if contact_info else None
+            _contact_is_new = contact_info.is_new if contact_info else True
             logger.info(
-                "[DeferredProcess][BSUID] ContactManager omitido para identidad sin teléfono"
+                "[DeferredProcess][BSUID] Contacto HubSpot: %s (nuevo=%s)",
+                safe_id(contact_id, "contact"),
+                _contact_is_new,
             )
         else:
             contact_manager = get_contact_manager()
@@ -3089,6 +3184,8 @@ async def _get_contact_phone_from_hubspot(contact_id: str) -> Optional[str]:
             phone = props.get("whatsapp_id") or props.get("phone")
 
             if phone:
+                if is_bsuid_identity_key(phone):
+                    return phone.lower()
                 normalizer = PhoneNormalizer()
                 validation = normalizer.normalize(phone)
                 if validation.is_valid:

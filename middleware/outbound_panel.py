@@ -26,6 +26,7 @@ import redis.asyncio as redis
 
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
+from .whatsapp_identity import is_bsuid_identity_key, is_whatsapp_bsuid
 from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso, TIMEZONE_BOGOTA
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
@@ -356,9 +357,134 @@ class WindowStatus:
     message: str
 
 
+@dataclass(frozen=True)
+class PanelTarget:
+    """Identidad que el panel puede usar como clave de conversación."""
+    key: str
+    is_bsuid: bool = False
+    error: Optional[str] = None
+
+
 # ============================================================================
 # Funciones auxiliares
 # ============================================================================
+
+def _resolve_panel_target(raw: Optional[str]) -> PanelTarget:
+    """
+    Resuelve el identificador recibido por el panel.
+
+    Teléfonos pasan por PhoneNormalizer como antes. Las llaves BSUID se
+    conservan intactas: no son teléfonos y no deben entrar al normalizador.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return PanelTarget(key="", error="Campo 'to' (o 'phone') es requerido")
+
+    if is_bsuid_identity_key(value):
+        return PanelTarget(key=value.lower(), is_bsuid=True)
+
+    normalizer = PhoneNormalizer()
+    validation = normalizer.normalize(value)
+    if not validation.is_valid:
+        return PanelTarget(
+            key="",
+            error=f"Número inválido: {validation.error_message}",
+        )
+    return PanelTarget(key=validation.normalized, is_bsuid=False)
+
+
+async def _resolve_outbound_address(target: PanelTarget, canal: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Devuelve la dirección real que Twilio debe recibir.
+
+    Para teléfono es la propia clave E.164. Para BSUID la clave interna solo
+    sirve en Redis/Mongo; el routing real vive en conv_meta.routing_address.
+    """
+    if target.error:
+        return None, target.error
+    if not target.is_bsuid:
+        return target.key, None
+
+    try:
+        meta = await _get_state_manager().get_meta(target.key, canal or "whatsapp")
+        routing_address = getattr(meta, "routing_address", None) if meta else None
+    except Exception as e:
+        logger.warning(f"[Panel][BSUID] No se pudo leer routing_address: {safe_error(e)}")
+        routing_address = None
+
+    if not is_whatsapp_bsuid(routing_address):
+        return (
+            None,
+            "La conversación BSUID no tiene dirección de routing válida para responder por WhatsApp.",
+        )
+    return routing_address, None
+
+
+async def _ensure_bsuid_hubspot_contact(
+    target: PanelTarget,
+    canal: str,
+    contact_id: Optional[str] = None,
+) -> Optional[str]:
+    """Busca o crea un contacto HubSpot para BSUID usando whatsapp_id, nunca phone."""
+    if contact_id or not target.is_bsuid:
+        return contact_id
+
+    state_manager = _get_state_manager()
+    meta = await state_manager.get_meta(target.key, canal or "whatsapp")
+
+    hubspot = _get_contact_manager().hubspot
+    existing_id = await hubspot.search_contact_by_phone(target.key)
+    if existing_id:
+        await state_manager.ensure_meta_with_channel(
+            phone=target.key,
+            canal=canal or "whatsapp",
+            contact_id=existing_id,
+            identity_type="bsuid",
+            has_phone=False,
+            add_to_zset=True,
+        )
+        return existing_id
+
+    display_name = (
+        getattr(meta, "display_name", None)
+        or getattr(meta, "username", None)
+        or "Contacto WhatsApp"
+    )
+    firstname = str(display_name).strip()[:80] or "Contacto WhatsApp"
+    owner_id = getattr(meta, "assigned_owner_id", None) if meta else None
+    hs_canal = "whatsapp_directo" if (canal or "whatsapp") == "whatsapp" else (canal or "whatsapp")
+
+    midnight_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    properties: Dict[str, Any] = {
+        "firstname": firstname,
+        "lastname": "WhatsApp",
+        "whatsapp_id": target.key,
+        "canal_origen": hs_canal,
+        "chatbot_timestamp": str(int(midnight_utc.timestamp() * 1000)),
+        "lifecyclestage": HUBSPOT_STAGE_NUEVO_LEAD,
+    }
+    if owner_id:
+        properties["hubspot_owner_id"] = owner_id
+
+    created_id = await hubspot.create_contact(properties)
+    await state_manager.ensure_meta_with_channel(
+        phone=target.key,
+        canal=canal or "whatsapp",
+        contact_id=created_id,
+        display_name=firstname,
+        owner_id=owner_id,
+        identity_type="bsuid",
+        has_phone=False,
+        add_to_zset=True,
+    )
+    try:
+        r = await _get_redis_client()
+        await r.set(f"phone_cache:{target.key}", created_id, ex=86400)
+        await r.set(f"phone_cache:{created_id}", target.key, ex=86400)
+    except Exception:
+        pass
+    logger.info(f"[Panel][BSUID] Contacto HubSpot asegurado: {safe_id(created_id, 'contact')} para {target.key}")
+    return created_id
 
 def _validate_api_key(api_key: Optional[str]) -> bool:
     """Valida la API key del admin."""
@@ -1596,6 +1722,31 @@ async def check_24h_window(phone_normalized: str) -> WindowStatus:
         last_msg_str = await r.get(key)
 
         if not last_msg_str:
+            if is_bsuid_identity_key(phone_normalized):
+                try:
+                    mongo_manager = get_mongo_manager()
+                    if await mongo_manager.connect():
+                        doc = await mongo_manager.db.messages.find_one(
+                            {"phone": phone_normalized, "sender": "client"},
+                            sort=[("timestamp", -1)],
+                            projection={"timestamp": 1},
+                        )
+                        last_ts = doc.get("timestamp") if doc else None
+                        if isinstance(last_ts, datetime):
+                            last_msg_time_mongo = (
+                                last_ts.replace(tzinfo=timezone.utc)
+                                if last_ts.tzinfo is None
+                                else last_ts.astimezone(timezone.utc)
+                            )
+                            last_msg_str = last_msg_time_mongo.isoformat()
+                            now = datetime.now(timezone.utc)
+                            ttl = max(60, int((last_msg_time_mongo + timedelta(hours=25) - now).total_seconds()))
+                            await r.set(key, last_msg_str, ex=ttl)
+                            logger.info(f"[Panel][BSUID] Ventana 24h recuperada desde Mongo para {phone_normalized}")
+                except Exception as e:
+                    logger.warning(f"[Panel][BSUID] No se pudo recuperar ventana 24h desde Mongo: {safe_error(e)}")
+
+        if not last_msg_str:
             # No hay registro - asumir ventana cerrada por seguridad
             return WindowStatus(
                 is_open=False,
@@ -1828,17 +1979,6 @@ async def send_message(
     if not target_number:
         raise HTTPException(status_code=400, detail="Campo 'to' (o 'phone') es requerido")
 
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(target_number)
-
-    if not validation.is_valid:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Número inválido: {validation.error_message}"
-        )
-
-    phone_normalized = validation.normalized
-
     # =========================================================================
     # ASIGNACIÓN DE CANAL POR DEFECTO    
     # =========================================================================
@@ -1846,6 +1986,15 @@ async def send_message(
         canal_final = "whatsapp"
     else:
         canal_final = canal.lower().strip()
+
+    target = _resolve_panel_target(target_number)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
+
+    phone_normalized = target.key
+    outbound_to, outbound_error = await _resolve_outbound_address(target, canal_final)
+    if outbound_error:
+        raise HTTPException(status_code=400, detail=outbound_error)
 
     # Parsear reply_to_preview (Form data no soporta objetos anidados)
     parsed_reply_preview = None
@@ -1878,7 +2027,7 @@ async def send_message(
         )
 
     # Obtener/crear contacto si no se proporcionó
-    if not contact_id:
+    if not contact_id and not target.is_bsuid:
         try:
             contact_manager = _get_contact_manager()
             contact_info = await contact_manager.identify_or_create_contact(
@@ -1889,6 +2038,14 @@ async def send_message(
         except Exception as e:
             logger.warning(f"[Panel] No se pudo obtener contacto: {safe_error(e)}")
             # Continuar sin contact_id
+    elif not contact_id and target.is_bsuid:
+        try:
+            contact_id = await asyncio.wait_for(
+                _ensure_bsuid_hubspot_contact(target, canal_final),
+                timeout=3.0,
+            )
+        except Exception as e:
+            logger.warning(f"[Panel][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
 
     # Pausar Sofía y cambiar a IN_CONVERSATION (asesora está chateando activamente)
     # SEGREGACIÓN POR CANAL: Usar el canal proporcionado para operaciones de estado
@@ -2012,7 +2169,7 @@ async def send_message(
             intro_text = reply_audio_intro(parsed_reply_preview)
             if intro_text:
                 intro_result = await twilio_client.send_whatsapp_message(
-                    to=phone_normalized,
+                    to=outbound_to,
                     body=intro_text,
                 )
                 if intro_result.get("status") == "success":
@@ -2032,7 +2189,7 @@ async def send_message(
     # suben al Media Content Service de Twilio, porque Conversations no acepta URLs
     # externas. Bunny sigue siendo la fuente de verdad del historial y del panel.
     result = await twilio_client.send_whatsapp_message(
-        to=phone_normalized,
+        to=outbound_to,
         body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
         media_url=permanent_media_url,
         media_bytes=media_subido.get("bytes") if permanent_media_url else None,
@@ -2373,12 +2530,22 @@ async def edit_advisor_message(
             logger.warning(f"[Panel][Edit-Notify] msg sin phone, no se puede notificar")
         else:
             correction_body = f"✏️ Corrección: {new_content}"
-            snd = await twilio_client.send_whatsapp_message(
-                to=phone,
-                body=correction_body,
-                conversation_sid=conv_sid,
-                chat_service_sid=chat_svc_sid,
+            target = _resolve_panel_target(phone)
+            outbound_to, outbound_error = await _resolve_outbound_address(
+                target, msg.get("channel", "whatsapp")
             )
+            if outbound_error:
+                logger.warning(f"[Panel][Edit-Notify] sin routing válido para {phone}: {outbound_error}")
+                outbound_to = None
+            if not outbound_to:
+                snd = {"status": "error", "message": outbound_error or "destino inválido"}
+            else:
+                snd = await twilio_client.send_whatsapp_message(
+                    to=outbound_to,
+                    body=correction_body,
+                    conversation_sid=conv_sid,
+                    chat_service_sid=chat_svc_sid,
+                )
             if snd.get("status") == "success":
                 correction_sid = snd.get("message_sid")
                 try:
@@ -2481,12 +2648,22 @@ async def delete_advisor_message(
             logger.warning(f"[Panel][Delete-Notify] msg sin phone, no se puede notificar")
         else:
             cancel_body = "🚫 Mensaje anterior anulado"
-            snd = await twilio_client.send_whatsapp_message(
-                to=phone,
-                body=cancel_body,
-                conversation_sid=conv_sid,
-                chat_service_sid=chat_svc_sid,
+            target = _resolve_panel_target(phone)
+            outbound_to, outbound_error = await _resolve_outbound_address(
+                target, msg.get("channel", "whatsapp")
             )
+            if outbound_error:
+                logger.warning(f"[Panel][Delete-Notify] sin routing válido para {phone}: {outbound_error}")
+                outbound_to = None
+            if not outbound_to:
+                snd = {"status": "error", "message": outbound_error or "destino inválido"}
+            else:
+                snd = await twilio_client.send_whatsapp_message(
+                    to=outbound_to,
+                    body=cancel_body,
+                    conversation_sid=conv_sid,
+                    chat_service_sid=chat_svc_sid,
+                )
             if snd.get("status") == "success":
                 cancel_sid = snd.get("message_sid")
                 try:
@@ -2555,22 +2732,19 @@ async def send_message_json(
     if not body or not body.strip():
         raise HTTPException(status_code=400, detail="El mensaje no puede estar vacío")
 
-    # Normalizar número
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(msg_request.phone)
-
-    if not validation.is_valid:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Número inválido: {validation.error_message}"
-        )
-
-    phone_normalized = validation.normalized
-
     # Normalizar canal
     canal_final = msg_request.canal.lower().strip() if msg_request.canal else "whatsapp"
     if canal_final == "null" or not canal_final:
         canal_final = "whatsapp"
+
+    target = _resolve_panel_target(msg_request.phone)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
+
+    phone_normalized = target.key
+    outbound_to, outbound_error = await _resolve_outbound_address(target, canal_final)
+    if outbound_error:
+        raise HTTPException(status_code=400, detail=outbound_error)
 
     # Verificar ventana de 24 horas
     window_status = await check_24h_window(phone_normalized)
@@ -2596,7 +2770,7 @@ async def send_message_json(
 
     # Obtener/crear contacto si no se proporcionó
     contact_id = msg_request.contact_id
-    if not contact_id:
+    if not contact_id and not target.is_bsuid:
         try:
             contact_manager = _get_contact_manager()
             contact_info = await contact_manager.identify_or_create_contact(
@@ -2606,6 +2780,14 @@ async def send_message_json(
             contact_id = contact_info.contact_id
         except Exception as e:
             logger.warning(f"[Panel-JSON] No se pudo obtener contacto: {safe_error(e)}")
+    elif not contact_id and target.is_bsuid:
+        try:
+            contact_id = await asyncio.wait_for(
+                _ensure_bsuid_hubspot_contact(target, canal_final),
+                timeout=3.0,
+            )
+        except Exception as e:
+            logger.warning(f"[Panel-JSON][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
 
     # Pausar Sofía y cambiar estado
     try:
@@ -2642,7 +2824,7 @@ async def send_message_json(
 
     # Enviar mensaje vía Twilio
     result = await twilio_client.send_whatsapp_message(
-        to=phone_normalized,
+        to=outbound_to,
         body=body_to_send
     )
 
@@ -2774,18 +2956,6 @@ async def send_template_message(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Normalizar número
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(to)
-
-    if not validation.is_valid:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Número inválido: {validation.error_message}"
-        )
-
-    phone_normalized = validation.normalized
-
     # =========================================================================
     # ASIGNACIÓN DE CANAL POR DEFECTO
     # Si 'canal' es nulo, vacío, o literalmente "null" (que a veces manda JS)
@@ -2794,6 +2964,24 @@ async def send_template_message(
         canal_final = "whatsapp"
     else:
         canal_final = canal.lower().strip()
+
+    target = _resolve_panel_target(to)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
+
+    phone_normalized = target.key
+    outbound_to, outbound_error = await _resolve_outbound_address(target, canal_final)
+    if outbound_error:
+        raise HTTPException(status_code=400, detail=outbound_error)
+
+    if not contact_id and target.is_bsuid:
+        try:
+            contact_id = await asyncio.wait_for(
+                _ensure_bsuid_hubspot_contact(target, canal_final),
+                timeout=3.0,
+            )
+        except Exception as e:
+            logger.warning(f"[Panel][Template][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
 
     # Verificar disponibilidad de Twilio
     if not twilio_client.is_available:
@@ -2902,7 +3090,7 @@ async def send_template_message(
     # Enviar mensaje via Twilio
     _t2 = time.monotonic()
     result = await twilio_client.send_whatsapp_message(
-        to=phone_normalized,
+        to=outbound_to,
         body=template_message,
         content_sid=content_sid,
         content_variables=content_variables,
@@ -3444,12 +3632,19 @@ async def transfer_contact(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Normalizar teléfono
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
-    if not validation.is_valid:
-        raise HTTPException(status_code=400, detail=f"Teléfono inválido: {phone}")
-    phone_normalized = validation.normalized
+    target = _resolve_panel_target(phone)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
+    phone_normalized = target.key
+
+    if not contact_id and target.is_bsuid:
+        try:
+            contact_id = await asyncio.wait_for(
+                _ensure_bsuid_hubspot_contact(target, canal or "whatsapp"),
+                timeout=3.0,
+            )
+        except Exception as e:
+            logger.warning(f"[Panel][Transfer][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
 
     # Validar modo
     if mode not in ["exclusive", "collaborative"]:
@@ -4469,10 +4664,8 @@ async def reset_bot_state(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Normalizar teléfono
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
-    phone_normalized = validation.normalized if validation.is_valid else phone
+    target = _resolve_panel_target(phone)
+    phone_normalized = target.key if not target.error else phone
 
     try:
         state_manager = _get_state_manager()
@@ -4577,16 +4770,14 @@ async def get_window_status(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
+    target = _resolve_panel_target(phone)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
 
-    if not validation.is_valid:
-        raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
-
-    window_status = await check_24h_window(validation.normalized)
+    window_status = await check_24h_window(target.key)
 
     return {
-        "phone": validation.normalized,
+        "phone": target.key,
         "window_open": window_status.is_open,
         "last_message_time": window_status.last_message_time.isoformat() if window_status.last_message_time else None,
         "time_remaining_seconds": window_status.time_remaining_seconds,
@@ -4619,12 +4810,20 @@ async def get_contact_detail(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
-    if not validation.is_valid:
-        raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
+    target = _resolve_panel_target(phone)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
 
-    phone_normalized = validation.normalized
+    phone_normalized = target.key
+    if target.is_bsuid and not contact_id:
+        try:
+            contact_id = await asyncio.wait_for(
+                _ensure_bsuid_hubspot_contact(target, canal or "whatsapp"),
+                timeout=3.0,
+            )
+        except Exception as e:
+            logger.warning(f"[Panel][Detail][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
+
     mongo_manager = get_mongo_manager()
 
     # ⚠️ 2026-06-05: Parse del cursor before_ts (igual que /history/{cid})
@@ -4789,13 +4988,11 @@ async def get_conversation_history(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
+    target = _resolve_panel_target(phone)
+    if target.error:
+        raise HTTPException(status_code=400, detail=target.error)
 
-    if not validation.is_valid:
-        raise HTTPException(status_code=400, detail=f"Número inválido: {validation.error_message}")
-
-    phone_normalized = validation.normalized
+    phone_normalized = target.key
     messages = []
     source = "none"
 
@@ -4953,15 +5150,13 @@ async def get_history_by_contact_id(
         # PASO 1: MongoDB por teléfono (preferido - más eficiente)
         # =====================================================================
         if phone:
-            normalizer = PhoneNormalizer()
-            validation = normalizer.normalize(phone)
-
-            if validation.is_valid:
+            target = _resolve_panel_target(phone)
+            if not target.error:
                 # Sin filtro de canal: el canal con que el panel abre el chat
                 # (canal_origen de HubSpot) puede diferir del canal con que se
                 # guardan los mensajes (historical_channel de Redis).
                 messages = await mongo_manager.get_history(
-                    phone=validation.normalized,
+                    phone=target.key,
                     limit=limit,
                     channel=None,
                     before_ts=before_ts_dt,
@@ -5076,10 +5271,8 @@ async def take_control_of_conversation(
     if not _validate_api_key(x_api_key):
         raise HTTPException(status_code=401, detail="API Key inválida")
 
-    # Normalizar teléfono
-    normalizer = PhoneNormalizer()
-    validation = normalizer.normalize(phone)
-    phone_normalized = validation.normalized if validation.is_valid else phone
+    target = _resolve_panel_target(phone)
+    phone_normalized = target.key if not target.error else phone
 
     try:
         state_manager = _get_state_manager()

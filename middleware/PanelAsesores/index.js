@@ -1715,7 +1715,7 @@ async function loadChatHistory(contactId, opciones = {}) {
         // FIX RACE CONDITION: Verificar que el contacto no cambió
         // mientras la petición estaba en vuelo. Si cambió, descartar.
         // ═══════════════════════════════════════════════════════════════
-        if (currentContactId !== requestedContactId) {
+        if (currentContactId !== requestedContactId || currentPhone !== requestedPhone) {
             console.warn(`[Panel] Race condition detectada: petición para ${requestedContactId} descartada (ahora es ${currentContactId})`);
             return; // Descartar respuesta obsoleta
         }
@@ -1729,7 +1729,7 @@ async function loadChatHistory(contactId, opciones = {}) {
             if ([502, 503, 504].includes(response.status)) {
                 console.warn('[Panel] Server reiniciando — reintentando historial en 3s');
                 setTimeout(() => {
-                    if (currentContactId === requestedContactId) {
+                    if (currentContactId === requestedContactId && currentPhone === requestedPhone) {
                         // Conservar `opciones`: si veníamos de ampliar a todos
                         // los canales, reintentar filtrado deshace la ampliación.
                         loadChatHistory(contactId, opciones);
@@ -1753,7 +1753,7 @@ async function loadChatHistory(contactId, opciones = {}) {
         console.log('[Panel] Datos recibidos para', requestedContactId, '- mensajes:', data.messages?.length || 0);
 
         // Doble verificación después del JSON parse
-        if (currentContactId !== requestedContactId) {
+        if (currentContactId !== requestedContactId || currentPhone !== requestedPhone) {
             console.warn(`[Panel] Race condition (post-parse): petición para ${requestedContactId} descartada`);
             return;
         }
@@ -1768,7 +1768,7 @@ async function loadChatHistory(contactId, opciones = {}) {
             console.warn('[Panel] HubSpot timeout — historial puede ser parcial, reintentando en 8s');
             showToast('Cargando historial completo...', 'info');
             setTimeout(() => {
-                if (currentContactId === requestedContactId) {
+                if (currentContactId === requestedContactId && currentPhone === requestedPhone) {
                     loadChatHistory(contactId, opciones);
                 }
             }, 8000);
@@ -1779,7 +1779,7 @@ async function loadChatHistory(contactId, opciones = {}) {
 
         // ⚠️ 2026-06-02: guardar cursor + has_more en state para paginación.
         // Solo si el contacto sigue siendo el mismo (race condition guard).
-        if (currentContactId === requestedContactId) {
+        if (currentContactId === requestedContactId && currentPhone === requestedPhone) {
             chatHistoryState.hasMore = data.has_more === true;
             chatHistoryState.oldestTs = data.oldest_ts || null;
             // Inicializar cache de mensajes (necesario para _prependChatMessages).
@@ -1807,7 +1807,7 @@ async function loadChatHistory(contactId, opciones = {}) {
             if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
                 console.warn('[Panel] Error de red — reintentando historial en 3s');
                 setTimeout(() => {
-                    if (currentContactId === requestedContactId) {
+                    if (currentContactId === requestedContactId && currentPhone === requestedPhone) {
                         loadChatHistory(contactId, opciones);
                     }
                 }, 3000);
@@ -1870,21 +1870,25 @@ async function loadOlderMessages() {
     if (chatHistoryState.loading) return;
     if (!chatHistoryState.hasMore) return;
     if (!chatHistoryState.oldestTs) return;
-    if (!chatHistoryState.contactId) return;
-    if (chatHistoryState.contactId !== currentContactId) return;
+    if (!chatHistoryState.contactId && !chatHistoryState.phone) return;
+    if (chatHistoryState.contactId && chatHistoryState.contactId !== currentContactId) return;
+    if (chatHistoryState.phone && chatHistoryState.phone !== currentPhone) return;
 
     const requestedCid = chatHistoryState.contactId;
+    const requestedPhone = chatHistoryState.phone;
     const requestedCursor = chatHistoryState.oldestTs;
     chatHistoryState.loading = true;
     _showLoadingMoreSpinner(true);
 
     try {
-        let url = `${BASE_URL}/history/${requestedCid}?limit=${CHAT_PAGE_SIZE}`
-                + `&before_ts=${encodeURIComponent(requestedCursor)}`;
+        let url = requestedCid
+            ? `${BASE_URL}/history/${encodeURIComponent(requestedCid)}?limit=${CHAT_PAGE_SIZE}`
+            : `${BASE_URL}/conversations/${encodeURIComponent(requestedPhone)}?limit=${CHAT_PAGE_SIZE}`;
+        url += `&before_ts=${encodeURIComponent(requestedCursor)}`;
         if (chatHistoryState.canal) {
             url += `&canal=${encodeURIComponent(chatHistoryState.canal)}`;
         }
-        if (chatHistoryState.phone) {
+        if (requestedCid && chatHistoryState.phone) {
             url += `&phone=${encodeURIComponent(chatHistoryState.phone)}`;
         }
 
@@ -1896,7 +1900,7 @@ async function loadOlderMessages() {
         const data = await response.json();
 
         // Race guard (capa 5): si el usuario cambió de conversación, descartar.
-        if (currentContactId !== requestedCid) {
+        if ((requestedCid && currentContactId !== requestedCid) || (requestedPhone && currentPhone !== requestedPhone)) {
             console.warn(`[Panel][Pagination] Contacto cambió durante fetch — descartando`);
             return;
         }
@@ -2178,6 +2182,7 @@ async function checkWindowStatus(phone) {
  */
 async function loadContactDetail(phone, contactId, canal) {
     const requestedContactId = contactId;
+    const requestedPhone = phone;
 
     const windowWarning = document.getElementById('windowWarning');
     const messageInput = document.getElementById('messageInput');
@@ -2199,7 +2204,7 @@ async function loadContactDetail(phone, contactId, canal) {
         const response = await fetch(url, { headers: { 'X-API-Key': API_KEY } });
 
         // Race condition: si el contacto cambió mientras esperábamos, descartar
-        if (currentContactId !== requestedContactId) {
+        if (currentContactId !== requestedContactId || currentPhone !== requestedPhone) {
             console.warn(`[Panel] Race condition en loadContactDetail: descartado (${requestedContactId})`);
             return;
         }
@@ -2213,6 +2218,13 @@ async function loadContactDetail(phone, contactId, canal) {
         }
 
         const data = await response.json();
+
+        if (!currentContactId && data.contact_id) {
+            currentContactId = String(data.contact_id);
+            const selectedContactId = document.getElementById('selectedContactId');
+            if (selectedContactId) selectedContactId.value = currentContactId;
+            chatHistoryState.contactId = currentContactId;
+        }
 
         // Renderizar mensajes
         renderChatBubbles(data.messages || []);
@@ -2263,14 +2275,14 @@ async function loadContactDetail(phone, contactId, canal) {
         }
 
     } catch (error) {
-        if (currentContactId !== requestedContactId) return;
+        if (currentContactId !== requestedContactId || currentPhone !== requestedPhone) return;
         console.error('[Panel] Error en loadContactDetail:', error);
         // Network error → retry silencioso (worker reiniciando)
         if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
             console.warn('[Panel] Error de red en detalle — reintentando en 3s');
             setTimeout(() => {
-                if (currentContactId === requestedContactId) {
-                    loadContactDetail(contactId);
+                if (currentContactId === requestedContactId && currentPhone === requestedPhone) {
+                    loadContactDetail(phone, contactId, canal);
                 }
             }, 3000);
             return;

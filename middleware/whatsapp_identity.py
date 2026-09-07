@@ -36,6 +36,7 @@ _BSUID_RE = re.compile(
     r"^whatsapp:[A-Z]{2}\.[A-Z0-9]{1,128}$",
     re.IGNORECASE,
 )
+_BSUID_KEY_RE = re.compile(r"^bsuid_[0-9a-f]{24}$", re.IGNORECASE)
 
 # Mantiene la tolerancia histórica del proyecto para teléfonos recibidos con o
 # sin prefijo whatsapp:, con +E.164 o formatos nacionales que luego resolverá
@@ -51,6 +52,13 @@ def is_whatsapp_bsuid(value: Optional[str]) -> bool:
     if not value:
         return False
     return bool(_BSUID_RE.fullmatch(str(value).strip()))
+
+
+def is_bsuid_identity_key(value: Optional[str]) -> bool:
+    """True si ``value`` es una llave interna creada por make_bsuid_identity_key."""
+    if not value:
+        return False
+    return bool(_BSUID_KEY_RE.fullmatch(str(value).strip()))
 
 
 def make_bsuid_identity_key(value: str) -> str:

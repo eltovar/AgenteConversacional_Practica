@@ -47,6 +47,7 @@ LAYOUT = {
     "13-contratos-api.md":    ("Fase 2 - Estructura",   "13 - Contratos de API y Eventos"),
     "14-adrs.md":              ("Fase 2 - Estructura",   "14 - Decisiones de Arquitectura (ADR)"),
     "18-migracion.md":        ("Fase 3 - Transicion",    "18 - Estrategia de Migracion"),
+    "22-investigacion-mensajeria.md": ("Fase 3 - Transicion", "22 - Investigacion de Herramientas de Mensajeria"),
     "16-antes-despues.md":     ("Fase 3 - Transicion",    "16 - Antes y Despues"),
     "17-benchmark-crms.md":    ("Fase 3 - Transicion",    "17 - Benchmark de CRMs de Referencia"),
     "wireframes/README.md":    ("Wireframes",             "Catalogo de Wireframes"),

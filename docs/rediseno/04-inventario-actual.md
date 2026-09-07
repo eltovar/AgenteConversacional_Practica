@@ -256,6 +256,6 @@ Contraste con lo que exigen los wireframes:
 
 ## 8. Pendiente
 
-- Confirmar si algún código escribe en `contacts` antes de eliminarla
+- ✅ **Cerrado 2026-08-26.** `contacts` y `panel_advisors` tienen **cero consumidores en Python** — verificado con el grafo de código. Ver [D-18 §6](18-migracion.md), carga 8
 - Inventariar el frontend (`middleware/PanelAsesores/index.js`)
 - Mapear cuáles de los 72 endpoints sobreviven al rediseño y cuáles se retiran

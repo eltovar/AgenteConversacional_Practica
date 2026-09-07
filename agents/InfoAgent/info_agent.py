@@ -41,7 +41,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
     """
 
     def __init__(self, tools: List[Any] = ALL_TOOLS):
-        self.tools = {tool.name: tool for tool in tools}
+        self.tools = {tool.TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SIDTWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID: tool for tool in tools}
 
     def _check_libertador_query(self, user_input: str) -> bool:
         """

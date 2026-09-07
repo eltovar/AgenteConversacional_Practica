@@ -237,6 +237,6 @@ Un solo canal **por usuario**, no por conexión. Todas las pestañas y dispositi
 
 - Esquema OpenAPI completo
 - Formato del cursor de paginación
-- Límites de peticiones por rol
+- Límites de peticiones por rol → **el mecanismo ya está decidido**: middleware único de entrada con límite por defecto en todas las rutas ([D-22 §7](22-investigacion-mensajeria.md), R-3 y R-4). Faltan los números por rol
 - Versionado de la API
-- Contrato de la cola de propagación → ADR
+- ✅ **Cerrado 2026-08-27.** La entidad `PROPAGACION` y su ciclo están definidos en [ADR-006 §3.1](14-adrs.md)

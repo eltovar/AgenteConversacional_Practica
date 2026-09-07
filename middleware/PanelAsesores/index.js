@@ -182,9 +182,7 @@ let pickerVisibleItems = [];
 // Estado de ventana 24h
 let currentWindowOpen = true;
 
-// =========================================================================
-// ⚠️ 2026-06-02: PAGINACIÓN CURSOR-BASED DEL HISTORIAL (scroll infinito)
-// =========================================================================
+
 // Tamaño de página: 100 mensajes por request. Calibrado para:
 //   • Carga inicial rápida (~300-500ms para conversaciones típicas).
 //   • Suficiente contexto sin saturar DOM (100 burbujas ≈ 500KB DOM).

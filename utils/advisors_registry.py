@@ -14,11 +14,6 @@ igual y sus consumidores no se enteran.
 """
 
 from typing import Dict, List, Optional
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ✏️ EDITAR AQUÍ para cambiar asesoras, nombres o reparto.
-# ═══════════════════════════════════════════════════════════════════════════════
-#
 #   name              Nombre visible en el panel y en los informes.
 #   team              Equipo. Debe coincidir con el `team` de channels_registry:
 #                     de ahí sale qué canales atiende.

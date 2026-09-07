@@ -212,7 +212,7 @@ El barrido del grafo encontró **seis módulos más** que funcionan y merecen co
 | 4 | Sacar `owner_id` de `channels_registry` a `CANAL_ASIGNADO` | 16 canales | 🟢 Baja |
 | 5 | Fusionar `whatsapp` y `whatsapp_directo` | por contar | 🟢 Baja |
 | 6 | Renombrar `Seguimiento` → `Post Cita` en HubSpot | 1 etapa | 🟢 El ID no cambia |
-| 7 | Crear etapa `Nuevo Lead` en HubSpot | — | 🟠 Toca producción |
+| 7 | ~~Crear etapa `Nuevo Lead`~~ → **apuntar al ID correcto** `1417459250` | — | 🟢 ✅ **Resuelto:** la etapa volvió a existir el 12-ago-2026. El viejo `1326631578` ya no existe |
 | 8 | Eliminar colecciones muertas `contacts` y `panel_advisors` | 0 y 4 docs | 🟢 **Verificado: cero consumidores** |
 
 ### 🔴 La migración 1 — la única realmente difícil

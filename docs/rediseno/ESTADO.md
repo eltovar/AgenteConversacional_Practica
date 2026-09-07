@@ -47,7 +47,8 @@ Rediseño del ~80 % del sistema SofIA para Inmobiliaria Proteger. **Fase de plan
 | `86909130` | Salo Tovar | Administrador |
 | `90889555` | Hector Guerra | Administrador |
 
-**Etapas visibles:** Interna 11 · Seguimiento 19 · Administrador 21.
+**Etapas — sistema destino:** **7 comunes a todos** + 3 grupos de propiedades con permiso por rol ([D-06 §4](06-matriz-permisos.md)).
+*(En el sistema actual son 21 excluyentes: Interna 11 · Seguimiento 19 · Admin 21.)*
 **Navegación:** asesoras `Dashboard · Lead · WhatsApp` · Admin `Dashboard · Lead` + ⚙ · Marketing `Dashboard · Redes · Citas`.
 
 ### Otras decisiones cerradas
@@ -88,6 +89,13 @@ Transferencia Interna → Seguimiento **manual y sin retorno** · reasignar un p
 | 7 | La colección `contacts` está **vacía** — código muerto |
 | 8 | `INTERES`, `EVENTO` y `CANAL_ASIGNADO` **no caben en HubSpot** — viven solo en la base propia |
 | 9 | **No existe banco de evaluación de prompts**: cada cambio es una apuesta a ciegas |
+| 10 | 🔴 **El webhook de Twilio no valida `X-Twilio-Signature`** — se lee solo para el log. Cualquiera con la URL puede inyectar mensajes falsos → [D-22](22-investigacion-mensajeria.md) |
+| 11 | 🔴 **Se registran 1.500 caracteres del cuerpo del webhook en claro**, con teléfono y mensaje del cliente. Contradice la regla de PII del propio `CLAUDE.md` |
+| 12 | Las notificaciones **no sobreviven a cerrar la pestaña**: no hay Web Push, solo la API `Notification` del navegador |
+| 13 | ⚠️ `CLAUDE.md` dice 1 worker de Gunicorn; el `Procfile` dice **2**. Por eso Redis Pub/Sub es imprescindible para el tiempo real |
+| 14 | ✅ **Hallazgos 10 y 11 corregidos y desplegados** (`8fdbc2a`, 28-ago). Firma de Twilio validada en modo `log_only`: **4 de 4 correctas**. Log del webhook sin PII |
+| 15 | 🔴 **La PII sigue saliendo por otros módulos**: 72 líneas con teléfono completo en 19 min, una con el texto del cliente |
+| 16 | 🔴 **Los usernames de WhatsApp rompen la respuesta**: `PhoneNormalizer` fabrica un teléfono desde `whatsapp:CO.<id>`, se crea contacto basura y Twilio rechaza con 21211. **3 de 4 mensajes afectados** |
 
 ---
 
@@ -96,10 +104,12 @@ Transferencia Interna → Seguimiento **manual y sin retorno** · reasignar un p
 | Fase | Documentos | Avance |
 |---|---|---|
 | **Fase 0 — Fundamentos** | D-01 · D-02 · D-03 | **100 %** ✅ |
-| **Fase 1 — Comportamiento** | D-04 · D-05 · D-06 · D-07 · D-08 · D-09 | **100 %** ✅ |
-| **Fase 2 — Estructura** | D-10 · D-11 · D-12 · D-13 · D-14 · D-15 | **92 %** |
-| **Fase 3 — Transición** | D-16 · D-17 · **D-18** ✅ · D-19 · D-20 · D-21 | **50 %** |
-| **Total** | **19 de 21 documentos** · 5.892 líneas | **93 %** |
+| **Fase 1 — Comportamiento** | D-04 · **D-05** ✅ · **D-06** ✅ · D-07 · D-08 · D-09 | **100 %** ✅ |
+| **Fase 2 — Estructura** | D-10 · D-11 · D-12 · D-13 · **D-14** ✅ · **D-15** ✅ | **100 %** ✅ |
+| **Fase 3 — Transición** | D-16 · D-17 · **D-18** ✅ · D-19 · D-20 · D-21 · **D-22** ✅ | **57 %** |
+| **Total** | **20 documentos** | **97 %** |
+
+> ✅ **D-05, D-06 y D-15 cerrados.** D-06 y D-16 sin preguntas abiertas.
 
 > 📋 **Auditoría completa archivo por archivo:** [AUDITORIA.md](AUDITORIA.md) — incluye los 9 puntos que están escritos pero desactualizados.
 
@@ -107,9 +117,11 @@ Transferencia Interna → Seguimiento **manual y sin retorno** · reasignar un p
 
 | Doc | Prioridad |
 |---|---|
-| **ADR-006** cola de propagación | 🔴 Sostiene D-11 y D-12. El patrón ya existe en envíos masivos |
-| **D-15** completar NFR de PII, memoria y disponibilidad | 🟠 Hoy son 67 líneas |
-| D-19 Riesgos · D-20 Roadmap · D-21 Definition of Ready | 🟠 |
+| **D-19** Matriz de riesgos | 🟠 Siguiente |
+| **D-20** Roadmap + trazabilidad | 🟠 |
+| **D-21** Definition of Ready | 🟠 |
+
+> ✅ **Fase 2 cerrada el 28-ago.** D-15 completado con los cuatro apartados que faltaban: disponibilidad, PII y retención, coste del LLM y observabilidad.
 
 ### El reparto real del rediseño *(medido con el grafo de código, D-18)*
 

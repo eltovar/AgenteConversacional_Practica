@@ -4,29 +4,6 @@ Profiler de consultas — el equivalente de P6SPY (Java) para este stack.
 Mide dónde se va el tiempo de cada request del panel, desglosado por capa:
 MongoDB, HubSpot (httpx) y el total del endpoint. Sin esto, decidir qué
 optimizar es adivinar.
-
-Tres piezas independientes, todas apagables:
-
-  1. MongoCommandLogger  — pymongo.monitoring.CommandListener. Loguea cada
-                           comando Mongo con su duración real medida por el
-                           driver. Es literalmente lo que hace P6Spy con SQL.
-  2. httpx event_hooks   — latencia por llamada a HubSpot.
-  3. ServerTimingMiddleware — acumula ambos por request y emite el header
-                           `Server-Timing`, que Chrome DevTools grafica
-                           nativamente en la pestaña Network.
-
-⚠️ PII (CLAUDE.md regla 2): los eventos de PyMongo traen el filtro completo
-de la query, que incluye teléfonos y nombres de clientes. NUNCA se loguea el
-filtro — solo nombre de comando, colección y duración. Las URLs de HubSpot
-se recortan a su path sin query string por la misma razón.
-
-Sin dependencias nuevas: pymongo.monitoring viene en pymongo, event_hooks en
-httpx. Cero llamadas de red adicionales.
-
-Control por entorno:
-    QUERY_PROFILER_ENABLED   "true"/"false"  (default: true)
-    QUERY_PROFILER_SLOW_MS   umbral de log en ms (default: 50)
-    SERVER_TIMING_ENABLED    header Server-Timing (default: true)
 """
 import contextvars
 import logging
@@ -79,9 +56,8 @@ _IGNORED_COMMANDS = frozenset({
 })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
 # Acumulador por request (contextvars — seguro con asyncio concurrente)
-# ═══════════════════════════════════════════════════════════════════════════
+
 # Un ContextVar se propaga a las tasks hijas de un request pero NO se comparte
 # entre requests concurrentes, que es exactamente lo que necesitamos. Un dict
 # global se mezclaría entre asesoras usando el panel a la vez.
@@ -115,9 +91,8 @@ def _record(layer: str, elapsed_ms: float) -> None:
     stats[f"{layer}_count"] = stats.get(f"{layer}_count", 0) + 1
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+
 # 1. MongoDB — CommandListener (el P6Spy de este stack)
-# ═══════════════════════════════════════════════════════════════════════════
 
 def _build_mongo_listener():
     """

@@ -5,6 +5,20 @@
 
 ---
 
+## 0-bis. Avance desde esta auditoría — 2026-08-27
+
+| Paso | Estado |
+|---|---|
+| ✅ **Commit** | Hecho por CyberTovar |
+| ✅ **Paso 1 · ADR-006** | Escrito. Patrón *outbox* generalizando el motor de envíos masivos |
+| ✅ **Paso 2 · D-11 §5 y D-12 §7-§8** | Cerrados. D-12 §7 sustituido por la lista medida de D-18 |
+| ✅ **D11-1** | La única pregunta que bloqueaba un documento — resuelta por ADR-006 |
+| 🟠 Siguiente | D-15 → D-19 → D-20 → D-21 |
+
+**Fase 2 pasa de 92 % a 97 %. Total: 95 %.**
+
+---
+
 ## 0. Respuesta directa
 
 **Sí, D-18 está creado y registrado.** `18-migracion.md`, 294 líneas, 9 secciones, dado de alta en el `LAYOUT` de `md2docx.py` y ya presente en el espejo Word (*Fase 3 - Transición / 18 - Estrategia de Migracion*).

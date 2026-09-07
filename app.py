@@ -1,14 +1,10 @@
-# ═══════════════════════════════════════════════════════════════════════════════
 # CARGA DE VARIABLES DE ENTORNO (DEBE IR PRIMERO)
-# ═══════════════════════════════════════════════════════════════════════════════
 from dotenv import load_dotenv
 
 from utils.message_aggregator import message_aggregator
 load_dotenv()
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT PARA SERVIR MEDIA DEL PANEL
-# ═══════════════════════════════════════════════════════════════════════════════
 from fastapi.responses import RedirectResponse
 from database.mongodb_client import get_mongo_manager
 from bson import ObjectId

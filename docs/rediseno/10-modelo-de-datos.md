@@ -254,5 +254,5 @@ Esquema real hoy: `phone · canal · canal_origen · contact_id · owner_id · s
 - Índices y claves — se define con D-12 y D-13
 - Nombres físicos de tablas y colecciones
 - ¿`presupuesto` y `segmento` se replican a HubSpot como propiedades nuevas, o viven solo en la base propia?
-- Política de retención de `EVENTO`
+- ✅ **Cerrada 2026-08-28.** Indefinida para eventos de contacto; 12 meses para acceso y configuración. Ver [D-15 §5.3](15-nfr.md)
 - Esquema exacto del campo `datos` por tipo de evento

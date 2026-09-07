@@ -214,23 +214,59 @@ El archivo de **10.222 líneas** y 72 endpoints es lo que hay que partir.
 
 ## 7. Qué se conserva del sistema actual
 
-| Se conserva | Notas |
+> ✅ **Actualizado el 2026-08-27** con el análisis de módulos de [D-18 §3](18-migracion.md), hecho sobre el índice del grafo de código (2.504 nodos, 9.470 aristas). Lo de abajo ya no es una intención: es una lista medida.
+
+| Se conserva | Cohesión | Notas |
+|---|---|---|
+| FastAPI + Gunicorn en Railway | — | Sin motivo para cambiar |
+| MongoDB como almacén principal | — | Se le añaden `USUARIO`, `INTERES`, `EVENTO`, `PROPAGACION` |
+| Redis para sesión, caché y tiempo real | — | Cambia su papel: **deja de guardar estado de negocio** |
+| PgVector + base de conocimiento | — | Intacto |
+| `sofia_brain.py` Single-Stream | — | Intacto — es la ventaja competitiva |
+| **Ciclo de citas** | **0,747** | ✅ **El módulo mejor construido del sistema.** Se conserva casi intacto |
+| **HubSpot outbound** | **0,784** | ✅ Se conserva; pasa a entregarse por la cola de propagación |
+| Envíos masivos · mensajes programados | — | ✅ Se conservan. **Y son la base de ADR-006** |
+| Twilio, Bunny, detectores | — | Intactos. Los detectores dejan de descartar lo que detectan |
+| `phone_normalizer` | fan-in 31 | Es la base de la identidad del contacto |
+| `media_processor` · `message_aggregator` · `timeline_logger` | — | ✅ Rescatados |
+| **`query_profiler`** | — | ✅ **La observabilidad del rediseño ya existe**, con enmascarado de PII incluido |
+| APScheduler | 0,389 | Se conserva; **sale de `app.py`** y sus parámetros van a configuración |
+| Citaciones de mensajes | — | 🟡 Se conserva y se mejora |
+
+### Lo que sí se rediseña
+
+| | Por qué |
 |---|---|
-| FastAPI + Gunicorn en Railway | Sin motivo para cambiar |
-| MongoDB como almacén principal | Se le añaden `USUARIO`, `INTERES`, `EVENTO` |
-| Redis para sesión, caché y tiempo real | Cambia su papel: **deja de guardar estado de negocio** |
-| PgVector + base de conocimiento | Intacto |
-| `sofia_brain.py` Single-Stream | Intacto — es la ventaja competitiva |
-| Twilio, Bunny, detectores | Intactos |
-| APScheduler | Se conserva; sus parámetros salen a configuración |
+| 🔴 **Notificaciones a las asesoras** | Están repartidas en **6 archivos y 3 persistencias**. No hay una definición común de qué es una notificación ni de cuándo se considera atendida. Existe hasta un endpoint (`cleanup_stale_inbox`) dedicado a limpiar la basura que ese diseño genera |
+| 🔴 Autorización · modelo de datos · `outbound_panel.py` | Es el núcleo del rediseño |
+| ⚠️ **Frontend del panel** | Cohesión **0,992** — calidad excelente. **Se rehace por diseño de producto, no por calidad del código** |
+
+### El reparto real
+
+| | % del sistema |
+|---|---|
+| ✅ Intacto | **~55 %** |
+| 🟡 Se mueve o ajusta | ~15 % |
+| 🔴 Se reescribe | **~30 %** |
 
 > 🔑 **El cambio de papel de Redis es importante.** Hoy guarda el estado conversacional —la fuente de verdad operativa—. En el destino guarda **sesión, caché y tiempo real**, y el estado de negocio vive en MongoDB. Eso elimina la clase de fallo que obligó a construir los cinco endpoints de recuperación.
+>
+> 🔑 **Y menos de un tercio del código se reescribe.** El "80 % de rediseño" es de **producto**, no de código.
 
 ---
 
-## 8. Pendiente
+## 8. La cola de propagación — diseño cerrado
+
+> ✅ **Resuelto en [ADR-006](14-adrs.md).** Era el único contenedor nuevo del diagrama y el único sin diseño interno.
+
+**Patrón *outbox*.** La escritura local es síncrona; la propagación a HubSpot se registra como fila en `PROPAGACION` y un trabajador la entrega con reintentos de espera creciente, con tope en ~9 h y estado terminal `abandonado` visible para el Administrador.
+
+**Se generaliza el motor de envíos masivos**, que ya resuelve reclamo atómico, arrendamiento, idempotencia y exclusión mutua — y que ya sobrevivió a un incidente real de 33 días.
+
+> **Consecuencia arquitectónica:** desaparecen los **36 s** que hoy puede costar un request bloqueado por un 429 de HubSpot. Es la respuesta directa a la *Investigación pendiente #1* de `CLAUDE.md`.
+
+### Lo que sigue pendiente en este documento
 
 - Diagrama de despliegue: qué corre en qué proceso de Railway
 - Estrategia de caché por entidad
-- Diseño interno de la cola de propagación → ADR
-- Cómo convive la arquitectura nueva con `main` durante la transición → [D-18](18-migracion.md)
+- Cómo convive la arquitectura nueva con `main` durante la transición → ✅ [D-18](18-migracion.md)

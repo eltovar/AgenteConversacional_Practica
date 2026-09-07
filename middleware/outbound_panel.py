@@ -209,9 +209,7 @@ def _get_contact_manager() -> ContactManager:
         logger.info("[Panel] ContactManager singleton inicializado")
     return _contact_manager_singleton
 
-# ============================================================================
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
-# ============================================================================
 # ── Cache de la respuesta de GET /contacts ──────────────────────────────────
 # El panel hace polling cada 10s (POLLING_INTERVAL_IDLE en index.js). Con el TTL
 # anterior de 5s el cache expiraba ANTES del siguiente poll, así que no acertaba
@@ -635,10 +633,6 @@ async def _cache_contact_stage(contact_id: str, stage: str) -> None:
     """
     Guarda lifecyclestage en Redis cache en background (sin bloquear el request).
 
-    nx: escritor best-effort. Esta tarea nace del enriquecimiento de
-    GET /contacts, que tarda 7-9s, y llega con una etapa leída al inicio del
-    request. Si mientras tanto alguien la cambió, la key ya tiene el valor bueno
-    y esta escritura debe declinarse — ver _invalidate_contact_stage_cache().
     """
     try:
         redis_client = await _get_redis_client()
@@ -855,7 +849,7 @@ def _get_state_manager() -> ConversationStateManager:
     return _state_manager_singleton
 
 
-# ── Circuit breaker de HubSpot ──────────────────────────────────────────────
+# ── Circuit breaker de HubSpot 
 # Dormir 12s dentro del request no descongestiona nada: HubSpot sigue saturado
 # porque el resto de peticiones sigue llegando. Y como las llamadas van detrás de
 # un Semaphore(2), esas esperas se SUMAN en vez de solaparse — de ahí los
@@ -1072,12 +1066,6 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 async def _build_zset_phone_index() -> Dict[str, Dict[str, float]]:
     """
     Lee el ZSET del panel UNA vez y lo indexa por teléfono.
-
-    ⚠️ Existe para hidratar VARIOS contactos sin pagar un ZSCAN por cada uno.
-    El ZSCAN de _hydrate_contact usa count=20, así que recorre todo el ZSET en
-    trozos de 20 → ~N/20 round-trips POR CONTACTO. Medido en producción
-    (9-ago-2026): GET /contacts/search tardaba 41,6s, de los cuales 39,5s eran
-    justamente esto (mongo=52ms, hubspot=2,1s).
 
     Returns:
         {phone: {canal: score}}. Vacío si Redis falla — los llamadores deben
@@ -1825,9 +1813,7 @@ async def update_last_client_message(phone_normalized: str) -> None:
         logger.error(f"[Panel] Error actualizando último mensaje: {safe_error(e)}")
 
 
-# ============================================================================
 # Funciones CRUD de Templates
-# ============================================================================
 
 async def _init_default_templates():
     """
@@ -7233,9 +7219,9 @@ async def create_appointment(
             # No falla el endpoint — MongoDB ya tiene la cita
             logger.warning(f"[Panel] No se pudo sincronizar cita a Redis (recordatorios pueden no funcionar): {redis_err}")
 
-    # ────────────────────────────────────────────────────────────────────────
+    
     # Embudo y confirmación al cliente
-    # ────────────────────────────────────────────────────────────────────────
+    
     # Van DESPUÉS del guardado y ninguno puede tumbar el endpoint: la cita ya
     # está en firme y es el dato valioso. Un fallo aquí se reporta en la
     # respuesta, no se traga en un log que nadie mira.
@@ -7394,9 +7380,7 @@ async def update_appointment(
     # deje a la asesora creyendo que el cliente ya conoce la nueva fecha.
     respuesta = {"ok": True, "client_notified": False, "client_notify_reason": "no_evaluado"}
 
-    # ────────────────────────────────────────────────────────────────────────
     # Refrescar la nota interna
-    # ────────────────────────────────────────────────────────────────────────
     # La nota que se escribió al crear la cita queda mintiendo tras una edición:
     # sigue diciendo la fecha, el encargado y la dirección viejos. La asesora abre
     # la conversación, lee la nota y actúa sobre datos caducados.
@@ -7687,9 +7671,7 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
         "hidden_stages_by_advisor": _hidden_by_advisor,
     })
 
-# ============================================================================
 # Funciones de background
-# ============================================================================
 
 async def _log_advisor_message_to_hubspot(
     contact_id: str,
@@ -9708,9 +9690,9 @@ async def recover_lost_conversations(
     }
 
 
-# =============================================================================
+
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
-# =============================================================================
+
 
 @router.post("/contacts/{contact_id}/scheduled-messages", status_code=201)
 async def create_scheduled_message(
@@ -9817,9 +9799,7 @@ async def cancel_scheduled_message(
     return {"ok": True}
 
 
-# ============================================================================
 # BULK CAMPAIGNS — Mensajes Masivos por Embudo (per-asesora)
-# ============================================================================
 
 def _validate_bulk_request(
     stage_id: str,

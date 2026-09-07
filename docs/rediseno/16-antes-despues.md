@@ -172,16 +172,41 @@ Importante decirlo: evita que desarrollo crea que hay que tocar todo.
 ---
 
 
+## 9-bis. Lo medido despues de escribir este documento
+
+> Anadido el 2026-08-28. Los porcentajes de §9 son **por area funcional** y siguen siendo validos. Esto es el reparto **por volumen de codigo**, medido con el grafo ([D-18 §5](18-migracion.md)).
+
+| | % del sistema |
+|---|---|
+| ✅ Intacto | **~55 %** |
+| 🟡 Se mueve o ajusta | ~15 % |
+| 🔴 Se reescribe | **~30 %** |
+
+> 🔑 **Los dos numeros no se contradicen.** El 80 % de §9 mide **cuanto cambia el producto**; el 30 % de aqui mide **cuanto codigo se reescribe**. El motor se conserva entero: lo que se rehace es lo que lo rodea.
+
+### Cuatro diferencias mas, descubiertas al auditar el sistema
+
+| Area | Hoy | Destino |
+|---|---|---|
+| **Transferencia a Seguimiento** | 🔴 **Automatica e invisible.** 10 etapas la disparan; cambiar el presupuesto **regala el contacto** sin avisar | Accion explicita con confirmacion ([D-06 §12](06-matriz-permisos.md)) |
+| **Entrada al sistema** | Webhook **sin validar origen** y volcando PII al log | ✅ Firma validada (`8fdbc2a`) + middleware unico de entrada |
+| **Notificaciones** | Solo con la pestana abierta. Si la asesora la cierra, **deja de enterarse de todo** | Entidad derivada de eventos + Web Push a evaluar (UC-018) |
+| **Alertas** | 🔴 **Ninguna.** Los tres incidentes mas caros los detecto una persona, no el sistema | 8 alertas minimas ([D-15 §7.3](15-nfr.md)) |
+
+---
+
 ## 10. Preguntas que este documento deja abiertas
 
 
-| # | Pregunta | Bloquea |
+> ✅ **Actualizado el 2026-08-28: las ocho quedaron resueltas.** Se conservan como rastro de la discusión.
+
+| # | Pregunta | Resolución |
 |---|---|---|
-| AD-1 | V-4: ¿canal o función como eje organizador? | Todo |
-| AD-2 | ¿Un contacto es una persona o una persona-por-canal? | Modelo de datos |
-| AD-3 | ✅ RESUELTO. Son dos listas separadas: *Historial de Notas* (quién anotó qué) y *Historial de Contacto* (timeline de embudos, intereses y citas) | Ver D-01 |
-| AD-4 | ¿Las automatizaciones pasan a ser configurables o se quedan en código? | Alcance, esfuerzo |
-| AD-5 | ¿Se conservan los colaboradores, sabiendo que HubSpot no puede persistirlos? | D-11 |
-| AD-6 | ¿Qué retardo de sincronización es aceptable por entidad? | D-11 |
-| AD-7 | ✅ RESUELTO indirectamente. El modelo pasa a *asignatario + eventos*; "posponer" deja de necesitar un estado propio | Ver [D-02 §18](02-actores-y-roles.md) |
-| AD-8 🆕 | ¿Se aprueba la entidad Interés (un contacto, varios inmuebles)? | D-10 — bloquea la Fase 2 |
+| AD-1 | V-4: ¿canal o función como eje organizador? | ✅ **Ninguno de los dos: ambos.** Son dimensiones **ortogonales**. El canal decide de quién es el lead al entrar; el rol decide qué puede hacer esa persona |
+| AD-2 | ¿Un contacto es una persona o una persona-por-canal? | ✅ **Una persona.** La clave es el teléfono; muere `(teléfono, canal)` — [D-10 §4.1](10-modelo-de-datos.md) |
+| AD-3 | ¿Un historial o dos? | ✅ **Dos listas separadas**: *Historial de Notas* y *Historial de Contacto* — ver D-01 |
+| AD-4 | ¿Automatizaciones configurables o en código? | ✅ **En código**, subiendo al nivel 1: los **tiempos y umbrales** salen a configuración. D15-1 en [D-15 §1](15-nfr.md) |
+| AD-5 | ¿Se conservan los colaboradores? | ✅ **No.** Sin colaboradores. El modo `collaborative` del código se retira en la fase E |
+| AD-6 | ¿Qué retardo de sincronización es aceptable? | ✅ **Resuelto por [ADR-006](14-adrs.md)**: espera creciente con tope en ~9 h — nunca peor que las 6 h de hoy |
+| AD-7 | ¿Hace falta "posponer"? | ✅ **No.** El modelo pasa a *asignatario + eventos* — [D-02 §18](02-actores-y-roles.md) |
+| AD-8 | ¿Se aprueba la entidad `Interés`? | ✅ **Incorporada al modelo** ([D-10 §3.2](10-modelo-de-datos.md)) y con permisos definidos ([D-06 §3](06-matriz-permisos.md)). ⚠️ Nunca la confirmaste con esas palabras, pero todo lo posterior la da por buena |

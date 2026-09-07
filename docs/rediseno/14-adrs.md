@@ -234,11 +234,217 @@ flowchart TD
 
 ## ADR-006 · Cola de propagación hacia HubSpot
 
-**Estado:** 🔴 pendiente de redactar — **es el ADR que falta y sostiene D-11**.
+**Estado:** ✅ **Aceptado** — 2026-08-27
+**Sostiene:** D-11 (política de fuente de verdad) · D-12 §2 y §8 (el contenedor nuevo)
 
-**Contexto:** la política de fuentes de verdad exige que la escritura local sea síncrona y la propagación a HubSpot diferida con reintentos. Esa pieza **no existe hoy**: la reconciliación de 6 h hace de sustituto.
+---
 
-**A decidir:** tecnología de la cola · política de reintentos · qué pasa si un elemento falla de forma permanente · cómo se observa su salud.
+### 1. Contexto
+
+La política de fuentes de verdad exige que **la escritura local sea síncrona** y **la propagación a HubSpot sea diferida y con reintentos**. Esa pieza no existe hoy.
+
+Lo que hay en su lugar son dos mecanismos, y ninguno es una cola:
+
+| Mecanismo | Qué hace | Por qué no basta |
+|---|---|---|
+| **Escritura directa a HubSpot dentro del request** | `_hubspot_post` / `_hubspot_get`, detrás de `Semaphore(2)` | Ante un 429 hace `await asyncio.sleep(12 * intento)` **bloqueando el request**. Con `max_retries=2` una sola llamada puede costar **36 s** |
+| **Reconciliación cada 6 h** (`app.py:1149`) | Recorre 200 conversaciones, pide a HubSpot el `hubspot_owner_id` de cada una y corrige Redis y MongoDB si divergen | Es un **sondeo con tope**, no una garantía de entrega. Solo cubre `owner_id`. Con 3.209 contactos, 200 por ejecución no alcanzan a recorrer la base |
+
+> 🔑 **El problema de fondo:** hoy una escritura que falla en HubSpot **se pierde en silencio**, y la reconciliación solo la rescata si es de las 200 más recientes y si es un `owner_id`. Todo lo demás —etapa, propiedades, notas— no se reconcilia nunca.
+
+Y hay un tercer motivo, que es el que convierte esto en urgente: el rediseño **multiplica las entidades que hay que propagar**. Hoy se sincroniza un campo. Mañana son etapa, propiedades, intereses, eventos y citas. Sostener eso con reconciliación por sondeo significaría un sondeo por entidad.
+
+---
+
+### 2. Decisión
+
+> **Se adopta el patrón *outbox*: toda escritura hacia HubSpot se registra como una fila en una colección propia, y un trabajador la entrega de forma asíncrona con reintentos.**
+>
+> **Y no se diseña desde cero: se generaliza el motor de envíos masivos, que ya implementa este patrón exacto y ya sobrevivió a un incidente real en producción.**
+
+#### El hallazgo que hace barata esta decisión
+
+`bulk_campaigns` **ya es una cola de trabajo durable**, con todas las piezas difíciles resueltas:
+
+| Pieza | Dónde está hoy | Por qué es difícil |
+|---|---|---|
+| **Reclamo atómico** | `find_one_and_update` sobre `contacts.$.status` | Sin atomicidad, dos trabajadores procesan el mismo elemento |
+| **Arrendamiento (*lease*)** | `claimed_at` + `recuperar_contactos_caducados()` | Sin esto, un proceso que muere deja el elemento reclamado **para siempre** |
+| **Idempotencia** | Clave Redis `bulk_send_dedup:{campaña}:{contacto}` con `NX` | Evita el envío doble cuando el reintento pisa a un envío que sí llegó |
+| **Exclusión mutua del trabajador** | Lock Redis `bulk_processor_lock`, TTL 30 s | Railway **solapa procesos durante el despliegue** |
+| **Lotes y concurrencia acotadas** | `BULK_BATCH_SIZE = 5` · `BULK_MAX_CONCURRENT = 2` | Es lo que impide saturar Twilio y HubSpot |
+| **Registro de intentos y del error** | `contacts.$.attempts` · `contacts.$.error` | Sin el contador no hay política de reintentos posible |
+| **Caducidad del trabajo** | `BULK_CAMPAIGN_MAX_AGE_HOURS = 24` | Un trabajo que sale semanas tarde llega fuera de contexto |
+
+##### 🔴 La lección que ya se pagó
+
+El comentario de `recuperar_contactos_caducados()` en `database/mongodb_client.py:2096` documenta el incidente:
+
+> Un contacto pasa a `in_progress` **antes** de enviar. Si el proceso muere en ese hueco —un SIGKILL por memoria, un reinicio a mitad de lote— el elemento queda reclamado para siempre: no hay nada `pending` que reclamar, pero la campaña tampoco cierra porque sigue habiendo un `in_progress`. Queda activa eternamente y, al ser la más antigua, **bloquea a todas las demás**.
+>
+> **Pasó de verdad: tres campañas y 217 envíos congelados 33 días, sin un solo error en los registros.**
+
+**Esa es la razón por la que el arrendamiento no es opcional en este ADR.** Una cola sin recuperación de reclamos huérfanos no se cae: se congela en silencio, que es peor.
+
+---
+
+### 3. Diseño
+
+#### 3.1 La entidad
+
+Una colección propia, `PROPAGACION`, con una fila por operación pendiente:
+
+| Campo | Para qué |
+|---|---|
+| `entidad` · `entidad_id` | Qué objeto se propaga (`contacto`, `etapa`, `interes`, `cita`…) |
+| `operacion` | `crear` · `actualizar` · `anotar` |
+| `carga` | El cuerpo exacto que se enviará a HubSpot |
+| `clave_orden` | **El `contacto_id`.** Serializa las operaciones del mismo contacto |
+| `clave_idempotencia` | Impide aplicar dos veces la misma operación |
+| `estado` | `pendiente` · `en_proceso` · `entregado` · `fallido` · `🔴 abandonado` |
+| `intentos` · `proximo_intento_en` | Sostienen el reintento con espera creciente |
+| `reclamado_en` | **El arrendamiento.** Sin este campo se repite el incidente de los 33 días |
+| `ultimo_error` | Qué dijo HubSpot la última vez |
+| `creado_en` | Permite medir el retardo real y caducar el trabajo viejo |
+
+#### 3.2 El flujo
+
+```mermaid
+flowchart TD
+    A["La asesora actúa<br/>en el panel"] --> B["Escritura LOCAL<br/><b>sincrona</b>"]
+    B --> C["Fila en PROPAGACION<br/>estado: pendiente"]
+    B --> R["Respuesta inmediata<br/>a la asesora"]:::ok
+
+    C --> W{"Trabajador<br/>cada 30 s"}
+    W -->|"lock Redis NX"| D["Rescatar reclamos<br/>caducados"]
+    D --> E["Reclamar lote<br/>atomico"]
+    E --> F["Enviar a HubSpot"]
+
+    F -->|"2xx"| G["entregado"]:::ok
+    F -->|"429 / 5xx"| H["pendiente<br/>+ espera creciente"]:::warn
+    F -->|"4xx permanente"| I["🔴 abandonado<br/>visible en el panel"]:::bad
+
+    H --> W
+    classDef ok fill:#e8f5e9,stroke:#2e7d32
+    classDef warn fill:#fff8e1,stroke:#f9a825
+    classDef bad fill:#ffebee,stroke:#c62828
+```
+
+> 🔑 **La asesora nunca espera a HubSpot.** Es el cambio de fondo: hoy un 429 le cuesta 36 s de pantalla congelada.
+
+#### 3.3 Política de reintentos
+
+| Intento | Espera | Acumulado |
+|---|---|---|
+| 1 | 30 s | 30 s |
+| 2 | 2 min | 2,5 min |
+| 3 | 8 min | 10,5 min |
+| 4 | 30 min | 41 min |
+| 5 | 2 h | 2,7 h |
+| **6** | **6 h** | **~9 h** |
+| 7 | — | 🔴 **Abandonado** |
+
+**Tres reglas que no se negocian:**
+
+1. **Espera creciente con desviación aleatoria.** Sin la desviación, todo lo que falló a la vez reintenta a la vez y vuelve a provocar el 429. El sistema ya tiene `apply_jitter()` para esto.
+2. **Si HubSpot manda `Retry-After`, manda `Retry-After`.** La cabecera gana sobre la tabla.
+3. **Un 4xx que no es 429 no se reintenta.** Un `400` por una propiedad que no existe no mejora esperando: va directo a `abandonado`.
+
+> **Por qué el último escalón es de 6 h:** es exactamente el ciclo de la reconciliación actual. La cola nunca es más lenta que lo que ya existe.
+
+#### 3.4 Qué pasa cuando algo falla de forma permanente
+
+> **Nada se borra y nada se pierde en silencio.** Un elemento abandonado se queda en la colección, marcado, y **aparece en la pantalla de administración**.
+
+| | |
+|---|---|
+| **Quién lo ve** | Solo el Administrador. Una asesora no puede hacer nada con un `400` de HubSpot |
+| **Qué puede hacer** | Reencolar (vuelve a `pendiente` con los intentos a cero) o descartar dejando constancia |
+| **Qué NO pasa** | La cola **no se bloquea**. Un elemento abandonado sale del camino; el resto de la clave de orden sigue |
+
+Esto es una corrección directa al comportamiento de hoy, donde un fallo de HubSpot **no deja rastro en ninguna parte**.
+
+#### 3.5 Cómo se observa su salud
+
+Cuatro números. Los tres primeros son los que habrían delatado el incidente de los 33 días **el primer día**:
+
+| Indicador | Alarma |
+|---|---|
+| **Edad del elemento pendiente más viejo** | 🔴 > 1 h |
+| Profundidad de la cola por estado | 🟠 pendientes crecen dos ciclos seguidos |
+| **Elementos abandonados sin resolver** | 🔴 cualquiera > 0 |
+| Reclamos caducados rescatados por ciclo | 🟠 > 0 de forma sostenida — algo está muriendo a mitad de lote |
+
+> 📊 **La instrumentación ya existe.** `middleware/query_profiler.py` mide el desglose de latencia y **ya enmascara la PII**. La cola se acopla a él en vez de estrenar observabilidad propia.
+
+#### 3.6 Orden dentro de un mismo contacto
+
+Es el único requisito genuinamente nuevo respecto de los masivos, donde cada contacto recibe **un** mensaje y el orden da igual.
+
+Aquí no: si una asesora mueve un lead a `Visita Agendada` y acto seguido a `Visita Realizada`, **entregarlo al revés deja el contacto en la etapa incorrecta de forma permanente**.
+
+> **Regla:** el trabajador **nunca procesa dos elementos con la misma `clave_orden` a la vez**, y los procesa en orden de creación. Entre contactos distintos, en paralelo.
+
+---
+
+### 4. Alternativas descartadas
+
+| Alternativa | Por qué no |
+|---|---|
+| **Celery / RQ / RabbitMQ** | Un servicio más que desplegar, vigilar y pagar. Contradice el ADR-002 (monolito modular). Y **el patrón ya está resuelto en el repositorio** |
+| **Redis Streams** | Redis en este sistema es memoria de trabajo, no almacén durable. Un `FLUSHDB` o una purga por presión de memoria **borraría escrituras confirmadas** al cliente |
+| **Solo `create_task` en segundo plano** | Ya existe y **ya causó un incidente documentado**: las tareas de fondo de `GET /contacts` revivían valores muertos de caché. Una tarea suelta muere con el proceso y no deja rastro |
+| **Ampliar la reconciliación de 6 h** | Es un sondeo: coste proporcional al tamaño de la base, no al número de cambios. Con 3.209 contactos y tope de 200 **ya no alcanza a recorrerla** |
+| **Escribir en HubSpot dentro del request** *(lo de hoy)* | 36 s de espera en pantalla ante un 429, y pérdida silenciosa si falla |
+
+---
+
+### 5. Consecuencias
+
+#### ✅ A favor
+
+| | |
+|---|---|
+| **Desaparecen los 36 s de espera** | El request deja de bloquearse por HubSpot. Es la respuesta directa a la *Investigación pendiente #1* de `CLAUDE.md` |
+| **Ninguna escritura se pierde** | Si HubSpot está caído una hora, la cola se vacía sola después |
+| **El 429 deja de ser una emergencia** | Pasa a ser lo que siempre fue: una señal de "más despacio" |
+| **Una sola vía de escritura** | Toda propagación pasa por el mismo sitio, se mide en el mismo sitio y se reintenta igual. Es el principio de D-11 hecho código |
+| **La reconciliación pasa a ser red de seguridad** | Se conserva, pero como verificación periódica — no como mecanismo de entrega |
+
+#### ⚠️ En contra
+
+| | Mitigación |
+|---|---|
+| **HubSpot deja de estar al día al instante** | Es exactamente lo que D-11 ya acepta y declara. Nadie mira HubSpot en directo: las asesoras no lo abren (A-02) |
+| Una colección más y un trabajador más | Reutilizan el motor de los masivos y el APScheduler que ya corre |
+| El trabajador comparte el worker de Gunicorn | Lotes cortos y acotados, como los masivos. **Y el memory watchdog obliga a respetar los singletons** |
+| Un fallo permanente exige intervención humana | Es deliberado. La alternativa —descartarlo solo— es la pérdida silenciosa que este ADR viene a eliminar |
+
+---
+
+### 6. Cómo se implementa sin romper `main`
+
+Encaja en la **fase A** de D-18, la que no rompe producción:
+
+| Paso | Qué entra | ¿Rompe? |
+|---|---|---|
+| 1 | Crear `PROPAGACION` y el trabajador **en modo espejo**: encola y entrega, pero la escritura directa actual sigue activa | ❌ No — solo se observa si la cola entrega lo mismo |
+| 2 | Con la cola verificada, **retirar la escritura directa** entidad por entidad, empezando por `owner_id` | 🟡 Reversible por entidad |
+| 3 | Bajar la reconciliación de 6 h a verificación diaria | ❌ No |
+
+> **El paso 1 es medible antes de depender de él**: durante ese periodo se compara lo que entregó la cola con lo que escribió el camino directo. Si divergen, el problema aparece **antes** del corte, no después.
+
+---
+
+### 7. Preguntas para ti
+
+| # | Pregunta | Mi recomendación |
+|---|---|---|
+| **Q6-1** | Un elemento abandonado, ¿avisa al Administrador de forma activa o espera a que abra la pantalla? | **Activa.** El sistema ya se quedó dos días sin responder por un fallo silencioso *(saldo de OpenAI)* |
+| **Q6-2** | ¿Cuánto se guardan los elementos ya entregados? | **30 días.** Suficiente para auditar, y evita que la colección crezca sin fin |
+| **Q6-3** | ¿Se acepta la tabla de reintentos con tope en ~9 h? | Sí — **nunca es peor que la reconciliación de 6 h de hoy** |
+
+> ✅ **Ninguna de las tres bloquea nada.** Son parámetros; el diseño no cambia con la respuesta.
 
 ---
 

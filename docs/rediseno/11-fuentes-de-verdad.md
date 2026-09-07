@@ -64,12 +64,44 @@ Se plantearon NTP, SNTP y PTP como posibles respuestas. **Resuelven un problema 
 
 ---
 
-## 5. Pendiente de desarrollar
+## 5. La cola de propagacion
 
-- Tabla completa entidad x sistema x autoridad (quien manda sobre cada campo)
-- Comportamiento ante conflicto: quien gana si dos sistemas difieren
-- Diseno de la cola de propagacion
-- Metricas de salud de la sincronizacion
+> ✅ **Resuelto en [ADR-006](14-adrs.md).** Era la pieza que sostenia toda esta politica y la que faltaba.
+
+**Decision:** patron *outbox*. Toda escritura hacia HubSpot se registra como fila en una coleccion propia (`PROPAGACION`) y un trabajador la entrega de forma asincrona con reintentos.
+
+**Lo importante para esta politica** — el resto del diseno esta en el ADR:
+
+| Garantia | Como |
+|---|---|
+| **Ninguna escritura se pierde** | La fila es durable. Si HubSpot esta caido, la cola retiene y reintenta |
+| **La asesora no espera a HubSpot** | La escritura local es sincrona; la propagacion, diferida. Hoy un 429 cuesta **36 s de pantalla congelada** |
+| **El orden por contacto se respeta** | `clave_orden = contacto_id`. Sin esto, `Visita Agendada` y `Visita Realizada` pueden entregarse al reves y dejar la etapa mal **de forma permanente** |
+| **Un fallo permanente se ve** | Estado `abandonado`, visible para el Administrador. Nunca se descarta en silencio |
+| **El retardo nunca empeora** | El ultimo escalon de reintento es de 6 h — exactamente el ciclo de la reconciliacion de hoy |
+
+> 🔑 **No se disena desde cero.** `bulk_campaigns` ya es una cola de trabajo durable con reclamo atomico, arrendamiento, idempotencia y exclusion mutua. ADR-006 la generaliza.
+
+### Metricas de salud de la sincronizacion
+
+Cuatro numeros, definidos en ADR-006 §3.5:
+
+| Indicador | Alarma |
+|---|---|
+| Edad del elemento pendiente mas viejo | 🔴 > 1 h |
+| Profundidad de la cola por estado | 🟠 crece dos ciclos seguidos |
+| Elementos abandonados sin resolver | 🔴 cualquiera > 0 |
+| Reclamos caducados rescatados por ciclo | 🟠 > 0 sostenido |
+
+### Comportamiento ante conflicto
+
+| Caso | Quien gana |
+|---|---|
+| Entidad **compartida** (contacto, etapa, propietario, nota, cita) | **HubSpot.** Es lo que ya hace `reconcile_owner_ids` y no hay motivo para cambiarlo |
+| Entidad **de la base propia** (usuario, rol, canal, interes, evento) | La base propia. HubSpot no las conoce — ver §6 |
+| Escritura local con propagacion **pendiente** | **La local.** La cola aun no ha entregado; HubSpot esta desactualizado por diseno, no en conflicto |
+
+> ⚠️ **Queda pendiente** la tabla campo por campo de las entidades compartidas. Se cierra al escribir el esquema de HubSpot en la fase A de [D-18](18-migracion.md), no antes: hasta que no existan las propiedades no se sabe cuales son.
 
 ---
 

@@ -18,11 +18,37 @@
       "Bash(git rm *)",
       "Bash(git push *)",
       "Bash(rm audit_endpoint.py)",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Bash(git -C \".claude/worktrees/inspiring-poitras-3f4473\" log main..HEAD --oneline)",
+      "mcp__2593f07b-6399-467d-9612-ba54ada51fa1__get-logs",
+      "Bash(mkdir -p \"C:/Users/Salo/AppData/Local/Temp/claude/rec\")",
+      "Bash(python -c ' *)",
+      "Bash(python docs/rediseno/_tools/docx2md.py)",
+      "Bash(grep -c '```mermaid' 02-actores-y-roles.md)",
+      "Bash(python -)",
+      "Bash(python \"C:/Users/Salo/Desktop/AgenteConversacional_Practica/docs/rediseno/_tools/md2docx.py\")",
+      "Bash(mkdir -p \"C:/Users/Salo/AppData/Local/Temp/claude/wf\")",
+      "Bash(rm -f img*.png)",
+      "Bash(cp \"C:/Users/Salo/AppData/Local/Temp/claude/wf/\"wf*.png .)",
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "WebSearch",
+      "mcp__3210b739-00ac-40b0-af98-94875d22ad4b__query_crm_data",
+      "mcp__3210b739-00ac-40b0-af98-94875d22ad4b__search_crm_objects",
+      "Bash(python docs/rediseno/_tools/md2docx.py)",
+      "Bash(python -c \"import pymongo; print\\('pymongo', pymongo.version\\)\")",
+      "Bash(railway status *)",
+      "Read(//c/Users/Salo/AppData/Local/codebase-memory-mcp/**)",
+      "Bash(\"C:/Users/Salo/AppData/Local/codebase-memory-mcp/codebase-memory-mcp.exe\" --version)",
+      "Bash(./codebase-memory-mcp.exe config *)",
+      "Bash(grep -nE '^\\\\$Repo|Repo\\\\s*=' install.ps1)"
     ],
     "deny": [],
     "ask": []
   },
+  "enabledMcpjsonServers": [
+    "codebase-memory-mcp"
+  ],
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true
   }

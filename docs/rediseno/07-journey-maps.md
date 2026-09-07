@@ -219,6 +219,12 @@ sequenceDiagram
 
 ## 8. Pendiente
 
-- Journey del cliente **que no responde** — qué pasa entre la ventana de 24 h y el cierre
-- Journey de reactivación: cliente que vuelve meses después por otro inmueble
-- Recorrido de error: qué ve la asesora si falla el envío de un mensaje
+> ⚠️ **Revisado el 2026-08-28.** Los tres siguen abiertos, pero **ya no faltan insumos**: el material para escribirlos existe. Se anota de dónde sale cada uno.
+
+| Journey | Material disponible |
+|---|---|
+| **Cliente que no responde** — entre la ventana de 24 h y el cierre | [D-08 §1-bis](08-maquinas-de-estado.md) separa los tres mecanismos (ventana / limpieza / posponer). El cierre automático por inactividad ya existe y `No Responde` es **el 38 % de la base**: 1.220 contactos. **Es el journey que más gente recorre y el único sin documentar** |
+| **Reactivación** — cliente que vuelve meses después | Se apoya en dos decisiones ya tomadas: el contacto es **una persona** (clave teléfono) y `motivo_cierre` **convive** con la etapa ([D-06 §10](06-matriz-permisos.md), P-6.5). Es exactamente el recorrido de `Post Cita` → recuperado por Seguimiento → `Cerrado Ganado` |
+| **Recorrido de error** — falla el envío de un mensaje | 🔴 **Ahora hay un caso real y medido**: los usernames de WhatsApp provocan Twilio 21211 y **el cliente nunca recibe respuesta** ([D-22 §4-ter](22-investigacion-mensajeria.md)). Y hay una regla de producto que hoy no se cumple: *"cuando un mensaje falla, la asesora DEBE verlo"* |
+
+> 🔑 **El tercero subió de prioridad.** Dejó de ser un supuesto: es un fallo en producción que ninguna asesora ve.

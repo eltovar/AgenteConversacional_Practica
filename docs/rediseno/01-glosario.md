@@ -198,7 +198,9 @@ Estaba registrada como etapa activa en la documentación previa. La columna "Nue
 La etapa `1407668893` se renombra a `Post Cita`. Nuevo significado: clientes que tras la visita decidieron no quedarse con el inmueble.
 A partir de aquí, "Seguimiento" designa exclusivamente al rol *Asesora de Seguimiento*. Ninguna etapa se llama así.
 > ✅ RESUELTO — `Nuevo Lead` se recrea. Es una etapa nueva en HubSpot, no la recuperación del ID viejo. La usan los dos roles de asesora.
-> ✅ RESUELTO — visibilidad por rol. Interna ve 11 etapas, Seguimiento ve 17. Matriz completa en [D-02 §6](02-actores-y-roles.md).
+> ✅ RESUELTO — visibilidad por rol **en el sistema actual**: Interna ve 11 etapas, Seguimiento **19**. Matriz en [D-02 §6](02-actores-y-roles.md).
+> ⚠️ **Corregido el 2026-08-28:** decía 17. Son **19**.
+> 🔑 **En el sistema destino esto ya no aplica:** son **7 etapas comunes + 3 grupos de propiedades** — ver [D-06 §4](06-matriz-permisos.md).
 🔴 Dos etapas quedaron huérfanas (ningún rol las ve): `Hasta 2M` (`1326631573`) y `No Responde` (`other`). La segunda es grave: el sistema escribe en ella mediante el auto-cierre, así que un contacto que caiga ahí desaparece del CRM sin que nadie pueda recuperarlo.
 
 ---

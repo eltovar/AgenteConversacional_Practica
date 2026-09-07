@@ -170,6 +170,28 @@ flowchart TD
 4. La transferencia es **manual y unidireccional**
 5. Una conversación **siempre** tiene asignatario. Nunca queda sin dueño
 
+### 3-bis. 🔴 Hoy la transferencia NO es manual — verificado en código
+
+> ⚠️ **Añadido el 2026-08-28.** El diagrama de arriba describe el **destino**. El sistema actual funciona distinto, y conviene dejarlo escrito porque cambia lo que hay que construir.
+
+`outbound_panel.py:129` define **diez etapas** que disparan transferencia automática a A. Seguimiento:
+
+| Grupo | Etapas que disparan |
+|---|---|
+| Cierre | `Seguimiento` *(nuestro `Post Cita`)* · `No responde` |
+| Presupuesto | `Hasta 1.5M` · `Hasta 2M` · `Hasta 2.5M` · `De 3M en adelante` |
+| Segmento | `Propietarios` · `Otros Municipios` · `Local o Bodega` · `Reubicados` |
+
+Al mover un contacto a cualquiera de ellas, `_transfer_to_luisa()` ejecuta **una cadena de seis pasos**: cierra la conversación del emisor → `transfer_ownership()` en Redis + MongoDB + HubSpot → activa en el panel destino → guarda `transfer_origin` → añade al inbox → notifica por WebSocket a ambas asesoras.
+
+> 🔑 **Para la asesora es un gesto manual; para el sistema son seis pasos automáticos.** Las dos lecturas son ciertas — describen la misma cosa desde sitios distintos.
+
+**En el destino esto cambia** ([D-06 §12](06-matriz-permisos.md), P-6.7): esas 10 etapas pasan a ser **valores de propiedad**, y cambiar una propiedad **deja de transferir**. La transferencia se convierte en la acción explícita del diagrama de §3.
+
+| ⚠️ Riesgo de secuencia | Si las etapas se convierten en propiedades **antes** de que exista el botón, la transferencia deja de funcionar **y nadie recibe un error**. Los contactos simplemente no llegan a A. Seguimiento |
+
+Y existe un segundo disparador, distinto: `STAGES_AUTO_CLOSE` — hoy solo `Cerrado Perdido` — que **cierra sin cambiar de dueño**. Es cierre puro, y SofIA retoma.
+
 ---
 
 ## 4. Alcance de SofIA
@@ -237,5 +259,5 @@ stateDiagram-v2
 ## 7. Pendiente
 
 - Estados de la entidad `Interés` — ¿activo, descartado, convertido?
-- Comportamiento de la propiedad de cierre: ¿un contacto cerrado puede reabrirse?
-- Transiciones permitidas por rol: ¿puede A. Interna saltar de `Nuevo Lead` a `Cerrado Ganado`?
+- ✅ **Cerrado 2026-08-28 — ¿un contacto cerrado puede reabrirse?** **Sí, y de forma manual.** `motivo_cierre` **convive** con la etapa: un contacto puede acabar con `motivo_cierre = Post Cita` **y** `etapa = Cerrado Ganado` — es la historia de quien declinó, fue recuperado por Seguimiento y compró. **Regla de conteo: al medir el embudo manda la `etapa`, no el `motivo_cierre`.** Ver [D-06 §10](06-matriz-permisos.md), P-6.5
+- ⚠️ **Transiciones permitidas por rol** — parcialmente cerrado: [D-06 §4.1](06-matriz-permisos.md) ya define **quién escribe cada etapa** (SofIA solo `Nuevo Lead`; asesoras y Admin el resto). Falta decidir si se permiten **saltos** dentro de lo que un rol puede escribir

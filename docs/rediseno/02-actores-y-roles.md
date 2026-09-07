@@ -668,7 +668,7 @@ La API de WhatsApp escalona las conversaciones diarias: 250 → 1.000 → 10.000
 | A favor | En contra |
 |---|---|
 | Aislamiento de fallos | El sistema tendrá ~7 usuarios |
-| Escalado independiente | Hoy es un monolito de 1 worker que ya sufrió fugas de memoria y `SIGKILL` |
+| Escalado independiente | Hoy es un monolito de **2 workers** (`Procfile`) que ya sufrió fugas de memoria y `SIGKILL` |
 | Despliegue independiente | Multiplican la complejidad operativa y los puntos de fallo |
 
 > Recomendación: *monolito modular* con límites internos estrictos, extrayendo servicios solo donde haya razón concreta (p. ej. el motor de IA). El 80% del beneficio con el 20% del riesgo. → ADR obligatorio en D-14.

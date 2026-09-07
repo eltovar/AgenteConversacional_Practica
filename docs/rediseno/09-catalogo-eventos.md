@@ -121,6 +121,6 @@ Todo evento comparte la misma forma:
 ## 7. Pendiente
 
 - Esquema exacto del campo `datos` por tipo de evento
-- Política de retención: ¿cuánto tiempo se guardan?
-- ¿Los eventos se replican a HubSpot o viven solo en la base propia? → D-11
+- ✅ **Cerrada 2026-08-28.** Eventos de contacto: **indefinido**. Eventos de acceso y configuración: **12 meses**. Ver [D-15 §5.3](15-nfr.md) y [D-06 §8](06-matriz-permisos.md)
+- ✅ **Cerrada.** `EVENTO` **no cabe en HubSpot** — el timeline cubre una parte, no los 22 tipos. Vive **solo en la base propia** y no se reconcilia. Ver [D-11 §6](11-fuentes-de-verdad.md)
 - Motivos estructurados de E-03: catálogo cerrado de razones de escalamiento

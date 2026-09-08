@@ -122,7 +122,7 @@ Adapta el tono al estilo del cliente. NO uses plantillas rígidas."""
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Respuesta fija para consultas sobre El Libertador (estudio de crédito para arriendo)
- = """EL REQUISITOS PARA ESTUDIO DE CRÉDITO – ARRIENDO ES MUY FACIL: SOLO SE REQUIERE
+RESPUESTA_LIBERTADOR = """EL REQUISITOS PARA ESTUDIO DE CRÉDITO – ARRIENDO ES MUY FACIL: SOLO SE REQUIERE
 
 Un Arrendatario + Deudor Solidario
 Cada uno debe contar con ingresos

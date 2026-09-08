@@ -10,7 +10,7 @@ from prompts.conversation.info import (
     SYSTEM_AGENT_PROMPT_WITH_USER,
     RAG_GENERATION_INSTRUCTIONS,
     FIRST_MESSAGE_INSTRUCTIONS,
-    RESPUESTA_LIBERTADOR,
+    LIBERTADOR_RESPONSE,
     LIBERTADOR_PATTERNS
 )
 from state_manager import ConversationState
@@ -103,7 +103,7 @@ class InfoAgent: # Renombrado de 'infoAgent' a 'InfoAgent' por convención
         # ═══════════════════════════════════════════════════════════════════
         if self._check_libertador_query(user_input):
             logger.info("[InfoAgent] ⚡ Detectada consulta sobre El Libertador - Retornando respuesta fija")
-            return RESPUESTA_LIBERTADOR
+            return LIBERTADOR_RESPONSE
 
         # Detectar si es primer mensaje para incluir presentación
         is_first_message = state and state.metadata.get("is_first_message", False)

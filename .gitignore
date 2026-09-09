@@ -32,24 +32,9 @@ htmlcov/
 *.cover
 cleanup_report_*.csv
 
-# Carpetas bases
-/docs/*
-!/docs/rediseno/
-!/docs/staging/
-!/docs/adr/
-!/docs/README.md
-/backup_pre_migration_20260423/
-# tests/ y scripts/ SI se versionan (sep-2026). Antes estaban ignorados con una
-# lista blanca de 9 ficheros, asi que cada checkout tenia una suite distinta y
-# `pytest tests/` no corria lo mismo en dos maquinas. Credenciales y PII se
-# limpiaron antes de versionar; no volver a meter ni telefonos ni nombres reales.
-/test/
 
-# Archivos
-DEPLOYMENT_REPORT_4FIXES.md
-.railway.json
-.migrate_checkpoint.json
-.CLAUDE.md
+# Memoria de claude
+.claude/
 
 # Logs y outputs locales (contienen PII de clientes)
 railway_logs_output.txt

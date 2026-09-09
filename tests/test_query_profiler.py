@@ -71,7 +71,7 @@ class _FakeMongoEvent:
         self.duration_micros = duration_ms * 1000
         self.command = {
             "find": "messages",
-            "filter": {"phone": "+573138405930", "name": "Maria Gomez"},
+            "filter": {"phone": "+573001234567", "name": "Fulanita Detal"},
         }
 
 
@@ -87,7 +87,7 @@ def test_04_slow_query_log_never_contains_pii(caplog):
     text = caplog.text
     assert "SLOW" in text, "No se logueo la query lenta"
     assert "messages" in text, "Deberia identificar la coleccion"
-    assert "3138405930" not in text, "FUGA DE PII: telefono en logs"
+    assert "3001234567" not in text, "FUGA DE PII: telefono en logs"
     assert "Maria" not in text, "FUGA DE PII: nombre en logs"
     assert "filter" not in text, "El filtro completo no debe loguearse"
 
@@ -99,9 +99,9 @@ def test_04b_safe_path_masks_phone_in_url():
     Loguear request.url.path crudo mandaba telefonos completos a Railway.
     CLAUDE.md regla 2 lo prohibe explicitamente.
     """
-    assert qp._safe_path("/panel/contacts/+573138405930/detail") == "/panel/contacts/{id}/detail"
-    assert qp._safe_path("/panel/conversations/573138405930") == "/panel/conversations/{id}"
-    assert qp._safe_path("/panel/reset-bot/+573138405930") == "/panel/reset-bot/{id}"
+    assert qp._safe_path("/panel/contacts/+573001234567/detail") == "/panel/contacts/{id}/detail"
+    assert qp._safe_path("/panel/conversations/573001234567") == "/panel/conversations/{id}"
+    assert qp._safe_path("/panel/reset-bot/+573001234567") == "/panel/reset-bot/{id}"
     # Rutas sin PII quedan intactas
     assert qp._safe_path("/panel/contacts") == "/panel/contacts"
     assert qp._safe_path("/panel/metrics") == "/panel/metrics"
@@ -119,7 +119,7 @@ async def test_04d_slow_request_log_never_leaks_phone(caplog, monkeypatch):
     class _Req:
         method = "GET"
         class url:
-            path = "/panel/contacts/+573138405930/detail"
+            path = "/panel/contacts/+573001234567/detail"
 
     async def call_next(request):
         return _FakeResponse()
@@ -128,7 +128,7 @@ async def test_04d_slow_request_log_never_leaks_phone(caplog, monkeypatch):
         await qp.server_timing_middleware(_Req(), call_next)
 
     assert "SLOW" in caplog.text, "No se logueo el request lento"
-    assert "3138405930" not in caplog.text, "FUGA DE PII: telefono en el log de request lento"
+    assert "3001234567" not in caplog.text, "FUGA DE PII: telefono en el log de request lento"
     assert "{id}" in caplog.text, "El path deberia aparecer enmascarado"
 
 
@@ -136,7 +136,7 @@ def test_05_failed_query_log_never_contains_pii(caplog):
     listener = qp._build_mongo_listener()
     with caplog.at_level(logging.ERROR):
         listener.failed(_FakeMongoEvent(10))
-    assert "3138405930" not in caplog.text
+    assert "3001234567" not in caplog.text
     assert "Maria" not in caplog.text
 
 
@@ -307,7 +307,7 @@ async def test_13b_httpx_hooks_actually_measure(monkeypatch, caplog):
             event_hooks=qp.build_httpx_event_hooks(),
         ) as client:
             await client.get(
-                "https://api.hubapi.com/crm/v3/objects/contacts?phone=%2B573138405930"
+                "https://api.hubapi.com/crm/v3/objects/contacts?phone=%2B573001234567"
             )
             await client.get("https://api.hubapi.com/crm/v3/objects/contacts")
 
@@ -316,7 +316,7 @@ async def test_13b_httpx_hooks_actually_measure(monkeypatch, caplog):
         f"Los hooks no midieron las 2 llamadas: {stats}"
     )
     assert stats["hubspot_ms"] > 0.0, "Duracion de HubSpot quedo en 0"
-    assert "3138405930" not in caplog.text, (
+    assert "3001234567" not in caplog.text, (
         "FUGA DE PII: el query string llego a los logs"
     )
 

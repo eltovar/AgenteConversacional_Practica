@@ -249,12 +249,12 @@ def test_la_traza_no_filtra_datos_del_cliente():
         "type": "whatsapp",
         "data": {
             "context": {"MessageId": WAMID},
-            "author": {"Name": "Emperatriz Espinosa", "Phone": "+573105155781"},
+            "author": {"Name": "Fulanita Detal", "Phone": "+573009998877"},
             "body": "mi cedula es 1020304050",
         },
     })
     linea, _ = rt.traza("SM" + "f" * 32, "finca_raiz", None, cm)
-    for secreto in ("Emperatriz", "Espinosa", "3105155781", "1020304050", "cedula"):
+    for secreto in ("Fulanita", "Detal", "3009998877", "1020304050", "cedula"):
         assert secreto not in linea
 
 

@@ -4,12 +4,12 @@ import logging
 
 
 def test_safe_phone_masks_digits_but_keeps_correlation():
-    raw = "whatsapp:+573138405930"
+    raw = "whatsapp:+573001234567"
     masked = safe_phone(raw)
 
-    assert "573138405930" not in masked
-    assert "3138405930" not in masked
-    assert masked.startswith("phone:***5930#")
+    assert "573001234567" not in masked
+    assert "3001234567" not in masked
+    assert masked.startswith("phone:***4567#")
     assert safe_phone(raw) == masked
 
 
@@ -32,11 +32,11 @@ def test_safe_id_masks_external_identifier():
 
 
 def test_safe_error_masks_phone_like_sequences():
-    masked = safe_error("fallo enviando a +57 313 840 5930 por timeout")
+    masked = safe_error("fallo enviando a +57 300 123 4567 por timeout")
 
     assert "313" not in masked
-    assert "573138405930" not in masked
-    assert "id:***5930#" in masked
+    assert "573001234567" not in masked
+    assert "id:***4567#" in masked
     assert "timeout" in masked
 
 
@@ -50,7 +50,7 @@ def test_safe_url_removes_query_tokens():
 
 
 def test_safe_mapping_logs_only_keys():
-    masked = safe_mapping({"nombre": "Luisa", "telefono": "+573138405930", "vacio": ""}, "meta")
+    masked = safe_mapping({"nombre": "Luisa", "telefono": "+573001234567", "vacio": ""}, "meta")
 
     assert "Luisa" not in masked
     assert "+573" not in masked
@@ -64,7 +64,7 @@ def test_sensitive_data_filter_masks_unwrapped_log_messages():
         level=logging.INFO,
         pathname=__file__,
         lineno=1,
-        msg="fallo para whatsapp:+573138405930 url=https://x.test/file?token=secret",
+        msg="fallo para whatsapp:+573001234567 url=https://x.test/file?token=secret",
         args=(),
         exc_info=None,
     )
@@ -72,7 +72,7 @@ def test_sensitive_data_filter_masks_unwrapped_log_messages():
     assert SensitiveDataFilter().filter(record)
     rendered = record.getMessage()
 
-    assert "573138405930" not in rendered
+    assert "573001234567" not in rendered
     assert "secret" not in rendered
-    assert "phone:***5930#" in rendered
+    assert "phone:***4567#" in rendered
     assert "token={masked}" in rendered

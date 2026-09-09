@@ -21,7 +21,7 @@ from starlette.requests import Request
 from middleware import webhook_handler as wh
 from utils import reply_trace as rt
 
-TELEFONO_FALSO = "+573138405930"
+TELEFONO_FALSO = "+573001234567"
 WAMID = "wamid.HBgMNTczMDAxMjM0NTY3FQIAEhggQTFCMkMzRDRFNUY2"
 
 
@@ -203,10 +203,10 @@ async def test_el_diagnostico_de_forma_no_lleva_valores(caplog):
 
 async def test_la_traza_no_registra_el_telefono_ni_el_cuerpo(caplog):
     lineas = await _lineas_de_traza(caplog, _campos_base(
-        Body="mi numero es 3138405930",
+        Body="mi numero es 3001234567",
         ChannelMetadata=_channel_metadata(con_cita=True),
     ))
     for linea in lineas:
-        assert "3138405930" not in linea
+        assert "3001234567" not in linea
         assert "apartamento" not in linea
         assert WAMID not in linea

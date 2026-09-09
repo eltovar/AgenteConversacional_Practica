@@ -33,25 +33,16 @@ htmlcov/
 cleanup_report_*.csv
 
 # Carpetas bases
-/scripts/
 /docs/*
 !/docs/rediseno/
 !/docs/staging/
 !/docs/adr/
 !/docs/README.md
 /backup_pre_migration_20260423/
-/tests/*
-!/tests/test_safe_logging.py
-!/tests/test_whatsapp_identity.py
-!/tests/test_bsuid_webhook.py
-!/tests/test_panel_bsuid_compat.py
-!/tests/test_phone_normalizer_international.py
-!/tests/test_multimedia_regresion.py
-!/tests/test_bsuid_phone_capture.py
-!/tests/test_identity_migration.py
-!/tests/test_panel_phone_edit.py
-!/tests/fixtures/
-!/tests/fixtures/fixtures_bsuid.json
+# tests/ y scripts/ SI se versionan (sep-2026). Antes estaban ignorados con una
+# lista blanca de 9 ficheros, asi que cada checkout tenia una suite distinta y
+# `pytest tests/` no corria lo mismo en dos maquinas. Credenciales y PII se
+# limpiaron antes de versionar; no volver a meter ni telefonos ni nombres reales.
 /test/
 
 # Archivos

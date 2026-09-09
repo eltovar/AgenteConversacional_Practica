@@ -96,7 +96,7 @@ def mongo(monkeypatch):
 async def test_guarda_el_saliente_con_su_sid(mongo):
     """El SID es lo único que permite resolver una cita después."""
     await wh._persistir_saliente(
-        phone="+573138405930",
+        phone="+573001234567",
         contenido="En un momento te contacta una asesora",
         resultado_envio={"status": "success", "message_sid": "SM5f713af5"},
         canal="finca_raiz",
@@ -114,7 +114,7 @@ async def test_guarda_el_saliente_con_su_sid(mongo):
 async def test_no_guarda_si_el_envio_fallo(mongo):
     """Si Twilio no lo entregó, el cliente no lo vio y no hay nada que citar."""
     await wh._persistir_saliente(
-        phone="+573138405930",
+        phone="+573001234567",
         contenido="hola",
         resultado_envio={"status": "error", "error_code": 21610},
         canal="whatsapp",
@@ -125,7 +125,7 @@ async def test_no_guarda_si_el_envio_fallo(mongo):
 @pytest.mark.asyncio
 async def test_no_guarda_si_no_hubo_resultado(mongo):
     await wh._persistir_saliente(
-        phone="+573138405930", contenido="hola",
+        phone="+573001234567", contenido="hola",
         resultado_envio=None, canal="whatsapp",
     )
     assert mongo.guardados == []
@@ -140,7 +140,7 @@ async def test_un_fallo_de_mongo_no_tumba_el_procesamiento(monkeypatch):
 
     monkeypatch.setattr(wh, "get_mongo_manager", lambda: _Rota())
     await wh._persistir_saliente(          # no debe propagar
-        phone="+573138405930", contenido="hola",
+        phone="+573001234567", contenido="hola",
         resultado_envio={"status": "success", "message_sid": "SM1"},
         canal="whatsapp",
     )
@@ -150,7 +150,7 @@ async def test_un_fallo_de_mongo_no_tumba_el_procesamiento(monkeypatch):
 async def test_prefiere_el_conversation_sid_del_envio(mongo):
     """El del resultado es el real; el del parámetro es el de la petición."""
     await wh._persistir_saliente(
-        phone="+573138405930", contenido="hola",
+        phone="+573001234567", contenido="hola",
         resultado_envio={
             "status": "success",
             "message_sid": "SM1",

@@ -31,7 +31,10 @@ from .identity_migration import migrate_identity_to_phone
 from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso, TIMEZONE_BOGOTA
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
-from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
+from .templates.templates import (  # Templates predefinidos
+    DEFAULT_TEMPLATES,
+    SOLO_AUTOMATICAS,
+)
 from utils.twilio_client import twilio_client
 from utils.date_parser import (
     DIAS_SEMANA_ABREV,
@@ -51,6 +54,7 @@ from utils.advisors_registry import (
     get_advisor_names,
     get_lead_receiving_ids,
     get_panel_advisor_ids,
+    get_panel_templates,
     get_transfer_target,
 )
 from integrations.hubspot import (
@@ -306,6 +310,7 @@ PIPELINE_STAGES = {
     "customer": "Cerrado ganado",
     "evangelist": "Cerrado perdido",
     "other": "No responde",
+    "1407668893": "Seguimiento",
     "1326623067": "Hasta 1.5M",
     "1326631573": "Hasta 2M",
     "1326632625": "Hasta 2.5M",
@@ -318,7 +323,7 @@ PIPELINE_STAGES = {
     "subscriber": "Reubicados",
     "lead": "Aprobado",
     "1353539189": "Venta",
-    "1407668893": "Seguimiento"
+    "1435775659": "Posible Espia"
 }
 
 # Lista ordenada de etapas para el frontend
@@ -331,6 +336,7 @@ PIPELINE_STAGES_LIST = [
     {"id": "customer", "name": "Cerrado ganado"},
     {"id": "evangelist", "name": "Cerrado perdido"},
     {"id": "other", "name": "No responde"},
+    {"id": "1407668893", "name": "Seguimiento"},
     {"id": "1326623067", "name": "Hasta 1.5M"},
     {"id": "1326631573", "name": "Hasta 2M"},
     {"id": "1326632625", "name": "Hasta 2.5M"},
@@ -343,7 +349,7 @@ PIPELINE_STAGES_LIST = [
     {"id": "subscriber", "name": "Reubicados"},
     {"id": "lead", "name": "Aprobado"},
     {"id": "1353539189", "name": "Venta"},
-    {"id": "1407668893", "name": "Seguimiento"}
+    {"id": "1435775659", "name": "Posible Espia"}
 ]
 
 @dataclass
@@ -1891,6 +1897,30 @@ async def _get_all_templates_by_advisor(advisor_id: str) -> list:
     return templates
 
 
+def _picker_visible(template: dict, permitidas: Optional[list]) -> bool:
+    """
+    Decide si una plantilla se ofrece en el picker del chat de esta asesora.
+
+    Why: el reparto por asesora se decide aquí y no en el navegador porque
+    `ADVISOR_ID` sale de un query param de la URL (index.js:126-133) — filtrar en
+    cliente sería cosmético. El endpoint sigue devolviendo TODAS las plantillas:
+    el modal de administración las necesita. Esto solo las etiqueta.
+    """
+    tid = template.get("id")
+
+    # Plantilla creada por la asesora desde el modal del panel: intocable.
+    # Se mira la pertenencia al catálogo y no el flag `is_default` porque editar
+    # una predefinida la copia al namespace personal y el flag deja de ser fiable.
+    if tid not in DEFAULT_TEMPLATES:
+        return True
+
+    if tid in SOLO_AUTOMATICAS:
+        return False
+
+    # `permitidas is None` = asesora sin reparto definido: ve el catálogo entero.
+    return permitidas is None or tid in permitidas
+
+
 async def _get_template_by_advisor(advisor_id: str, template_id: str) -> Optional[dict]:
     r = await _get_redis_client()
     key = f"{TEMPLATE_PREFIX}{advisor_id}:{template_id}"
@@ -3204,8 +3234,10 @@ async def list_templates(
         raise HTTPException(status_code=401, detail="API Key inválida")
     await _init_default_templates()
     templates = await _get_all_templates_by_advisor(advisor_id)
+    permitidas = get_panel_templates(advisor_id)
     categories = {}
     for t in templates:
+        t["picker_visible"] = _picker_visible(t, permitidas)
         cat = t.get("category", "otros")
         if cat not in categories:
             categories[cat] = []

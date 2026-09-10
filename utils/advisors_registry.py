@@ -23,6 +23,10 @@ from typing import Dict, List, Optional
 #                     le transfieren a mano, así que tiene bandeja.
 #   receives_transfers  Destino de las transferencias por embudo (los 10 de
 #                     STAGES_TRANSFER_TO_LUISA). Solo una asesora puede serlo.
+#   panel_templates   Ids de las plantillas PREDEFINIDAS que ve en el picker del
+#                     chat. None = sin reparto, ve el catalogo entero. Las que la
+#                     asesora crea a mano desde el modal del panel viven en Redis
+#                     y NUNCA se ven afectadas por este campo.
 
 ADVISORS: Dict[str, dict] = {
     "89096378": {
@@ -31,6 +35,11 @@ ADVISORS: Dict[str, dict] = {
         "receives_leads": True,
         "uses_panel": True,
         "receives_transfers": False,
+        "panel_templates": [
+            "saludo_reactivador_inmueble",
+            "cita_confirmacion",
+            "seguimiento_personalizado",
+        ],
     },
     "89096380": {
         "name": "Luisa",
@@ -38,6 +47,10 @@ ADVISORS: Dict[str, dict] = {
         "receives_leads": True,
         "uses_panel": True,
         "receives_transfers": True,
+        "panel_templates": [
+            "cita_confirmacion",
+            "seguimiento_personalizado",
+        ],
     },
     "89096379": {
         "name": "Monica",
@@ -45,6 +58,7 @@ ADVISORS: Dict[str, dict] = {
         "receives_leads": False,
         "uses_panel": True,
         "receives_transfers": False,
+        "panel_templates": None,
     },
     "82598814": {
         "name": "Equipo de Marketing",
@@ -52,6 +66,7 @@ ADVISORS: Dict[str, dict] = {
         "receives_leads": False,
         "uses_panel": False,
         "receives_transfers": False,
+        "panel_templates": None,
     },
 }
 
@@ -94,6 +109,19 @@ def get_transfer_target() -> Optional[str]:
         if cfg["receives_transfers"]:
             return aid
     return None
+
+
+def get_panel_templates(advisor_id: str) -> Optional[List[str]]:
+    """
+    Ids de las plantillas predefinidas que esta asesora ve en el picker del chat.
+
+    None significa "sin reparto": ve el catálogo entero. Es distinto de `[]`, que
+    sería un reparto vacío y le dejaría el picker sin ninguna predefinida. Una
+    asesora que no esté en el registro también devuelve None: mejor que vea de más
+    a que se quede sin poder reabrir una ventana de 24h cerrada.
+    """
+    cfg = ADVISORS.get(str(advisor_id))
+    return cfg.get("panel_templates") if cfg else None
 
 
 def get_team(advisor_id: str) -> Optional[str]:

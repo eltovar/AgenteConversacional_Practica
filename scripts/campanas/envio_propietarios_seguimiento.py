@@ -1,5 +1,5 @@
 """
-Envío masivo: Template "Seguimiento Personalizado" a propietarios Envigado.
+Envío masivo: Template "campana_propietarios" a propietarios Envigado.
 
 Usa la misma base de datos Excel que carga_200_propietarios_envigado.py.
 NO toca Redis ni panel — el contacto solo aparece en inbox si responde.
@@ -30,6 +30,9 @@ try:
 except ImportError:
     pass
 
+# Después de load_dotenv a propósito: content_sids lee las env vars al importarse.
+from middleware.templates import content_sids as _content_sids  # noqa: E402
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -39,7 +42,15 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 
-TEMPLATE_SID = "HXd1c44acc7571a216729fcb4f778db019"
+# El SID que había aquí a fuego (HXd1c44acc7571a216729fcb4f778db019) pertenecía a la
+# cuenta Twilio anterior a la migración del 4-ago-2026: ya no existe, así que el envío
+# fallaba con HTTP 400 en el primer contacto. Se toma de la fuente única de verdad.
+#
+# ⚠️ Esto cambia el MENSAJE, no solo el SID: `campana_propietarios` es el texto de
+# captación de inmuebles, no un «seguimiento personalizado». Ambos toman una sola
+# variable {{1}}=nombre, así que el envío funciona igual. Verificar el texto en el
+# --preview antes de un --execute.
+TEMPLATE_SID = _content_sids.CAMPANA_PROPIETARIOS
 
 EXCEL_PATH = "BASE_DATOS_PROPIETARIOS_CELULARES.xlsx"
 LOG_PATH = "envio_propietarios_seguimiento.log"
@@ -190,7 +201,7 @@ async def send_template(
 
 def print_preview(records: List[PropietarioRecord]):
     print("\n" + "=" * 80)
-    print("  📤 ENVÍO MASIVO — Seguimiento Personalizado a Propietarios")
+    print("  📤 ENVÍO MASIVO — Campaña Propietarios (captación de inmuebles)")
     print("=" * 80)
     print(f"  Template: {TEMPLATE_SID}")
     print(f"  Desde:    {TWILIO_PHONE_NUMBER}")
@@ -294,7 +305,7 @@ def main():
     if args.execute:
         print_preview(records)
         print(f"\n⚠  Enviar template a {len(records)} propietarios vía WhatsApp")
-        print(f"   Template: Seguimiento Personalizado ({TEMPLATE_SID})")
+        print(f"   Template: campana_propietarios ({TEMPLATE_SID})")
         print(f"   Desde:    {TWILIO_PHONE_NUMBER}")
         confirm = input("\n   ¿Continuar? (SI): ")
         if confirm.strip().upper() != "SI":

@@ -1705,10 +1705,13 @@ async def check_appointment_followup2():
                         try:
                             canal_apt = apt.canal or "whatsapp"
                             mongo_mgr = get_mongo_manager()
+                            # Espejo de `experiencia_citav2` (FOLLOWUP_2). Twilio manda por
+                            # ContentSid, así que este texto solo alimenta el historial del
+                            # panel: si diverge, la asesora lee algo distinto de lo que
+                            # recibió el cliente.
                             survey_preview = (
                                 f"Hola {contact_name},  Para nosotros es importante conocer tu "
-                                f"experiencia y seguir mejorando la calidad de nuestro servicio: "
-                                f"https://forms.gle/W3bQbDVFkR4ybVbW6"
+                                f"experiencia: https://forms.gle/W3bQbDVFkR4ybVbW6"
                             )
                             await mongo_mgr.save_message(
                                 phone=apt.phone_normalized,

@@ -91,6 +91,7 @@ const PIPELINE_STAGES = [
     { id: "customer", name: "Cerrado ganado" },
     { id: "evangelist", name: "Cerrado perdido" },
     { id: "other", name: "No responde" },
+    { id: "1407668893", name: "Seguimiento" },
     { id: "1326623067", name: "Hasta 1.5M" },
     { id: "1326631573", name: "Hasta 2M" },
     { id: "1326632625", name: "Hasta 2.5M" },
@@ -103,7 +104,7 @@ const PIPELINE_STAGES = [
     { id: "subscriber", name: "Reubicados" },
     { id: "lead", name: "Aprobado" },
     { id: "1353539189", name: "Venta" },
-    { id: "1407668893", name: "Seguimiento" }
+    { id: "1435775659", name: "Posible Espia" }
 ];
 
 // Todos los portales disponibles — todos los asesores pueden seleccionar cualquier portal al crear un contacto.
@@ -674,7 +675,13 @@ function renderTemplatePicker(filter) {
     };
 
     const categories = {};
+    // Que plantilla ve cada asesora lo decide el backend (outbound_panel.py:
+    // _picker_visible): ADVISOR_ID sale de un query param de la URL, asi que un
+    // reparto hecho aqui seria cosmetico. El modal de administracion no filtra.
+    // `!== false` a proposito: si el backend aun no manda el campo, se ve todo en
+    // vez de quedarse el picker en blanco.
     templatesData
+        .filter(t => t.picker_visible !== false)
         .filter(t => !f
             || t.name.toLowerCase().includes(f)
             || (t.category || '').toLowerCase().includes(f)

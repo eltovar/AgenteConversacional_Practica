@@ -3616,7 +3616,6 @@ async def delete_template(
 # Endpoint para CREAR contacto manualmente
 # ============================================================================
 
-@router.post("/contacts/create")
 async def create_manual_contact(
     firstname: str = Form(..., description="Nombre del contacto"),
     phone: str = Form(..., description="Teléfono del contacto"),
@@ -3876,7 +3875,6 @@ async def create_manual_contact(
 # Endpoint para TRANSFERIR contacto a otra asesora
 # ============================================================================
 
-@router.post("/contacts/{phone}/transfer")
 async def transfer_contact(
     phone: str,
     to_owner_id: str = Form(..., description="ID del asesor destino"),
@@ -3999,7 +3997,6 @@ def _get_advisor_name(advisor_id: str) -> str:
 # Endpoints de Solicitud de Transferencia
 # ============================================================================
 
-@router.post("/contacts/{contact_id}/transfer-request")
 async def request_transfer(
     contact_id: str,
     phone: str = Query(..., description="Teléfono normalizado del contacto"),
@@ -4074,7 +4071,6 @@ async def request_transfer(
     return {"status": "transferred", "phone": phone, "canal": canal}
 
 
-@router.post("/contacts/{contact_id}/transfer-accept")
 async def accept_transfer(
     contact_id: str,
     by_advisor_id: str = Query(..., description="ID del asesor que acepta (propietario actual)"),
@@ -4147,7 +4143,6 @@ async def accept_transfer(
     return {"status": "accepted"}
 
 
-@router.post("/contacts/{contact_id}/transfer-reject")
 async def reject_transfer(
     contact_id: str,
     by_advisor_id: str = Query(..., description="ID del asesor que rechaza"),
@@ -4186,7 +4181,6 @@ async def reject_transfer(
 # Endpoint para editar nombre de contacto
 # ============================================================================
 
-@router.patch("/contacts/{contact_id}/name")
 async def update_contact_name(
     contact_id: str,
     firstname: str = Form(..., description="Nombre del contacto"),
@@ -4392,7 +4386,6 @@ async def _close_conversation_internal(
     }
 
 
-@router.delete("/contacts/{phone}/close")
 async def close_conversation(
     phone: str,
     canal: Optional[str] = None,
@@ -4420,7 +4413,6 @@ async def close_conversation(
 # Endpoint: Marcar contacto como leído (borra del advisor_inbox en Redis)
 # ============================================================================
 
-@router.post("/contacts/{phone}/mark-read")
 async def mark_contact_read(
     phone: str,
     advisor_id: Optional[str] = Query(None, description="ID del asesor que leyó el contacto (se infiere del meta si no se provee)"),
@@ -4668,7 +4660,6 @@ async def _auto_close_by_stage(
 # Endpoint para actualizar lifecyclestage del Contact en HubSpot
 # ============================================================================
 
-@router.patch("/contacts/{contact_id}/stage")
 async def update_contact_stage(
     contact_id: str,
     stage_id: str = Body(..., embed=True),
@@ -4779,7 +4770,6 @@ _CANALES_DISPLAY_VALIDOS = [
 ]
 
 
-@router.patch("/contacts/{phone}/canal")
 async def update_contact_canal_display(
     phone: str,
     canal_display: str = Body(..., embed=True),
@@ -4915,7 +4905,6 @@ async def get_pipeline_stages(
     }
 
 
-@router.post("/reset-bot/{phone}")
 async def reset_bot_state(
     phone: str,
     canal: Optional[str] = Query(None, description="Canal específico a resetear"),
@@ -5026,7 +5015,6 @@ async def reset_bot_state(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/window-status/{phone}")
 async def get_window_status(
     phone: str,
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -5053,7 +5041,6 @@ async def get_window_status(
     }
 
 
-@router.get("/contacts/{phone}/detail")
 async def get_contact_detail(
     phone: str,
     contact_id: Optional[str] = Query(None, description="ID del contacto en HubSpot"),
@@ -5206,7 +5193,6 @@ async def get_contact_detail(
     }
 
 
-@router.get("/contacts/{phone}/hydrate")
 async def hydrate_contact_endpoint(
     phone: str,
     canal: Optional[str] = Query(None, description="Canal preferido (hint) si se conoce"),
@@ -5235,7 +5221,6 @@ async def hydrate_contact_endpoint(
     return hydrated
 
 
-@router.get("/conversations/{phone}")
 @limiter.limit("60/minute")
 async def get_conversation_history(
     request: Request,
@@ -5357,7 +5342,6 @@ async def get_conversation_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/history/{contact_id}")
 @limiter.limit("60/minute")
 async def get_history_by_contact_id(
     request: Request,
@@ -5541,7 +5525,6 @@ async def get_history_by_contact_id(
         )
 
 
-@router.post("/contacts/{phone}/take-control")
 async def take_control_of_conversation(
     phone: str,
     canal: Optional[str] = Query(None, description="Canal de origen"),
@@ -5725,7 +5708,6 @@ async def debug_redis(
         }
 
 
-@router.get("/contacts/search")
 async def search_contacts_by_keyword(
     q: str = Query(..., min_length=2, max_length=100, description="Palabra clave a buscar"),
     limit: int = Query(20, ge=1, le=50),
@@ -6109,7 +6091,6 @@ def _split_always_visible(
     }
 
 
-@router.get("/contacts")
 @limiter.limit("30/minute")
 async def get_active_contacts(
     request: Request,

@@ -6,7 +6,7 @@ until the next, deeper extraction.
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.templates_service import (
     create_template,
     delete_template,
     get_template_by_id,

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import websocket_endpoint
+from services.panel.realtime_service import websocket_endpoint
 
 
 router = APIRouter(prefix="/whatsapp/panel", tags=["Panel de Envío"])

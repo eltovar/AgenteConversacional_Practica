@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.scheduled_messages_service import (
     cancel_scheduled_message,
     create_scheduled_message,
     get_scheduled_messages,

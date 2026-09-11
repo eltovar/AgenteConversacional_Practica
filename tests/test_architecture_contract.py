@@ -1,9 +1,13 @@
 from utils.architecture_contract import (
     ARCHITECTURE_COMPONENTS,
     ARCHITECTURE_EDGES,
+    DATA_DEPENDENCIES,
     DOMAIN_SOURCES_OF_TRUTH,
+    EXTERNAL_PROVIDER_COMPONENTS,
+    OWNED_DATA_COMPONENTS,
     SOURCE_COMPONENTS,
     architecture_contract_summary,
+    data_dependency_keys_by_ownership,
     find_edges_for_component,
     validate_architecture_contract,
 )
@@ -79,3 +83,20 @@ def test_component_lookup_connects_scheduler_and_panel():
 
     assert "scheduled_jobs" in scheduler_edges
     assert {"manual_response", "panel_contacts"}.issubset(panel_edges)
+
+
+def test_data_dependencies_separate_owned_data_from_external_providers():
+    assert OWNED_DATA_COMPONENTS == {"mongo", "pgvector", "redis"}
+    assert EXTERNAL_PROVIDER_COMPONENTS == {"bunny", "hubspot", "openai", "twilio"}
+    assert OWNED_DATA_COMPONENTS.isdisjoint(EXTERNAL_PROVIDER_COMPONENTS)
+
+    for key, dependency in DATA_DEPENDENCIES.items():
+        assert key in ARCHITECTURE_COMPONENTS
+        assert dependency.role
+        assert dependency.migration_policy
+        assert dependency.evidence
+
+
+def test_data_dependency_lookup_is_filterable_by_ownership():
+    assert data_dependency_keys_by_ownership("owned") == ("mongo", "pgvector", "redis")
+    assert data_dependency_keys_by_ownership("external") == ("bunny", "hubspot", "openai", "twilio")

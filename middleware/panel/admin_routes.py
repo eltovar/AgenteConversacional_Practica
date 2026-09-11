@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.admin_service import (
     cleanup_stale_inbox,
     recover_lost_conversations,
     recover_outage,

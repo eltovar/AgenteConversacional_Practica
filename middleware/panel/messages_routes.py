@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.messages_service import (
     delete_advisor_message,
     edit_advisor_message,
     send_message,

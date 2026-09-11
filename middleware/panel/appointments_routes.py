@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.appointments_service import (
     cancel_appointment,
     create_appointment,
     delete_appointment,

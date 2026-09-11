@@ -14,6 +14,9 @@ def get_panel_router() -> APIRouter:
     from middleware.panel.advisors_routes import router as advisors_router
     from middleware.panel.appointments_routes import router as appointments_router
     from middleware.panel.bulk_campaigns_routes import router as bulk_campaigns_router
+    from middleware.panel.bot_control_routes import router as bot_control_router
+    from middleware.panel.contacts_routes import router as contacts_router
+    from middleware.panel.conversations_routes import router as conversations_router
     from middleware.panel.diagnostics_routes import router as diagnostics_router
     from middleware.panel.messages_routes import router as messages_router
     from middleware.panel.metrics_routes import router as metrics_router
@@ -23,6 +26,7 @@ def get_panel_router() -> APIRouter:
     from middleware.panel.realtime_routes import router as realtime_router
     from middleware.panel.scheduled_messages_routes import router as scheduled_messages_router
     from middleware.panel.templates_routes import router as templates_router
+    from middleware.panel.transfer_routes import router as transfer_router
     from middleware.panel.ui_routes import router as ui_router
     from middleware.panel.workers_routes import router as workers_router
 
@@ -37,6 +41,10 @@ def get_panel_router() -> APIRouter:
     router.include_router(scheduled_messages_router)
     router.include_router(bulk_campaigns_router)
     router.include_router(messages_router)
+    router.include_router(contacts_router)
+    router.include_router(transfer_router)
+    router.include_router(bot_control_router)
+    router.include_router(conversations_router)
     router.include_router(metrics_router)
     router.include_router(appointments_router)
     router.include_router(notes_router)

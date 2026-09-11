@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.notifications_service import (
     get_advisor_notifications,
     mark_all_notifications_read,
     mark_notification_read,

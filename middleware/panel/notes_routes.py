@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.notes_service import (
     create_contact_note,
     delete_contact_note,
     get_contact_notes,

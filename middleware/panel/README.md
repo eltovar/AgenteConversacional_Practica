@@ -36,9 +36,11 @@ Orden sugerido:
 12. `ui_routes.py` - iniciado: raiz HTML del panel.
 13. `realtime_routes.py` - iniciado: WebSocket del panel.
 14. `messages_routes.py` - iniciado: envio manual JSON/form y edicion/eliminacion.
-15. `contacts_routes.py`
-16. `conversations_routes.py`
-17. `admin_routes.py` - iniciado: recuperacion y mantenimiento administrativo.
+15. `contacts_routes.py` - iniciado: creacion, lectura, estado, canal y control humano.
+16. `transfer_routes.py` - iniciado: transferencia directa y flujo solicitud/aceptacion/rechazo.
+17. `bot_control_routes.py` - iniciado: reset del bot y estado de ventana WhatsApp.
+18. `conversations_routes.py` - iniciado: historial por telefono y por contacto.
+19. `admin_routes.py` - iniciado: recuperacion y mantenimiento administrativo.
 
 Mientras una ruta siga en `outbound_panel.py`, este paquete la expone por medio
 del router legado. Cuando se migre un grupo, se retira del router legado y se

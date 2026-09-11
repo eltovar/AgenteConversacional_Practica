@@ -94,6 +94,29 @@ def test_panel_boundary_exposes_extracted_route_groups(monkeypatch):
     assert ("DELETE", "/whatsapp/panel/messages/{mongo_id}") in routes
     assert ("POST", "/whatsapp/panel/send-message-json") in routes
 
+    assert ("POST", "/whatsapp/panel/contacts/create") in routes
+    assert ("PATCH", "/whatsapp/panel/contacts/{contact_id}/name") in routes
+    assert ("DELETE", "/whatsapp/panel/contacts/{phone}/close") in routes
+    assert ("POST", "/whatsapp/panel/contacts/{phone}/mark-read") in routes
+    assert ("PATCH", "/whatsapp/panel/contacts/{contact_id}/stage") in routes
+    assert ("PATCH", "/whatsapp/panel/contacts/{phone}/canal") in routes
+    assert ("GET", "/whatsapp/panel/contacts/{phone}/detail") in routes
+    assert ("GET", "/whatsapp/panel/contacts/{phone}/hydrate") in routes
+    assert ("POST", "/whatsapp/panel/contacts/{phone}/take-control") in routes
+    assert ("GET", "/whatsapp/panel/contacts/search") in routes
+    assert ("GET", "/whatsapp/panel/contacts") in routes
+
+    assert ("POST", "/whatsapp/panel/contacts/{phone}/transfer") in routes
+    assert ("POST", "/whatsapp/panel/contacts/{contact_id}/transfer-request") in routes
+    assert ("POST", "/whatsapp/panel/contacts/{contact_id}/transfer-accept") in routes
+    assert ("POST", "/whatsapp/panel/contacts/{contact_id}/transfer-reject") in routes
+
+    assert ("POST", "/whatsapp/panel/reset-bot/{phone}") in routes
+    assert ("GET", "/whatsapp/panel/window-status/{phone}") in routes
+
+    assert ("GET", "/whatsapp/panel/conversations/{phone}") in routes
+    assert ("GET", "/whatsapp/panel/history/{contact_id}") in routes
+
     assert ("GET", "/whatsapp/panel/") in routes
 
 

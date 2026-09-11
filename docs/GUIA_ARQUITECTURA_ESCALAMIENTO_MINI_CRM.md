@@ -24,6 +24,21 @@ Lo que no esta listo para escalar sin orden:
 - Staging existe a nivel visual, pero debe bloquear escrituras reales por defecto antes de usarlo con confianza.
 - La app todavia depende mucho de HubSpot como fuente operativa; si la meta es eliminar dependencias, primero hay que crear modelo propio.
 
+## Estado implementado en esta iteracion
+
+Quedo lista la primera base tecnica para seguir escalando sin perder la logica
+actual:
+
+1. **Rutas del panel separadas:** `middleware/panel/*_routes.py` declara los endpoints del panel y conserva las mismas URLs publicas.
+2. **Capa de servicios creada:** `services/panel/*_service.py` es la nueva frontera de negocio. Por ahora funciona como fachada hacia la implementacion legada.
+3. **Datos propios vs proveedores externos:** `utils/architecture_contract.py` declara `DATA_DEPENDENCIES`, `OWNED_DATA_COMPONENTS` y `EXTERNAL_PROVIDER_COMPONENTS`.
+4. **Contratos de dominio:** `domain/crm/models.py` define contacto, conversacion, mensaje, cita, etapa, asesor y evento sin depender de FastAPI ni proveedores externos.
+
+Regla para las siguientes iteraciones: primero mover cuerpos internos desde
+`middleware/outbound_panel.py` hacia `services/panel`, despues conectar esos
+servicios con modelos de `domain/crm`, y solo luego introducir nuevas
+funcionalidades del mini CRM.
+
 ## 2. Arquitectura actual observada
 
 ```mermaid

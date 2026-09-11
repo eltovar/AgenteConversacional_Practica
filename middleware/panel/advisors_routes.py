@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import list_advisors, update_advisor
+from services.panel.advisors_service import list_advisors, update_advisor
 
 
 router = APIRouter(prefix="/whatsapp/panel", tags=["Panel de Envío"])

@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from middleware.outbound_panel import (
+from services.panel.metrics_service import (
     export_appointments_excel,
     export_metrics_csv,
     export_metrics_excel,

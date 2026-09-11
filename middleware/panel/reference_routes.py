@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import get_pipeline_stages
+from services.panel.reference_service import get_pipeline_stages
 
 
 router = APIRouter(prefix="/whatsapp/panel", tags=["Panel de Envío"])

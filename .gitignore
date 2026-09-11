@@ -53,6 +53,8 @@ cleanup_report_*.csv
 !/tests/test_multimedia_regresion.py
 !/tests/test_environment_safety.py
 !/tests/test_panel_router_boundary.py
+!/tests/test_panel_service_boundary.py
+!/tests/test_crm_domain_contracts.py
 !/tests/fixtures/
 !/tests/fixtures/fixtures_bsuid.json
 /test/

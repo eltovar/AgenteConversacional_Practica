@@ -7,7 +7,7 @@ the new panel boundary.
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.workers_service import (
     create_worker,
     delete_worker,
     list_workers,

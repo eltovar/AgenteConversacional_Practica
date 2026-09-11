@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from middleware.outbound_panel import (
+from services.panel.bulk_campaigns_service import (
     create_bulk_campaign,
     get_bulk_campaign_status,
     get_last_bulk_campaign,

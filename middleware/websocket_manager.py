@@ -200,7 +200,11 @@ class ConnectionManager:
                     logger.warning(f"[WebSocket] fallback get_meta falló para {safe_phone(phone)}: {safe_error(_e)}")
 
             if advisor_id:
-                await self.publish_to_advisor(redis_client, advisor_id, notification)
+                targeted_notification = {
+                    **notification,
+                    "advisor_id": str(advisor_id),
+                }
+                await self.publish_to_advisor(redis_client, advisor_id, targeted_notification)
                 logger.info(
                     f"[WebSocket] notify_new_message -> targeted "
                     f"advisor={safe_id(advisor_id, 'advisor')} phone={safe_phone(phone)}"

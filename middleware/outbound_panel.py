@@ -628,6 +628,135 @@ def _plain_template_closed_window_error(
     )
 
 
+async def _invalidate_contacts_response_cache(reason: str = "") -> None:
+    """Borra el cache de GET /contacts tras cambios visibles en panel."""
+    try:
+        r = await _get_redis_client()
+        keys = [key async for key in r.scan_iter("contacts_resp:*", count=200)]
+        if keys:
+            await r.delete(*keys)
+        logger.debug(
+            f"[Panel] Cache contacts_resp invalidado ({len(keys)} keys)"
+            f"{f' reason={reason}' if reason else ''}"
+        )
+    except Exception as e:
+        logger.debug(f"[Panel] No se pudo invalidar cache contacts_resp: {safe_error(e)}")
+
+
+async def _publish_panel_contact_update(
+    *,
+    phone: Optional[str],
+    canal: Optional[str],
+    action: str,
+    advisor_id: Optional[str] = None,
+    contact_id: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Publica un cambio visible del panel por Redis Pub/Sub, dirigido si hay owner."""
+    if not phone:
+        return
+
+    try:
+        r = await _get_redis_client()
+        payload = {
+            "type": "contact_updated",
+            "action": action,
+            "phone": phone,
+            "canal": canal or "whatsapp",
+            "contact_id": contact_id,
+            "timestamp": get_bogota_now_iso(),
+            **extra,
+        }
+        if advisor_id:
+            payload["advisor_id"] = str(advisor_id)
+            await ws_manager.publish_to_advisor(r, str(advisor_id), payload)
+        else:
+            await ws_manager.publish_broadcast(r, payload)
+    except Exception as e:
+        logger.warning(f"[Panel] WS contact update falló action={action}: {safe_error(e)}")
+
+
+def _normalize_contact_phone_key(phone: Optional[str]) -> str:
+    """Llave estable para deduplicar contactos por teléfono."""
+    if not phone:
+        return ""
+    value = str(phone).strip()
+    if is_bsuid_identity_key(value):
+        return value.lower()
+    try:
+        validation = PhoneNormalizer().normalize(value)
+        if validation.is_valid:
+            return validation.normalized
+    except Exception:
+        pass
+    return re.sub(r"\D+", "", value)
+
+
+def _contact_identity_key(contact: Dict[str, Any]) -> str:
+    """Identidad canónica de contacto para impedir duplicados en el panel."""
+    contact_id = contact.get("contact_id") or contact.get("id")
+    if contact_id:
+        return f"cid:{contact_id}"
+    phone_key = _normalize_contact_phone_key(contact.get("phone") or contact.get("whatsapp"))
+    return f"phone:{phone_key}" if phone_key else ""
+
+
+def _contact_dedup_rank(contact: Dict[str, Any]) -> Tuple[int, str]:
+    """Prioriza la copia más útil cuando varias fuentes traen el mismo contacto."""
+    status = contact.get("conversation_status") or contact.get("status") or ""
+    priority = 0
+    if contact.get("has_unread"):
+        priority += 100
+    if contact.get("pending_reply"):
+        priority += 50
+    if status in {"HUMAN_ACTIVE", "PENDING_HANDOFF", "IN_CONVERSATION"}:
+        priority += 25
+    if contact.get("contact_id") or contact.get("id"):
+        priority += 10
+    if contact.get("display_name") and contact.get("display_name") != contact.get("phone"):
+        priority += 5
+    return priority, str(contact.get("last_activity") or contact.get("activated_at") or "")
+
+
+def _dedupe_panel_contacts(contacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Dedup final del panel por contact_id o teléfono normalizado.
+
+    Redis, Mongo y HubSpot pueden traer la misma persona con formas distintas
+    de teléfono o por canal. La UI debe ver un solo contacto operativo.
+    """
+    by_key: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    for contact in contacts:
+        key = _contact_identity_key(contact)
+        if not key:
+            order.append(f"anon:{len(order)}")
+            by_key[order[-1]] = contact
+            continue
+
+        if key not in by_key:
+            by_key[key] = contact
+            order.append(key)
+            continue
+
+        current = by_key[key]
+        if _contact_dedup_rank(contact) > _contact_dedup_rank(current):
+            merged = {**current, **contact}
+        else:
+            merged = {**contact, **current}
+
+        merged["has_unread"] = bool(current.get("has_unread") or contact.get("has_unread"))
+        merged["pending_reply"] = bool(current.get("pending_reply") or contact.get("pending_reply"))
+        by_key[key] = merged
+
+    deduped = [by_key[key] for key in order]
+    removed = len(contacts) - len(deduped)
+    if removed:
+        logger.warning(f"[Panel][Dedup] {removed} contactos duplicados removidos antes de responder")
+    return deduped
+
+
 # ============================================================================
 # Funciones auxiliares
 # ============================================================================
@@ -4323,6 +4452,13 @@ async def _close_conversation_internal(
     phone_normalized = validation.normalized if validation.is_valid else phone
 
     state_manager = _get_state_manager()
+    canal_safe = (canal or "whatsapp").lower()
+    close_owner_id = None
+    try:
+        _pre_close_meta = await state_manager.get_meta(phone_normalized, canal_safe)
+        close_owner_id = _pre_close_meta.assigned_owner_id if _pre_close_meta else None
+    except Exception:
+        close_owner_id = None
 
     await state_manager.activate_bot(phone_normalized, canal=canal)
     if phone != phone_normalized:
@@ -4330,7 +4466,6 @@ async def _close_conversation_internal(
 
     try:
         r = await _get_redis_client()
-        canal_safe = (canal or "whatsapp").lower()
         member = f"{phone_normalized}:{canal_safe}"
         await r.zrem("active_conversations_sorted", member)
         await r.srem("bot_controlled_conversations", member)
@@ -4364,9 +4499,12 @@ async def _close_conversation_internal(
     except Exception as e_arch:
         logger.warning(f"[Panel] No se pudo archivar en MongoDB al cerrar {safe_phone(phone_normalized)}: {safe_error(e_arch)}")
 
+    await _invalidate_contacts_response_cache("close_conversation")
+
     try:
         _close_meta = await state_manager.get_meta(phone_normalized, canal or "whatsapp")
         if _close_meta and _close_meta.assigned_owner_id:
+            close_owner_id = close_owner_id or _close_meta.assigned_owner_id
             await state_manager.remove_from_advisor_inbox(
                 _close_meta.assigned_owner_id, phone_normalized, canal or "whatsapp"
             )
@@ -4383,6 +4521,7 @@ async def _close_conversation_internal(
         "phone": phone_normalized,
         "canal": canal,
         "new_status": "BOT_ACTIVE",
+        "advisor_id": close_owner_id,
     }
 
 
@@ -4399,6 +4538,13 @@ async def close_conversation(
 
     try:
         result = await _close_conversation_internal(phone, canal)
+        await _publish_panel_contact_update(
+            phone=result.get("phone"),
+            canal=result.get("canal") or canal,
+            action="closed",
+            advisor_id=result.get("advisor_id"),
+            new_status=result.get("new_status"),
+        )
         return {
             "status": "success",
             "message": "Conversación cerrada - Sofía retomará automáticamente",
@@ -4699,6 +4845,7 @@ async def update_contact_stage(
             stage_name = PIPELINE_STAGES.get(stage_id, stage_id)
             logger.info(f"[Panel] Contacto {safe_id(contact_id, 'contact')} actualizado a etapa '{stage_name}'")
             await _invalidate_contact_stage_cache(contact_id, stage_id)
+            await _invalidate_contacts_response_cache("stage_update")
 
             payload = {
                 "status": "success",
@@ -4743,6 +4890,24 @@ async def update_contact_stage(
                         f"[Panel] AutoClose falló para contact={contact_id} stage={stage_id}: {e_close}"
                     )
                     payload["close_error"] = str(e_close)
+
+            if phone and not payload.get("closed") and not payload.get("transferred"):
+                _stage_owner_id = None
+                try:
+                    _stage_meta = await _get_state_manager().get_meta(phone, canal or "whatsapp")
+                    _stage_owner_id = _stage_meta.assigned_owner_id if _stage_meta else None
+                except Exception:
+                    _stage_owner_id = None
+                await _publish_panel_contact_update(
+                    phone=phone,
+                    canal=canal,
+                    action="stage_updated",
+                    advisor_id=_stage_owner_id,
+                    contact_id=contact_id,
+                    stage_id=stage_id,
+                    stage_name=stage_name,
+                    current_stage=stage_id,
+                )
 
             return payload
         else:
@@ -6737,17 +6902,26 @@ async def get_active_contacts(
         _perf_trace.mark("historical")
 
         # === PASO 5: Combinar y deduplicar ===
-        seen_phones = {c.get("phone") for c in active_contacts if c.get("phone")}
-        seen_contact_ids = {c.get("contact_id") for c in active_contacts if c.get("contact_id")}
+        active_contacts = _dedupe_panel_contacts(active_contacts)
+        seen_phones = {
+            _normalize_contact_phone_key(c.get("phone"))
+            for c in active_contacts if c.get("phone")
+        }
+        seen_contact_ids = {
+            str(c.get("contact_id") or c.get("id"))
+            for c in active_contacts if c.get("contact_id") or c.get("id")
+        }
 
         for contact in historical_contacts:
             phone = contact.get("phone")
             contact_id = contact.get("id") or contact.get("contact_id")
+            phone_key = _normalize_contact_phone_key(phone)
+            contact_id_key = str(contact_id) if contact_id else ""
 
             # Evitar duplicados
-            if phone and phone in seen_phones:
+            if phone_key and phone_key in seen_phones:
                 continue
-            if contact_id and contact_id in seen_contact_ids:
+            if contact_id_key and contact_id_key in seen_contact_ids:
                 continue
 
             # Filtrar por advisor: solo incluir históricos que pertenecen al advisor actual
@@ -6757,10 +6931,10 @@ async def get_active_contacts(
                     continue
 
             active_contacts.append(contact)
-            if phone:
-                seen_phones.add(phone)
-            if contact_id:
-                seen_contact_ids.add(contact_id)
+            if phone_key:
+                seen_phones.add(phone_key)
+            if contact_id_key:
+                seen_contact_ids.add(contact_id_key)
 
         # === [Sync] Deep link cross-advisor: incluir contacto aunque no pertenezca al advisor ===
         # Hidratación completa via _hydrate_contact — garantiza que el frontend reciba
@@ -6860,7 +7034,7 @@ async def get_active_contacts(
         # respetar lo mismo: ver _nunca_se_corta().
         _always_in_final = [c for c in contacts_sorted if _nunca_se_corta(c)]
         _rest_in_final = [c for c in contacts_sorted if not _nunca_se_corta(c)]
-        _dynamic_result = _always_in_final + _rest_in_final[:limit]
+        _dynamic_result = _dedupe_panel_contacts(_always_in_final + _rest_in_final[:limit])
 
         _pending_in_final = sum(
             1 for c in _always_in_final

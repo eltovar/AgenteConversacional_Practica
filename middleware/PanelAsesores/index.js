@@ -1232,6 +1232,64 @@ const CANAL_LABELS = {
     tiktok: 'TT', ciencuadras: 'CC', charly: 'CH'
 };
 
+function _normalizeContactPhoneKey(phone) {
+    return String(phone || '').replace(/[^\d+]/g, '').replace(/^\+/, '');
+}
+
+function _contactIdentityKey(contact) {
+    const cid = contact?.contact_id || contact?.id;
+    if (cid) return `cid:${cid}`;
+    const phoneKey = _normalizeContactPhoneKey(contact?.phone || contact?.whatsapp);
+    return phoneKey ? `phone:${phoneKey}` : '';
+}
+
+function _contactDedupRank(contact) {
+    let score = 0;
+    const status = contact?.conversation_status || contact?.status || '';
+    if (contact?.has_unread) score += 100;
+    if (contact?.pending_reply) score += 50;
+    if (['HUMAN_ACTIVE', 'PENDING_HANDOFF', 'IN_CONVERSATION'].includes(status)) score += 25;
+    if (contact?.contact_id || contact?.id) score += 10;
+    if (contact?.display_name && contact.display_name !== contact.phone) score += 5;
+    return [score, String(contact?.last_activity || contact?.activated_at || '')];
+}
+
+function _dedupeContactsForRender(contacts) {
+    const byKey = new Map();
+    const order = [];
+
+    for (const contact of contacts || []) {
+        const key = _contactIdentityKey(contact);
+        if (!key) {
+            order.push(Symbol('contact'));
+            byKey.set(order[order.length - 1], contact);
+            continue;
+        }
+
+        if (!byKey.has(key)) {
+            byKey.set(key, contact);
+            order.push(key);
+            continue;
+        }
+
+        const current = byKey.get(key);
+        const incomingRank = _contactDedupRank(contact);
+        const currentRank = _contactDedupRank(current);
+        const incomingWins = incomingRank[0] > currentRank[0]
+            || (incomingRank[0] === currentRank[0] && incomingRank[1] > currentRank[1]);
+        const merged = incomingWins ? { ...current, ...contact } : { ...contact, ...current };
+        merged.has_unread = Boolean(current?.has_unread || contact?.has_unread);
+        merged.pending_reply = Boolean(current?.pending_reply || contact?.pending_reply);
+        byKey.set(key, merged);
+    }
+
+    const deduped = order.map(key => byKey.get(key)).filter(Boolean);
+    if (deduped.length !== (contacts || []).length) {
+        console.warn('[Panel][Dedup] Contactos duplicados removidos antes de render:', (contacts || []).length - deduped.length);
+    }
+    return deduped;
+}
+
 /**
  * Aplica filtros activos (portal + etapa) sobre allContacts y renderiza.
  * Llamado desde loadContacts(), filterByPortal(), onStageFilterChange().
@@ -1245,6 +1303,7 @@ function _applyFiltersAndRender() {
         filterContacts(_activeTerm);
         return;
     }
+    allContacts = _dedupeContactsForRender(allContacts);
     let filtered = allContacts;
     if (activePortalFilter) filtered = filtered.filter(c => c.canal_origen === activePortalFilter);
     if (activeStageFilter)  filtered = filtered.filter(c => c.current_stage === activeStageFilter);
@@ -1428,7 +1487,7 @@ async function loadContacts() {
         if (!response.ok) throw new Error('Error al cargar contactos');
 
         const data = await response.json();
-        const newContacts = data.contacts || [];
+        const newContacts = _dedupeContactsForRender(data.contacts || []);
 
         // [StageFilter] Aviso si HubSpot devolvió el tope duro (más contactos disponibles allá)
         if (data.filter_mode === 'stage_full' && data.max_reached) {
@@ -5942,10 +6001,13 @@ function handleWebSocketMessage(data) {
             // a este asesor. Con Fix-A activo el backend enruta targeted, pero esto protege
             // contra: (1) broadcast de fallback si meta no tiene assigned_owner_id,
             // (2) backlog durante reconexión WS, (3) cache staleness, (4) regresiones futuras.
-            // Si phone no está en allContacts → silenciar beep/badge y schedule refresh.
+            // Si phone no está en allContacts y el evento NO viene dirigido a esta asesora
+            // → silenciar beep/badge y schedule refresh.
             if (data.action === 'new_message' && data.phone && data.phone !== currentPhone) {
+                const _targetedToThisAdvisor = data.advisor_id && ADVISOR_ID &&
+                    String(data.advisor_id) === String(ADVISOR_ID);
                 const _phoneInList = allContacts.some(c => (c.phone || '') === data.phone);
-                if (!_phoneInList) {
+                if (!_phoneInList && !_targetedToThisAdvisor) {
                     console.warn('[Panel][Guard] Evento WS foráneo (phone no en lista local):', data.phone);
                     if (!window._foreignProbation) window._foreignProbation = new Set();
                     if (window._foreignProbation.has(data.phone)) {
@@ -5959,6 +6021,9 @@ function handleWebSocketMessage(data) {
                     // El siguiente evento WS para el mismo phone ya pasará el guard.
                     scheduleContactsRefresh();
                     break;
+                }
+                if (!_phoneInList && _targetedToThisAdvisor) {
+                    console.log('[Panel][Guard] Evento WS dirigido a esta asesora; se notifica aunque el contacto aún no esté renderizado:', data.phone);
                 }
             }
 
@@ -5999,6 +6064,25 @@ function handleWebSocketMessage(data) {
                     allContacts[ni].display_name = data.display_name;
                     _applyFiltersAndRender();
                 }
+                break;
+            }
+
+            if (data.action === 'closed' && data.phone) {
+                _performCloseCleanup(data.phone);
+                scheduleContactsRefresh();
+                break;
+            }
+
+            if (data.action === 'stage_updated' && data.phone && data.current_stage) {
+                const si = allContacts.findIndex(c => c.phone === data.phone);
+                if (si !== -1) {
+                    allContacts[si].current_stage = data.current_stage;
+                    const cacheKey = allContacts[si].contact_id || data.contact_id || data.phone;
+                    if (cacheKey) contactDealCache[cacheKey] = { current_stage: data.current_stage };
+                    _contactFingerprints.delete(data.phone);
+                    _applyFiltersAndRender();
+                }
+                scheduleContactsRefresh();
                 break;
             }
 
@@ -6730,14 +6814,14 @@ function playNotificationBeep() {
  * Muestra notificacion del navegador.
  */
 function showBrowserNotification(title, body) {
-    // Nota: playNotificationBeep() ya se llama en handleNewMessageNotification — no llamar aquí para evitar doble beep
-    console.log('[Panel][Notif] Permiso actual:', Notification.permission, '| título:', title);
-
     // Verificar si las notificaciones estan soportadas y permitidas
     if (!('Notification' in window)) {
         console.warn('[Panel][Notif] Notification API no soportada en este browser');
         return;
     }
+
+    // Nota: playNotificationBeep() ya se llama en handleNewMessageNotification — no llamar aquí para evitar doble beep
+    console.log('[Panel][Notif] Permiso actual:', Notification.permission, '| título:', title);
 
     if (Notification.permission === 'granted') {
         new Notification(title, {

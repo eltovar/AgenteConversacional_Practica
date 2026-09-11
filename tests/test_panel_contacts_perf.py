@@ -11,6 +11,7 @@ from middleware import outbound_panel as panel
 
 PANEL_JS = Path(ROOT) / "middleware" / "PanelAsesores" / "index.js"
 PANEL_PY = Path(ROOT) / "middleware" / "outbound_panel.py"
+WEBSOCKET_PY = Path(ROOT) / "middleware" / "websocket_manager.py"
 
 
 def test_contacts_perf_trace_masks_advisor_and_reports_slow_step(caplog, monkeypatch):
@@ -185,3 +186,99 @@ def test_transfer_response_is_explicit_for_new_visibility_guard():
 
     assert "Transferencia ${scopeText} confirmada" in frontend_source
     assert "La nueva validación permitirá abrirlo en el panel de ${toName}" in frontend_source
+
+
+def test_targeted_new_message_events_keep_advisor_id_for_notification_guard():
+    source = WEBSOCKET_PY.read_text(encoding="utf-8")
+
+    assert "targeted_notification = {" in source
+    assert '"advisor_id": str(advisor_id)' in source
+    assert "await self.publish_to_advisor(redis_client, advisor_id, targeted_notification)" in source
+
+
+def test_frontend_does_not_drop_targeted_new_message_when_contact_not_rendered_yet():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "const _targetedToThisAdvisor = data.advisor_id && ADVISOR_ID" in source
+    assert "String(data.advisor_id) === String(ADVISOR_ID)" in source
+    assert "if (!_phoneInList && !_targetedToThisAdvisor)" in source
+    assert "Evento WS dirigido a esta asesora" in source
+
+
+def test_browser_notification_checks_api_support_before_permission_read():
+    source = PANEL_JS.read_text(encoding="utf-8")
+    fn = source.split("function showBrowserNotification(title, body)", 1)[1]
+    fn = fn.split("function sendWebSocketPing()", 1)[0]
+
+    assert fn.index("if (!('Notification' in window))") < fn.index("Notification.permission")
+
+
+def test_panel_visible_changes_invalidate_contacts_cache_and_publish_ws():
+    source = PANEL_PY.read_text(encoding="utf-8")
+
+    assert 'scan_iter("contacts_resp:*"' in source
+    assert 'await _invalidate_contacts_response_cache("close_conversation")' in source
+    assert 'await _invalidate_contacts_response_cache("stage_update")' in source
+    assert 'action="closed"' in source
+    assert 'action="stage_updated"' in source
+
+
+def test_frontend_applies_closed_and_stage_ws_without_reload():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "if (data.action === 'closed' && data.phone)" in source
+    assert "_performCloseCleanup(data.phone);" in source
+    assert "if (data.action === 'stage_updated' && data.phone && data.current_stage)" in source
+    assert "allContacts[si].current_stage = data.current_stage;" in source
+
+
+def test_panel_contacts_dedupe_by_normalized_phone_and_keeps_unread_copy():
+    contacts = [
+        {
+            "phone": "+57 300 111 2233",
+            "display_name": "+57 300 111 2233",
+            "has_unread": False,
+            "last_activity": "2026-09-11T10:00:00",
+        },
+        {
+            "phone": "+573001112233",
+            "display_name": "Cliente Real",
+            "has_unread": True,
+            "last_activity": "2026-09-11T10:02:00",
+        },
+    ]
+
+    deduped = panel._dedupe_panel_contacts(contacts)
+
+    assert len(deduped) == 1
+    assert deduped[0]["display_name"] == "Cliente Real"
+    assert deduped[0]["has_unread"] is True
+
+
+def test_panel_contacts_dedupe_by_contact_id():
+    contacts = [
+        {"phone": "+573001112233", "contact_id": "123", "display_name": "Viejo"},
+        {"phone": "+573009998888", "id": "123", "display_name": "Nuevo", "pending_reply": True},
+    ]
+
+    deduped = panel._dedupe_panel_contacts(contacts)
+
+    assert len(deduped) == 1
+    assert deduped[0]["display_name"] == "Nuevo"
+    assert deduped[0]["pending_reply"] is True
+
+
+def test_frontend_dedupes_contacts_before_badges_and_render():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "function _dedupeContactsForRender(contacts)" in source
+    assert "const newContacts = _dedupeContactsForRender(data.contacts || []);" in source
+    assert "allContacts = _dedupeContactsForRender(allContacts);" in source
+
+
+def test_backend_applies_final_dedupe_before_contacts_response():
+    source = PANEL_PY.read_text(encoding="utf-8")
+
+    assert "active_contacts = _dedupe_panel_contacts(active_contacts)" in source
+    assert "_dynamic_result = _dedupe_panel_contacts(" in source
+    assert "_normalize_contact_phone_key(phone)" in source

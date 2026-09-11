@@ -32,6 +32,15 @@ class ArchitectureEdge:
     evidence: Evidence
 
 
+@dataclass(frozen=True)
+class DataDependency:
+    key: str
+    ownership: str
+    role: str
+    migration_policy: str
+    evidence: Evidence
+
+
 ARCHITECTURE_COMPONENTS: Dict[str, ArchitectureComponent] = {
     "twilio": ArchitectureComponent("twilio", "external", "codigo_verificado", ("utils.twilio_client", "middleware.webhook_handler")),
     "webhook": ArchitectureComponent("webhook", "internal", "codigo_verificado", ("middleware.webhook_handler",)),
@@ -116,6 +125,71 @@ DOMAIN_SOURCES_OF_TRUTH = {
 }
 
 
+DATA_DEPENDENCIES: Dict[str, DataDependency] = {
+    "redis": DataDependency(
+        "redis",
+        "owned",
+        "estado efimero, cache operacional, colas ligeras y realtime",
+        "mantener como estado propio no durable; persistir decisiones finales en Mongo cuando apliquen",
+        ("middleware.conversation_state", "middleware.websocket_manager", "app.scheduler"),
+    ),
+    "mongo": DataDependency(
+        "mongo",
+        "owned",
+        "historial operativo, conversaciones, mensajes y eventos del CRM",
+        "convertir gradualmente en fuente interna principal del mini CRM",
+        ("database.mongodb_client", "middleware.outbound_panel"),
+    ),
+    "pgvector": DataDependency(
+        "pgvector",
+        "owned",
+        "conocimiento vectorial RAG",
+        "usar como almacenamiento propio de conocimiento despues de validar produccion",
+        ("rag.vector_store", "rag.rag_service"),
+    ),
+    "hubspot": DataDependency(
+        "hubspot",
+        "external",
+        "CRM externo actual para owner, etapa y sincronizacion comercial",
+        "encapsular escrituras y migrar lectura operacional hacia modelos internos",
+        ("integrations.hubspot", "middleware.contact_manager"),
+    ),
+    "twilio": DataDependency(
+        "twilio",
+        "external",
+        "canal WhatsApp y entrega de mensajes",
+        "mantener como proveedor reemplazable detras de adaptadores",
+        ("utils.twilio_client", "middleware.webhook_handler"),
+    ),
+    "bunny": DataDependency(
+        "bunny",
+        "external",
+        "almacenamiento/CDN multimedia",
+        "mantener detras de adaptador y prefijos por ambiente",
+        ("utils.media_processor",),
+    ),
+    "openai": DataDependency(
+        "openai",
+        "external",
+        "modelo IA y procesamiento inteligente",
+        "aislar prompts, respuestas y costos detras de servicios propios",
+        ("llm_client", "middleware.sofia_brain", "utils.media_processor"),
+    ),
+}
+
+
+OWNED_DATA_COMPONENTS = frozenset(
+    key for key, dependency in DATA_DEPENDENCIES.items()
+    if dependency.ownership == "owned"
+)
+
+
+EXTERNAL_PROVIDER_COMPONENTS = frozenset(
+    key for key, dependency in DATA_DEPENDENCIES.items()
+    if dependency.ownership == "external"
+)
+
+
 def component_keys() -> Tuple[str, ...]:
     return tuple(sorted(ARCHITECTURE_COMPONENTS))
 
@@ -139,6 +213,17 @@ def validate_architecture_contract() -> Tuple[str, ...]:
     missing_sources = SOURCE_COMPONENTS.difference(OBS_SOURCES)
     if missing_sources:
         errors.append(f"obs_sources:{','.join(sorted(missing_sources))}")
+
+    unknown_dependencies = set(DATA_DEPENDENCIES).difference(ARCHITECTURE_COMPONENTS)
+    if unknown_dependencies:
+        errors.append(f"data_dependencies:{','.join(sorted(unknown_dependencies))}")
+
+    invalid_ownership = {
+        key for key, dependency in DATA_DEPENDENCIES.items()
+        if dependency.ownership not in {"owned", "external"}
+    }
+    if invalid_ownership:
+        errors.append(f"data_ownership:{','.join(sorted(invalid_ownership))}")
 
     return tuple(errors)
 
@@ -171,3 +256,12 @@ def statuses_for(components: Iterable[str]) -> Dict[str, str]:
         for key in components
         if key in ARCHITECTURE_COMPONENTS
     }
+
+
+def data_dependency_keys_by_ownership(ownership: str) -> Tuple[str, ...]:
+    return tuple(
+        sorted(
+            key for key, dependency in DATA_DEPENDENCIES.items()
+            if dependency.ownership == ownership
+        )
+    )

@@ -9,6 +9,7 @@ import httpx
 from typing import Awaitable, Callable, Optional, Dict, Any, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from logging_config import logger
+from utils.environment import require_hubspot_write_allowed
 from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 
 
@@ -29,6 +30,23 @@ from utils.safe_logging import safe_error, safe_id, safe_phone, safe_text
 ContactUpdateHook = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 _contact_update_hooks: List[ContactUpdateHook] = []
+
+
+class HubSpotWriteBlockedError(RuntimeError):
+    """Raised when an environment safety gate blocks a HubSpot write."""
+
+
+def _require_hubspot_write(action: str) -> None:
+    allowed, reason = require_hubspot_write_allowed()
+    if allowed:
+        return
+
+    logger.warning(
+        "[HubSpotClient] Escritura bloqueada por safety gate: action=%s reason=%s",
+        action,
+        reason,
+    )
+    raise HubSpotWriteBlockedError(reason)
 
 
 def register_contact_update_hook(hook: ContactUpdateHook) -> None:
@@ -377,6 +395,7 @@ class HubSpotClient:
         
         Las propiedades se validan y filtran automáticamente.
         """
+        _require_hubspot_write("create_contact")
         endpoint = "/crm/v3/objects/contacts"
         
         # Validar y filtrar propiedades antes de enviar
@@ -394,6 +413,7 @@ class HubSpotClient:
         Las propiedades se validan y filtran automáticamente para evitar
         errores 400 PROPERTY_DOESNT_EXIST de propiedades no configuradas en HubSpot.
         """
+        _require_hubspot_write("update_contact")
         endpoint = f"/crm/v3/objects/contacts/{contact_id}"
         
         # Validar y filtrar propiedades antes de enviar
@@ -425,6 +445,7 @@ class HubSpotClient:
         """
         Crea un Deal (oportunidad) y lo asocia automáticamente al contacto.
         """
+        _require_hubspot_write("create_deal")
         endpoint = "/crm/v3/objects/deals"
 
         # Agregar campos obligatorios del pipeline (usar parámetros o defaults)
@@ -458,6 +479,7 @@ class HubSpotClient:
         A diferencia de update_contact, no pasa por el validador de propiedades
         ya que los deals tienen su propio esquema de propiedades personalizadas.
         """
+        _require_hubspot_write("update_deal")
         endpoint = f"/crm/v3/objects/deals/{deal_id}"
         await self._request("PATCH", endpoint, {"properties": properties})
         logger.info(f"[HubSpotClient] Deal actualizado: {safe_id(deal_id, 'deal')}")
@@ -472,6 +494,7 @@ class HubSpotClient:
         """
         Crea una nota en HubSpot y la asocia a un contacto.
         """
+        _require_hubspot_write("create_note")
         from datetime import datetime, timezone
 
         endpoint = "/crm/v3/objects/notes"
@@ -521,6 +544,7 @@ class HubSpotClient:
         """
         if not note_id:
             return False
+        _require_hubspot_write("update_note")
         try:
             await self._request(
                 "PATCH",

@@ -306,6 +306,208 @@ class _ContactsPerfTrace:
             )
         )
 
+
+def _contact_visible_for_advisor(
+    contact: Dict[str, Any],
+    *,
+    advisor_id: str,
+    allowed_channels: set[str],
+    other_advisor_ids: set[str],
+) -> bool:
+    """
+    Regla central de segregacion del inbox.
+
+    El owner real manda sobre el canal. La atribucion por canal solo rescata
+    conversaciones huerfanas; no puede mostrarle a una asesora un contacto que
+    ya pertenece a otra.
+    """
+    advisor_str = str(advisor_id)
+    canal_origen = (contact.get("canal_origen") or "").lower().strip()
+    contact_owner = (
+        contact.get("owner_id")
+        or contact.get("assigned_owner_id")
+        or contact.get("hubspot_owner_id")
+    )
+    contact_owner_str = str(contact_owner) if contact_owner else ""
+    assigned_owner_ids = contact.get("assigned_owner_ids") or []
+    assigned_owner_ids_str = [str(x) for x in assigned_owner_ids if x]
+
+    if contact_owner_str == advisor_str:
+        return True
+    if advisor_str in assigned_owner_ids_str:
+        return True
+    if contact_owner_str:
+        return contact_owner_str not in other_advisor_ids and canal_origen in allowed_channels
+    return canal_origen in allowed_channels
+
+
+def _advisor_visibility_scope(advisor_id: str) -> Tuple[set[str], set[str], bool]:
+    """
+    Calcula los canales y otros owners para aplicar la misma segregacion en
+    lista de contactos e historial de chat.
+    """
+    from integrations.hubspot.lead_assigner import LeadAssigner
+
+    advisor_str = str(advisor_id or "").strip()
+    advisor_team = None
+
+    for team_name, team_members in LeadAssigner.OWNERS_CONFIG.items():
+        for member in team_members:
+            if str(member.get("id")) == advisor_str:
+                advisor_team = team_name
+                break
+        if advisor_team:
+            break
+
+    all_advisor_ids = set()
+    for team_members in LeadAssigner.OWNERS_CONFIG.values():
+        for member in team_members:
+            member_id = member.get("id")
+            if member_id:
+                all_advisor_ids.add(str(member_id))
+
+    if not advisor_team:
+        return set(), all_advisor_ids - {advisor_str}, False
+
+    allowed_channels = {
+        canal
+        for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items()
+        if team == advisor_team
+    }
+    if advisor_team == "default":
+        allowed_channels.update(
+            canal
+            for canal, team in LeadAssigner.CHANNEL_TO_TEAM.items()
+            if team == "default"
+        )
+
+    return allowed_channels, all_advisor_ids - {advisor_str}, True
+
+
+async def _resolve_chat_visibility_contact(
+    *,
+    phone: Optional[str] = None,
+    contact_id: Optional[str] = None,
+    canal: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Obtiene el mínimo sujeto de autorización para abrir historial.
+
+    Usa Redis/HubSpot vía _hydrate_contact cuando hay teléfono y cae a MongoDB
+    para chats antiguos donde la metadata no está completa.
+    """
+    if phone:
+        target = _resolve_panel_target(phone)
+        if target.error:
+            return None
+
+        if not target.is_bsuid:
+            hydrated = await _hydrate_contact(target.key, canal_hint=canal)
+            if hydrated:
+                return hydrated
+
+        try:
+            mongo_mgr = get_mongo_manager()
+            query: Dict[str, Any] = {"phone": target.key}
+            if canal:
+                query["canal"] = canal.lower().strip()
+            doc = await mongo_mgr.db.conversations.find_one(
+                query,
+                sort=[("last_activity", -1)],
+                projection={
+                    "phone": 1,
+                    "canal": 1,
+                    "canal_origen": 1,
+                    "owner_id": 1,
+                    "contact_id": 1,
+                    "_id": 0,
+                },
+            )
+            if doc:
+                return {
+                    "phone": doc.get("phone") or target.key,
+                    "contact_id": doc.get("contact_id"),
+                    "canal_origen": doc.get("canal_origen") or doc.get("canal") or canal,
+                    "owner_id": doc.get("owner_id"),
+                    "assigned_owner_ids": [],
+                }
+        except Exception as e:
+            logger.debug(f"[Panel][Guard] Fallback Mongo conversations falló: {safe_error(e)}")
+
+    if contact_id and str(contact_id).isdigit():
+        try:
+            batch = await _hubspot_batch_get_contacts([str(contact_id)])
+            props = batch.get(str(contact_id)) or {}
+            if props:
+                return {
+                    "phone": props.get("phone"),
+                    "contact_id": str(contact_id),
+                    "canal_origen": props.get("canal_origen") or canal,
+                    "owner_id": props.get("hubspot_owner_id"),
+                    "assigned_owner_ids": [],
+                }
+        except Exception as e:
+            logger.debug(f"[Panel][Guard] HubSpot batch falló para auth historial: {safe_error(e)}")
+
+        try:
+            mongo_mgr = get_mongo_manager()
+            doc = await mongo_mgr.db.messages.find_one(
+                {"hubspot_contact_id": str(contact_id)},
+                sort=[("timestamp", -1)],
+                projection={"phone": 1, "channel": 1, "canal": 1, "_id": 0},
+            )
+            if doc and doc.get("phone"):
+                return await _resolve_chat_visibility_contact(
+                    phone=doc.get("phone"),
+                    contact_id=contact_id,
+                    canal=canal or doc.get("channel") or doc.get("canal"),
+                )
+        except Exception as e:
+            logger.debug(f"[Panel][Guard] Fallback Mongo messages falló: {safe_error(e)}")
+
+    return None
+
+
+async def _assert_advisor_can_open_chat(
+    *,
+    advisor_id: Optional[str],
+    phone: Optional[str] = None,
+    contact_id: Optional[str] = None,
+    canal: Optional[str] = None,
+) -> None:
+    """
+    Bloquea la carga de historial si el chat pertenece a otra asesora.
+    """
+    if not advisor_id:
+        return
+
+    advisor_str = str(advisor_id).strip()
+    allowed_channels, other_advisor_ids, known_advisor = _advisor_visibility_scope(advisor_str)
+    if not known_advisor:
+        raise HTTPException(status_code=403, detail="Asesora no autorizada para abrir este chat")
+
+    contact = await _resolve_chat_visibility_contact(
+        phone=phone,
+        contact_id=contact_id,
+        canal=canal,
+    )
+    if not contact:
+        raise HTTPException(status_code=404, detail="No se pudo validar el contacto del chat")
+
+    if not _contact_visible_for_advisor(
+        contact,
+        advisor_id=advisor_str,
+        allowed_channels=allowed_channels,
+        other_advisor_ids=other_advisor_ids,
+    ):
+        logger.warning(
+            f"[Panel][Guard] Historial bloqueado para advisor={safe_id(advisor_str, 'advisor')} "
+            f"phone={safe_phone(phone or contact.get('phone'))} "
+            f"contact={safe_id(contact_id or contact.get('contact_id'), 'contact')}"
+        )
+        raise HTTPException(status_code=403, detail="Este chat pertenece a otra asesora")
+
+
 def get_httpx_client() -> httpx.AsyncClient:
     """
     Retorna cliente HTTP global con connection pooling.
@@ -409,6 +611,21 @@ class PanelTarget:
     key: str
     is_bsuid: bool = False
     error: Optional[str] = None
+
+
+def _plain_template_closed_window_error(
+    content_sid: Optional[str],
+    window_status: WindowStatus,
+) -> Optional[str]:
+    """Retorna el error de negocio para plantillas no aprobadas fuera de ventana."""
+    if content_sid or window_status.is_open:
+        return None
+
+    return (
+        "Esta plantilla no tiene ContentSid aprobado por WhatsApp y el contacto "
+        "no tiene ventana de 24 horas abierta. Selecciona una plantilla aprobada "
+        "o espera a que el cliente responda."
+    )
 
 
 # ============================================================================
@@ -1069,7 +1286,7 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 
     url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/read"
     payload = {
-        "properties": ["firstname", "lastname", "email", "phone", "lifecyclestage", "hubspot_owner_id"],
+        "properties": ["firstname", "lastname", "email", "phone", "lifecyclestage", "hubspot_owner_id", "canal_origen"],
         "inputs": [{"id": cid} for cid in contact_ids]
     }
 
@@ -1090,6 +1307,7 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
                     "phone": props.get("phone"),
                     "lifecyclestage": props.get("lifecyclestage") or "",
                     "hubspot_owner_id": props.get("hubspot_owner_id") or "",
+                    "canal_origen": props.get("canal_origen") or "",
                 }
             if response.status_code == 207:
                 logger.info(f"[Panel] Batch HubSpot 207 (parcial): {len(results)}/{len(contact_ids)} contactos válidos")
@@ -1988,7 +2206,6 @@ async def _delete_template_by_advisor(advisor_id: str, template_id: str) -> bool
 # Endpoints de API
 # ============================================================================
 
-@router.post("/send-message")
 @limiter.limit("20/minute")
 async def send_message(
     request: Request,
@@ -2520,7 +2737,6 @@ def _msg_age_seconds(msg_doc: Dict[str, Any]) -> float:
         return 0.0
 
 
-@router.patch("/messages/{mongo_id}")
 @limiter.limit("20/minute")
 async def edit_advisor_message(
     request: Request,
@@ -2641,7 +2857,6 @@ async def edit_advisor_message(
     })
 
 
-@router.delete("/messages/{mongo_id}")
 @limiter.limit("20/minute")
 async def delete_advisor_message(
     request: Request,
@@ -2756,7 +2971,6 @@ async def delete_advisor_message(
     })
 
 
-@router.post("/send-message-json")
 @limiter.limit("20/minute")
 async def send_message_json(
     request: Request,
@@ -2984,7 +3198,6 @@ async def send_message_json(
         )
 
 
-@router.post("/send-template")
 async def send_template_message(
     background_tasks: BackgroundTasks,
     to: str = Form(..., description="Número de destino (+573001234567)"),
@@ -3130,8 +3343,17 @@ async def send_template_message(
     elif not content_sid:
         logger.warning(
             f"[Panel] Template '{template_id}' sin content_sid — "
-            f"se enviará como texto plano (fallará con ventana cerrada)"
+            f"se enviará como texto plano solo si la ventana está abierta"
         )
+
+    window_status = await check_24h_window(phone_normalized)
+    plain_template_error = _plain_template_closed_window_error(content_sid, window_status)
+    if plain_template_error:
+        logger.warning(
+            f"[Panel] Template '{template_id}' sin content_sid bloqueado para "
+            f"{safe_phone(phone_normalized)}: ventana cerrada"
+        )
+        raise HTTPException(status_code=400, detail=plain_template_error)
 
     # Enviar mensaje via Twilio
     _t2 = time.monotonic()
@@ -3226,7 +3448,6 @@ async def send_template_message(
 # Endpoints CRUD de Templates
 # ============================================================================
 
-@router.get("/config/template-sids")
 async def get_template_sids(
     advisor_id: str = Query(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -3245,7 +3466,6 @@ async def get_template_sids(
     }
 
 
-@router.get("/templates")
 async def list_templates(
     advisor_id: str = Query(...),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -3268,7 +3488,6 @@ async def list_templates(
     }
 
 
-@router.get("/templates/{template_id}")
 async def get_template_by_id(
     template_id: str,
     advisor_id: str = Query(...),
@@ -3283,7 +3502,6 @@ async def get_template_by_id(
     return template
 
 
-@router.post("/templates")
 async def create_template(
     advisor_id: str = Query(...),
     name: str = Form(..., description="Nombre del template"),
@@ -3332,7 +3550,6 @@ async def create_template(
     )
 
 
-@router.put("/templates/{template_id}")
 async def update_template(
     template_id: str,
     advisor_id: str = Query(...),
@@ -3370,7 +3587,6 @@ async def update_template(
     }
 
 
-@router.delete("/templates/{template_id}")
 async def delete_template(
     template_id: str,
     advisor_id: str = Query(...),
@@ -3713,6 +3929,9 @@ async def transfer_contact(
 
     from_owner = result.get("from_owner")
     hubspot_updated = "queued" if contact_id and mode == "exclusive" else "skipped"
+    from_owner_name = _get_advisor_name(from_owner) if from_owner else "Sin asesor previo"
+    to_owner_name = _get_advisor_name(to_owner_id)
+    transfer_scope = "exclusiva" if mode == "exclusive" else "colaborativa"
 
     # === 3. Notificar vía WebSocket ===
     try:
@@ -3741,11 +3960,17 @@ async def transfer_contact(
 
     return {
         "status": "success",
-        "message": f"Contacto transferido a {to_owner_id}",
+        "message": (
+            f"Transferencia {transfer_scope} confirmada: el chat pasó de "
+            f"{from_owner_name} a {to_owner_name}."
+        ),
         "phone": phone_normalized,
         "from_owner": from_owner,
+        "from_owner_name": from_owner_name,
         "to_owner": to_owner_id,
+        "to_owner_name": to_owner_name,
         "mode": mode,
+        "transfer_scope": transfer_scope,
         "hubspot_updated": hubspot_updated,
         "transfer_history": result.get("transfer_history", [])
     }
@@ -4606,7 +4831,6 @@ async def update_contact_canal_display(
 
 # ─── Notificaciones del asesor ────────────────────────────────────────────────
 
-@router.get("/notifications")
 @limiter.limit("60/minute")
 async def get_advisor_notifications(
     request: Request,
@@ -4631,7 +4855,6 @@ async def get_advisor_notifications(
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
-@router.post("/notifications/{notif_id}/read")
 async def mark_notification_read(
     notif_id: str,
     advisor: str = Body(..., embed=True),
@@ -4650,7 +4873,6 @@ async def mark_notification_read(
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
-@router.post("/notifications/read-all")
 async def mark_all_notifications_read(
     advisor: str = Body(..., embed=True),
     notif_type: Optional[str] = Body(None, embed=True),
@@ -4678,7 +4900,6 @@ async def mark_all_notifications_read(
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
-@router.get("/stages")
 async def get_pipeline_stages(
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -4837,6 +5058,7 @@ async def get_contact_detail(
     phone: str,
     contact_id: Optional[str] = Query(None, description="ID del contacto en HubSpot"),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
+    advisor_id: Optional[str] = Query(None, description="ID de la asesora que abre el chat"),
     limit: int = Query(50, ge=1, le=100),
     # ⚠️ 2026-06-05: cursor para que el panel pueda paginar con scroll infinito.
     # Si llega, NO se consulta HubSpot (mismo guard que /history/{cid}).
@@ -4869,6 +5091,13 @@ async def get_contact_detail(
             )
         except Exception as e:
             logger.warning(f"[Panel][Detail][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
+
+    await _assert_advisor_can_open_chat(
+        advisor_id=advisor_id,
+        phone=phone_normalized,
+        contact_id=contact_id,
+        canal=canal,
+    )
 
     mongo_manager = get_mongo_manager()
 
@@ -5015,6 +5244,7 @@ async def get_conversation_history(
     # Frontend usa scroll infinito con before_ts para cargar páginas siguientes.
     limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal para filtrar mensajes"),
+    advisor_id: Optional[str] = Query(None, description="ID de la asesora que abre el chat"),
     before_ts: Optional[str] = Query(
         None,
         description="Cursor ISO 8601 — retorna mensajes con timestamp < before_ts (paginación)"
@@ -5039,6 +5269,12 @@ async def get_conversation_history(
         raise HTTPException(status_code=400, detail=target.error)
 
     phone_normalized = target.key
+    await _assert_advisor_can_open_chat(
+        advisor_id=advisor_id,
+        phone=phone_normalized,
+        canal=canal,
+    )
+
     messages = []
     source = "none"
 
@@ -5130,6 +5366,7 @@ async def get_history_by_contact_id(
     limit: int = Query(100, ge=1, le=500),
     canal: Optional[str] = Query(None, description="Canal de origen para filtrar mensajes"),
     phone: Optional[str] = Query(None, description="Teléfono para buscar historial"),
+    advisor_id: Optional[str] = Query(None, description="ID de la asesora que abre el chat"),
     before_ts: Optional[str] = Query(
         None,
         description="Cursor ISO 8601 — retorna mensajes con timestamp < before_ts (paginación)"
@@ -5161,6 +5398,13 @@ async def get_history_by_contact_id(
                 "error": "ID de contacto inválido (debe ser numérico)"
             }
         )
+
+    await _assert_advisor_can_open_chat(
+        advisor_id=advisor_id,
+        phone=phone,
+        contact_id=contact_id,
+        canal=canal,
+    )
 
     messages = []
     source = "none"
@@ -5417,7 +5661,6 @@ async def take_control_of_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/debug/redis")
 async def debug_redis(
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -6216,30 +6459,15 @@ async def get_active_contacts(
                 filtered_contacts = []
                 excluded_count = 0
                 for contact in active_contacts:
-                    canal_origen = (contact.get("canal_origen") or "").lower().strip()
-                    contact_owner = contact.get("owner_id") or contact.get("assigned_owner_id") or contact.get("hubspot_owner_id")
-                    contact_owner_str = str(contact_owner) if contact_owner else ""
-                    assigned_owner_ids = contact.get("assigned_owner_ids") or []
-                    assigned_owner_ids_str = [str(x) for x in assigned_owner_ids if x]
-
-                    is_owner = contact_owner_str == advisor_str
-                    is_collaborator = advisor_str in assigned_owner_ids_str
-
-                    if is_owner or is_collaborator:
+                    if _contact_visible_for_advisor(
+                        contact,
+                        advisor_id=advisor_str,
+                        allowed_channels=allowed_channels,
+                        other_advisor_ids=other_advisor_ids,
+                    ):
                         filtered_contacts.append(contact)
-                        continue
-
-                    if canal_origen:
-                        if contact_owner_str and contact_owner_str in other_advisor_ids:
-                            excluded_count += 1
-                            continue
-                        if canal_origen in allowed_channels:
-                            filtered_contacts.append(contact)
-                        else:
-                            excluded_count += 1
-                        continue
-
-                    excluded_count += 1
+                    else:
+                        excluded_count += 1
 
                 active_contacts = filtered_contacts
                 logger.info(
@@ -6703,7 +6931,6 @@ async def get_active_contacts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/diagnose")
 async def diagnose_system(x_api_key: str = Header(None, alias="X-API-Key")):
     """
     Endpoint de diagnóstico: estado de Redis + estimación de carga HubSpot.
@@ -6847,7 +7074,6 @@ async def _get_hubspot_contact_info(contact_id: str) -> Optional[dict]:
 # ADVISORS (Asesores del panel - nombres editables)
 # ============================================================================
 
-@router.get("/advisors")
 async def list_advisors(x_api_key: str = Header(None, alias="X-API-Key")):
     """Lista todos los asesores con sus nombres editables."""
     if not _validate_api_key(x_api_key):
@@ -6861,7 +7087,6 @@ class AdvisorUpdateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
-@router.patch("/advisors/{advisor_id}")
 async def update_advisor(
     advisor_id: str,
     body: AdvisorUpdateRequest,
@@ -6882,7 +7107,6 @@ async def update_advisor(
 # WORKERS (Equipo de campo para citas)
 # ============================================================================
 
-@router.get("/workers")
 async def list_workers(x_api_key: str = Header(None, alias="X-API-Key")):
     """Lista todos los workers activos del equipo de campo."""
     if not _validate_api_key(x_api_key):
@@ -6929,7 +7153,6 @@ def _normalizar_telefono_encargado(crudo: Optional[str]) -> Optional[str]:
     return resultado.normalized
 
 
-@router.post("/workers", status_code=201)
 async def create_worker(
     body: WorkerCreateRequest,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -6946,7 +7169,6 @@ async def create_worker(
     return {"worker_id": worker_id, "name": body.name, "phone": telefono}
 
 
-@router.patch("/workers/{worker_id}")
 async def update_worker(
     worker_id: str,
     body: WorkerUpdateRequest,
@@ -6963,7 +7185,6 @@ async def update_worker(
     return {"ok": True, "name": body.name, "phone": telefono}
 
 
-@router.delete("/workers/{worker_id}")
 async def delete_worker(
     worker_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -7140,7 +7361,6 @@ class ScheduledMessageCreateRequest(BaseModel):
     notes: str = Field("", description="Nota interna opcional")
 
 
-@router.post("/contacts/{contact_id}/appointments", status_code=201)
 async def create_appointment(
     contact_id: str,
     body: AppointmentCreateRequest,
@@ -7353,7 +7573,6 @@ async def create_appointment(
     }
 
 
-@router.get("/contacts/{contact_id}/appointments")
 async def get_appointments(
     contact_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -7366,7 +7585,6 @@ async def get_appointments(
     return {"appointments": appts, "total": len(appts)}
 
 
-@router.patch("/appointments/{appointment_id}/cancel")
 async def cancel_appointment(
     appointment_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -7408,7 +7626,6 @@ class AppointmentUpdateBody(BaseModel):
     notes: str = None
 
 
-@router.patch("/appointments/{appointment_id}")
 async def update_appointment(
     appointment_id: str,
     body: AppointmentUpdateBody,
@@ -7574,7 +7791,6 @@ async def update_appointment(
     return respuesta
 
 
-@router.delete("/appointments/{appointment_id}")
 async def delete_appointment(
     appointment_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -7622,7 +7838,6 @@ class NoteUpdateBody(BaseModel):
     content: str = Field(..., min_length=1, max_length=2000)
 
 
-@router.get("/contacts/{contact_id}/notes")
 async def get_contact_notes(
     contact_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -7635,7 +7850,6 @@ async def get_contact_notes(
     return {"notes": notes, "total": len(notes)}
 
 
-@router.post("/contacts/{contact_id}/notes", status_code=201)
 async def create_contact_note(
     contact_id: str,
     body: NoteCreateBody,
@@ -7658,7 +7872,6 @@ async def create_contact_note(
     return {"ok": True, "note_id": note_id, "notes": notes}
 
 
-@router.patch("/contacts/{contact_id}/notes/{note_id}")
 async def update_contact_note(
     contact_id: str,
     note_id: str,
@@ -7676,7 +7889,6 @@ async def update_contact_note(
     return {"ok": True, "notes": notes}
 
 
-@router.delete("/contacts/{contact_id}/notes/{note_id}")
 async def delete_contact_note(
     contact_id: str,
     note_id: str,
@@ -7697,7 +7909,6 @@ async def delete_contact_note(
 # UI del Panel
 # ============================================================================
 
-@router.get("/", response_class=HTMLResponse)
 async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     """
     Interfaz web del panel de envio para asesores - WhatsApp Web Style.
@@ -8030,7 +8241,6 @@ def format_status_excel(status: str) -> str:
     return status_map.get(status_clean, status_clean.capitalize())
 
 
-@router.get("/metrics")
 async def get_social_media_metrics(
     days: int = Query(7, ge=1, le=30, description="Días a analizar"),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -8222,7 +8432,6 @@ async def get_social_media_metrics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/metrics/export")
 async def export_metrics_csv(
     days: int = Query(7, ge=1, le=30, description="Días a analizar"),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -8307,7 +8516,6 @@ async def export_metrics_csv(
     )
 
 
-@router.get("/metrics/export-excel")
 async def export_metrics_excel(
     days: int = Query(7, ge=1, le=30, description="Días a analizar"),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -8488,7 +8696,6 @@ async def export_metrics_excel(
 # MÉTRICAS DE CITAS REALIZADAS (dashboard mercadeo)
 # ============================================================================
 
-@router.get("/metrics/appointments")
 async def get_appointments_metrics(
     date_from: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
     date_to: str = Query(..., description="YYYY-MM-DD (Bogotá)"),
@@ -8594,7 +8801,6 @@ async def get_appointments_metrics(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/metrics/appointments/export-excel")
 async def export_appointments_excel(
     date_from: str = Query(..., description="YYYY-MM-DD"),
     date_to: str = Query(..., description="YYYY-MM-DD"),
@@ -8746,7 +8952,6 @@ def _format_datetime_bogota(iso_str: str) -> str:
         return iso_str[:16]
 
 
-@router.get("/metrics/", response_class=HTMLResponse)
 async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, alias="key")):
     """
     Dashboard de metricas para analista de redes sociales.
@@ -8778,7 +8983,6 @@ async def metrics_dashboard_ui(request: Request, x_api_key: str = Query(None, al
 # WebSocket para notificaciones en tiempo real
 # ============================================================================
 
-@router.websocket("/ws/{advisor_id}")
 async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
     """
     Endpoint WebSocket para notificaciones en tiempo real.
@@ -8856,7 +9060,6 @@ async def websocket_endpoint(websocket: WebSocket, advisor_id: str):
         ws_manager.disconnect(websocket, advisor_id)
 
 
-@router.get("/ws/stats")
 async def websocket_stats(x_api_key: str = Header(None, alias="X-API-Key")):
     """
     Retorna estadísticas de conexiones WebSocket activas.
@@ -8871,7 +9074,6 @@ async def websocket_stats(x_api_key: str = Header(None, alias="X-API-Key")):
 # ENDPOINT RECOVERY: Restaurar contactos desaparecidos desde HubSpot
 # ============================================================================
 
-@router.post("/admin/restore-panel")
 async def restore_panel_from_hubspot(
     x_api_key: str = Header(None, alias="X-API-Key"),
 ):
@@ -9022,7 +9224,6 @@ def _parse_iso_to_utc(iso_str: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-@router.post("/admin/recover-outage")
 async def recover_outage(
     start_iso: str = Query(..., description="Inicio ventana ISO 8601 ej: 2026-05-20T10:54:00-05:00"),
     end_iso: str = Query(..., description="Fin ventana ISO 8601 ej: 2026-05-20T14:00:00-05:00"),
@@ -9199,7 +9400,6 @@ async def recover_outage(
 # ONE-SHOT: Limpieza de advisor_inbox stale (BOT_ACTIVE entries)
 # =============================================================================
 
-@router.post("/admin/cleanup-stale-inbox")
 async def cleanup_stale_inbox(
     dry_run: bool = Query(True, description="True = solo listar, no borrar"),
     x_api_key: str = Header(None, alias="X-API-Key"),
@@ -9261,7 +9461,6 @@ async def cleanup_stale_inbox(
     }
 
 
-@router.post("/admin/sync-owners")
 async def sync_owners_with_hubspot(
     dry_run: bool = Query(True, description="True = solo listar, no aplicar"),
     limit: int = Query(50, ge=1, le=500, description="Contactos a procesar por lote"),
@@ -9429,7 +9628,6 @@ async def sync_owners_with_hubspot(
     }
 
 
-@router.post("/admin/sync-owners-mongo")
 async def sync_owners_mongo(
     dry_run: bool = Query(True),
     limit: int = Query(50, ge=1, le=200),
@@ -9566,7 +9764,6 @@ async def sync_owners_mongo(
     }
 
 
-@router.post("/admin/recover-lost-conversations")
 async def recover_lost_conversations(
     dry_run: bool = Query(True),
     hours: int = Query(72, ge=1, le=168, description="Ventana de tiempo en horas"),
@@ -9777,7 +9974,6 @@ async def recover_lost_conversations(
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
 # =============================================================================
 
-@router.post("/contacts/{contact_id}/scheduled-messages", status_code=201)
 async def create_scheduled_message(
     contact_id: str,
     body: ScheduledMessageCreateRequest,
@@ -9850,7 +10046,6 @@ async def create_scheduled_message(
     }
 
 
-@router.get("/contacts/{contact_id}/scheduled-messages")
 async def get_scheduled_messages(
     contact_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -9863,7 +10058,6 @@ async def get_scheduled_messages(
     return {"messages": messages, "total": len(messages)}
 
 
-@router.delete("/scheduled-messages/{message_id}", status_code=200)
 async def cancel_scheduled_message(
     message_id: str,
     x_api_key: str = Header(None, alias="X-API-Key")
@@ -10120,7 +10314,6 @@ async def _filter_contacts_by_last_message_range(
 # Endpoints Bulk Campaigns
     # ----------------------------------------------------------------------------
 
-@router.post("/bulk-campaigns/preview")
 async def preview_bulk_campaign(
     stage_id: str = Body(...),
     advisor_id: str = Body(...),
@@ -10152,7 +10345,6 @@ async def preview_bulk_campaign(
     }
 
 
-@router.post("/bulk-campaigns")
 async def create_bulk_campaign(
     stage_id: str = Body(...),
     advisor_id: str = Body(...),
@@ -10211,7 +10403,6 @@ async def create_bulk_campaign(
     }
 
 
-@router.get("/bulk-campaigns/{campaign_id}")
 async def get_bulk_campaign_status(
     campaign_id: str,
     advisor_id: str = Query(...),
@@ -10239,7 +10430,6 @@ async def get_bulk_campaign_status(
     }
 
 
-@router.get("/bulk-campaigns/last/{stage_id}")
 async def get_last_bulk_campaign(
     stage_id: str,
     advisor_id: str = Query(...),

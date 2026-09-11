@@ -27,6 +27,7 @@ from typing import Optional, Dict, Any, Tuple
 from openai import AsyncOpenAI
 
 from logging_config import logger
+from utils.environment import apply_bunny_prefix, require_bunny_upload_allowed
 from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text, safe_url
 
 # ============================================================================
@@ -532,6 +533,17 @@ class MediaProcessor:
             content_type: MIME type del archivo. Si no se especifica, se infiere de la extensión.
         """
         import asyncio
+
+        allowed, reason = require_bunny_upload_allowed()
+        if not allowed:
+            logger.warning(
+                "[BunnyStorage] Upload bloqueado por safety gate: reason=%s folder=%s",
+                reason,
+                safe_id(folder, "folder"),
+            )
+            raise RuntimeError(reason)
+
+        folder = apply_bunny_prefix(folder)
 
         # Limpiar nombre de archivo para URLs seguras
         clean_filename = filename.replace(" ", "_").replace(":", "-").replace("+", "")

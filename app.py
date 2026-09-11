@@ -87,6 +87,11 @@ from integrations.hubspot import get_outbound_router, get_timeline_logger
 from middleware.outbound_panel import update_last_client_message
 from middleware.websocket_manager import ws_manager
 from utils.architecture_contract import architecture_contract_summary
+from utils.environment import (
+    configured_safety_summary,
+    rag_index_on_startup_enabled,
+    scheduler_outbound_enabled,
+)
 from utils.safe_logging import obs_event, safe_error, safe_id, safe_phone, safe_text
 from utils.scheduler_observability import SCHEDULER_OBS_EVENT_MASK, log_scheduler_event
 
@@ -947,7 +952,7 @@ async def _renew_scheduler_lock():
     Se re-escribe el valor con el PID propio: si el lock hubiera expirado en un
     hueco de red, esto lo recupera en vez de dejar el puesto vacante.
     """
-    global _scheduler_lock_held, _scheduler_obs_listener_registered
+    global _scheduler_lock_held
     if not _scheduler_lock_held:
         return
     try:
@@ -1807,7 +1812,8 @@ async def health_check():
         "status": "healthy",
         "timestamp": get_bogota_now_iso(),
         "redis": "unchecked",
-        "scheduler": "running" if scheduler.running else "stopped"
+        "scheduler": "running" if scheduler.running else "stopped",
+        "safety": configured_safety_summary(),
     }
 
     try:
@@ -1831,45 +1837,48 @@ async def startup_event():
     logger.info("[STARTUP] Iniciando servidor Sofía v2.0... (Worker PID: %s)", pid)
     logger.info(architecture_contract_summary())
 
-    # Cargar Knowledge Base — un solo worker indexa (lock Redis para evitar stampede)
-    # Con 4 workers Gunicorn, sin lock todos ejecutan reload_knowledge_base() simultáneamente:
-    # 4× DELETE + 4× INSERT + 4× embedding API calls → estado no determinístico en pgvector.
-    # Redis SET NX (only if Not eXists) garantiza que solo 1 worker indexa; los demás
-    # solo inicializan la conexión SQLAlchemy sin tocar los datos.
-    try:
-        from rag.rag_service import rag_service
-        from rag.vector_store import pg_vector_store
-        import redis.asyncio as _redis_rag
+    if rag_index_on_startup_enabled():
+        # Cargar Knowledge Base — un solo worker indexa (lock Redis para evitar stampede)
+        # Con 4 workers Gunicorn, sin lock todos ejecutan reload_knowledge_base() simultáneamente:
+        # 4× DELETE + 4× INSERT + 4× embedding API calls → estado no determinístico en pgvector.
+        # Redis SET NX (only if Not eXists) garantiza que solo 1 worker indexa; los demás
+        # solo inicializan la conexión SQLAlchemy sin tocar los datos.
+        try:
+            from rag.rag_service import rag_service
+            from rag.vector_store import pg_vector_store
+            import redis.asyncio as _redis_rag
 
-        _rag_redis = _redis_rag.from_url(
-            get_redis_url(), encoding="utf-8", decode_responses=True,
-            socket_timeout=2.0, socket_connect_timeout=2.0
-        )
-        # Atómico: solo el primer worker en ganar el lock indexa la KB.
-        # TTL 120s cubre sobrecarga de embeddings; se limpia solo al expirar.
-        _rag_lock = await _rag_redis.set("rag_kb_lock", str(pid), nx=True, ex=120)
-        await _rag_redis.aclose()
+            _rag_redis = _redis_rag.from_url(
+                get_redis_url(), encoding="utf-8", decode_responses=True,
+                socket_timeout=2.0, socket_connect_timeout=2.0
+            )
+            # Atómico: solo el primer worker en ganar el lock indexa la KB.
+            # TTL 120s cubre sobrecarga de embeddings; se limpia solo al expirar.
+            _rag_lock = await _rag_redis.set("rag_kb_lock", str(pid), nx=True, ex=120)
+            await _rag_redis.aclose()
 
-        if _rag_lock:
-            # Este worker ganó el lock → ejecuta DELETE + embeddings + INSERT
-            result = rag_service.reload_knowledge_base()
-            if result["status"] == "error":
-                raise RuntimeError(f"Fallo en carga KB: {result.get('message')}")
-            logger.info("[STARTUP] ✅ KB Lista. Chunks: %s (líder PID: %s)", result.get('chunks_indexed'), pid)
-        else:
-            # Otro worker ya está indexando → solo inicializar la conexión DB (sin re-indexar)
-            pg_vector_store.initialize_db()
-            logger.info("[STARTUP] ⏭  KB indexada por otro worker. Conexión DB lista (PID: %s)", pid)
+            if _rag_lock:
+                # Este worker ganó el lock → ejecuta DELETE + embeddings + INSERT
+                result = rag_service.reload_knowledge_base()
+                if result["status"] == "error":
+                    raise RuntimeError(f"Fallo en carga KB: {result.get('message')}")
+                logger.info("[STARTUP] ✅ KB Lista. Chunks: %s (líder PID: %s)", result.get('chunks_indexed'), pid)
+            else:
+                # Otro worker ya está indexando → solo inicializar la conexión DB (sin re-indexar)
+                pg_vector_store.initialize_db()
+                logger.info("[STARTUP] ⏭  KB indexada por otro worker. Conexión DB lista (PID: %s)", pid)
 
-    except Exception as e:
-        logger.error("[STARTUP] ⚠️ Error cargando KB: %s", e)
+        except Exception as e:
+            logger.error("[STARTUP] ⚠️ Error cargando KB: %s", e)
+    else:
+        logger.warning("[STARTUP] RAG index on startup bloqueado por safety gate")
 
     # Scheduler: solo UN worker por instancia Railway ejecuta los jobs.
     # Sin lock, N workers corren cada job independientemente:
     #   - check_appointment_reminders efectivo cada 15 min → Rate Limit HubSpot + duplicados
     #   - check_appointment_followups efectivo cada 7.5 min → mensajes duplicados post-cita
     # Redis SET NX garantiza atomicamente que solo 1 worker adquiere el liderazgo.
-    global _scheduler_lock_held
+    global _scheduler_lock_held, _scheduler_obs_listener_registered
     _is_scheduler_leader = False
     try:
         # Singleton, no from_url: un pool por arranque es innecesario y el proyecto
@@ -1909,6 +1918,10 @@ async def startup_event():
     _register_jobs = True
 
     if _register_jobs:
+        _scheduler_outbound_enabled = scheduler_outbound_enabled()
+        if not _scheduler_outbound_enabled:
+            logger.warning("[STARTUP] Jobs outbound bloqueados por safety gate de scheduler")
+
         # Heartbeat primero: mantiene vivo el liderazgo mientras el worker lo esté.
         # Se registra aunque no seamos líderes todavía — si ganamos por reintento
         # tiene que estar listo para renovar. La propia función es no-op mientras
@@ -1920,7 +1933,7 @@ async def startup_event():
             replace_existing=True,
         )
 
-        if APPOINTMENT_REMINDERS_ENABLED:
+        if APPOINTMENT_REMINDERS_ENABLED and _scheduler_outbound_enabled:
             scheduler.add_job(
                 check_appointment_reminders,
                 trigger=IntervalTrigger(minutes=30),
@@ -1929,7 +1942,7 @@ async def startup_event():
             )
             logger.info("[STARTUP] Scheduler de recordatorios de citas HABILITADO (cada 30 min)")
 
-        if FOLLOWUP_ENABLED:
+        if FOLLOWUP_ENABLED and _scheduler_outbound_enabled:
             scheduler.add_job(
                 check_and_send_followups,
                 trigger=IntervalTrigger(hours=1),
@@ -1938,7 +1951,7 @@ async def startup_event():
             )
             logger.info("[STARTUP] Scheduler de seguimiento 24h HABILITADO")
 
-        if APPOINTMENT_REMINDERS_ENABLED:
+        if APPOINTMENT_REMINDERS_ENABLED and _scheduler_outbound_enabled:
             scheduler.add_job(
                 check_appointment_followups,
                 trigger=IntervalTrigger(minutes=15),
@@ -2069,50 +2082,62 @@ async def startup_event():
             except Exception as e:
                 logger.error("[SchedMsg] Error en ciclo: %s", safe_error(e), exc_info=True)
 
-        scheduler.add_job(
-            check_scheduled_messages,
-            trigger=IntervalTrigger(minutes=1),
-            id="scheduled_messages",
-            replace_existing=True
-        )
-        logger.info("[STARTUP] Scheduler de mensajes programados HABILITADO (cada 1 min)")
+        if _scheduler_outbound_enabled:
+            scheduler.add_job(
+                check_scheduled_messages,
+                trigger=IntervalTrigger(minutes=1),
+                id="scheduled_messages",
+                replace_existing=True
+            )
+            logger.info("[STARTUP] Scheduler de mensajes programados HABILITADO (cada 1 min)")
+        else:
+            logger.warning("[STARTUP] Scheduler de mensajes programados BLOQUEADO por safety gate")
 
         # Bulk campaigns processor (cada 15s) — procesa lotes pequeños de mensajes masivos
-        from middleware.outbound_panel import _process_bulk_campaign_tick_safe
-        scheduler.add_job(
-            _process_bulk_campaign_tick_safe,
-            trigger=IntervalTrigger(seconds=15),
-            id="bulk_campaign_processor",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-            replace_existing=True,
-        )
-        logger.info("[STARTUP] Bulk campaign processor HABILITADO (cada 15s)")
+        if _scheduler_outbound_enabled:
+            from middleware.outbound_panel import _process_bulk_campaign_tick_safe
+            scheduler.add_job(
+                _process_bulk_campaign_tick_safe,
+                trigger=IntervalTrigger(seconds=15),
+                id="bulk_campaign_processor",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+                replace_existing=True,
+            )
+            logger.info("[STARTUP] Bulk campaign processor HABILITADO (cada 15s)")
+        else:
+            logger.warning("[STARTUP] Bulk campaign processor BLOQUEADO por safety gate")
 
         # Notificaciones 24h al asesor — detecta contactos HUMAN_ACTIVE sin respuesta del asesor en 24h
-        try:
-            scheduler.add_job(
-                check_24h_advisor_notifications,
-                trigger=IntervalTrigger(hours=1),
-                id="advisor_24h_notifications",
-                replace_existing=True
-            )
-            logger.info("[STARTUP] ✅ Scheduler notificaciones 24h asesor HABILITADO (cada 1h)")
-        except Exception as _e24h:
-            logger.error("[STARTUP] ❌ FALLO registrando advisor_24h_notifications: %s", _e24h, exc_info=True)
+        if _scheduler_outbound_enabled:
+            try:
+                scheduler.add_job(
+                    check_24h_advisor_notifications,
+                    trigger=IntervalTrigger(hours=1),
+                    id="advisor_24h_notifications",
+                    replace_existing=True
+                )
+                logger.info("[STARTUP] ✅ Scheduler notificaciones 24h asesor HABILITADO (cada 1h)")
+            except Exception as _e24h:
+                logger.error("[STARTUP] ❌ FALLO registrando advisor_24h_notifications: %s", _e24h, exc_info=True)
+        else:
+            logger.warning("[STARTUP] Scheduler notificaciones 24h asesor BLOQUEADO por safety gate")
 
         # Recordatorio diario de contactos Aprobados — 9:00 AM Bogotá (America/Bogota)
-        try:
-            scheduler.add_job(
-                check_aprobados_daily,
-                trigger=CronTrigger(hour=9, minute=0, timezone="America/Bogota"),
-                id="aprobados_daily_reminder",
-                replace_existing=True
-            )
-            logger.info("[STARTUP] ✅ Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
-        except Exception as _eapro:
-            logger.error("[STARTUP] ❌ FALLO registrando aprobados_daily_reminder: %s", _eapro, exc_info=True)
+        if _scheduler_outbound_enabled:
+            try:
+                scheduler.add_job(
+                    check_aprobados_daily,
+                    trigger=CronTrigger(hour=9, minute=0, timezone="America/Bogota"),
+                    id="aprobados_daily_reminder",
+                    replace_existing=True
+                )
+                logger.info("[STARTUP] ✅ Scheduler recordatorio Aprobados HABILITADO (diario 9:00 AM Bogotá)")
+            except Exception as _eapro:
+                logger.error("[STARTUP] ❌ FALLO registrando aprobados_daily_reminder: %s", _eapro, exc_info=True)
+        else:
+            logger.warning("[STARTUP] Scheduler recordatorio Aprobados BLOQUEADO por safety gate")
 
         # ⚠️ 2026-05-30: Rebuild nocturno del ZSET desde MongoDB conversations.
         # Auto-consistencia: recupera conversaciones perdidas del inbox por
@@ -2134,51 +2159,60 @@ async def startup_event():
         # entran a las 8:30. No choca con el rebuild del ZSET de las 3:00.
         # Viene EN SECO: con DEPURACION_AUTO_ENABLED=false calcula y deja el
         # informe en el log sin mover a nadie.
-        try:
-            from middleware.job_depuracion_masivos import (
-                ID_JOB as _ID_DEPURACION,
-                check_depuracion_masivos,
-            )
-            scheduler.add_job(
-                check_depuracion_masivos,
-                trigger=CronTrigger(hour=5, minute=0, timezone="America/Bogota"),
-                id=_ID_DEPURACION,
-                replace_existing=True,
-            )
-            logger.info(
-                "[STARTUP] Depuracion 'No responde' HABILITADA (5:00 AM Bogota, "
-                "aplicando=%s)",
-                os.getenv("DEPURACION_AUTO_ENABLED", "false"),
-            )
-        except Exception as _erd:
-            logger.error(
-                "[STARTUP] FALLO registrando depuracion_no_responde: %s", _erd, exc_info=True
-            )
+        if _scheduler_outbound_enabled:
+            try:
+                from middleware.job_depuracion_masivos import (
+                    ID_JOB as _ID_DEPURACION,
+                    check_depuracion_masivos,
+                )
+                scheduler.add_job(
+                    check_depuracion_masivos,
+                    trigger=CronTrigger(hour=5, minute=0, timezone="America/Bogota"),
+                    id=_ID_DEPURACION,
+                    replace_existing=True,
+                )
+                logger.info(
+                    "[STARTUP] Depuracion 'No responde' HABILITADA (5:00 AM Bogota, "
+                    "aplicando=%s)",
+                    os.getenv("DEPURACION_AUTO_ENABLED", "false"),
+                )
+            except Exception as _erd:
+                logger.error(
+                    "[STARTUP] FALLO registrando depuracion_no_responde: %s", _erd, exc_info=True
+                )
+        else:
+            logger.warning("[STARTUP] Depuracion 'No responde' BLOQUEADA por safety gate")
 
-        try:
-            scheduler.add_job(
-                reconcile_owner_ids,
-                trigger=IntervalTrigger(hours=6),
-                id="reconcile_owner_ids",
-                replace_existing=True,
-            )
-            logger.info("[STARTUP] Reconciliación owner_ids HABILITADA (cada 6h)")
-        except Exception as _erc:
-            logger.error("[STARTUP] FALLO registrando reconcile_owner_ids: %s", _erc, exc_info=True)
+        if _scheduler_outbound_enabled:
+            try:
+                scheduler.add_job(
+                    reconcile_owner_ids,
+                    trigger=IntervalTrigger(hours=6),
+                    id="reconcile_owner_ids",
+                    replace_existing=True,
+                )
+                logger.info("[STARTUP] Reconciliación owner_ids HABILITADA (cada 6h)")
+            except Exception as _erc:
+                logger.error("[STARTUP] FALLO registrando reconcile_owner_ids: %s", _erc, exc_info=True)
+        else:
+            logger.warning("[STARTUP] Reconciliación owner_ids BLOQUEADA por safety gate")
 
-        try:
-            scheduler.add_job(
-                rescue_stalled_leads,
-                trigger=IntervalTrigger(minutes=5),
-                id="rescue_stalled_leads",
-                replace_existing=True,
-            )
-            logger.info(
-                "[STARTUP] Rescate de leads estancados HABILITADO (cada 5min, timeout %dmin)",
-                RESCUE_TIMEOUT_MINUTES
-            )
-        except Exception as _ers:
-            logger.error("[STARTUP] FALLO registrando rescue_stalled_leads: %s", _ers, exc_info=True)
+        if _scheduler_outbound_enabled:
+            try:
+                scheduler.add_job(
+                    rescue_stalled_leads,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="rescue_stalled_leads",
+                    replace_existing=True,
+                )
+                logger.info(
+                    "[STARTUP] Rescate de leads estancados HABILITADO (cada 5min, timeout %dmin)",
+                    RESCUE_TIMEOUT_MINUTES
+                )
+            except Exception as _ers:
+                logger.error("[STARTUP] FALLO registrando rescue_stalled_leads: %s", _ers, exc_info=True)
+        else:
+            logger.warning("[STARTUP] Rescate de leads estancados BLOQUEADO por safety gate")
 
         # Observabilidad pasiva: escucha APScheduler sin envolver ni alterar jobs.
         if not _scheduler_obs_listener_registered:

@@ -66,8 +66,8 @@ def get_whatsapp_router():
 
 def get_outbound_panel_router():
     """Lazy import del router del Panel de Envío para asesores."""
-    from .outbound_panel import router
-    return router
+    from .panel import get_panel_router
+    return get_panel_router()
 
 
 __all__ = [

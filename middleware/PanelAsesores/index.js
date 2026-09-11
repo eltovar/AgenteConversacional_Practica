@@ -1699,7 +1699,7 @@ async function loadChatHistory(contactId, opciones = {}) {
         // Carga inicial = 100 mensajes (los más recientes). Si el usuario scrollea
         // hacia arriba, loadOlderMessages() trae páginas adicionales de 100 con
         // ?before_ts=<oldest_ts>. Esto evita transferir miles de mensajes upfront.
-        let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=${CHAT_PAGE_SIZE}`;
+        let historyUrl = `${BASE_URL}/history/${requestedContactId}?limit=${CHAT_PAGE_SIZE}&advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`;
         if (requestedCanal) {
             historyUrl += `&canal=${encodeURIComponent(requestedCanal)}`;
         }
@@ -1882,8 +1882,8 @@ async function loadOlderMessages() {
 
     try {
         let url = requestedCid
-            ? `${BASE_URL}/history/${encodeURIComponent(requestedCid)}?limit=${CHAT_PAGE_SIZE}`
-            : `${BASE_URL}/conversations/${encodeURIComponent(requestedPhone)}?limit=${CHAT_PAGE_SIZE}`;
+            ? `${BASE_URL}/history/${encodeURIComponent(requestedCid)}?limit=${CHAT_PAGE_SIZE}&advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`
+            : `${BASE_URL}/conversations/${encodeURIComponent(requestedPhone)}?limit=${CHAT_PAGE_SIZE}&advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`;
         url += `&before_ts=${encodeURIComponent(requestedCursor)}`;
         if (chatHistoryState.canal) {
             url += `&canal=${encodeURIComponent(chatHistoryState.canal)}`;
@@ -2197,7 +2197,7 @@ async function loadContactDetail(phone, contactId, canal) {
     try {
         // ⚠️ 2026-06-02: limit alineado con CHAT_PAGE_SIZE (100). Paginación
         // siguiente se hace vía loadOlderMessages() → GET /history/{cid}.
-        let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=${CHAT_PAGE_SIZE}`;
+        let url = `${BASE_URL}/contacts/${encodeURIComponent(phone)}/detail?limit=${CHAT_PAGE_SIZE}&advisor_id=${encodeURIComponent(ADVISOR_ID || '')}`;
         if (contactId) url += `&contact_id=${encodeURIComponent(contactId)}`;
         if (canal) url += `&canal=${encodeURIComponent(canal)}`;
 
@@ -2697,6 +2697,17 @@ let isFirstChatLoad = true;
 // Variable para tracking del contacto actual en el chat (para detectar cambio de contacto)
 let renderedContactId = null;
 
+function getMessageDisplayText(msg) {
+    if (!msg) return '';
+    const candidates = [msg.message, msg.content, msg.body, msg.text];
+    for (const value of candidates) {
+        if (value === null || value === undefined) continue;
+        const text = String(value);
+        if (text.length > 0) return text;
+    }
+    return '';
+}
+
 function renderChatBubbles(messages) {
     const container = document.getElementById('chatMessages');
 
@@ -2876,7 +2887,7 @@ function renderChatBubbles(messages) {
 
             // Detectar audio guardado como texto plano: "🎵 Audio: https://..."
             // Ocurre cuando MongoDB guarda el audio en msg.message en vez de msg.media
-            let _displayMsg = msg.message || '';
+            let _displayMsg = getMessageDisplayText(msg);
             if (!mediaUrl && _displayMsg) {
                 const _atm = _displayMsg.match(/^🎵\s*Audio:\s*(https?:\/\/\S+)([\s\S]*)?$/i);
                 if (_atm) {
@@ -2960,7 +2971,8 @@ function renderChatBubbles(messages) {
                     </svg>
                 </button>` : '';
 
-            const _safeContent = (msg.message || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const _rawContent = getMessageDisplayText(msg);
+            const _safeContent = _rawContent.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
             // Mensajes eliminados: burbuja neutra sin contenido
             if (msg.deleted) {
@@ -6163,6 +6175,8 @@ function handleMessageDeliveryFailed(data) {
             errBubble.className = 'flex justify-end mb-2';
             const errorDetail = data.error_code === '63024'
                 ? 'Este número no tiene WhatsApp activo'
+                : data.error_code === '63016'
+                ? 'Ventana de 24 horas cerrada: usa una plantilla aprobada de WhatsApp'
                 : data.error_code === '63049'
                 ? 'Sesión expirada o número bloqueado'
                 : `Error de envío (código: ${data.error_code || 'desconocido'})`;
@@ -7292,9 +7306,16 @@ async function transferContact(event) {
         if (response.ok && data.status === 'success') {
             // Obtener nombre del asesor destino
             const toAdvisor = advisorsList.find(a => a.id === toOwnerId);
-            const toName = toAdvisor ? toAdvisor.name : toOwnerId;
+            const toName = data.to_owner_name || (toAdvisor ? toAdvisor.name : toOwnerId);
+            const fromName = data.from_owner_name || 'esta asesora';
+            const scopeText = data.transfer_scope || (data.mode === 'collaborative' ? 'colaborativa' : 'exclusiva');
 
-            showTransferResult('success', `Contacto transferido a ${toName}`);
+            showTransferResult(
+                'success',
+                `Transferencia ${scopeText} confirmada: el chat pasó de ${fromName} a ${toName}. ` +
+                `La nueva validación permitirá abrirlo en el panel de ${toName}.`
+            );
+            showToast(`Transferencia confirmada a ${toName}`, 'success');
 
             // Cerrar modal y refrescar
             setTimeout(() => {

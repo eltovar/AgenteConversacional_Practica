@@ -2316,6 +2316,12 @@ async def whatsapp_status_callback(
 
                     if ErrorCode == "63024":
                         user_msg = f"⚠️ Mensaje NO entregado: el número {phone_normalized} no tiene WhatsApp activo."
+                    elif ErrorCode == "63016":
+                        user_msg = (
+                            f"⚠️ Mensaje NO entregado al número {phone_normalized}. "
+                            f"La ventana de 24 horas está cerrada. Usa una plantilla aprobada de WhatsApp "
+                            f"para iniciar la conversación."
+                        )
                     elif ErrorCode == "63049":
                         user_msg = (
                             f"⚠️ Mensaje NO entregado al número {phone_normalized}. "

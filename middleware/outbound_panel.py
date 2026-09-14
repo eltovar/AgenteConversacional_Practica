@@ -757,6 +757,56 @@ def _dedupe_panel_contacts(contacts: List[Dict[str, Any]]) -> List[Dict[str, Any
     return deduped
 
 
+def _build_contacts_page_after_dedupe(
+    always_contacts: List[Dict[str, Any]],
+    rest_contacts: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """
+    Arma la pagina final sin perder cupos por duplicados.
+
+    Los contactos que deben permanecer visibles entran todos. El resto se
+    completa hasta `limit` contactos unicos; asi un duplicado dentro de los
+    primeros N no hace que alguien desaparezca del inbox aunque exista mas abajo.
+    """
+    by_key: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    def _add(contact: Dict[str, Any]) -> bool:
+        key = _contact_identity_key(contact) or f"anon:{len(order)}"
+        is_new = key not in by_key
+        if is_new:
+            by_key[key] = contact
+            order.append(key)
+            return True
+
+        current = by_key[key]
+        if _contact_dedup_rank(contact) > _contact_dedup_rank(current):
+            merged = {**current, **contact}
+        else:
+            merged = {**contact, **current}
+        merged["has_unread"] = bool(current.get("has_unread") or contact.get("has_unread"))
+        merged["pending_reply"] = bool(current.get("pending_reply") or contact.get("pending_reply"))
+        by_key[key] = merged
+        return False
+
+    for contact in always_contacts:
+        _add(contact)
+
+    rest_added = 0
+    for contact in rest_contacts:
+        if _add(contact):
+            rest_added += 1
+        if rest_added >= limit:
+            break
+
+    result = [by_key[key] for key in order]
+    removed = len(always_contacts) + min(len(rest_contacts), max(limit, 0)) - len(result)
+    if removed > 0:
+        logger.warning(f"[Panel][Dedup] {removed} duplicados removidos y pagina rellenada antes de responder")
+    return result
+
+
 # ============================================================================
 # Funciones auxiliares
 # ============================================================================
@@ -7034,7 +7084,7 @@ async def get_active_contacts(
         # respetar lo mismo: ver _nunca_se_corta().
         _always_in_final = [c for c in contacts_sorted if _nunca_se_corta(c)]
         _rest_in_final = [c for c in contacts_sorted if not _nunca_se_corta(c)]
-        _dynamic_result = _dedupe_panel_contacts(_always_in_final + _rest_in_final[:limit])
+        _dynamic_result = _build_contacts_page_after_dedupe(_always_in_final, _rest_in_final, limit)
 
         _pending_in_final = sum(
             1 for c in _always_in_final

@@ -144,6 +144,7 @@ let replyToMessage = null;  // { id, sender, sender_name, content, media_type, t
 let contactDealCache = {};  // Cache de deal_id por contacto para evitar flickering
 const _contactFingerprints = new Map(); // Fingerprint del último render por phone → evita re-renders innecesarios
 const recentlyClosedPhones = new Set(); // Guard contra race condition: evita que polling stale re-renderice contactos recién cerrados
+let _lastSuspiciousShrinkAt = 0; // Evita que una respuesta parcial borre el inbox durante polling normal
 // [Bug2] Render guard: evita que dos renders DOM corran intercalados (causa index jumping)
 let _renderInProgress = false;
 let _pendingRenderContacts = null;
@@ -1290,6 +1291,34 @@ function _dedupeContactsForRender(contacts) {
     return deduped;
 }
 
+function _shouldKeepPreviousContactsOnSuspiciousShrink(previousContacts, nextContacts, options = {}) {
+    const intentionalFilter = Boolean(options.workerIdParam || options.dateFrom || options.activeStageFilter);
+    if (intentionalFilter) return false;
+    if (!Array.isArray(previousContacts) || !Array.isArray(nextContacts)) return false;
+    if (previousContacts.length < 10 || nextContacts.length === 0) return false;
+    if (nextContacts.length >= previousContacts.length) return false;
+
+    const now = Date.now();
+    if (now - _lastSuspiciousShrinkAt < 5000) return false;
+
+    const nextKeys = new Set(nextContacts.map(_contactIdentityKey).filter(Boolean));
+    const missing = previousContacts.filter(contact => {
+        const phone = contact?.phone || '';
+        const key = _contactIdentityKey(contact);
+        return key && !nextKeys.has(key) && !recentlyClosedPhones.has(phone);
+    });
+    const lostMany = missing.length >= 5;
+    const lostRatio = nextContacts.length < previousContacts.length * 0.7;
+    if (!lostMany && !lostRatio) return false;
+
+    _lastSuspiciousShrinkAt = now;
+    console.warn(
+        '[Panel][Inbox] Respuesta parcial sospechosa; se conserva la lista actual y se reintenta.',
+        { previous: previousContacts.length, next: nextContacts.length, missing: missing.length }
+    );
+    return true;
+}
+
 /**
  * Aplica filtros activos (portal + etapa) sobre allContacts y renderiza.
  * Llamado desde loadContacts(), filterByPortal(), onStageFilterChange().
@@ -1505,6 +1534,15 @@ async function loadContacts() {
         // Excepción: si hay un filtro activo (worker o fecha), el 0 es intencional → limpiar lista.
         if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam && !dateFrom) {
             console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
+            return;
+        }
+
+        if (_shouldKeepPreviousContactsOnSuspiciousShrink(allContacts, newContacts, {
+            workerIdParam,
+            dateFrom,
+            activeStageFilter
+        })) {
+            setTimeout(loadContacts, 1200);
             return;
         }
 

@@ -10,8 +10,9 @@ existentes (Redis, HubSpot, state_manager). No escribe al ZSET.
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
-from utils.safe_logging import safe_error, safe_id
+from utils.safe_logging import obs_event, safe_error, safe_id
 
 if TYPE_CHECKING:
     from middleware.conversation_state import ConversationStateManager
@@ -23,6 +24,49 @@ MAX_STAGE_CONTACTS = int(os.getenv("MAX_STAGE_CONTACTS", "500"))
 HS_STAGE_CACHE_TTL = int(os.getenv("HS_STAGE_CACHE_TTL", "60"))
 _MAX_PAGES = 10  # safety: 10 páginas × 100 = 1000 ceiling
 _BATCH_SIZE = 100  # HubSpot batch read máximo
+STAGE_FILTER_PERF_TOTAL_SLOW_MS = float(os.getenv("STAGE_FILTER_PERF_TOTAL_SLOW_MS", "1000"))
+STAGE_FILTER_PERF_STEP_SLOW_MS = float(os.getenv("STAGE_FILTER_PERF_STEP_SLOW_MS", "250"))
+
+
+class _StageFilterPerfTrace:
+    """Traza por fase para ubicar lentitud al cargar contactos desde HubSpot."""
+
+    def __init__(self, stage: str, owner_id: str):
+        self.stage = stage
+        self.owner_id = owner_id
+        self._start = time.perf_counter()
+        self._last = self._start
+        self._steps: List[tuple[str, float]] = []
+
+    def mark(self, step: str) -> None:
+        now = time.perf_counter()
+        self._steps.append((step, (now - self._last) * 1000.0))
+        self._last = now
+
+    def emit(self, *, status: str, contact_count: int = 0, from_cache: bool = False) -> None:
+        total_ms = (time.perf_counter() - self._start) * 1000.0
+        slow_steps = [
+            f"{name}={elapsed:.0f}ms"
+            for name, elapsed in self._steps
+            if elapsed >= STAGE_FILTER_PERF_STEP_SLOW_MS
+        ]
+        if status == "ok" and total_ms < STAGE_FILTER_PERF_TOTAL_SLOW_MS and not slow_steps:
+            return
+
+        logger.warning(
+            obs_event(
+                "panel",
+                "stage_filter",
+                "perf_trace",
+                status=status,
+                stage=safe_id(self.stage, "stage"),
+                owner=safe_id(self.owner_id, "owner"),
+                contact_count=contact_count,
+                from_cache=from_cache,
+                duration_ms=round(total_ms),
+                slow_steps=";".join(slow_steps) if slow_steps else "none",
+            )
+        )
 
 
 # ── Cache helpers ────────────────────────────────────────────────────────────
@@ -175,12 +219,16 @@ async def get_contacts_by_stage_full(
             "from_cache": bool,
         }
     """
+    perf_trace = _StageFilterPerfTrace(stage, owner_id)
+
     # Cache hit
     cached = await _get_cached_stage_results(stage, owner_id)
+    perf_trace.mark("cache_lookup")
     if cached is not None:
         logger.info(
             f"[StageFilter] Cache HIT stage={stage} owner={owner_id} count={len(cached)}"
         )
+        perf_trace.emit(status="ok", contact_count=len(cached), from_cache=True)
         return {
             "contacts": cached,
             "total": len(cached),
@@ -188,30 +236,39 @@ async def get_contacts_by_stage_full(
             "from_cache": True,
         }
 
-    # HubSpot search paginado
-    hs_results = await _paginated_search(stage, owner_id)
-    contact_ids = [r.get("id") for r in hs_results if r.get("id")]
-
-    # Enriquecer (batches de 100)
-    enriched = await _batch_enrich(contact_ids)
-
-    # Merge con Redis ZSET
-    final = await _merge_with_redis(contact_ids, enriched, state_manager, owner_id, stage)
-
-    # Cache write — defensivo: nunca propaga (los resultados frescos son lo que importa)
     try:
-        await _set_cached_stage_results(stage, owner_id, final)
-    except Exception as _cache_err:
-        logger.warning(f"[StageFilter] Cache write propagated unexpectedly: {_cache_err}")
+        # HubSpot search paginado
+        hs_results = await _paginated_search(stage, owner_id)
+        perf_trace.mark("hubspot_search")
+        contact_ids = [r.get("id") for r in hs_results if r.get("id")]
 
-    logger.info(
-        f"[StageFilter] Pipeline complete stage={stage} owner={owner_id}: "
-        f"hs={len(hs_results)} enriched={len(enriched)} final={len(final)}"
-    )
+        # Enriquecer (batches de 100)
+        enriched = await _batch_enrich(contact_ids)
+        perf_trace.mark("hubspot_enrich")
 
-    return {
-        "contacts": final,
-        "total": len(final),
-        "max_reached": len(final) >= MAX_STAGE_CONTACTS,
-        "from_cache": False,
-    }
+        # Merge con Redis ZSET
+        final = await _merge_with_redis(contact_ids, enriched, state_manager, owner_id, stage)
+        perf_trace.mark("redis_merge")
+
+        # Cache write — defensivo: nunca propaga (los resultados frescos son lo que importa)
+        try:
+            await _set_cached_stage_results(stage, owner_id, final)
+        except Exception as _cache_err:
+            logger.warning(f"[StageFilter] Cache write propagated unexpectedly: {_cache_err}")
+        perf_trace.mark("cache_write")
+
+        logger.info(
+            f"[StageFilter] Pipeline complete stage={stage} owner={owner_id}: "
+            f"hs={len(hs_results)} enriched={len(enriched)} final={len(final)}"
+        )
+        perf_trace.emit(status="ok", contact_count=len(final), from_cache=False)
+
+        return {
+            "contacts": final,
+            "total": len(final),
+            "max_reached": len(final) >= MAX_STAGE_CONTACTS,
+            "from_cache": False,
+        }
+    except Exception:
+        perf_trace.emit(status="error")
+        raise

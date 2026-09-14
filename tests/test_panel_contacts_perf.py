@@ -268,6 +268,25 @@ def test_panel_contacts_dedupe_by_contact_id():
     assert deduped[0]["pending_reply"] is True
 
 
+def test_panel_contacts_page_refills_after_dedupe():
+    always = [
+        {"phone": "+573001112233", "display_name": "No leido", "has_unread": True},
+    ]
+    rest = [
+        {"phone": "+57 300 111 2233", "display_name": "Duplicado viejo"},
+        {"phone": "+573002224444", "display_name": "Cliente 2"},
+        {"phone": "+573003335555", "display_name": "Cliente 3"},
+    ]
+
+    page = panel._build_contacts_page_after_dedupe(always, rest, limit=2)
+
+    phones = [c["phone"] for c in page]
+    assert len(page) == 3
+    assert "+573001112233" in phones
+    assert "+573002224444" in phones
+    assert "+573003335555" in phones
+
+
 def test_frontend_dedupes_contacts_before_badges_and_render():
     source = PANEL_JS.read_text(encoding="utf-8")
 
@@ -280,5 +299,27 @@ def test_backend_applies_final_dedupe_before_contacts_response():
     source = PANEL_PY.read_text(encoding="utf-8")
 
     assert "active_contacts = _dedupe_panel_contacts(active_contacts)" in source
-    assert "_dynamic_result = _dedupe_panel_contacts(" in source
+    assert "_dynamic_result = _build_contacts_page_after_dedupe(" in source
     assert "_normalize_contact_phone_key(phone)" in source
+
+
+def test_frontend_keeps_previous_contacts_on_suspicious_polling_shrink():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "function _shouldKeepPreviousContactsOnSuspiciousShrink(" in source
+    assert "previousContacts.length < 10" in source
+    assert "nextContacts.length < previousContacts.length * 0.7" in source
+    assert "setTimeout(loadContacts, 1200);" in source
+    assert "recentlyClosedPhones.has(phone)" in source
+
+
+def test_stage_filter_has_hubspot_perf_trace():
+    source = (Path(ROOT) / "middleware" / "stage_filter.py").read_text(encoding="utf-8")
+
+    assert "class _StageFilterPerfTrace" in source
+    assert 'obs_event(' in source
+    assert '"stage_filter"' in source
+    assert 'perf_trace' in source
+    assert 'perf_trace.mark("hubspot_search")' in source
+    assert 'perf_trace.mark("hubspot_enrich")' in source
+    assert 'perf_trace.mark("redis_merge")' in source

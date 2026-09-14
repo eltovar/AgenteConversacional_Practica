@@ -6473,26 +6473,17 @@ function handleNewMessageNotification(data) {
 function handleContactTransferred(data) {
     console.log('[Panel] Contacto transferido:', data);
 
-    // Notificacion visual + sonido para transferencias entrantes
+    // Transferencia silenciosa: no es mensaje nuevo ni atención urgente.
+    // Debe quedar disponible para la asesora destino, pero sin beep, badge
+    // ni anclaje al tope del inbox.
     if (data.direction === 'incoming') {
-        console.log('[Panel][Sound] Disparando beep por transferencia entrante de', data.phone);
-        playNotificationBeep();
-        showBrowserNotification(
-            'Nuevo contacto',
-            `${data.contact_name || data.phone} ha sido transferido a tu panel`
-        );
+        showToast(`Contacto transferido: ${data.contact_name || data.phone}`, 'info');
     }
 
-    // Refrescar lista
-    loadContacts();
-    // Actualizar badge según dirección de la transferencia
+    scheduleContactsRefresh();
+
     if (data.phone) {
-        if (data.direction === 'incoming' && !_seenPhones.has(data.phone)) {
-            // Transferencia entrante: el asesor aún no ha visto este contacto → badge
-            unreadCounts[data.phone] = 1;
-            updateUnreadBadge(data.phone, 1);
-            console.log('[Panel][Inbox] Badge transferencia entrante para', data.phone);
-        } else if (data.direction !== 'incoming') {
+        if (data.direction !== 'incoming') {
             // Transferencia saliente: limpiar badge propio
             unreadCounts[data.phone] = 0;
             updateUnreadBadge(data.phone, 0);

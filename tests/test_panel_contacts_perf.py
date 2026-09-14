@@ -188,6 +188,33 @@ def test_transfer_response_is_explicit_for_new_visibility_guard():
     assert "La nueva validación permitirá abrirlo en el panel de ${toName}" in frontend_source
 
 
+def test_transfer_incoming_is_silent_and_not_badged():
+    source = PANEL_JS.read_text(encoding="utf-8")
+    fn = source.split("function handleContactTransferred(data)", 1)[1]
+    fn = fn.split("/**\n * Maneja cambio de estado", 1)[0]
+
+    assert "playNotificationBeep()" not in fn
+    assert "showBrowserNotification(" not in fn
+    assert "unreadCounts[data.phone] = 1" not in fn
+    assert "updateUnreadBadge(data.phone, 1)" not in fn
+    assert "scheduleContactsRefresh();" in fn
+    assert "showToast(`Contacto transferido:" in fn
+
+
+def test_backend_transfer_does_not_add_receiver_to_unread_inbox():
+    source = PANEL_PY.read_text(encoding="utf-8")
+    transfer_endpoint = source.split("async def transfer_contact(", 1)[1]
+    transfer_endpoint = transfer_endpoint.split("async def accept_transfer(", 1)[0]
+    request_endpoint = source.split("async def request_transfer(", 1)[1]
+    request_endpoint = request_endpoint.split("async def accept_transfer(", 1)[0]
+    accept_endpoint = source.split("async def accept_transfer(", 1)[1]
+    accept_endpoint = accept_endpoint.split("async def reject_transfer(", 1)[0]
+
+    for block in (transfer_endpoint, request_endpoint, accept_endpoint):
+        assert "add_to_advisor_inbox" not in block
+        assert "remove_from_advisor_inbox" in block
+
+
 def test_targeted_new_message_events_keep_advisor_id_for_notification_guard():
     source = WEBSOCKET_PY.read_text(encoding="utf-8")
 

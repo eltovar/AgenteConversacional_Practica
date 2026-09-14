@@ -4142,9 +4142,10 @@ async def transfer_contact(
     except Exception as e:
         logger.warning(f"[Panel] Error notificando WebSocket: {safe_error(e)}")
 
-    # Inbox: agregar al inbox del receptor, remover del emisor
+    # Transferencia silenciosa: no agregar al inbox de no-leídos del receptor.
+    # El owner ya quedó transferido arriba; el contacto aparecerá por propiedad,
+    # pero no como mensaje nuevo urgente ni anclado al tope.
     try:
-        await state_manager.add_to_advisor_inbox(to_owner_id, phone_normalized, canal or "whatsapp")
         if from_owner:
             await state_manager.remove_from_advisor_inbox(from_owner, phone_normalized, canal or "whatsapp")
     except Exception as _tr_inbox_err:
@@ -4253,10 +4254,9 @@ async def request_transfer(
         "action": "transfer_completed"
     })
 
-    # Inbox: el receptor recibe el contacto como no-leído; el emisor lo pierde
+    # Transferencia silenciosa: el receptor no recibe badge/no-leído automático.
     try:
         _sm_tr = _get_state_manager()
-        await _sm_tr.add_to_advisor_inbox(requesting_advisor_id, phone, canal or "whatsapp")
         await _sm_tr.remove_from_advisor_inbox(owner_advisor_id, phone, canal or "whatsapp")
     except Exception as _tr_req_inbox_err:
         logger.warning(f"[Panel][Inbox] Error inbox transfer-request (non-fatal): {_tr_req_inbox_err}")
@@ -4325,10 +4325,9 @@ async def accept_transfer(
         "action": "transfer_completed"
     })
 
-    # Inbox: el solicitante recibe el contacto como no-leído; el propietario anterior lo pierde
+    # Transferencia silenciosa: el solicitante no recibe badge/no-leído automático.
     try:
         _sm_ta = _get_state_manager()
-        await _sm_ta.add_to_advisor_inbox(requester_id, phone, None)
         await _sm_ta.remove_from_advisor_inbox(by_advisor_id, phone, None)
     except Exception as _ta_inbox_err:
         logger.warning(f"[Panel][Inbox] Error inbox transfer-accept (non-fatal): {_ta_inbox_err}")

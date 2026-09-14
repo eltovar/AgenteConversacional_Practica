@@ -2434,6 +2434,12 @@ async def send_message(
         raise HTTPException(status_code=400, detail=target.error)
 
     phone_normalized = target.key
+    if not target.is_bsuid and target_number != phone_normalized:
+        logger.info(
+            "[Panel][ManualSend] Destino normalizado antes de enviar: %s -> %s",
+            safe_phone(target_number),
+            safe_phone(phone_normalized),
+        )
     outbound_to, outbound_error = await _resolve_outbound_address(target, canal_final)
     if outbound_error:
         raise HTTPException(status_code=400, detail=outbound_error)
@@ -2788,9 +2794,18 @@ async def send_message(
             }
         )
     else:
+        twilio_code = result.get("code")
+        status_code = 400 if twilio_code in (21211, 21614, 63003) else 500
+        if twilio_code in (21211, 21614, 63003):
+            detail = (
+                "Twilio rechazó el destino normalizado. "
+                "Verifica que el número tenga WhatsApp activo y código de país correcto."
+            )
+        else:
+            detail = f"Error enviando mensaje: {result.get('message')}"
         raise HTTPException(
-            status_code=500,
-            detail=f"Error enviando mensaje: {result.get('message')}"
+            status_code=status_code,
+            detail=detail
         )
 
 

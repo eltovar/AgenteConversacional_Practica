@@ -9,6 +9,8 @@ from middleware.phone_normalizer import PhoneNormalizer
         ("whatsapp:+573001234567", "+573001234567"),
         ("+573001234567", "+573001234567"),
         ("573001234567", "+573001234567"),
+        ("00573001234567", "+573001234567"),
+        ("+57 (300) 123-4567", "+573001234567"),
         ("3001234567", "+573001234567"),
         ("03001234567", "+573001234567"),
     ],
@@ -54,4 +56,3 @@ def test_extranjeros_fuera_de_rango_e164_se_rechazan(raw_phone):
 
     assert result.is_valid is False
     assert "internacional" in result.error_message
-

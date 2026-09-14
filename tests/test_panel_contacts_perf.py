@@ -346,3 +346,21 @@ def test_frontend_supports_date_range_filter():
     assert "const hasDateFilter = Boolean(dateFrom || dateTo);" in source
     assert "url += `&date_to=${dateTo}T23:59:59`;" in source
     assert "if (_dateTo) _dateTo.addEventListener('change', loadContacts);" in source
+
+
+def test_manual_contact_first_send_uses_normalized_phone():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "function _normalizePanelPhoneInput(value)" in source
+    assert "formData.set('phone', normalizedPhone.normalized);" in source
+    assert "const createdPhone = data.phone || normalizedPhone.normalized;" in source
+    assert "document.getElementById('selectedPhone').value = phone;" in source
+    assert "currentPhone = phone;" in source
+
+
+def test_manual_send_logs_normalized_target_and_maps_twilio_invalid_number():
+    source = PANEL_PY.read_text(encoding="utf-8")
+
+    assert "[Panel][ManualSend] Destino normalizado antes de enviar" in source
+    assert "twilio_code in (21211, 21614, 63003)" in source
+    assert "Twilio rechazó el destino normalizado" in source

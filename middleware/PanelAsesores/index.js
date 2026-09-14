@@ -307,6 +307,43 @@ function _detectPhoneTerm(term) {
     return null;
 }
 
+function _normalizePanelPhoneInput(value) {
+    const original = String(value || '').trim();
+    if (!original) return { isValid: false, normalized: '', error: 'Telefono requerido' };
+    if (/^bsuid_[0-9a-f]{24}$/i.test(original)) {
+        return { isValid: true, normalized: original.toLowerCase(), isBsuid: true };
+    }
+
+    const withoutPrefix = original.replace(/^whatsapp:/i, '').trim();
+    const hasPlus = withoutPrefix.startsWith('+');
+    let digits = withoutPrefix.replace(/[^\d]/g, '');
+    if (digits.startsWith('00')) {
+        digits = digits.slice(2);
+    }
+    if (!digits) return { isValid: false, normalized: '', error: 'El telefono no contiene digitos' };
+
+    if (hasPlus && !digits.startsWith('57')) {
+        if (digits.length < 7 || digits.length > 15) {
+            return { isValid: false, normalized: '', error: 'Numero internacional fuera de rango' };
+        }
+        return { isValid: true, normalized: `+${digits}` };
+    }
+
+    if (digits.startsWith('57') && digits.length === 12) {
+        return { isValid: true, normalized: `+${digits}` };
+    }
+    if (digits.startsWith('0')) {
+        digits = digits.slice(1);
+    }
+    if (digits.length > 10) {
+        digits = digits.slice(-10);
+    }
+    if (digits.length !== 10 || !digits.startsWith('3')) {
+        return { isValid: false, normalized: '', error: 'Debe ser un celular colombiano o un numero internacional con +' };
+    }
+    return { isValid: true, normalized: `+57${digits}` };
+}
+
 async function filterContacts(searchTerm, options = {}) {
     const term = searchTerm.toLowerCase().trim();
     const allowRemote = options.allowRemote !== false;
@@ -5298,10 +5335,17 @@ async function sendMessage(e) {
     e.preventDefault();
     console.log('[Panel] sendMessage() iniciado');
 
-    const phone = document.getElementById('selectedPhone').value;
+    let phone = document.getElementById('selectedPhone').value;
     const contactId = document.getElementById('selectedContactId').value;
     const message = document.getElementById('messageInput').value.trim();
     const resultDiv = document.getElementById('sendResult');
+
+    const normalizedPhone = _normalizePanelPhoneInput(phone);
+    if (phone && normalizedPhone.isValid && !normalizedPhone.isBsuid) {
+        phone = normalizedPhone.normalized;
+        document.getElementById('selectedPhone').value = phone;
+        currentPhone = phone;
+    }
 
     console.log('[Panel] Datos de envio:', { phone, contactId, messageLength: message.length, hasMedia: !!selectedMediaFile });
 
@@ -5356,6 +5400,12 @@ async function sendMessage(e) {
         console.warn('[Panel] Validacion fallida: phone vacio o sin contenido');
         resultDiv.className = 'mt-2 text-sm text-red-600';
         resultDiv.textContent = 'Selecciona un contacto y escribe un mensaje o adjunta un archivo';
+        resultDiv.classList.remove('hidden');
+        return;
+    }
+    if (!normalizedPhone.isValid) {
+        resultDiv.className = 'mt-2 text-sm text-red-600';
+        resultDiv.textContent = normalizedPhone.error || 'Telefono invalido';
         resultDiv.classList.remove('hidden');
         return;
     }
@@ -7028,6 +7078,14 @@ async function createManualContact(event) {
         showCreateResult('error', 'Nombre y telefono son obligatorios');
         return;
     }
+    const normalizedPhone = _normalizePanelPhoneInput(phone);
+    if (!normalizedPhone.isValid || normalizedPhone.isBsuid) {
+        showCreateResult('error', normalizedPhone.error || 'Telefono invalido');
+        return;
+    }
+    formData.set('phone', normalizedPhone.normalized);
+    const phoneInput = form.querySelector('input[name="phone"]');
+    if (phoneInput) phoneInput.value = normalizedPhone.normalized;
 
     // Deshabilitar boton mientras procesa
     if (submitBtn) {
@@ -7099,6 +7157,8 @@ async function createManualContact(event) {
         } else if (response.ok && data.status === 'success') {
             // Exito
             showCreateResult('success', `Contacto "${data.display_name}" creado exitosamente`);
+            const createdPhone = data.phone || normalizedPhone.normalized;
+            const selectedCanal = formData.get('canal') || 'whatsapp_directo';
 
             // Cerrar modal despues de 2 segundos y refrescar lista
             setTimeout(() => {
@@ -7106,12 +7166,11 @@ async function createManualContact(event) {
                 loadContacts();
 
                 // Seleccionar el nuevo contacto automaticamente
-                if (data.contact_id && data.phone) {
+                if (data.contact_id && createdPhone) {
                     // Inicializar badge de no leídos en 0
-                    unreadCounts[data.phone] = 0;
-                    updateUnreadBadge(data.phone, 0);
-                    const selectedCanal = formData.get('canal') || 'whatsapp_directo';
-                    selectContact(data.contact_id, data.phone, data.display_name, selectedCanal);
+                    unreadCounts[createdPhone] = 0;
+                    updateUnreadBadge(createdPhone, 0);
+                    selectContact(data.contact_id, createdPhone, data.display_name, selectedCanal);
                 }
             }, 1500);
         } else {

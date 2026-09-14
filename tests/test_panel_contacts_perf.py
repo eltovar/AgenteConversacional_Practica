@@ -323,3 +323,26 @@ def test_stage_filter_has_hubspot_perf_trace():
     assert 'perf_trace.mark("hubspot_search")' in source
     assert 'perf_trace.mark("hubspot_enrich")' in source
     assert 'perf_trace.mark("redis_merge")' in source
+
+
+def test_frontend_search_polling_does_not_restart_remote_search():
+    source = PANEL_JS.read_text(encoding="utf-8")
+
+    assert "let searchRequestSeq = 0;" in source
+    assert "const searchResultCache = new Map();" in source
+    assert "function filterContacts(searchTerm, options = {})" in source
+    assert "const allowRemote = options.allowRemote !== false;" in source
+    assert "filterContacts(_activeTerm, { allowRemote: false });" in source
+    assert "requestSeq !== searchRequestSeq" in source
+
+
+def test_frontend_supports_date_range_filter():
+    source = PANEL_JS.read_text(encoding="utf-8")
+    html = (Path(ROOT) / "middleware" / "PanelAsesores" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="dateTo"' in html
+    assert "function _getDateRangeFilter()" in source
+    assert "const { dateFrom, dateTo } = _getDateRangeFilter();" in source
+    assert "const hasDateFilter = Boolean(dateFrom || dateTo);" in source
+    assert "url += `&date_to=${dateTo}T23:59:59`;" in source
+    assert "if (_dateTo) _dateTo.addEventListener('change', loadContacts);" in source

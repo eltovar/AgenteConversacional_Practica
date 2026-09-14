@@ -276,6 +276,9 @@ function hideLoader() {
 
 // Debounce para búsqueda en servidor (evitar spam de requests)
 let searchDebounceTimeout = null;
+let searchRequestSeq = 0;
+const searchResultCache = new Map();
+const SEARCH_CACHE_TTL_MS = 15000;
 
 // Estado global: término actual de búsqueda (para empty-state contextual)
 window._currentSearchTerm = '';
@@ -304,11 +307,13 @@ function _detectPhoneTerm(term) {
     return null;
 }
 
-async function filterContacts(searchTerm) {
+async function filterContacts(searchTerm, options = {}) {
     const term = searchTerm.toLowerCase().trim();
+    const allowRemote = options.allowRemote !== false;
     window._currentSearchTerm = term;
 
     if (!term) {
+        clearTimeout(searchDebounceTimeout);
         _applyFiltersAndRender();
         return;
     }
@@ -330,8 +335,13 @@ async function filterContacts(searchTerm) {
     // Mostrar resultados locales inmediatamente
     renderContactsList(localFiltered);
 
+    if (!allowRemote) {
+        return;
+    }
+
     // Si el término es corto (< 3 caracteres), solo hacer búsqueda local
     if (term.length < 3) {
+        clearTimeout(searchDebounceTimeout);
         return;
     }
 
@@ -343,14 +353,22 @@ async function filterContacts(searchTerm) {
 
     // Debounce 500ms para no spamear requests mientras el usuario escribe
     clearTimeout(searchDebounceTimeout);
+    const requestSeq = ++searchRequestSeq;
     searchDebounceTimeout = setTimeout(async () => {
         // Evitar carrera: si el término cambió durante el debounce, abortar
-        if (window._currentSearchTerm !== term) return;
+        if (window._currentSearchTerm !== term || requestSeq !== searchRequestSeq) return;
 
         const localPhones = new Set(localFiltered.map(c => c.phone));
         const allContactPhones = new Set(allContacts.map(c => c.phone));
         let additionalFromServer = [];
         let additionalFromLocal = [];
+        const cacheKey = `${phoneE164 ? 'phone' : 'text'}:${term}`;
+        const cached = searchResultCache.get(cacheKey);
+        if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+            if (window._currentSearchTerm !== term || requestSeq !== searchRequestSeq) return;
+            renderContactsList(cached.contacts);
+            return;
+        }
 
         // ── Rama A: Búsqueda por teléfono vía /hydrate ──
         if (phoneE164) {
@@ -437,7 +455,7 @@ async function filterContacts(searchTerm) {
         }
 
         // Si el término cambió mientras esperábamos, abortar el render
-        if (window._currentSearchTerm !== term) return;
+        if (window._currentSearchTerm !== term || requestSeq !== searchRequestSeq) return;
 
         const allAdditional = [...additionalFromLocal, ...additionalFromServer];
         if (allAdditional.length > 0) {
@@ -446,10 +464,13 @@ async function filterContacts(searchTerm) {
                 `+${additionalFromServer.length} servidor` +
                 (phoneE164 ? ` (phone detectado: ${phoneE164})` : '')
             );
-            renderContactsList([...localFiltered, ...allAdditional]);
+            const resultContacts = [...localFiltered, ...allAdditional];
+            searchResultCache.set(cacheKey, { ts: Date.now(), contacts: resultContacts });
+            renderContactsList(resultContacts);
         } else if (localFiltered.length === 0) {
             // Ningún resultado en ningún lado — re-render para que el empty state
             // contextual se muestre correctamente
+            searchResultCache.set(cacheKey, { ts: Date.now(), contacts: [] });
             renderContactsList([]);
         }
     }, 500);
@@ -1328,8 +1349,9 @@ function _applyFiltersAndRender() {
     // los resultados de búsqueda con el polling periódico.
     const _activeTerm = (window._currentSearchTerm || '').trim();
     if (_activeTerm) {
-        // Re-ejecuta filterContacts que hará render local + eventualmente /hydrate
-        filterContacts(_activeTerm);
+        // Re-ejecuta solo el filtro local; el polling no debe reiniciar /hydrate
+        // ni /contacts/search mientras la asesora está escribiendo.
+        filterContacts(_activeTerm, { allowRemote: false });
         return;
     }
     allContacts = _dedupeContactsForRender(allContacts);
@@ -1449,18 +1471,35 @@ function onWorkerFilterChange(workerId) {
     loadContacts();
 }
 
+function _getDateRangeFilter() {
+    let dateFrom = document.getElementById('dateFrom')?.value || '';
+    let dateTo = document.getElementById('dateTo')?.value || '';
+
+    if (dateFrom && dateTo && dateTo < dateFrom) {
+        [dateFrom, dateTo] = [dateTo, dateFrom];
+    }
+    if (!dateFrom && dateTo) {
+        dateFrom = dateTo;
+    }
+    if (dateFrom && !dateTo) {
+        dateTo = dateFrom;
+    }
+
+    return { dateFrom, dateTo };
+}
+
 async function loadContacts() {
     const workerSel = document.getElementById('workerFilter');
     const workerIdParam = workerSel ? workerSel.value : '';
 
-    // Un solo input de fecha — filtra por un día específico
-    const dateFrom = document.getElementById('dateFrom')?.value;
+    const { dateFrom, dateTo } = _getDateRangeFilter();
+    const hasDateFilter = Boolean(dateFrom || dateTo);
 
     // Construir URL base según modo activo
     let url;
     if (workerIdParam) {
         url = `${BASE_URL}/contacts?worker_id=${encodeURIComponent(workerIdParam)}`;
-    } else if (dateFrom) {
+    } else if (hasDateFilter) {
         url = `${BASE_URL}/contacts?filter_time=custom`;
     } else {
         // Sin fecha: mostrar todos los contactos activos sin filtro histórico
@@ -1484,19 +1523,19 @@ async function loadContacts() {
         }
     }
 
-    // Agregar fecha: si dateFrom tiene valor, se filtra ese día completo (00:00 → 23:59)
-    if (dateFrom) {
+    // Agregar rango de fechas; si solo hay una fecha, filtra ese día completo.
+    if (hasDateFilter) {
         url += `&date_from=${dateFrom}T00:00:00`;
-        url += `&date_to=${dateFrom}T23:59:59`;
+        url += `&date_to=${dateTo}T23:59:59`;
     }
 
-    if (!workerIdParam && dateFrom) {
+    if (!workerIdParam && hasDateFilter) {
         const dateFieldEl = document.querySelector('input[name="dateField"]:checked');
         const dateField = dateFieldEl ? dateFieldEl.value : 'last_activity';
         url += `&date_field=${dateField}`;
-        console.log(`[Filtro] Fecha: ${dateFrom}  |  campo: ${dateField}`);
+        console.log(`[Filtro] Rango: ${dateFrom} → ${dateTo}  |  campo: ${dateField}`);
     } else if (workerIdParam) {
-        console.log(`[Filtro] Modo worker: ${workerIdParam} | Fecha: ${dateFrom || '(todas)'}`);
+        console.log(`[Filtro] Modo worker: ${workerIdParam} | Rango: ${hasDateFilter ? `${dateFrom} → ${dateTo}` : '(todas)'}`);
     } else {
         console.log(`[Filtro] Sin fecha — mostrando todos los contactos activos`);
     }
@@ -1532,14 +1571,14 @@ async function loadContacts() {
         // pero teníamos una lista previa, es casi seguro un error de pool exhausto (Too many
         // connections). Mantener la lista anterior evita el blink total de la UI.
         // Excepción: si hay un filtro activo (worker o fecha), el 0 es intencional → limpiar lista.
-        if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam && !dateFrom) {
+        if (newContacts.length === 0 && allContacts.length > 0 && !workerIdParam && !hasDateFilter) {
             console.warn('[Filtro] Manteniendo lista anterior para evitar blink vacío (posible error transitorio).');
             return;
         }
 
         if (_shouldKeepPreviousContactsOnSuspiciousShrink(allContacts, newContacts, {
             workerIdParam,
-            dateFrom,
+            dateFrom: hasDateFilter ? dateFrom : '',
             activeStageFilter
         })) {
             setTimeout(loadContacts, 1200);
@@ -2665,7 +2704,7 @@ function _renderContactsListInner(contacts) {
     const container = document.getElementById('contactsList');
 
     if (!contacts || contacts.length === 0) {
-        const _currentDate = document.getElementById('dateFrom')?.value;
+        const { dateFrom: _currentDateFrom, dateTo: _currentDateTo } = _getDateRangeFilter();
         const _searchTerm = (window._currentSearchTerm || '').trim();
         let _emptyMsg;
         if (_searchTerm) {
@@ -2679,15 +2718,20 @@ function _renderContactsListInner(contacts) {
                 : `Sin resultados para <strong>"${_safeTerm}"</strong>.<br><span class="text-xs text-gray-500">Intenta con otro término o parte del nombre.</span>`;
         } else if (activeWorkerFilter && activeWorkerName) {
             _emptyMsg = `No hay citas de <strong>${activeWorkerName}</strong> en el período seleccionado.`;
-        } else if (_currentDate) {
-            const [_y, _m, _d] = _currentDate.split('-');
+        } else if (_currentDateFrom) {
+            const [_y, _m, _d] = _currentDateFrom.split('-');
+            const [_ty, _tm, _td] = _currentDateTo.split('-');
             const _meses = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
             const _fechaDisplay = `${parseInt(_d)} ${_meses[parseInt(_m) - 1]}. ${_y}`;
+            const _fechaToDisplay = `${parseInt(_td)} ${_meses[parseInt(_tm) - 1]}. ${_ty}`;
+            const _rangeDisplay = _currentDateFrom === _currentDateTo
+                ? _fechaDisplay
+                : `${_fechaDisplay} → ${_fechaToDisplay}`;
             const _fieldEl = document.querySelector('input[name="dateField"]:checked');
             const _field = _fieldEl ? _fieldEl.value : 'last_activity';
             _emptyMsg = _field === 'created_at'
-                ? `No hay contactos que llegaron el <strong>${_fechaDisplay}</strong>.`
-                : `No hay contactos con actividad el <strong>${_fechaDisplay}</strong>.`;
+                ? `No hay contactos que llegaron en <strong>${_rangeDisplay}</strong>.`
+                : `No hay contactos con actividad en <strong>${_rangeDisplay}</strong>.`;
         } else {
             _emptyMsg = 'No hay contactos esperando atención.';
         }
@@ -5825,6 +5869,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Cambio en input de fecha → recargar automáticamente
     const _dateFrom = document.getElementById('dateFrom');
     if (_dateFrom) _dateFrom.addEventListener('change', loadContacts);
+    const _dateTo = document.getElementById('dateTo');
+    if (_dateTo) _dateTo.addEventListener('change', loadContacts);
 
     // Enviar mensaje - Form submit
     const sendForm = document.getElementById('sendForm');

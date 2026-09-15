@@ -10,6 +10,8 @@ nunca se escribía en True. Resultado: el contacto reaparecía.
 
 Ejecutar:
     python -m pytest tests/panel/test_close_conversation_persistence.py -v
+
+Esto ejecuta correctamente los tests. El bug donde las conversacion aparecen despues de ser cerrados probablemente es por otro motivo.
 """
 import json
 import sys

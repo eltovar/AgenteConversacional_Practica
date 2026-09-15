@@ -15,6 +15,15 @@ SID vigente como default). No hardcodear SIDs aquí: cambian al migrar de cuenta
 
 from . import content_sids as _sids
 
+# Plantillas que dispara el scheduler por su cuenta (app.py:1562 y app.py:1684).
+# No se ofrecen en el picker del chat a NADIE: reenviarlas a mano le llega al
+# cliente dos veces. Siguen en el catálogo, se siguen enviando solas y el modal de
+# administración las sigue mostrando — ocultar no es borrar.
+#
+# `cita_confirmacion` también se envía sola (al agendar la cita), pero se decidió
+# dejarla visible para poder reenviarla a mano; por eso no está en esta lista.
+SOLO_AUTOMATICAS = ("seguimiento_cita", "experiencia_cita")
+
 DEFAULT_TEMPLATES = {
     "cita_confirmacion": {
         "id": "cita_confirmacion",
@@ -37,31 +46,18 @@ DEFAULT_TEMPLATES = {
         "content_variables_map": ["fecha", "hora", "lugar", "asesor", "contacto"],
         "is_default": True,
     },
-    "cita_cancelacion": {
-        "id": "cita_cancelacion",
-        "name": "Cancelación de Cita",
-        "category": "cita",
-        "body": (
-            "Hola, {nombre}. Lamentamos informarte que la cita del {fecha} a las {hora} "
-            "ha sido cancelada. ¿Te gustaría reagendarla para otro momento?"
-        ),
-        "variables": ["nombre", "fecha", "hora"],
-        "content_sid": None,
-        "content_variables_map": ["nombre", "fecha", "hora"],
-        "is_default": True,
-    },
     "saludo_reactivador_inmueble": {
         "id": "saludo_reactivador_inmueble",
-        "name": "Saludo Reactivador Inmueble",
+        "name": "Saludo Inicial",
         "category": "reactivacion",
+        # Espejo exacto del texto aprobado en Meta. La clave `saludo_reactivador_inmueble`
+        # se conserva: es el id con el que el panel envía y el que ya vive en Redis.
         "body": (
-            "Cordial saludo,\n"
-            "Le escribe Yubeny Ocampo de Inmobiliaria Proteger.\n"
-            "Espero que se encuentre muy bien.\n"
-            "Lo contacto porque me informan que se encuentra en búsqueda de inmueble para arriendo."
+            "Buenos días, como estas? te escribe Yubeny Ocampo. "
+            "el inmueble esta disponible, deseás que te agende cita para verlo?"
         ),
         "variables": [],
-        # Twilio: saludo_reactivador_inmueble — aprobado Meta
+        # Twilio: saludo_inicial — aprobado Meta
         "content_sid": _sids.SALUDO_INMUEBLE,
         "content_variables_map": [],
         "is_default": True,
@@ -102,14 +98,13 @@ DEFAULT_TEMPLATES = {
         "name": "Encuesta de Experiencia (2/2)",
         "category": "seguimiento",
         "body": (
-            "Hola {nombre},  Para nosotros es importante conocer tu experiencia "
-            "y seguir mejorando la calidad de nuestro servicio: "
+            "Hola {nombre},  Para nosotros es importante conocer tu experiencia: "
             "https://forms.gle/W3bQbDVFkR4ybVbW6 \n"
-            "Toma un minuto y es anónima. ¡Gracias por confiar en "
-            "Inmobiliaria Proteger! 💛"
+            "Esta encuesta toma un minuto y es anónima. "
+            "¡Gracias por confiar en nosotros! 💛"
         ),
         "variables": ["nombre"],
-        # {{1}}=nombre — Twilio: experiencia_cita
+        # {{1}}=nombre — Twilio: experiencia_citav2
         "content_sid": _sids.FOLLOWUP_2,
         "content_variables_map": ["nombre"],
         "is_default": True,

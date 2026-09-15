@@ -1,6 +1,6 @@
 """Traza de las citaciones entrantes: separa "no citó" de "citó y lo perdimos".
 
-Why: cuando un cliente responde citando un mensaje en WhatsApp y Twilio no nos
+Cuando un cliente responde citando un mensaje en WhatsApp y Twilio no nos
 manda una referencia utilizable, la cita desaparece sin dejar rastro — no se
 guarda nada en Mongo, no se emite ningún error, y el mensaje queda idéntico a
 uno que nunca citó nada. Ese silencio es el problema de fondo: impide medir el

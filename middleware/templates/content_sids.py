@@ -35,14 +35,25 @@ def _sid(env_name: str, default: str = "") -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Plantillas de reactivación y saludo
 # ─────────────────────────────────────────────────────────────────────────────
+# Twilio: `saludo_inicial` (10-sep-2026). Sustituye a la vieja `saludo_inmueble`,
+# que se da de baja en Twilio: su SID ya no se nombra en ningún sitio del repo a
+# propósito, para que nada apunte a una plantilla que va a dejar de existir.
+# Ambas tenían cero variables, así que el cambio fue un reemplazo limpio de SID.
 SALUDO_INMUEBLE = _sid(
-    "TWILIO_TPL_SALUDO_INMUEBLE", "HX05ea3f2fbac7879ccf35be6e3ed74287"
+    "TWILIO_TPL_SALUDO_INMUEBLE", "HX7dccecd8a5ee36a74a6f1099b088f6a6"
 )
 REACTIVACION_LINK = _sid(
     "TWILIO_TPL_REACTIVACION_LINK", "HXb733162e38a6786faf5db72133660a0d"
 )
 AUN_EN_BUSQUEDA = _sid(
     "TWILIO_TPL_AUN_EN_BUSQUEDA", "HXfd6fcb949b5747ca39d7b19af4f988fe"
+)
+# Campaña promocional de reactivación (sep-2026). Ojo: el texto aprobado en Meta
+# lleva dentro «Válido hasta el 30 de septiembre 2026», y el módulo de masivos no
+# tiene mecanismo de caducidad — pasada esa fecha hay que retirarla a mano de
+# BULK_TEMPLATES (aquí y en el espejo de PanelAsesores/index.js).
+DESCUENTO_PRIMER_MES = _sid(
+    "TWILIO_TPL_DESCUENTO_PRIMER_MES", "HXbd548b226a3bdba40cc209c8d4b0417c"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,8 +71,11 @@ MENSAJE_PERSONALIZADO = _sid(
 FOLLOWUP_1 = _sid(
     "TWILIO_TPL_CITA_SEGUIMIENTO", "HXb586a84cf325689db3efd19ec2f2e93f"
 )
+# Twilio: `experiencia_citav2`. Sustituye a `experiencia_cita`
+# (HX1f96c23a505ea1b292401dbd7d0de13d), que sigue aprobada pero ya no se consume.
+# Misma variable {{1}}=nombre; solo cambia el texto (más corto).
 FOLLOWUP_2 = _sid(
-    "TWILIO_TPL_CITA_EXPERIENCIA", "HX1f96c23a505ea1b292401dbd7d0de13d"
+    "TWILIO_TPL_CITA_EXPERIENCIA", "HXf09d950f78a7997939a0424203d18598"
 )
 RECORDATORIO_CITA: Optional[str] = _sid(
     "TWILIO_REMINDER_TEMPLATE_SID", "HXdd7160cc287929ec3ae4d18160e7c51b"
@@ -103,6 +117,27 @@ BULK_TEMPLATES = [
             {"key": "2", "label": "Mensaje personalizado"},
         ],
     },
+    {
+        # `name` se persiste en Mongo como prefijo "[BULK template: ...]" y es la
+        # clave con la que el chip 📢 Masivo del chat recupera este preview
+        # (index.js:2930). Renombrarlo dejaría sin cuerpo a lo ya enviado.
+        "sid": DESCUENTO_PRIMER_MES,
+        "name": "descuento_primer_mes",
+        "label": "🎁 Descuento 10% primer mes",
+        "preview": (
+            "¡Hola, {1}! 👋\n\n"
+            "Hace unos días nos escribiste buscando un inmueble y queremos darte una "
+            "razón para retomar tu búsqueda con nosotros. 🏡\n"
+            "🎁 Obtén un 10% de descuento con el código 13127 en el primer mes de "
+            "arrendamiento al elegir una de nuestras propiedades.\n\n"
+            "Si todavía estás buscando, cuéntanos qué necesitas y te enviaremos "
+            "nuevas opciones.\n\n"
+            "Válido hasta el 30 de septiembre 2026 - Aplican TyC"
+        ),
+        "vars": [
+            {"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"},
+        ],
+    },
 ]
 
 # Plantillas que el panel puede programar para una fecha específica.
@@ -141,6 +176,7 @@ def all_sids() -> dict:
         "reactivacion_link": REACTIVACION_LINK,
         "aun_en_busqueda": AUN_EN_BUSQUEDA,
         "mensaje_personalizado": MENSAJE_PERSONALIZADO,
+        "descuento_primer_mes": DESCUENTO_PRIMER_MES,
         "followup_1": FOLLOWUP_1,
         "followup_2": FOLLOWUP_2,
         "recordatorio_cita": RECORDATORIO_CITA or "",

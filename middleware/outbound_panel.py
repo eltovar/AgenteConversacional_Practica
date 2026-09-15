@@ -27,10 +27,14 @@ import redis.asyncio as redis
 from logging_config import logger
 from .phone_normalizer import PhoneNormalizer
 from .whatsapp_identity import is_bsuid_identity_key, is_whatsapp_bsuid
+from .identity_migration import migrate_identity_to_phone
 from .conversation_state import ConversationStateManager, ConversationStatus, get_bogota_now, get_bogota_now_iso, TIMEZONE_BOGOTA
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
-from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
+from .templates.templates import (  # Templates predefinidos
+    DEFAULT_TEMPLATES,
+    SOLO_AUTOMATICAS,
+)
 from utils.twilio_client import twilio_client
 from utils.date_parser import (
     DIAS_SEMANA_ABREV,
@@ -50,6 +54,7 @@ from utils.advisors_registry import (
     get_advisor_names,
     get_lead_receiving_ids,
     get_panel_advisor_ids,
+    get_panel_templates,
     get_transfer_target,
 )
 from integrations.hubspot import (
@@ -209,9 +214,7 @@ def _get_contact_manager() -> ContactManager:
         logger.info("[Panel] ContactManager singleton inicializado")
     return _contact_manager_singleton
 
-# ============================================================================
 # Caché de lifecyclestage del Contact en Redis (compartida entre workers Railway)
-# ============================================================================
 # ── Cache de la respuesta de GET /contacts ──────────────────────────────────
 # El panel hace polling cada 10s (POLLING_INTERVAL_IDLE en index.js). Con el TTL
 # anterior de 5s el cache expiraba ANTES del siguiente poll, así que no acertaba
@@ -555,6 +558,7 @@ PIPELINE_STAGES = {
     "customer": "Cerrado ganado",
     "evangelist": "Cerrado perdido",
     "other": "No responde",
+    "1407668893": "Seguimiento",
     "1326623067": "Hasta 1.5M",
     "1326631573": "Hasta 2M",
     "1326632625": "Hasta 2.5M",
@@ -567,7 +571,7 @@ PIPELINE_STAGES = {
     "subscriber": "Reubicados",
     "lead": "Aprobado",
     "1353539189": "Venta",
-    "1407668893": "Seguimiento"
+    "1435775659": "Posible Espia"
 }
 
 # Lista ordenada de etapas para el frontend
@@ -580,6 +584,7 @@ PIPELINE_STAGES_LIST = [
     {"id": "customer", "name": "Cerrado ganado"},
     {"id": "evangelist", "name": "Cerrado perdido"},
     {"id": "other", "name": "No responde"},
+    {"id": "1407668893", "name": "Seguimiento"},
     {"id": "1326623067", "name": "Hasta 1.5M"},
     {"id": "1326631573", "name": "Hasta 2M"},
     {"id": "1326632625", "name": "Hasta 2.5M"},
@@ -592,7 +597,7 @@ PIPELINE_STAGES_LIST = [
     {"id": "subscriber", "name": "Reubicados"},
     {"id": "lead", "name": "Aprobado"},
     {"id": "1353539189", "name": "Venta"},
-    {"id": "1407668893", "name": "Seguimiento"}
+    {"id": "1435775659", "name": "Posible Espia"}
 ]
 
 @dataclass
@@ -1077,10 +1082,6 @@ async def _cache_contact_stage(contact_id: str, stage: str) -> None:
     """
     Guarda lifecyclestage en Redis cache en background (sin bloquear el request).
 
-    nx: escritor best-effort. Esta tarea nace del enriquecimiento de
-    GET /contacts, que tarda 7-9s, y llega con una etapa leída al inicio del
-    request. Si mientras tanto alguien la cambió, la key ya tiene el valor bueno
-    y esta escritura debe declinarse — ver _invalidate_contact_stage_cache().
     """
     try:
         redis_client = await _get_redis_client()
@@ -1297,7 +1298,7 @@ def _get_state_manager() -> ConversationStateManager:
     return _state_manager_singleton
 
 
-# ── Circuit breaker de HubSpot ──────────────────────────────────────────────
+# ── Circuit breaker de HubSpot 
 # Dormir 12s dentro del request no descongestiona nada: HubSpot sigue saturado
 # porque el resto de peticiones sigue llegando. Y como las llamadas van detrás de
 # un Semaphore(2), esas esperas se SUMAN en vez de solaparse — de ahí los
@@ -1515,12 +1516,6 @@ async def _hubspot_batch_get_contacts(contact_ids: list[str]) -> Dict[str, Dict[
 async def _build_zset_phone_index() -> Dict[str, Dict[str, float]]:
     """
     Lee el ZSET del panel UNA vez y lo indexa por teléfono.
-
-    ⚠️ Existe para hidratar VARIOS contactos sin pagar un ZSCAN por cada uno.
-    El ZSCAN de _hydrate_contact usa count=20, así que recorre todo el ZSET en
-    trozos de 20 → ~N/20 round-trips POR CONTACTO. Medido en producción
-    (9-ago-2026): GET /contacts/search tardaba 41,6s, de los cuales 39,5s eran
-    justamente esto (mongo=52ms, hubspot=2,1s).
 
     Returns:
         {phone: {canal: score}}. Vacío si Redis falla — los llamadores deben
@@ -1846,6 +1841,14 @@ async def _hydrate_contact(
         "deal_stage": best_meta_dict.get("deal_stage"),
         "last_advisor_message": best_meta_dict.get("last_advisor_message"),
         "source": source,
+        # Identidad: sin esto el panel solo puede deducir que un contacto no
+        # tiene teléfono mirando si la clave empieza por "bsuid_", y no sabría
+        # cuándo ofrecer el botón de agregar número.
+        "identity_type": best_meta_dict.get("identity_type") or "phone",
+        "has_phone": bool(
+            best_meta_dict.get("has_phone", not is_bsuid_identity_key(phone_norm))
+        ),
+        "routing_address": best_meta_dict.get("routing_address"),
     }
 
     # Si no hay rastro alguno (ni Redis ni HubSpot), retornar None — contacto inexistente
@@ -2268,9 +2271,7 @@ async def update_last_client_message(phone_normalized: str) -> None:
         logger.error(f"[Panel] Error actualizando último mensaje: {safe_error(e)}")
 
 
-# ============================================================================
 # Funciones CRUD de Templates
-# ============================================================================
 
 async def _init_default_templates():
     """
@@ -2337,6 +2338,30 @@ async def _get_all_templates_by_advisor(advisor_id: str) -> list:
                 templates.append(tpl)
     templates.sort(key=lambda x: (x.get("category", ""), x.get("name", "")))
     return templates
+
+
+def _picker_visible(template: dict, permitidas: Optional[list]) -> bool:
+    """
+    Decide si una plantilla se ofrece en el picker del chat de esta asesora.
+
+    Why: el reparto por asesora se decide aquí y no en el navegador porque
+    `ADVISOR_ID` sale de un query param de la URL (index.js:126-133) — filtrar en
+    cliente sería cosmético. El endpoint sigue devolviendo TODAS las plantillas:
+    el modal de administración las necesita. Esto solo las etiqueta.
+    """
+    tid = template.get("id")
+
+    # Plantilla creada por la asesora desde el modal del panel: intocable.
+    # Se mira la pertenencia al catálogo y no el flag `is_default` porque editar
+    # una predefinida la copia al namespace personal y el flag deja de ser fiable.
+    if tid not in DEFAULT_TEMPLATES:
+        return True
+
+    if tid in SOLO_AUTOMATICAS:
+        return False
+
+    # `permitidas is None` = asesora sin reparto definido: ve el catálogo entero.
+    return permitidas is None or tid in permitidas
 
 
 async def _get_template_by_advisor(advisor_id: str, template_id: str) -> Optional[dict]:
@@ -3669,8 +3694,10 @@ async def list_templates(
         raise HTTPException(status_code=401, detail="API Key inválida")
     await _init_default_templates()
     templates = await _get_all_templates_by_advisor(advisor_id)
+    permitidas = get_panel_templates(advisor_id)
     categories = {}
     for t in templates:
+        t["picker_visible"] = _picker_visible(t, permitidas)
         cat = t.get("category", "otros")
         if cat not in categories:
             categories[cat] = []
@@ -4492,6 +4519,115 @@ async def update_contact_name(
     except Exception as e:
         logger.error(f"[Panel] Error inesperado actualizando nombre: {safe_error(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# ============================================================================
+# Endpoint para editar el teléfono de un contacto
+# ============================================================================
+
+@router.patch("/contacts/{contact_id}/phone")
+async def update_contact_phone(
+    contact_id: str,
+    phone: str = Form(..., description="Teléfono del contacto"),
+    canal: str = Form("whatsapp", description="Canal de la conversación"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+):
+    """
+    Fija el teléfono de un contacto, migrando la clave si venía de un BSUID.
+
+    Gemelo de PATCH /contacts/{contact_id}/name. Existe porque las
+    conversaciones que llegan por username de WhatsApp no traen número: la
+    asesora lo consigue hablando y aquí lo deja escrito.
+
+    Cuando la conversación estaba indexada bajo una clave BSUID, esto NO es un
+    simple update de HubSpot: `migrate_identity_to_phone` mueve la clave en
+    Redis y Mongo. El BSUID sobrevive como dirección de entrega — el routing de
+    Twilio no cambia.
+    """
+    logger.info(f"[Panel] PATCH teléfono - contact_id={safe_id(contact_id, 'contact')}")
+
+    if not _validate_api_key(x_api_key):
+        raise HTTPException(status_code=401, detail="API Key inválida")
+
+    if not contact_id or contact_id in ("null", "undefined"):
+        raise HTTPException(status_code=400, detail="ID de contacto inválido")
+    try:
+        int(contact_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ID de contacto debe ser numérico")
+
+    validation = PhoneNormalizer().normalize(phone or "")
+    if not validation.is_valid:
+        logger.warning(f"[Panel] Teléfono rechazado: {safe_error(validation.error_message)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Número inválido: {validation.error_message}",
+        )
+    phone_norm = validation.normalized
+
+    redis_client = await _get_redis_client()
+    clave_actual = await redis_client.get(f"phone_cache:{contact_id}")
+    clave_actual = clave_actual if isinstance(clave_actual, str) else (
+        clave_actual.decode() if clave_actual else None
+    )
+
+    # ── Caso 1: la conversación venía de un BSUID → migrar la clave ──
+    if clave_actual and is_bsuid_identity_key(clave_actual):
+        resultado = await migrate_identity_to_phone(
+            clave_actual, phone_norm, canal or "whatsapp", source="panel",
+        )
+        if not resultado.ok:
+            _detalles = {
+                "invalid_phone": (400, "El número no es válido"),
+                "locked": (409, "Hay otra actualización en curso, intenta de nuevo"),
+            }
+            code, msg = _detalles.get(resultado.outcome, (500, "No se pudo actualizar el teléfono"))
+            raise HTTPException(status_code=code, detail=msg)
+
+        return {
+            "status": "success",
+            "message": "Teléfono actualizado correctamente",
+            "contact_id": resultado.contact_id or contact_id,
+            "phone": resultado.phone,
+            "old_phone": clave_actual,
+            "migrated": True,
+            "outcome": resultado.outcome,
+        }
+
+    # ── Caso 2: contacto telefónico → corregir el número en HubSpot ──
+    # No se migran claves aquí: cambiar el teléfono de un contacto que YA tenía
+    # uno es una operación distinta (y hoy no soportada desde el panel), no una
+    # migración de identidad.
+    hubspot_api_key = os.getenv("HUBSPOT_API_KEY")
+    if not hubspot_api_key:
+        raise HTTPException(status_code=500, detail="HUBSPOT_API_KEY no configurada")
+
+    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+    try:
+        response = await _hubspot_patch(url, {"properties": {"phone": phone_norm}}, hubspot_api_key)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Timeout conectando con HubSpot")
+    except Exception as e:
+        logger.error(f"[Panel] Error actualizando teléfono: {safe_error(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno actualizando el teléfono")
+
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail="Contacto no encontrado en HubSpot")
+    if response.status_code != 200:
+        logger.error(
+            f"[Panel] HubSpot rechazó el teléfono: {response.status_code} - "
+            f"{safe_error(response.text, 200)}"
+        )
+        raise HTTPException(status_code=response.status_code, detail="HubSpot rechazó el cambio")
+
+    return {
+        "status": "success",
+        "message": "Teléfono actualizado correctamente",
+        "contact_id": contact_id,
+        "phone": phone_norm,
+        "migrated": False,
+        "outcome": "updated",
+    }
 
 
 # ============================================================================
@@ -5403,10 +5539,27 @@ async def get_contact_detail(
     has_more = len(messages) >= limit and source == "mongodb"
     oldest_ts = messages[0].get("timestamp") if messages else None
 
+    # Identidad: el panel necesita saber si este contacto tiene teléfono real
+    # para decidir si muestra el número o el botón de agregarlo.
+    _detail_meta = None
+    try:
+        _detail_meta = await _get_state_manager().get_meta(
+            phone_normalized, canal or "whatsapp"
+        )
+    except Exception as _det_err:
+        logger.debug(f"[Panel][Detail] meta de identidad no legible: {safe_error(_det_err)}")
+
     return {
         "phone": phone_normalized,
         "contact_id": contact_id,
         "canal": canal,
+        # Identidad
+        "identity_type": getattr(_detail_meta, "identity_type", None) or "phone",
+        "has_phone": (
+            bool(getattr(_detail_meta, "has_phone", True))
+            if _detail_meta else not target.is_bsuid
+        ),
+        "routing_address": getattr(_detail_meta, "routing_address", None),
         # Historial
         "messages": messages,
         "message_count": len(messages),
@@ -7737,9 +7890,9 @@ async def create_appointment(
             # No falla el endpoint — MongoDB ya tiene la cita
             logger.warning(f"[Panel] No se pudo sincronizar cita a Redis (recordatorios pueden no funcionar): {redis_err}")
 
-    # ────────────────────────────────────────────────────────────────────────
+    
     # Embudo y confirmación al cliente
-    # ────────────────────────────────────────────────────────────────────────
+    
     # Van DESPUÉS del guardado y ninguno puede tumbar el endpoint: la cita ya
     # está en firme y es el dato valioso. Un fallo aquí se reporta en la
     # respuesta, no se traga en un log que nadie mira.
@@ -7895,9 +8048,7 @@ async def update_appointment(
     # deje a la asesora creyendo que el cliente ya conoce la nueva fecha.
     respuesta = {"ok": True, "client_notified": False, "client_notify_reason": "no_evaluado"}
 
-    # ────────────────────────────────────────────────────────────────────────
     # Refrescar la nota interna
-    # ────────────────────────────────────────────────────────────────────────
     # La nota que se escribió al crear la cita queda mintiendo tras una edición:
     # sigue diciendo la fecha, el encargado y la dirección viejos. La asesora abre
     # la conversación, lee la nota y actúa sobre datos caducados.
@@ -8182,9 +8333,7 @@ async def panel_ui(request: Request, x_api_key: str = Query(None, alias="key")):
         "hidden_stages_by_advisor": _hidden_by_advisor,
     })
 
-# ============================================================================
 # Funciones de background
-# ============================================================================
 
 async def _log_advisor_message_to_hubspot(
     contact_id: str,
@@ -10189,9 +10338,9 @@ async def recover_lost_conversations(
     }
 
 
-# =============================================================================
+
 # SCHEDULED MESSAGES — Mensajes WhatsApp plantilla programados por asesoras
-# =============================================================================
+
 
 async def create_scheduled_message(
     contact_id: str,
@@ -10295,9 +10444,7 @@ async def cancel_scheduled_message(
     return {"ok": True}
 
 
-# ============================================================================
 # BULK CAMPAIGNS — Mensajes Masivos por Embudo (per-asesora)
-# ============================================================================
 
 def _validate_bulk_request(
     stage_id: str,

@@ -28,7 +28,7 @@ plantilla y los datos de la cita, sale una decisión. Así la regla se prueba
 entera sin red, y el día que se reenvíe una confirmación desde otro sitio se
 reusa tal cual en vez de duplicarla.
 
-⏱️  `fecha_hora` debe llegar en hora de Bogotá. Este módulo no convierte zonas:
+`fecha_hora` debe llegar en hora de Bogotá. Este módulo no convierte zonas:
 el llamador ya tiene el datetime en la zona correcta y hacerlo dos veces es
 como se producen las citas con una hora de diferencia.
 """

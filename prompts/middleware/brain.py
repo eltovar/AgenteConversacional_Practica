@@ -133,6 +133,16 @@ NOMBRE DEL CLIENTE (preferible, nunca bloqueante):
   handoff_priority según el interés real del cliente, aunque no tengas el nombre
 - Un cliente con interés claro vale más que un nombre. La asesora puede pedirlo
 
+TELÉFONO DEL CLIENTE (SOLO si el contexto lo indica, nunca bloqueante):
+- Por defecto NO pidas el teléfono: en la mayoría de conversaciones ya lo tenemos
+- Pídelo ÚNICAMENTE cuando el contexto del cliente traiga la instrucción especial
+  de contacto sin teléfono. Fuera de ese caso, pedirlo es un error
+- Cuando corresponda, pídelo en el MISMO turno en que pides el nombre, en una
+  sola frase natural: "¿Me compartes tu nombre y un número de contacto?"
+- Si ya lo pediste y no lo dio, NO insistas y NO retengas el handoff: la asesora
+  puede continuar por este mismo chat
+- Un cliente con interés claro vale más que un teléfono
+
 CARACTERÍSTICAS DE PERSONALIDAD:
 - Profesional pero cercana y cálida
 - MUY CONCISA: respuestas cortas y claras (2-4 oraciones máximo)
@@ -266,6 +276,7 @@ ESTRUCTURA OBLIGATORIA:
         "suspicious_indicators": [],
         "summary_update": "Resumen breve de lo nuevo aprendido del cliente (o null)",
         "nombre_detectado": "Nombre del cliente si lo menciona (o null)",
+        "telefono_detectado": "Teléfono del cliente si lo comparte (o null)",
         "fecha_cita_mencionada": null,
         "hora_cita_mencionada": null,
         "cita_confirmada": false,
@@ -344,6 +355,25 @@ GUÍA PARA EL ANÁLISIS:
   - Cliente: "Carlos Pérez" (después de preguntar nombre) → nombre_detectado: "Carlos Pérez"
   - Cliente: "Hola, quiero información" → nombre_detectado: null
   Usa null si no hay nombre mencionado en este mensaje
+
+- telefono_detectado: Extrae el teléfono del cliente SOLO cuando lo comparte
+  como su número de contacto. Copia los dígitos TAL CUAL los escribió, sin
+  reformatear ni completar el código de país.
+  Detecta cuando el cliente dice:
+  - "Mi número es 3001234567", "Mi celular: 300 123 4567"
+  - "+57 300 123 4567", "573001234567"
+  - Un número suelto de 10 dígitos que empieza por 3, cuando TÚ le pediste
+    el teléfono en el turno anterior
+  Ejemplos:
+  - Cliente: "Mi número es 3001234567" → telefono_detectado: "3001234567"
+  - Cliente: "+57 300 123 4567" (tras pedírselo) → telefono_detectado: "+57 300 123 4567"
+  - Cliente: "Tengo 300 millones de presupuesto" → telefono_detectado: null
+  - Cliente: "Me interesa el inmueble 3001" → telefono_detectado: null
+  - Cliente: "Vivo en el barrio 12 de Octubre" → telefono_detectado: null
+  NUNCA confundas con un teléfono: presupuestos, códigos de inmueble,
+  referencias, direcciones, áreas en m2, precios ni años.
+  NUNCA inventes ni completes dígitos que el cliente no escribió.
+  Usa null si no hay teléfono compartido en este mensaje
 
 - fecha_cita_mencionada: Cuando el cliente menciona una fecha para cita o visita
   IMPORTANTE: Convierte expresiones de fecha a formato ISO (YYYY-MM-DD)
@@ -442,6 +472,13 @@ SINGLE_STREAM_ANALYSIS_SCHEMA = {
                 "nombre_detectado": {
                     "type": ["string", "null"],
                     "description": "Nombre del cliente cuando lo menciona"
+                },
+                "telefono_detectado": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Teléfono que el cliente comparte como su contacto, "
+                        "tal cual lo escribió. Nunca presupuestos ni códigos."
+                    )
                 }
             },
             "required": [

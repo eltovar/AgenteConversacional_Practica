@@ -8083,7 +8083,7 @@ function describirFalloConfirmacion(motivo) {
         'sin_telefono_del_cliente': 'No se envio la confirmacion: el contacto no tiene telefono.',
         'plantilla_no_encontrada': 'No se envio la confirmacion: falta la plantilla cita_confirmacion.',
         'plantilla_sin_cuerpo': 'No se envio la confirmacion: la plantilla esta vacia.',
-        'twilio_no_disponible': 'No se envio la confirmacion: WhatsApp no esta disponible en este momento.',
+        'whatsapp_meta_no_disponible': 'No se envio la confirmacion: WhatsApp no esta disponible en este momento.',
     };
     if (mapa[clave]) return mapa[clave];
     return 'No se envio la confirmacion al cliente (' + (motivo || 'motivo desconocido') + ').';

@@ -16,7 +16,7 @@ from utils.safe_logging import OBS_SOURCES
 
 def test_architecture_contract_contains_critical_components():
     expected = {
-        "twilio",
+        "meta_whatsapp",
         "webhook",
         "sofia_brain",
         "openai",
@@ -87,7 +87,7 @@ def test_component_lookup_connects_scheduler_and_panel():
 
 def test_data_dependencies_separate_owned_data_from_external_providers():
     assert OWNED_DATA_COMPONENTS == {"mongo", "pgvector", "redis"}
-    assert EXTERNAL_PROVIDER_COMPONENTS == {"bunny", "hubspot", "openai", "twilio"}
+    assert EXTERNAL_PROVIDER_COMPONENTS == {"bunny", "hubspot", "openai", "meta_whatsapp"}
     assert OWNED_DATA_COMPONENTS.isdisjoint(EXTERNAL_PROVIDER_COMPONENTS)
 
     for key, dependency in DATA_DEPENDENCIES.items():
@@ -99,4 +99,4 @@ def test_data_dependencies_separate_owned_data_from_external_providers():
 
 def test_data_dependency_lookup_is_filterable_by_ownership():
     assert data_dependency_keys_by_ownership("owned") == ("mongo", "pgvector", "redis")
-    assert data_dependency_keys_by_ownership("external") == ("bunny", "hubspot", "openai", "twilio")
+    assert data_dependency_keys_by_ownership("external") == ("bunny", "hubspot", "meta_whatsapp", "openai")

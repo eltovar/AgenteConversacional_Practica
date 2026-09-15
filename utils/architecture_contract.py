@@ -42,7 +42,7 @@ class DataDependency:
 
 
 ARCHITECTURE_COMPONENTS: Dict[str, ArchitectureComponent] = {
-    "twilio": ArchitectureComponent("twilio", "external", "codigo_verificado", ("utils.twilio_client", "middleware.webhook_handler")),
+    "meta_whatsapp": ArchitectureComponent("meta_whatsapp", "external", "codigo_verificado", ("utils.meta_whatsapp_client", "middleware.webhook_handler")),
     "webhook": ArchitectureComponent("webhook", "internal", "codigo_verificado", ("middleware.webhook_handler",)),
     "sofia_brain": ArchitectureComponent("sofia_brain", "internal", "codigo_verificado", ("middleware.sofia_brain",)),
     "openai": ArchitectureComponent("openai", "external", "codigo_verificado", ("middleware.sofia_brain", "utils.media_processor")),
@@ -60,16 +60,16 @@ ARCHITECTURE_COMPONENTS: Dict[str, ArchitectureComponent] = {
 
 ARCHITECTURE_EDGES: Dict[str, ArchitectureEdge] = {
     "whatsapp_inbound": ArchitectureEdge(
-        "whatsapp_inbound", "twilio", "webhook", "entrada_whatsapp",
-        ("POST /whatsapp/webhook", "source=twilio", "tests/test_twilio_signature.py"),
+        "whatsapp_inbound", "meta_whatsapp", "webhook", "entrada_whatsapp",
+        ("POST /whatsapp/webhook", "source=meta", "META_WEBHOOK_VERIFY_TOKEN"),
     ),
     "bot_processing": ArchitectureEdge(
         "bot_processing", "webhook", "sofia_brain", "respuesta_automatica",
         ("middleware.webhook_handler.get_sofia_brain", "source=openai"),
     ),
     "manual_response": ArchitectureEdge(
-        "manual_response", "panel", "twilio", "respuesta_manual",
-        ("POST /whatsapp/panel/send", "utils.twilio_client", "source=twilio"),
+        "manual_response", "panel", "meta_whatsapp", "respuesta_manual",
+        ("POST /whatsapp/panel/send", "utils.whatsapp_client", "source=meta"),
     ),
     "panel_contacts": ArchitectureEdge(
         "panel_contacts", "panel", "redis", "estado_panel",
@@ -92,7 +92,7 @@ ARCHITECTURE_EDGES: Dict[str, ArchitectureEdge] = {
         ("middleware.websocket_manager", "Redis Pub/Sub", "source=redis"),
     ),
     "scheduled_jobs": ArchitectureEdge(
-        "scheduled_jobs", "scheduler", "twilio", "jobs_operativos",
+        "scheduled_jobs", "scheduler", "meta_whatsapp", "jobs_operativos",
         ("app.scheduler.add_job", "utils.scheduler_observability", "source=scheduler"),
     ),
     "rag_startup": ArchitectureEdge(
@@ -103,7 +103,7 @@ ARCHITECTURE_EDGES: Dict[str, ArchitectureEdge] = {
 
 
 SOURCE_COMPONENTS = frozenset({
-    "twilio",
+    "meta",
     "hubspot",
     "bunny",
     "mongo",
@@ -154,12 +154,12 @@ DATA_DEPENDENCIES: Dict[str, DataDependency] = {
         "encapsular escrituras y migrar lectura operacional hacia modelos internos",
         ("integrations.hubspot", "middleware.contact_manager"),
     ),
-    "twilio": DataDependency(
-        "twilio",
+    "meta_whatsapp": DataDependency(
+        "meta_whatsapp",
         "external",
         "canal WhatsApp y entrega de mensajes",
-        "mantener como proveedor reemplazable detras de adaptadores",
-        ("utils.twilio_client", "middleware.webhook_handler"),
+        "mantener como proveedor oficial detras del cliente interno de WhatsApp",
+        ("utils.meta_whatsapp_client", "utils.whatsapp_client", "middleware.webhook_handler"),
     ),
     "bunny": DataDependency(
         "bunny",

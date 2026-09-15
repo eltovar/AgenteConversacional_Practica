@@ -15,6 +15,8 @@ Flujo:
 import os
 import json
 import re
+import hmac
+import hashlib
 from typing import Any, Optional
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -64,7 +66,7 @@ from utils.business_hours import (
 )
 
 # Cliente Twilio para respuestas diferidas (evita timeout de 15 segundos)
-from utils.twilio_client import twilio_client
+from utils.whatsapp_client import whatsapp_client
 
 # Agregador de mensajes para esperar múltiples mensajes antes de responder
 from utils.message_aggregator import message_aggregator
@@ -99,7 +101,8 @@ RESCUE_ENGAGEMENT_TURNS = 5
 RESCUE_FAILURE_TURNS = 2
 
 BSUID_SUPPORT_FLAG = "FEATURE_WHATSAPP_BSUID_SUPPORT"
-BSUID_CONTACT_CONTENT_SID_ENV = "TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID"
+BSUID_CONTACT_CONTENT_SID_ENV = "META_WHATSAPP_REQUEST_CONTACT_TEMPLATE"
+BSUID_CONTACT_CONTENT_SID_FALLBACK_ENV = "TWILIO_WHATSAPP_REQUEST_CONTACT_CONTENT_SID"
 _EXPLICIT_PHONE_RE = re.compile(
     r"(?:whatsapp:)?\+\d[\d\s().-]{6,}\d|\b(?:57)?3\d{9}\b|\b0?3\d{9}\b",
     re.IGNORECASE,
@@ -131,7 +134,10 @@ async def _handle_bsuid_identity(
     identity_label: str = "BSUID",
 ) -> Response:
     """Corta el flujo telefonico para identidades no-phone y solicita contacto."""
-    content_sid = os.getenv(BSUID_CONTACT_CONTENT_SID_ENV, "").strip()
+    content_sid = (
+        os.getenv(BSUID_CONTACT_CONTENT_SID_ENV, "").strip()
+        or os.getenv(BSUID_CONTACT_CONTENT_SID_FALLBACK_ENV, "").strip()
+    )
     if not content_sid:
         logger.error(
             "[Webhook][%s] contact_request_missing_content_sid "
@@ -171,7 +177,7 @@ async def _handle_bsuid_identity(
                 safe_error(idem_err),
             )
 
-    result = await twilio_client.send_whatsapp_message(
+    result = await whatsapp_client.send_whatsapp_message(
         to=raw_to,
         body="",
         content_sid=content_sid,
@@ -390,7 +396,7 @@ async def _fetch_reply_context_deferred(
     import asyncio
     await asyncio.sleep(delay)
     try:
-        result = await twilio_client.get_conversation_message(
+        result = await whatsapp_client.get_conversation_message(
             conversation_sid=conversation_sid,
             message_sid=im_sid,
             chat_service_sid=chat_service_sid,
@@ -923,7 +929,7 @@ async def _process_message_deferred(
             
             # Enviar mensaje especial si existe (ej: PENDING_HANDOFF)
             if special_message:
-                result = await twilio_client.send_whatsapp_message(
+                result = await whatsapp_client.send_whatsapp_message(
                     to=outbound_to,
                     body=special_message,
                     conversation_sid=conversation_sid,
@@ -1175,7 +1181,7 @@ async def _process_message_deferred(
                 )
             
             if out_of_hours_msg:
-                _res_fuera_horario = await twilio_client.send_whatsapp_message(
+                _res_fuera_horario = await whatsapp_client.send_whatsapp_message(
                     to=outbound_to,
                     body=out_of_hours_msg,
                     conversation_sid=conversation_sid,
@@ -1200,7 +1206,7 @@ async def _process_message_deferred(
         # ════════════════════════════════════════════════════════════
         # PASO 7: Enviar respuesta via Twilio REST API
         # ════════════════════════════════════════════════════════════
-        send_result = await twilio_client.send_whatsapp_message(
+        send_result = await whatsapp_client.send_whatsapp_message(
             to=outbound_to,
             body=response_text,
             conversation_sid=conversation_sid,
@@ -1282,7 +1288,7 @@ async def _process_message_deferred(
         # Intentar enviar mensaje de error al usuario
         try:
             _texto_error = "Disculpa, tuve un inconveniente técnico. Por favor intenta de nuevo."
-            _res_error = await twilio_client.send_whatsapp_message(
+            _res_error = await whatsapp_client.send_whatsapp_message(
                 to=outbound_to if "outbound_to" in locals() else phone_normalized,
                 body=_texto_error
             )
@@ -1333,6 +1339,175 @@ TWILIO_SIGNATURE_MODE = os.getenv("TWILIO_SIGNATURE_MODE", "log_only").strip().l
 # reportar http:// y un host interno — sin esto, la firma nunca calzaría.
 # Mismo patrón que PANEL_BASE_URL (outbound_panel.py).
 TWILIO_WEBHOOK_BASE_URL = os.getenv("TWILIO_WEBHOOK_BASE_URL", "").rstrip("/")
+META_WEBHOOK_VERIFY_TOKEN = os.getenv("META_WEBHOOK_VERIFY_TOKEN", "").strip()
+META_APP_SECRET = os.getenv("META_APP_SECRET", "").strip()
+META_WEBHOOK_SIGNATURE_MODE = os.getenv("META_WEBHOOK_SIGNATURE_MODE", "log_only").strip().lower()
+
+
+def _looks_like_meta_payload(raw_body: bytes) -> bool:
+    try:
+        data = json.loads(raw_body or b"{}")
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("object") == "whatsapp_business_account":
+        return True
+    entries = data.get("entry") or []
+    return bool(entries and isinstance(entries, list) and (entries[0] or {}).get("changes"))
+
+
+def _meta_signature_is_valid(request: Request, raw_body: bytes) -> bool:
+    if not META_APP_SECRET:
+        return False
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not signature.startswith("sha256="):
+        return False
+    expected = hmac.new(
+        META_APP_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature.replace("sha256=", "", 1), expected)
+
+
+def _meta_contact_name(value: dict, wa_id: str) -> Optional[str]:
+    for contact in value.get("contacts") or []:
+        if str(contact.get("wa_id") or "") == str(wa_id or ""):
+            return ((contact.get("profile") or {}).get("name") or "").strip() or None
+    contacts = value.get("contacts") or []
+    if contacts:
+        return ((contacts[0].get("profile") or {}).get("name") or "").strip() or None
+    return None
+
+
+def _meta_message_to_internal(value: dict, msg: dict) -> dict:
+    msg_type = msg.get("type") or "text"
+    from_id = str(msg.get("from") or "").strip()
+    text_body = ""
+    media_id = None
+    media_content_type = None
+
+    if msg_type == "text":
+        text_body = ((msg.get("text") or {}).get("body") or "").strip()
+    elif msg_type in {"image", "audio", "video", "document"}:
+        media = msg.get(msg_type) or {}
+        media_id = media.get("id")
+        media_content_type = media.get("mime_type")
+        caption = (media.get("caption") or "").strip()
+        if msg_type == "document":
+            filename = media.get("filename")
+            text_body = caption or (f"[Documento recibido: {filename}]" if filename else "[Documento recibido]")
+        else:
+            text_body = caption
+    elif msg_type == "button":
+        text_body = ((msg.get("button") or {}).get("text") or "").strip()
+    elif msg_type == "interactive":
+        interactive = msg.get("interactive") or {}
+        text_body = (
+            ((interactive.get("button_reply") or {}).get("title") or "")
+            or ((interactive.get("list_reply") or {}).get("title") or "")
+        ).strip()
+    else:
+        text_body = f"[Mensaje WhatsApp tipo {msg_type}]"
+
+    context = msg.get("context") or {}
+    return {
+        "From": f"whatsapp:+{from_id}" if from_id and not from_id.startswith("+") else f"whatsapp:{from_id}",
+        "Body": text_body,
+        "ProfileName": _meta_contact_name(value, from_id),
+        "WaId": from_id,
+        "MessageSid": msg.get("id"),
+        "NumMedia": 1 if media_id else 0,
+        "MediaUrl0": f"meta://{media_id}" if media_id else None,
+        "MediaContentType0": media_content_type,
+        "OriginalRepliedMessageSid": context.get("id"),
+    }
+
+
+async def _handle_meta_statuses(value: dict) -> None:
+    statuses = value.get("statuses") or []
+    if not statuses:
+        return
+    mongo_manager = get_mongo_manager()
+    for item in statuses:
+        message_id = item.get("id")
+        status = item.get("status")
+        recipient = item.get("recipient_id")
+        errors = item.get("errors") or []
+        error = errors[0] if errors else {}
+        if status in {"delivered", "read", "sent"}:
+            await mongo_manager.update_delivery_status(
+                message_sid=message_id,
+                status="delivered" if status in {"sent", "delivered"} else "read",
+                delivered_at=datetime.utcnow() if status in {"sent", "delivered"} else None,
+            )
+        elif status == "failed":
+            await mongo_manager.update_delivery_status(
+                message_sid=message_id,
+                status="failed",
+                error_code=str(error.get("code") or ""),
+                error_message=error.get("message") or error.get("title"),
+            )
+            logger.warning(
+                "[MetaStatus] Mensaje fallido id=%s recipient=%s error=%s",
+                safe_id(message_id, "wamid"),
+                safe_phone(recipient),
+                safe_error(error),
+            )
+
+
+async def _handle_meta_webhook_payload(raw_body: bytes, background_tasks: BackgroundTasks) -> Response:
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except Exception as e:
+        logger.error("[MetaWebhook] JSON invalido: %s", safe_error(e))
+        return Response(content="", status_code=400)
+
+    entries = payload.get("entry") or []
+    for entry in entries:
+        for change in entry.get("changes") or []:
+            value = change.get("value") or {}
+            await _handle_meta_statuses(value)
+            for msg in value.get("messages") or []:
+                internal = _meta_message_to_internal(value, msg)
+                raw_from = internal["From"]
+                normalizer = PhoneNormalizer()
+                validation = normalizer.normalize(raw_from.replace("whatsapp:", ""))
+                if not validation.is_valid:
+                    logger.warning("[MetaWebhook] Numero invalido: %s", safe_phone(raw_from))
+                    continue
+                phone_normalized = validation.normalized
+                background_tasks.add_task(
+                    _process_message_deferred,
+                    phone_normalized,
+                    raw_from,
+                    internal["Body"],
+                    internal["ProfileName"],
+                    internal["MessageSid"],
+                    internal["NumMedia"],
+                    internal["MediaUrl0"],
+                    internal["MediaContentType0"],
+                    "whatsapp",
+                    internal["OriginalRepliedMessageSid"],
+                    "whatsapp",
+                    None,
+                    None,
+                    WhatsAppIdentityType.PHONE.value,
+                    None,
+                    raw_from,
+                    None,
+                    internal["WaId"],
+                    None,
+                )
+                logger.info(
+                    "[MetaWebhook] Mensaje encolado phone=%s id=%s media=%s",
+                    safe_phone(phone_normalized),
+                    safe_id(internal["MessageSid"], "wamid"),
+                    internal["NumMedia"],
+                )
+
+    return Response(content="", status_code=200)
 
 
 def _twilio_signed_url(request: Request) -> str:
@@ -1388,6 +1563,21 @@ class MiddlewareConfig:
 
 # Instancias globales (lazy initialization)
 _config: Optional[MiddlewareConfig] = None
+
+
+@router.get("/webhook")
+async def whatsapp_webhook_verify(request: Request):
+    """Verificacion inicial del webhook de Meta Cloud API."""
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token and token == META_WEBHOOK_VERIFY_TOKEN:
+        logger.info("[MetaWebhook] Verificacion completada")
+        return Response(content=challenge or "", media_type="text/plain")
+
+    logger.warning("[MetaWebhook] Verificacion rechazada")
+    return Response(content="Forbidden", status_code=403)
 _state_manager: Optional[ConversationStateManager] = None
 _contact_manager: Optional[ContactManager] = None
 _sofia_brain: Optional[SofiaBrain] = None
@@ -1625,6 +1815,18 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
         )
     except Exception as _diag_e:
         logger.warning(f"[Webhook][RAW] No se pudo leer body para diagnóstico: {_diag_e}")
+
+    if is_json_request and _looks_like_meta_payload(_raw_peek):
+        if META_WEBHOOK_SIGNATURE_MODE != "off":
+            sig_ok = _meta_signature_is_valid(request, _raw_peek)
+            if not sig_ok:
+                if META_WEBHOOK_SIGNATURE_MODE == "enforce":
+                    logger.warning("[MetaWebhook][Sig] RECHAZADO: firma invalida o ausente")
+                    return Response(content="", status_code=403)
+                logger.warning("[MetaWebhook][Sig] log_only: firma invalida o ausente")
+            else:
+                logger.info("[MetaWebhook][Sig] Firma valida")
+        return await _handle_meta_webhook_payload(_raw_peek, background_tasks)
 
     # ── Validación de firma Twilio ─────────────────────────────────
     if TWILIO_SIGNATURE_MODE != "off":
@@ -2109,7 +2311,7 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             )
             logger.error(
                 obs_event(
-                    "twilio",
+                    "meta",
                     "webhook",
                     "invalid_number",
                     status="rejected",
@@ -2330,7 +2532,7 @@ async def whatsapp_status_callback(
                     else:
                         user_msg = (
                             f"⚠️ Mensaje NO entregado al número {phone_normalized}. "
-                            f"Error Twilio: {ErrorCode or 'desconocido'}."
+                            f"Error WhatsApp: {ErrorCode or 'desconocido'}."
                         )
 
                     notification = {

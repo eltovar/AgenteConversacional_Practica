@@ -1,55 +1,45 @@
 # middleware/templates/content_sids.py
 """
-Fuente única de verdad para los Content SIDs (HX...) de las plantillas de Twilio.
+Fuente única de verdad para los identificadores de plantillas WhatsApp.
 
-Why: los Content SIDs pertenecen a la CUENTA de Twilio. Al migrar de cuenta,
-TODOS cambian — aunque Meta duplique las plantillas del lado de la WABA.
-Antes vivían hardcodeados en 5 lugares (templates.py, outbound_panel.py, app.py
-y dos arrays en PanelAsesores/index.js), así que un cambio de cuenta obligaba a
-editar cuatro archivos y desplegar bajo presión.
+En Meta Cloud API el identificador operativo es el nombre de la plantilla
+aprobada en WhatsApp Manager. Durante la migración conservamos el nombre
+histórico `content_sid` en los modelos internos para no reescribir todo el panel
+de una sola vez.
 
-Ahora se resuelven por variable de entorno con el SID vigente como default:
-el sistema sigue funcionando sin tocar nada, y el día de la migración basta con
-definir las variables en Railway.
-
-Los defaults corresponden a la cuenta Twilio vigente desde la migración del
-4-ago-2026 (WABA 1579913223763554). El Account SID no se versiona: vive en
-`TWILIO_ACCOUNT_SID` en Railway.
-Procedimiento de cambio: docs/RUNBOOK_MIGRACION_TWILIO.md (FASE 5.3)
-
-⚠️ En la migración NO se recrearon 4 plantillas que existían en la cuenta anterior:
-`saludo_reactivador`, `seguimiento_cita`, `seguimiento_personalizado` y
-`reactivacion_con_link`. Sus constantes y referencias fueron eliminadas.
-Textos originales por si hay que rehacerlas: docs/PLANTILLAS_PARA_RECREAR.md
+Prioridad de lectura:
+1. META_TPL_*: nombre aprobado en Meta.
+2. TWILIO_TPL_*: fallback temporal si se fuerza WHATSAPP_PROVIDER=twilio.
+3. Nombre lógico Meta como default seguro para desarrollo.
 """
 
 import os
 from typing import Optional
 
 
-def _sid(env_name: str, default: str = "") -> str:
-    """Lee un Content SID de entorno, cayendo al default de la cuenta actual."""
-    return (os.getenv(env_name) or default).strip()
+def _template(meta_env: str, twilio_env: str, default: str = "") -> str:
+    """Lee el identificador de plantilla vigente para el proveedor activo."""
+    return (os.getenv(meta_env) or os.getenv(twilio_env) or default).strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plantillas de reactivación y saludo
 # ─────────────────────────────────────────────────────────────────────────────
-SALUDO_INMUEBLE = _sid(
-    "TWILIO_TPL_SALUDO_INMUEBLE", "HX05ea3f2fbac7879ccf35be6e3ed74287"
+SALUDO_INMUEBLE = _template(
+    "META_TPL_SALUDO_INMUEBLE", "TWILIO_TPL_SALUDO_INMUEBLE", "saludo_reactivador_inmueble"
 )
-REACTIVACION_LINK = _sid(
-    "TWILIO_TPL_REACTIVACION_LINK", "HXb733162e38a6786faf5db72133660a0d"
+REACTIVACION_LINK = _template(
+    "META_TPL_REACTIVACION_LINK", "TWILIO_TPL_REACTIVACION_LINK", "reactivacion_inmueble_link"
 )
-AUN_EN_BUSQUEDA = _sid(
-    "TWILIO_TPL_AUN_EN_BUSQUEDA", "HXfd6fcb949b5747ca39d7b19af4f988fe"
+AUN_EN_BUSQUEDA = _template(
+    "META_TPL_AUN_EN_BUSQUEDA", "TWILIO_TPL_AUN_EN_BUSQUEDA", "aun_en_busqueda"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plantillas de seguimiento
 # ─────────────────────────────────────────────────────────────────────────────
-MENSAJE_PERSONALIZADO = _sid(
-    "TWILIO_TPL_MENSAJE_PERSONALIZADO", "HXbca931e16b226053193dc3e003e06372"
+MENSAJE_PERSONALIZADO = _template(
+    "META_TPL_MENSAJE_PERSONALIZADO", "TWILIO_TPL_MENSAJE_PERSONALIZADO", "mensaje_personalizado"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,20 +47,20 @@ MENSAJE_PERSONALIZADO = _sid(
 # del ciclo de la cita: los antiguos TWILIO_FOLLOWUP1/2_TEMPLATE_SID nunca
 # llegaron a existir en Railway, así que renombrarlos no rompe nada.
 # ─────────────────────────────────────────────────────────────────────────────
-FOLLOWUP_1 = _sid(
-    "TWILIO_TPL_CITA_SEGUIMIENTO", "HXb586a84cf325689db3efd19ec2f2e93f"
+FOLLOWUP_1 = _template(
+    "META_TPL_CITA_SEGUIMIENTO", "TWILIO_TPL_CITA_SEGUIMIENTO", "seguimiento_cita"
 )
-FOLLOWUP_2 = _sid(
-    "TWILIO_TPL_CITA_EXPERIENCIA", "HX1f96c23a505ea1b292401dbd7d0de13d"
+FOLLOWUP_2 = _template(
+    "META_TPL_CITA_EXPERIENCIA", "TWILIO_TPL_CITA_EXPERIENCIA", "experiencia_cita"
 )
-RECORDATORIO_CITA: Optional[str] = _sid(
-    "TWILIO_REMINDER_TEMPLATE_SID", "HXdd7160cc287929ec3ae4d18160e7c51b"
+RECORDATORIO_CITA: Optional[str] = _template(
+    "META_TPL_RECORDATORIO_CITA", "TWILIO_REMINDER_TEMPLATE_SID", "recordatorio_cita"
 ) or None
 
 # No consumida por el backend — se usa manualmente desde el panel / scripts ad-hoc.
 # Se registra aquí para que el SID viva en un solo lugar.
-CAMPANA_PROPIETARIOS = _sid(
-    "TWILIO_TPL_CAMPANA_PROPIETARIOS", "HXfe0ca6d5004d215819a05d504577e4d7"
+CAMPANA_PROPIETARIOS = _template(
+    "META_TPL_CAMPANA_PROPIETARIOS", "TWILIO_TPL_CAMPANA_PROPIETARIOS", "campana_propietarios"
 )
 
 

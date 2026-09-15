@@ -40,6 +40,9 @@ client_openai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Twilio auth para descargar media
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+META_API_VERSION = os.getenv("META_API_VERSION", "v21.0").strip() or "v21.0"
+META_GRAPH_BASE_URL = os.getenv("META_GRAPH_BASE_URL", "https://graph.facebook.com").rstrip("/")
 
 # Media Content Service — host REGIONAL obligatorio. `mcs.twilio.com` (sin región)
 # devuelve 301 hacia la web pública y luego 403. Configurable por si la cuenta
@@ -384,6 +387,39 @@ class MediaProcessor:
             raise Exception(f"Error descargando media de Twilio: {response.status_code}")
 
         logger.info(f"[MediaProcessor] Media descargada de Twilio: {len(response.content)} bytes")
+        return response.content
+
+    async def download_meta_media(self, media_id: str) -> bytes:
+        """Descarga multimedia desde Meta Cloud API usando el media id nativo."""
+        token = META_ACCESS_TOKEN or os.getenv("META_ACCESS_TOKEN")
+        if not token:
+            raise Exception("META_ACCESS_TOKEN no configurado para descargar media")
+
+        client = self._get_http_client()
+        meta_url = f"{META_GRAPH_BASE_URL}/{META_API_VERSION}/{media_id}"
+        meta_resp = await client.get(meta_url, headers={"Authorization": f"Bearer {token}"}, timeout=30.0)
+        if meta_resp.status_code != 200:
+            logger.error(
+                "[MediaProcessor] Error consultando media Meta: %s - %s",
+                meta_resp.status_code,
+                safe_error(meta_resp.text, 200),
+            )
+            raise Exception(f"Error consultando media Meta: {meta_resp.status_code}")
+
+        media_url = (meta_resp.json() or {}).get("url")
+        if not media_url:
+            raise Exception("Meta no devolvio URL temporal de media")
+
+        response = await client.get(media_url, headers={"Authorization": f"Bearer {token}"}, timeout=60.0)
+        if response.status_code != 200:
+            logger.error(
+                "[MediaProcessor] Error descargando media Meta: %s - %s",
+                response.status_code,
+                safe_error(response.text, 200),
+            )
+            raise Exception(f"Error descargando media Meta: {response.status_code}")
+
+        logger.info("[MediaProcessor] Media descargada de Meta: %s bytes", len(response.content))
         return response.content
 
     # =========================================================================
@@ -828,8 +864,11 @@ class MediaProcessor:
             is_video = "video" in content_lower
             is_document = content_type in DOCUMENT_MIME_TYPES
 
-            # 1. Descargar de Twilio primero (para todos los tipos)
-            media_bytes = await self.download_twilio_media(media_url)
+            # 1. Descargar del proveedor primero (para todos los tipos)
+            if media_url.startswith("meta://"):
+                media_bytes = await self.download_meta_media(media_url.replace("meta://", "", 1))
+            else:
+                media_bytes = await self.download_twilio_media(media_url)
 
             # Validar tamaño máximo para documentos y videos
             if is_video and len(media_bytes) > MAX_VIDEO_SIZE_BYTES:

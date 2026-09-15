@@ -54,7 +54,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 from agents.orchestrator import process_message
-from utils.twilio_client import twilio_client
+from utils.whatsapp_client import whatsapp_client
 from middleware.templates import content_sids as tpl_sids
 from logging_config import logger
 import uvicorn
@@ -369,9 +369,9 @@ async def process_aggregated_messages(session_id: str, to_number: str):
         except Exception:
             pass
 
-        # 8. Enviar respuesta via Twilio
-        if twilio_client.is_available:
-            send_result = await twilio_client.send_whatsapp_message(
+        # 8. Enviar respuesta via WhatsApp Meta
+        if whatsapp_client.is_available:
+            send_result = await whatsapp_client.send_whatsapp_message(
                 to=to_number,
                 body=result["response"]
             )
@@ -483,18 +483,18 @@ async def check_appointment_reminders():
                 f"a las {scheduled_dt.strftime('%H:%M')}. ¡Te esperamos!"
             )
 
-            # Enviar vía Twilio
-            if twilio_client.is_available:
+            # Enviar vía WhatsApp Meta
+            if whatsapp_client.is_available:
                 _reminder_sid = tpl_sids.RECORDATORIO_CITA
                 if _reminder_sid:
-                    result = await twilio_client.send_whatsapp_message(
+                    result = await whatsapp_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body=message,
                         content_sid=_reminder_sid,
                         content_variables={"1": contact_name, "2": scheduled_dt.strftime('%H:%M')}
                     )
                 else:
-                    result = await twilio_client.send_whatsapp_message(
+                    result = await whatsapp_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body=message
                     )
@@ -550,7 +550,7 @@ async def check_appointment_reminders():
                         safe_phone(apt.phone_normalized), safe_error(result.get("message"))
                     )
             else:
-                logger.warning("[Scheduler][Reminder] Twilio no disponible para recordatorios")
+                logger.warning("[Scheduler][Reminder] WhatsApp Meta no disponible para recordatorios")
 
         logger.info(
             "[Scheduler][Reminder] ✓ Completado — evaluadas: %d, enviadas: %d, omitidas: %d",
@@ -1370,8 +1370,8 @@ async def check_and_send_followups():
                     # Marcar antes de enviar (idempotencia)
                     await r.set(followup_key, "pending", ex=60)
 
-                    if twilio_client.is_available:
-                        result = await twilio_client.send_whatsapp_message(
+                    if whatsapp_client.is_available:
+                        result = await whatsapp_client.send_whatsapp_message(
                             to=phone,
                             body=followup_message
                         )
@@ -1598,9 +1598,9 @@ async def check_appointment_followups():
                     f"Cuéntanos para continuar con tu proceso!!"
                 )
 
-                if twilio_client.is_available:
+                if whatsapp_client.is_available:
                     _followup_sid = tpl_sids.FOLLOWUP_1
-                    result = await twilio_client.send_whatsapp_message(
+                    result = await whatsapp_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body="",
                         content_sid=_followup_sid,
@@ -1672,7 +1672,7 @@ async def check_appointment_followups():
                     else:
                         logger.warning("[Scheduler][Followup] Error enviando followup a %s", safe_phone(apt.phone_normalized))
                 else:
-                    logger.warning("[Scheduler][Followup] Twilio no disponible para followup post-cita")
+                    logger.warning("[Scheduler][Followup] WhatsApp Meta no disponible para followup post-cita")
 
             except Exception as apt_err:
                 logger.error("[Scheduler][Followup] Error en followup post-cita %s: %s", safe_phone(apt.phone_normalized), safe_error(apt_err))
@@ -1728,8 +1728,8 @@ async def check_appointment_followup2():
                     safe_phone(apt.phone_normalized), safe_id(contact_name, "name"), _name_source
                 )
 
-                if twilio_client.is_available:
-                    result = await twilio_client.send_whatsapp_message(
+                if whatsapp_client.is_available:
+                    result = await whatsapp_client.send_whatsapp_message(
                         to=apt.phone_normalized,
                         body="",
                         content_sid=_followup2_sid,
@@ -1773,7 +1773,7 @@ async def check_appointment_followup2():
                     else:
                         logger.warning("[Scheduler][Followup2] Error enviando encuesta a %s", safe_phone(apt.phone_normalized))
                 else:
-                    logger.warning("[Scheduler][Followup2] Twilio no disponible para followup2")
+                    logger.warning("[Scheduler][Followup2] WhatsApp Meta no disponible para followup2")
 
             except Exception as apt_err:
                 logger.error("[Scheduler][Followup2] Error en %s: %s", safe_phone(apt.phone_normalized), safe_error(apt_err))
@@ -2031,7 +2031,7 @@ async def startup_event():
         # ── Mensajes programados: envío de plantillas WhatsApp en fecha específica ──
         async def check_scheduled_messages():
             """
-            Detecta mensajes de plantilla programados que ya vencieron y los envía vía Twilio.
+            Detecta mensajes de plantilla programados que ya vencieron y los envía vía WhatsApp Meta.
             Corre cada 1 minuto. Usa Redis SET NX como lock de idempotencia (TTL 24h)
             para garantizar un único envío aunque el job se solape.
             """
@@ -2058,11 +2058,11 @@ async def startup_event():
                         continue
 
                     try:
-                        if not twilio_client.is_available:
-                            logger.warning("[SchedMsg] Twilio no disponible, skip %s", safe_id(msg_id, "scheduled_msg"))
+                        if not whatsapp_client.is_available:
+                            logger.warning("[SchedMsg] WhatsApp Meta no disponible, skip %s", safe_id(msg_id, "scheduled_msg"))
                             continue
 
-                        await twilio_client.send_whatsapp_message(
+                        await whatsapp_client.send_whatsapp_message(
                             to=msg["phone"],
                             body="",
                             content_sid=msg["template_sid"],

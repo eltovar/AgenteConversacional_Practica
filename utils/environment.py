@@ -65,6 +65,13 @@ def twilio_outbound_enabled() -> bool:
     )
 
 
+def whatsapp_outbound_enabled() -> bool:
+    return bool_env(
+        "WHATSAPP_OUTBOUND_ENABLED",
+        default=twilio_outbound_enabled(),
+    )
+
+
 def hubspot_writes_enabled() -> bool:
     return bool_env(
         "HUBSPOT_WRITE_ENABLED",
@@ -114,6 +121,20 @@ def _twilio_allowlist() -> set[str]:
     }
 
 
+@lru_cache(maxsize=1)
+def _whatsapp_allowlist() -> set[str]:
+    raw = _raw("WHATSAPP_ALLOWED_TO_NUMBERS") or _raw("TWILIO_ALLOWED_TO_NUMBERS")
+
+    if not raw:
+        return set()
+
+    return {
+        _normalize_phone(item)
+        for item in re.split(r"[\s,;]+", raw)
+        if item.strip()
+    }
+
+
 def _normalize_phone(value: str) -> str:
     return re.sub(r"\D+", "", value or "")
 
@@ -130,12 +151,34 @@ def is_twilio_recipient_allowed(to: str) -> bool:
     )
 
 
+def is_whatsapp_recipient_allowed(to: str) -> bool:
+    if not is_staging():
+        return True
+
+    allowlist = _whatsapp_allowlist()
+
+    return bool(
+        allowlist
+        and _normalize_phone(to) in allowlist
+    )
+
+
 def require_twilio_outbound_allowed(to: str) -> tuple[bool, str]:
     if not twilio_outbound_enabled():
         return False, "TWILIO_OUTBOUND_ENABLED=false"
 
     if not is_twilio_recipient_allowed(to):
         return False, "recipient_not_in_TWILIO_ALLOWED_TO_NUMBERS"
+
+    return True, "allowed"
+
+
+def require_whatsapp_outbound_allowed(to: str) -> tuple[bool, str]:
+    if not whatsapp_outbound_enabled():
+        return False, "WHATSAPP_OUTBOUND_ENABLED=false"
+
+    if not is_whatsapp_recipient_allowed(to):
+        return False, "recipient_not_in_WHATSAPP_ALLOWED_TO_NUMBERS"
 
     return True, "allowed"
 
@@ -181,6 +224,7 @@ def configured_safety_summary() -> dict:
         "environment": env_name(),
         "is_staging": is_staging(),
         "twilio_outbound_enabled": twilio_outbound_enabled(),
+        "whatsapp_outbound_enabled": whatsapp_outbound_enabled(),
         "twilio_allowlist_configured": bool(_twilio_allowlist()),
         "hubspot_writes_enabled": hubspot_writes_enabled(),
         "scheduler_outbound_enabled": scheduler_outbound_enabled(),

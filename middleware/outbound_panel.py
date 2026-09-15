@@ -31,7 +31,7 @@ from .conversation_state import ConversationStateManager, ConversationStatus, ge
 from .contact_manager import ContactManager
 from .websocket_manager import ws_manager
 from .templates.templates import DEFAULT_TEMPLATES  # Templates predefinidos
-from utils.twilio_client import twilio_client
+from utils.whatsapp_client import whatsapp_client
 from utils.date_parser import (
     DIAS_SEMANA_ABREV,
     DIAS_SEMANA_CAP,
@@ -184,7 +184,7 @@ BULK_NO_RESPONDE_FLAG_TTL = 86400 * 30
 BULK_SEND_DEDUP_PREFIX = "bulk_send_dedup:"
 HUBSPOT_BULK_SEARCH_CACHE_PREFIX = "hubspot_bulk_search:"
 
-# Plantillas permitidas para envío masivo. Mapeo SID → metadata.
+# Plantillas permitidas para envío masivo. Mapeo identificador plantilla → metadata.
 # La variable key="1" (nombre) SIEMPRE se auto-fill desde HubSpot firstname per-contacto.
 # Las demás variables se reciben del frontend como texto literal (aplicado a todos).
 # Los SIDs viven en middleware/templates/content_sids.py — cambian al migrar de cuenta Twilio.
@@ -2468,10 +2468,10 @@ async def send_message(
         )
 
     # Verificar disponibilidad de Twilio
-    if not twilio_client.is_available:
+    if not whatsapp_client.is_available:
         raise HTTPException(
             status_code=503,
-            detail="Twilio no está configurado correctamente"
+            detail="WhatsApp Meta no está configurado correctamente"
         )
 
     # Obtener/crear contacto si no se proporcionó
@@ -2616,7 +2616,7 @@ async def send_message(
         if media_type == "audio":
             intro_text = reply_audio_intro(parsed_reply_preview)
             if intro_text:
-                intro_result = await twilio_client.send_whatsapp_message(
+                intro_result = await whatsapp_client.send_whatsapp_message(
                     to=outbound_to,
                     body=intro_text,
                 )
@@ -2636,7 +2636,7 @@ async def send_message(
     # Los bytes van además del media_url: con TWILIO_FORCE_CONVERSATIONS activo se
     # suben al Media Content Service de Twilio, porque Conversations no acepta URLs
     # externas. Bunny sigue siendo la fuente de verdad del historial y del panel.
-    result = await twilio_client.send_whatsapp_message(
+    result = await whatsapp_client.send_whatsapp_message(
         to=outbound_to,
         body=body_for_twilio or "📎",  # Twilio requiere body, usar emoji si solo hay media
         media_url=permanent_media_url,
@@ -2798,7 +2798,7 @@ async def send_message(
         status_code = 400 if twilio_code in (21211, 21614, 63003) else 500
         if twilio_code in (21211, 21614, 63003):
             detail = (
-                "Twilio rechazó el destino normalizado. "
+                "WhatsApp rechazó el destino normalizado. "
                 "Verifica que el número tenga WhatsApp activo y código de país correcto."
             )
         else:
@@ -2866,7 +2866,7 @@ async def _backfill_im_sid_after_send(
                 f"(probablemente primera interacción saliente — esperar webhook)"
             )
             return
-        result = await twilio_client.list_conversation_messages(
+        result = await whatsapp_client.list_conversation_messages(
             conversation_sid, limit=5, chat_service_sid=chat_service_sid
         )
         if result.get("status") != "success":
@@ -2964,7 +2964,7 @@ async def edit_advisor_message(
     # Best-effort: sincronizar Twilio Conversations Store (solo dentro de 15min)
     twilio_store_synced = False
     if conv_sid and im_sid and age <= EDIT_WINDOW_SECONDS:
-        tw = await twilio_client.update_conversation_message(conv_sid, im_sid, new_content, chat_service_sid=chat_svc_sid)
+        tw = await whatsapp_client.update_conversation_message(conv_sid, im_sid, new_content, chat_service_sid=chat_svc_sid)
         twilio_store_synced = tw.get("status") == "success"
         if not twilio_store_synced:
             logger.warning(
@@ -2996,7 +2996,7 @@ async def edit_advisor_message(
             if not outbound_to:
                 snd = {"status": "error", "message": outbound_error or "destino inválido"}
             else:
-                snd = await twilio_client.send_whatsapp_message(
+                snd = await whatsapp_client.send_whatsapp_message(
                     to=outbound_to,
                     body=correction_body,
                     conversation_sid=conv_sid,
@@ -3081,7 +3081,7 @@ async def delete_advisor_message(
     # Best-effort: borrar del Twilio Conversations Store (no afecta WhatsApp del cliente)
     twilio_store_deleted = False
     if conv_sid and im_sid:
-        tw = await twilio_client.delete_conversation_message(conv_sid, im_sid, chat_service_sid=chat_svc_sid)
+        tw = await whatsapp_client.delete_conversation_message(conv_sid, im_sid, chat_service_sid=chat_svc_sid)
         twilio_store_deleted = (tw.get("status") == "success")
         if not twilio_store_deleted:
             logger.warning(
@@ -3113,7 +3113,7 @@ async def delete_advisor_message(
             if not outbound_to:
                 snd = {"status": "error", "message": outbound_error or "destino inválido"}
             else:
-                snd = await twilio_client.send_whatsapp_message(
+                snd = await whatsapp_client.send_whatsapp_message(
                     to=outbound_to,
                     body=cancel_body,
                     conversation_sid=conv_sid,
@@ -3216,10 +3216,10 @@ async def send_message_json(
         )
 
     # Verificar disponibilidad de Twilio
-    if not twilio_client.is_available:
+    if not whatsapp_client.is_available:
         raise HTTPException(
             status_code=503,
-            detail="Twilio no está configurado correctamente"
+            detail="WhatsApp Meta no está configurado correctamente"
         )
 
     # Obtener/crear contacto si no se proporcionó
@@ -3277,7 +3277,7 @@ async def send_message_json(
         logger.info(f"[Panel-JSON][QuoteInject] Quote inyectada en body (solo Twilio)")
 
     # Enviar mensaje vía Twilio
-    result = await twilio_client.send_whatsapp_message(
+    result = await whatsapp_client.send_whatsapp_message(
         to=outbound_to,
         body=body_to_send
     )
@@ -3437,10 +3437,10 @@ async def send_template_message(
             logger.warning(f"[Panel][Template][BSUID] No se pudo asegurar contacto HubSpot: {safe_error(e)}")
 
     # Verificar disponibilidad de Twilio
-    if not twilio_client.is_available:
+    if not whatsapp_client.is_available:
         raise HTTPException(
             status_code=503,
-            detail="Twilio no está configurado correctamente"
+            detail="WhatsApp Meta no está configurado correctamente"
         )
 
     import time
@@ -3551,7 +3551,7 @@ async def send_template_message(
 
     # Enviar mensaje via Twilio
     _t2 = time.monotonic()
-    result = await twilio_client.send_whatsapp_message(
+    result = await whatsapp_client.send_whatsapp_message(
         to=outbound_to,
         body=template_message,
         content_sid=content_sid,
@@ -7469,10 +7469,10 @@ async def _enviar_confirmacion_cita(
         if not hace_falta_reenviar(comunicadas, decision):
             return False, MOTIVO_SIN_CAMBIOS_PARA_EL_CLIENTE
 
-        if not twilio_client.is_available:
-            return False, "twilio_no_disponible"
+        if not whatsapp_client.is_available:
+            return False, "whatsapp_meta_no_disponible"
 
-        envio = await twilio_client.send_whatsapp_message(
+        envio = await whatsapp_client.send_whatsapp_message(
             to=phone_normalized,
             body=decision.cuerpo,
             content_sid=decision.content_sid,
@@ -7571,7 +7571,7 @@ class AppointmentCreateRequest(BaseModel):
 
 
 class ScheduledMessageCreateRequest(BaseModel):
-    template_sid: str = Field(..., description="Content SID de la plantilla Twilio (ej. HX...)")
+    template_sid: str = Field(..., description="Identificador de plantilla WhatsApp aprobada")
     template_name: str = Field(..., description="Nombre legible de la plantilla")
     template_variables: dict = Field(..., description="Variables de la plantilla, ej. {'1': 'Carlos'}")
     scheduled_dt: str = Field(..., description="Fecha y hora de envío en ISO 8601 (naive = hora Colombia)")
@@ -10320,8 +10320,8 @@ def _validate_bulk_request(
         return None, f"stage_id '{stage_id}' no permite envío masivo"
     if stage_id not in PIPELINE_STAGES:
         return None, f"stage_id '{stage_id}' inválido"
-    if not template_sid or not template_sid.startswith("HX"):
-        return None, "template_sid inválido (debe comenzar con HX)"
+    if not template_sid or not template_sid.strip():
+        return None, "template_sid inválido"
     template_meta = BULK_ALLOWED_TEMPLATES.get(template_sid)
     if not template_meta:
         return None, f"template_sid '{template_sid}' no permitido para envío masivo"
@@ -10709,7 +10709,7 @@ async def _send_bulk_template_message(
         f"vars={content_variables}"
     )
 
-    result = await twilio_client.send_whatsapp_message(
+    result = await whatsapp_client.send_whatsapp_message(
         to=phone,
         body=None,
         content_sid=content_sid,

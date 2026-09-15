@@ -19,6 +19,7 @@ _SECRET_PAIR_RE = re.compile(
 )
 OBS_SOURCES = frozenset({
     "twilio",
+    "meta",
     "hubspot",
     "bunny",
     "mongo",

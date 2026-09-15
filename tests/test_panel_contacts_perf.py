@@ -390,4 +390,4 @@ def test_manual_send_logs_normalized_target_and_maps_twilio_invalid_number():
 
     assert "[Panel][ManualSend] Destino normalizado antes de enviar" in source
     assert "twilio_code in (21211, 21614, 63003)" in source
-    assert "Twilio rechazó el destino normalizado" in source
+    assert "WhatsApp rechazó el destino normalizado" in source

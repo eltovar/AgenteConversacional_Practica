@@ -8233,6 +8233,15 @@ let BULK_TEMPLATES = [
             { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' },
             { key: '2', label: 'Mensaje personalizado' }
         ]
+    },
+    {
+        sid: 'HXbd548b226a3bdba40cc209c8d4b0417c',
+        name: 'descuento_primer_mes',
+        label: '🎁 Descuento 10% primer mes',
+        preview: '¡Hola, {1}! 👋\n\nHace unos días nos escribiste buscando un inmueble y queremos darte una razón para retomar tu búsqueda con nosotros. 🏡\n🎁 Obtén un 10% de descuento con el código 13127 en el primer mes de arrendamiento al elegir una de nuestras propiedades.\n\nSi todavía estás buscando, cuéntanos qué necesitas y te enviaremos nuevas opciones.\n\nVálido hasta el 30 de septiembre 2026 - Aplican TyC',
+        vars: [
+            { key: '1', label: 'Nombre del contacto', auto_fill: 'firstname' }
+        ]
     }
 ];
 

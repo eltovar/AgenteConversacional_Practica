@@ -505,7 +505,10 @@
                 <!-- Variables dinámicas -->
                 <div id="bulkVarsContainer" class="space-y-2"></div>
                 <!-- Preview del mensaje -->
-                <div id="bulkPreviewBox" class="hidden bg-amber-50 border-l-4 border-amber-400 px-3 py-2 rounded text-sm text-amber-900 italic"></div>
+                <!-- whitespace-pre-wrap: el preview se pinta con textContent y hay
+                     plantillas multilínea. pre-line NO está en el tailwind.css
+                     purgado; pre-wrap sí. -->
+                <div id="bulkPreviewBox" class="hidden whitespace-pre-wrap bg-amber-50 border-l-4 border-amber-400 px-3 py-2 rounded text-sm text-amber-900 italic"></div>
                 <!-- Conteo de contactos -->
                 <div id="bulkPreview" class="bg-blue-50 border-l-4 border-blue-500 px-3 py-2 rounded text-sm text-blue-900">
                     Selecciona fechas y plantilla para ver el conteo.

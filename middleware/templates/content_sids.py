@@ -48,6 +48,13 @@ REACTIVACION_LINK = _sid(
 AUN_EN_BUSQUEDA = _sid(
     "TWILIO_TPL_AUN_EN_BUSQUEDA", "HXfd6fcb949b5747ca39d7b19af4f988fe"
 )
+# Campaña promocional de reactivación (sep-2026). Ojo: el texto aprobado en Meta
+# lleva dentro «Válido hasta el 30 de septiembre 2026», y el módulo de masivos no
+# tiene mecanismo de caducidad — pasada esa fecha hay que retirarla a mano de
+# BULK_TEMPLATES (aquí y en el espejo de PanelAsesores/index.js).
+DESCUENTO_PRIMER_MES = _sid(
+    "TWILIO_TPL_DESCUENTO_PRIMER_MES", "HXbd548b226a3bdba40cc209c8d4b0417c"
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plantillas de seguimiento
@@ -110,6 +117,27 @@ BULK_TEMPLATES = [
             {"key": "2", "label": "Mensaje personalizado"},
         ],
     },
+    {
+        # `name` se persiste en Mongo como prefijo "[BULK template: ...]" y es la
+        # clave con la que el chip 📢 Masivo del chat recupera este preview
+        # (index.js:2930). Renombrarlo dejaría sin cuerpo a lo ya enviado.
+        "sid": DESCUENTO_PRIMER_MES,
+        "name": "descuento_primer_mes",
+        "label": "🎁 Descuento 10% primer mes",
+        "preview": (
+            "¡Hola, {1}! 👋\n\n"
+            "Hace unos días nos escribiste buscando un inmueble y queremos darte una "
+            "razón para retomar tu búsqueda con nosotros. 🏡\n"
+            "🎁 Obtén un 10% de descuento con el código 13127 en el primer mes de "
+            "arrendamiento al elegir una de nuestras propiedades.\n\n"
+            "Si todavía estás buscando, cuéntanos qué necesitas y te enviaremos "
+            "nuevas opciones.\n\n"
+            "Válido hasta el 30 de septiembre 2026 - Aplican TyC"
+        ),
+        "vars": [
+            {"key": "1", "label": "Nombre del contacto", "auto_fill": "firstname"},
+        ],
+    },
 ]
 
 # Plantillas que el panel puede programar para una fecha específica.
@@ -148,6 +176,7 @@ def all_sids() -> dict:
         "reactivacion_link": REACTIVACION_LINK,
         "aun_en_busqueda": AUN_EN_BUSQUEDA,
         "mensaje_personalizado": MENSAJE_PERSONALIZADO,
+        "descuento_primer_mes": DESCUENTO_PRIMER_MES,
         "followup_1": FOLLOWUP_1,
         "followup_2": FOLLOWUP_2,
         "recordatorio_cita": RECORDATORIO_CITA or "",

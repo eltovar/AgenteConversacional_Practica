@@ -41,7 +41,9 @@
       "Read(//c/Users/Salo/AppData/Local/codebase-memory-mcp/**)",
       "Bash(\"C:/Users/Salo/AppData/Local/codebase-memory-mcp/codebase-memory-mcp.exe\" --version)",
       "Bash(./codebase-memory-mcp.exe config *)",
-      "Bash(grep -nE '^\\\\$Repo|Repo\\\\s*=' install.ps1)"
+      "Bash(grep -nE '^\\\\$Repo|Repo\\\\s*=' install.ps1)",
+      "Bash(python -m pytest tests/plantillas/test_content_sids.py -q)",
+      "Bash(python -m pytest tests/plantillas/ -q)"
     ],
     "deny": [],
     "ask": []

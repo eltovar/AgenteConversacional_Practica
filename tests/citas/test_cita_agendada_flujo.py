@@ -36,8 +36,10 @@ import middleware.outbound_panel as panel  # noqa: E402
 from middleware.outbound_panel import (  # noqa: E402
     HUBSPOT_STAGE_EN_CONVERSACION,
     HUBSPOT_STAGE_VISITA_AGENDADA,
-    AppointmentCreateRequest,
     _update_contact_to_visita_agendada,
+)
+from services.panel.appointments_service import (  # noqa: E402
+    AppointmentCreateRequest,
     create_appointment,
 )
 from middleware.templates.templates import DEFAULT_TEMPLATES  # noqa: E402
@@ -432,7 +434,7 @@ async def test_un_contacto_sin_telefono_agenda_sin_confirmacion():
 
 from datetime import datetime, timezone  # noqa: E402
 
-from middleware.outbound_panel import (  # noqa: E402
+from services.panel.appointments_service import (  # noqa: E402
     AppointmentUpdateBody,
     _fecha_larga_nota,
     _texto_nota_cita,
